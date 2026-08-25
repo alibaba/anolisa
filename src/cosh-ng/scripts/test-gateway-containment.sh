@@ -60,8 +60,14 @@ for property in \
     "Delegate=no" \
     "TimeoutStopSec=15" \
     "Restart=on-failure" \
+    "NoNewPrivileges=true" \
+    "PrivateTmp=true" \
+    "PrivateDevices=true" \
+    "TemporaryFileSystem=/dev/shm:ro,nosuid,nodev,noexec" \
+    "ProtectSystem=strict" \
     "ProtectControlGroups=true" \
-    "InaccessiblePaths=/run/user"; do
+    "InaccessiblePaths=/run/user" \
+    "RestrictSUIDSGID=false"; do
     grep -Fqx -- "$property" "$PACKAGED_UNIT" \
         || fail "packaged Gateway unit is missing containment property: $property"
 done
@@ -80,13 +86,20 @@ ENVIRONMENT_FILE="/etc/cosh/gateway-${INSTANCE}.env"
 USER_RUNTIME_DIR="/run/user/65534"
 POSITIVE_USER_UNIT="${BASE}-positive-user.service"
 FIXTURE="$WORK_DIR/tree-fixture.sh"
-STATE="$WORK_DIR/state"
+WORKSPACE_ROOT="/opt/${BASE}"
+WORKSPACE="$WORKSPACE_ROOT/workspace"
+STATE="/var/lib/cosh-gateway-${INSTANCE}"
+SHM_MARKER="${BASE}-suid-probe"
+HOST_SHM_PROBE="/dev/shm/${SHM_MARKER}"
 CONTROL_GROUP=""
 
 [ ! -e "$UNIT_FILE" ] || fail "refusing to replace an existing runtime Gateway template"
 [ ! -e "$DROP_IN_DIR" ] || fail "refusing to replace an existing Gateway drop-in"
 [ ! -e "$WS_CKPT_UNIT_FILE" ] || fail "refusing to replace an existing runtime ws-ckpt unit"
 [ ! -e "$ENVIRONMENT_FILE" ] || fail "refusing to replace an existing Gateway environment"
+[ ! -e "$WORKSPACE_ROOT" ] || fail "refusing to reuse an existing workspace root"
+[ ! -e "$STATE" ] || fail "refusing to reuse an existing Gateway state directory"
+[ ! -e "$HOST_SHM_PROBE" ] || fail "refusing to reuse an existing /dev/shm probe"
 ! systemctl is-active --quiet user@65534.service \
     || fail "refusing to reuse an active fixture user manager"
 
@@ -116,17 +129,24 @@ cleanup() {
     fi
     rm -rf -- "$DROP_IN_DIR"
     rm -f -- "$WS_CKPT_UNIT_FILE" "$ENVIRONMENT_FILE"
+    rm -f -- "$HOST_SHM_PROBE"
     systemctl daemon-reload >/dev/null 2>&1
     case "$WORK_DIR" in
         /run/cosh-gateway-containment.*) rm -rf -- "$WORK_DIR" ;;
+    esac
+    case "$WORKSPACE_ROOT" in
+        /opt/cosh-gateway-containment-*) rm -rf -- "$WORKSPACE_ROOT" ;;
+    esac
+    case "$STATE" in
+        /var/lib/cosh-gateway-containment*) rm -rf -- "$STATE" ;;
     esac
 }
 trap cleanup EXIT INT TERM
 
 install -m 0755 "$SOURCE_FIXTURE" "$FIXTURE"
-install -d -m 0770 -o 65534 -g 65534 "$STATE"
+install -d -m 0755 -o 65534 -g 65534 "$WORKSPACE"
 install -d -m 0755 /etc/cosh "$DROP_IN_DIR"
-printf 'COSH_GATEWAY_WORKSPACE=%s\n' "$STATE" > "$ENVIRONMENT_FILE"
+printf 'COSH_GATEWAY_WORKSPACE=%s\n' "$WORKSPACE" > "$ENVIRONMENT_FILE"
 chmod 0600 "$ENVIRONMENT_FILE"
 
 sed 's|{libexecdir}|/usr/libexec|g' "$PACKAGED_UNIT" > "$UNIT_FILE"
@@ -143,6 +163,7 @@ User=65534
 Group=65534
 Environment=XDG_RUNTIME_DIR=$USER_RUNTIME_DIR
 ExecStart=
+ExecStartPre="$FIXTURE" assert-core-filesystem "$WORKSPACE" "$STATE" "$SHM_MARKER"
 ExecStartPre="$FIXTURE" assert-clean "$STATE"
 ExecStart="$FIXTURE" launch "$STATE" "$TOKEN"
 EOF
@@ -170,7 +191,7 @@ run_as_fixture_user systemctl --user stop "$POSITIVE_USER_UNIT"
 systemctl start "$UNIT"
 
 EFFECTIVE_PROPERTIES="$(systemctl show "$UNIT" \
-    --property=Type,KillMode,SendSIGKILL,FinalKillSignal,Delegate,Restart,FragmentPath,DropInPaths)"
+    --property=Type,KillMode,SendSIGKILL,FinalKillSignal,Delegate,Restart,FragmentPath,DropInPaths,ProtectSystem,RestrictSUIDSGID,NoNewPrivileges,PrivateDevices,TemporaryFileSystem)"
 for property in \
     "Type=exec" \
     "KillMode=control-group" \
@@ -178,12 +199,24 @@ for property in \
     "FinalKillSignal=9" \
     "Delegate=no" \
     "Restart=on-failure" \
+    "ProtectSystem=strict" \
+    "RestrictSUIDSGID=no" \
+    "NoNewPrivileges=yes" \
+    "PrivateDevices=yes" \
+    "TemporaryFileSystem=/dev/shm:ro,nosuid,nodev,noexec" \
     "FragmentPath=$UNIT_FILE"; do
     printf '%s\n' "$EFFECTIVE_PROPERTIES" | grep -Fqx -- "$property" \
         || fail "effective Gateway unit property mismatch: $property"
 done
 printf '%s\n' "$EFFECTIVE_PROPERTIES" | grep -F -- "$DROP_IN" >/dev/null \
     || fail "systemd did not load the fixture-only ExecStart drop-in"
+systemctl show "$UNIT" --property=Environment --value \
+    | grep -F -- "HOME=/var/lib/cosh-gateway-${INSTANCE}/core-home" >/dev/null \
+    || fail "systemd did not isolate brokered Core HOME below private state"
+[ -s "$STATE/dev-shm-containment-result" ] \
+    || fail "the private /dev/shm containment probe did not complete"
+[ ! -e "$HOST_SHM_PROBE" ] \
+    || fail "the Core unit created a host-visible SUID/SGID /dev/shm artifact"
 case "$(systemctl show "$UNIT" --property=TimeoutStopUSec --value)" in
     15s | 15000000us) ;;
     *) fail "effective Gateway stop timeout differs from the packaged 15 seconds" ;;

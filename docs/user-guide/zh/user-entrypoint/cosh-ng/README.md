@@ -68,6 +68,14 @@ Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` �
   `cosh-gateway@.service` unit。它选择 contained `core` runtime 和
   `gateway-brokered-v1` profile，并接纳配置的 canonical workspace：
 
+  Unit 默认把 Core `HOME` 设为 private systemd `StateDirectory` 下的
+  `/var/lib/cosh-gateway-%i/core-home`。Provider config 可以放在
+  `/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`，也可以使用
+  `/etc/copilot-shell/config.toml` system config。不要在
+  `/etc/cosh/gateway-$USER.env` 中把 `HOME` 设到该 `StateDirectory` 之外。
+  `EnvironmentFile` 中的值会覆盖 unit 的安全默认值，而 admitted workspace 与其他 host
+  path 对这个 contained Core profile 保持只读。
+
   ```bash
   sudo install -d -m 0755 /etc/cosh
   sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"

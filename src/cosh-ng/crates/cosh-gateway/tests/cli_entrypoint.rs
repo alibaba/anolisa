@@ -430,6 +430,7 @@ fn packaged_base_service_is_task_only_and_free_of_ws_ckpt_dependency() {
 
     assert!(unit.contains("--core-executable=\"{libexecdir}/cosh-ng/cosh-core\""));
     assert!(unit.contains("--workspace=${COSH_GATEWAY_WORKSPACE}"));
+    assert!(unit.contains("Environment=HOME=/var/lib/cosh-gateway-%i/core-home"));
     assert!(!unit.contains("ws-ckpt.service"));
     assert!(!unit.contains("--checkpoint-socket="));
     assert!(!unit.contains("--security-audit="));
@@ -441,11 +442,19 @@ fn packaged_base_service_is_task_only_and_free_of_ws_ckpt_dependency() {
         "Delegate=no",
         "TimeoutStopSec=15",
         "Restart=on-failure",
+        "NoNewPrivileges=true",
+        "PrivateTmp=true",
+        "PrivateDevices=true",
+        "TemporaryFileSystem=/dev/shm:ro,nosuid,nodev,noexec",
+        "ProtectSystem=strict",
         "ProtectControlGroups=true",
         "InaccessiblePaths=/run/user",
+        "RestrictSUIDSGID=false",
     ] {
         assert!(unit.lines().any(|line| line == property), "{property}");
     }
+    assert!(!unit.lines().any(|line| line == "ProtectSystem=full"));
+    assert!(!unit.lines().any(|line| line == "RestrictSUIDSGID=true"));
     assert!(!unit.contains("--adapter="));
     assert!(!unit.contains("--profile="));
     assert!(!unit.contains("--runtime-backend="));

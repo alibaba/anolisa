@@ -73,6 +73,16 @@ remaining arguments unchanged.
   `cosh-gateway@.service`. It selects the contained `core` runtime with the
   `gateway-brokered-v1` profile and admits the configured canonical workspace:
 
+  The unit defaults Core `HOME` to
+  `/var/lib/cosh-gateway-%i/core-home`, below its private systemd
+  `StateDirectory`. Store the provider configuration at
+  `/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`, or use
+  `/etc/copilot-shell/config.toml` as a system configuration. Do not set
+  `HOME` to a path outside that `StateDirectory` in
+  `/etc/cosh/gateway-$USER.env`. `EnvironmentFile` values override the unit's
+  safe default, while the admitted workspace and other host paths are
+  read-only for this contained Core profile.
+
   ```bash
   sudo install -d -m 0755 /etc/cosh
   sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"

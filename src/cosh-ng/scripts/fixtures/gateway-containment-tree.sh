@@ -3,8 +3,98 @@
 set -euo pipefail
 
 usage() {
-    printf 'usage: %s {assert-clean|launch|leaf|spawn-grandchild|double-fork} ...\n' "$0" >&2
+    printf 'usage: %s {assert-core-filesystem|assert-clean|launch|leaf|spawn-grandchild|double-fork} ...\n' "$0" >&2
     exit 64
+}
+
+assert_core_filesystem() {
+    local workspace="$1" state="$2" shm_marker="$3"
+
+    python3 - "$workspace" "$state" "$shm_marker" <<'PY'
+import ctypes
+import errno
+import os
+import sys
+
+workspace, state, shm_marker = map(os.fsencode, sys.argv[1:])
+if os.path.basename(shm_marker) != shm_marker:
+    raise RuntimeError(f"invalid /dev/shm marker basename: {shm_marker!r}")
+expected_home = state + b"/core-home"
+actual_home = os.fsencode(os.environ.get("HOME", ""))
+if actual_home != expected_home:
+    raise RuntimeError(f"private Core HOME mismatch: {actual_home!r}")
+
+dev_flags = os.statvfs(b"/dev").f_flag
+if not dev_flags & os.ST_RDONLY:
+    raise RuntimeError("PrivateDevices did not mount /dev read-only")
+
+shm_flags = os.statvfs(b"/dev/shm").f_flag
+for flag, label in (
+    (os.ST_RDONLY, "read-only"),
+    (os.ST_NOSUID, "nosuid"),
+    (os.ST_NODEV, "nodev"),
+    (os.ST_NOEXEC, "noexec"),
+):
+    if not shm_flags & flag:
+        raise RuntimeError(f"private /dev/shm is not {label}")
+
+shm_probe = b"/dev/shm/" + shm_marker
+try:
+    fd = os.open(shm_probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o6755)
+except OSError as error:
+    if error.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+        raise
+else:
+    os.close(fd)
+    os.unlink(shm_probe)
+    raise RuntimeError("the private /dev/shm remained writable")
+
+shm_result_path = state + b"/dev-shm-containment-result"
+fd = os.open(shm_result_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+os.write(fd, b"creation-denied\n")
+os.close(fd)
+
+
+class OpenHow(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint64),
+        ("mode", ctypes.c_uint64),
+        ("resolve", ctypes.c_uint64),
+    ]
+
+
+libc = ctypes.CDLL(None, use_errno=True)
+how = OpenHow(os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC, 0, 0)
+fd = libc.syscall(437, -100, workspace, ctypes.byref(how), ctypes.sizeof(how))
+if fd < 0:
+    error = ctypes.get_errno()
+    raise OSError(error, f"openat2 workspace probe failed: {os.strerror(error)}")
+os.close(fd)
+
+forbidden = workspace + b"/must-not-create-suid"
+try:
+    fd = os.open(forbidden, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o4755)
+except OSError as error:
+    if error.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+        raise
+else:
+    os.close(fd)
+    os.unlink(forbidden)
+    raise RuntimeError("the admitted Core workspace remained writable")
+
+marker = state + b"/private-state-probe"
+fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+os.close(fd)
+os.unlink(marker)
+
+log_dir = expected_home + b"/.copilot-shell/logs"
+os.makedirs(log_dir, mode=0o700, exist_ok=True)
+log_file = log_dir + b"/cosh-core.log.probe"
+fd = os.open(log_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+os.write(fd, b"private Core logging remains writable\n")
+os.close(fd)
+os.unlink(log_file)
+PY
 }
 
 process_start_time() {
@@ -191,6 +281,10 @@ launch() {
 }
 
 case "${1:-}" in
+    assert-core-filesystem)
+        [ "$#" -eq 4 ] || usage
+        assert_core_filesystem "$2" "$3" "$4"
+        ;;
     assert-clean)
         [ "$#" -eq 2 ] || usage
         assert_clean "$2"

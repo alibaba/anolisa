@@ -126,6 +126,13 @@ slash command、Web 或 remote capability，也没有需要 approval 的 side ef
 
 配置 workspace 并启动按 account 命名的 Gateway instance。
 
+Core unit 默认把 `HOME` 设为 private systemd `StateDirectory` 下的
+`/var/lib/cosh-gateway-%i/core-home`。Core provider config 可以放在
+`/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`，也可以使用
+`/etc/copilot-shell/config.toml` system config。不要在
+`/etc/cosh/gateway-$USER.env` 中把 `HOME` 覆盖到该 `StateDirectory` 之外；environment
+file 的优先级高于安全默认值，而 admitted workspace 与其他 host path 在这个 unit 中是只读的。
+
 ```bash
 sudo install -d -m 0755 /etc/cosh
 sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"

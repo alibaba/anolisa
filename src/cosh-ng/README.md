@@ -137,6 +137,16 @@ side effect.
 
 Configure the workspace and start the account-named Gateway instance:
 
+The Core unit defaults `HOME` to
+`/var/lib/cosh-gateway-%i/core-home`, below its private systemd
+`StateDirectory`. Put the Core provider configuration at
+`/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`, or use the
+system configuration at `/etc/copilot-shell/config.toml`. Do not override
+`HOME` to a path outside that `StateDirectory` in
+`/etc/cosh/gateway-$USER.env`; the environment file takes precedence over the
+safe default, while the admitted workspace and other host paths are read-only
+inside this unit.
+
 ```bash
 sudo install -d -m 0755 /etc/cosh
 sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"
