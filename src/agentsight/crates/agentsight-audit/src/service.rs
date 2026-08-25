@@ -145,7 +145,7 @@ impl AuditService {
     /// Returns a typed persistence or stored-data error when the query fails.
     pub fn case_index_by_agent_policy(
         &self,
-    ) -> Result<HashMap<(String, String), Uuid>, AuditError> {
+    ) -> Result<HashMap<(String, String, String), Uuid>, AuditError> {
         self.store.case_index_by_agent_policy()
     }
 
