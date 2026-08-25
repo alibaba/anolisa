@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-08-25
+
+### Added
+- Add Native shell integration (`shell.integration = "native"`) for a hook-free shell and Enhanced Shell-only mode toggled with `Shift+Tab`, while keeping Enhanced Assisted as the default with visible prompt markers; slash commands, tool calls, permissions, and system notices now use distinct `/`, `*`, `!`, and `·` card prefixes so output ownership is visible at a glance (#2759)
+
 ## [0.20.0] — 2026-08-24
 
 ### Added
