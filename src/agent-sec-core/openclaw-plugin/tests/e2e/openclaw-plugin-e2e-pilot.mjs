@@ -243,7 +243,6 @@ async function runPilot() {
     AGENT_SEC_OPENCLAW_PILOT_OPENCLAW_LOG: openclawCallsLog,
     AGENT_SEC_OPENCLAW_PILOT_CLI_LOG: agentSecCliCallsLog,
     AGENT_SEC_OPENCLAW_PILOT_CLI_OVERRIDE_FILE: agentSecCliOverrideFile,
-    AGENT_SEC_DAEMON_PROMPT_PRELOAD: process.env.AGENT_SEC_DAEMON_PROMPT_PRELOAD ?? "0",
     // Bonjour/mDNS discovery is unrelated to this plugin e2e and OpenClaw
     // 2026.4.24 has a reproducible ciao cancellation crash in CI-like hosts.
     OPENCLAW_DISABLE_BONJOUR: "1",
