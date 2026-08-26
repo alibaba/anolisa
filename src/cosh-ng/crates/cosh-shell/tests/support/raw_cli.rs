@@ -132,7 +132,7 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input(
     )
 }
 
-pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
+pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input_after_start(
     adapter: &str,
     extra_args: &[&str],
     envs: &[(&str, &str)],
@@ -145,7 +145,7 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
         envs,
         Path::new(env!("CARGO_MANIFEST_DIR")),
         chunks,
-        RawCliRunMode::Shared,
+        RawCliRunMode::Exclusive,
         Some(session_started),
         None,
     )

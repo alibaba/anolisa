@@ -45,7 +45,10 @@ fn spawn_hook_session(
     let (session_started_tx, session_started_rx) = mpsc::channel();
     let session = thread::spawn(move || {
         let home = home.to_string_lossy().into_owned();
-        run_raw_cli_with_args_env_and_delayed_input_after_start(
+        // These tests measure hook deadlines after observing the hook PID.
+        // Keep their startup outside competing raw CLI sessions so scheduler
+        // load cannot consume the independent hook-start watchdog first.
+        run_raw_cli_serial_with_args_env_and_delayed_input_after_start(
             "fake",
             &[],
             &[("HOME", home.as_str())],
