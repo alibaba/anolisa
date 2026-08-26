@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use super::connection::{
+    create_connection, default_base_path, wal_checkpoint, wal_checkpoint_busy,
+};
 use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 
 /// SQLite-based audit event store
@@ -228,9 +230,30 @@ impl AuditStore {
         Ok(())
     }
 
-    /// Execute WAL checkpoint to flush WAL data back to the main database file
+    /// Execute WAL checkpoint to flush WAL data back to the main database file.
     pub fn checkpoint(&self) -> Result<()> {
         wal_checkpoint(&self.conn)
+    }
+
+    /// Truncating WAL checkpoint that reports whether it was blocked (busy).
+    ///
+    /// See [`wal_checkpoint_busy`]; size-based purge uses this to stop
+    /// deleting when the WAL cannot be truncated (#2888).
+    pub fn checkpoint_busy(&self) -> Result<bool> {
+        wal_checkpoint_busy(&self.conn)
+    }
+
+    /// Free-page bytes on the shared database file (freelist count x page size).
+    ///
+    /// Used by size-based purge convergence: deleted rows grow the freelist
+    /// instead of shrinking the file, so the logical data size is
+    /// `physical - freelist_bytes`.
+    pub fn freelist_bytes(&self) -> Result<u64> {
+        let freelist: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok((freelist.max(0) * page_size.max(0)) as u64)
     }
 
     /// Get summary statistics since a given timestamp

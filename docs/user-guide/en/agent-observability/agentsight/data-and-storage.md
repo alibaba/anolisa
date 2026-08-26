@@ -39,6 +39,14 @@ how you browse a copy or an archive. The tracer itself always writes to the defa
 | `genai_events.db` | 200 MB by default; pruning starts at 90% of the cap and removes the oldest 5% of records per pass | `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` in the service environment |
 | `interruption_events.db` | 30 days and 100 MB | `features.interruption_detection.retention_days` / `max_db_size_mb` |
 
+The limit is a logical-data cap (physical file size minus free pages); pruning
+removes the oldest records first until the logical size fits. The physical file
+does not shrink after pruning: freed pages go to the freelist and are reused by
+future writes, so the file stabilizes at its historical peak. To return disk
+space to the filesystem, run `sudo sqlite3 /var/log/sysak/.agentsight/<db>
+'VACUUM;'` manually during a low-traffic window — VACUUM rebuilds the whole
+file, so stop the service first to avoid tripping the cgroup memory limit.
+
 To raise the GenAI cap for the packaged service:
 
 ```bash

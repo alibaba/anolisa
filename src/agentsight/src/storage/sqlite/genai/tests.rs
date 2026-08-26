@@ -1039,9 +1039,8 @@ fn test_prune_old_records() {
 }
 
 #[test]
-fn test_wal_checkpoint_methods() {
+fn test_wal_checkpoint_method() {
     let (store, path) = create_populated_store("wal_ckpt");
-    store.checkpoint().unwrap();
     store.wal_checkpoint().unwrap();
     cleanup_db(&path);
 }
@@ -1464,10 +1463,12 @@ fn check_and_prune_converges_for_all_overshoot_levels() {
 
         store.check_and_prune_if_needed().unwrap();
 
+        // Convergence is on logical size: the physical file keeps its peak
+        // size (freed pages stay on the freelist, #2888).
         assert!(
-            store.get_total_db_size() < threshold,
-            "{label}: database must shrink below threshold, got {} bytes",
-            store.get_total_db_size()
+            store.effective_db_size() < threshold,
+            "{label}: logical size must drop below threshold, got {} bytes",
+            store.effective_db_size()
         );
         assert!(
             row_count(&store) < rows as i64,
@@ -1497,6 +1498,39 @@ fn check_and_prune_noop_below_threshold() {
     cleanup_size_test_db(&path);
 }
 
+/// When another connection holds a read snapshot, the truncating WAL
+/// checkpoint returns busy and the prune loop must stop instead of deleting
+/// round after round against a size that cannot converge (only the WAL keeps
+/// growing) — under the pre-fix behavior the loop deleted until the table was
+/// empty.
+#[test]
+fn check_and_prune_stops_when_wal_checkpoint_busy() {
+    set_test_db_limit();
+    let path = unique_size_test_db("busy");
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    grow_db(&store, 300, 10 * 1024);
+    store.wal_checkpoint().unwrap();
+
+    // Hold a read snapshot on a separate connection: this blocks
+    // `PRAGMA wal_checkpoint(TRUNCATE)` from completing (busy).
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM genai_events;")
+        .unwrap();
+
+    store.check_and_prune_if_needed().unwrap();
+
+    let rows = row_count(&store);
+    assert!(
+        rows > 0,
+        "prune must stop once the WAL cannot be truncated, not delete everything \
+         (remaining: {rows})"
+    );
+    drop(reader);
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
 /// Reopening an oversized database triggers the startup cleanup path in
 /// `new_with_path_and_batch`.
 #[test]
@@ -1512,8 +1546,8 @@ fn startup_cleanup_prunes_oversized_db() {
 
     let threshold = super::schema::get_prune_threshold();
     assert!(
-        store.get_total_db_size() < threshold,
-        "startup cleanup must bring the database below the threshold"
+        store.effective_db_size() < threshold,
+        "startup cleanup must bring the logical size below the threshold"
     );
     drop(store);
     cleanup_size_test_db(&path);

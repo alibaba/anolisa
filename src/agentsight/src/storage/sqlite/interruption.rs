@@ -776,7 +776,7 @@ impl InterruptionStore {
         let mut stuck_rounds = 0u32;
 
         for _ in 0..20 {
-            let size = self.total_db_file_size();
+            let size = self.effective_db_file_size()?;
             if size <= threshold {
                 break;
             }
@@ -804,12 +804,25 @@ impl InterruptionStore {
 
             // A DELETE in WAL mode does not shrink the main file (it appends
             // to the WAL instead), so size must be re-measured after a
-            // checkpoint or the loop cannot observe progress.
-            if let Err(e) = self.checkpoint() {
-                log::warn!("checkpoint during interruption trim failed: {e}");
+            // checkpoint or the loop cannot observe progress. A busy
+            // checkpoint (another connection holds a read snapshot) leaves
+            // the WAL intact — stop trimming: further deletes would keep
+            // appending WAL frames and never converge.
+            match self.checkpoint() {
+                Ok(true) => {
+                    log::warn!(
+                        "WAL checkpoint busy during interruption trim; \
+                         stopping (the WAL could not be truncated)"
+                    );
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!("checkpoint during interruption trim failed: {e}");
+                }
             }
 
-            let new_size = self.total_db_file_size();
+            let new_size = self.effective_db_file_size()?;
             if new_size < size {
                 stuck_rounds = 0;
             } else {
@@ -866,6 +879,27 @@ impl InterruptionStore {
         total
     }
 
+    /// Logical data size: physical size minus freelist pages. Trim convergence
+    /// is measured on this: deletes free pages into the freelist without
+    /// shrinking the physical file.
+    ///
+    /// # Errors
+    /// Returns an error when the connection mutex is poisoned.
+    fn effective_db_file_size(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        let physical = self.total_db_file_size();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let freelist: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap_or(4096);
+        Ok(physical.saturating_sub((freelist.max(0) * page_size.max(0)) as u64))
+    }
+
     fn row_count(&self) -> Result<i64, Box<dyn std::error::Error>> {
         let conn = self
             .conn
@@ -875,20 +909,24 @@ impl InterruptionStore {
         Ok(count)
     }
 
-    /// Reclaim free pages and truncate the WAL.
+    /// Flush and truncate the WAL.
     ///
-    /// VACUUM rebuilds the main file; in WAL mode it can reset the journal
-    /// mode, so WAL is re-enabled before the truncating checkpoint. Mirrors
-    /// the sibling genai store's `checkpoint()`.
-    fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Never VACUUMs: rebuilding the file would push its pages through the
+    /// page cache, which counts against the service's cgroup memory limit and
+    /// can OOM-kill the process on large databases (#2888). Freed pages stay
+    /// on the freelist and are reused by future inserts, so the physical file
+    /// stops growing once the logical size fits.
+    ///
+    /// Returns `Ok(true)` when the checkpoint was blocked by another
+    /// connection's read snapshot (busy): the statement succeeds but the WAL
+    /// is NOT truncated.
+    fn checkpoint(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
-        conn.execute_batch("VACUUM;")?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(())
+        let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok(busy != 0)
     }
 }
 
@@ -1697,12 +1735,15 @@ mod tests {
     }
 
     /// Regression for #2818: an oversized database must be trimmed to the
-    /// limit (newest rows survive) and the file must actually shrink, not
-    /// stay put while the table is wiped. Reverting to a main-file-only size
-    /// check without an in-loop checkpoint makes this fail: the loop then
-    /// cannot observe progress and deletes until the table is empty.
+    /// limit (newest rows survive) and the logical size must converge, without
+    /// wiping the table. Reverting to a main-file-only size check without an
+    /// in-loop checkpoint makes this fail: the loop then cannot observe
+    /// progress and deletes until the table is empty.
+    ///
+    /// The physical file may stay at its historical peak (#2888): freed pages
+    /// go to the freelist and are reused by future inserts.
     #[test]
-    fn purge_size_based_keeps_newest_and_shrinks_file() {
+    fn purge_size_based_keeps_newest_and_converges() {
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
             "test_interruption_size_{}_{}.db",
@@ -1749,11 +1790,13 @@ mod tests {
             "newest row must survive size-based trim"
         );
 
-        // File (main + WAL) actually shrank below the limit.
-        let size_after = store.total_db_file_size();
+        // Logical size (physical minus freelist) converges below the limit;
+        // the physical file may stay at its peak since pages are not returned
+        // to the OS without VACUUM (#2888).
+        let size_after = store.effective_db_file_size().unwrap();
         assert!(
             size_after <= 1024 * 1024,
-            "file must fit after trim, got {size_after}"
+            "logical size must fit after trim, got {size_after}"
         );
 
         // Once the file fits, the next purge is a no-op.
@@ -1814,6 +1857,55 @@ mod tests {
         let deleted = store.purge_old_and_oversized(0, 1).unwrap();
         assert_eq!(deleted, 0, "below the configured limit must not trim");
 
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// When another connection holds a read snapshot, the truncating WAL
+    /// checkpoint returns busy and the trim loop must stop instead of deleting
+    /// against a size that can never converge (only the WAL keeps growing).
+    #[test]
+    fn purge_size_based_stops_when_wal_checkpoint_busy() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_busy_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = InterruptionStore::new_with_path(&path).unwrap();
+
+        // ~1.2MB across 300 rows (~4KB each), over a 1MB limit.
+        let blob = "z".repeat(4 * 1024);
+        for i in 0..300u64 {
+            let mut e = make_event("conv-busy", InterruptionType::LlmError);
+            e.interruption_id = format!("int-busy-{i:04}");
+            e.occurred_at_ns = 1_000 + i as i64;
+            e.detail = Some(blob.clone());
+            store.insert(&e).unwrap();
+        }
+        store.checkpoint().unwrap();
+
+        // Hold a read snapshot on a separate connection: this blocks
+        // `PRAGMA wal_checkpoint(TRUNCATE)` from completing (busy).
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM interruption_events;")
+            .unwrap();
+
+        let deleted = store.purge_old_and_oversized(0, 1).unwrap();
+        let remaining = store.row_count().unwrap();
+        assert!(
+            remaining > 0,
+            "trim must stop once the WAL cannot be truncated, not delete \
+             everything (deleted {deleted}, remaining {remaining})"
+        );
+
+        drop(reader);
         drop(store);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
