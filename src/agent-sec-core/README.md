@@ -364,6 +364,12 @@ The six integrity states are `pass` / `none` / `drifted` / `warn` / `deny` /
 | `audit <dir>` | Show version history and signature chain |
 | `check --all` / `scan --all` | Batch mode across all registered skill dirs |
 
+`decide` is the supported interface for recording user decisions. The former
+hidden `set-policy` placeholder was never implemented and is not a supported
+command; invoking it is an unknown-command usage error with exit code 2. The
+hidden `rotate-keys` reservation also remains unavailable: direct execution
+exits non-zero and leaves the signing keys unchanged.
+
 ### Quick Example
 
 ```bash

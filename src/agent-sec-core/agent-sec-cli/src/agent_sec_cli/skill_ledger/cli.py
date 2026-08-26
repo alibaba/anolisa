@@ -567,40 +567,21 @@ def cmd_export(
 
 
 # ---------------------------------------------------------------------------
-# set-policy (stub)
-# ---------------------------------------------------------------------------
-
-
-@app.command("set-policy", hidden=True)
-def cmd_set_policy(
-    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
-    policy: str = typer.Option(
-        ..., "--policy", help="Execution policy to apply: allow | block | warning"
-    ),
-) -> None:
-    """Set a skill's execution policy (coming soon).
-
-    Will control whether a skill is allowed to run, blocked, or triggers a
-    warning based on its security state. Not yet implemented.
-    """
-    typer.echo("set-policy: this feature is coming soon.")
-    raise typer.Exit(code=0)
-
-
-# ---------------------------------------------------------------------------
-# rotate-keys (stub)
+# rotate-keys (reserved stub)
 # ---------------------------------------------------------------------------
 
 
 @app.command("rotate-keys", hidden=True)
 def cmd_rotate_keys() -> None:
-    """Rotate the signing key pair (coming soon).
+    """Report that signing-key rotation is not implemented.
 
-    Will archive the current key pair and generate a new one, allowing
-    continued verification of manifests signed with the old keys.
+    This reserved command makes no key changes and exits non-zero when invoked.
     """
-    typer.echo("rotate-keys: this feature is coming soon.")
-    raise typer.Exit(code=0)
+    typer.echo(
+        "Error: rotate-keys is not implemented; no keys were changed.",
+        err=True,
+    )
+    raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

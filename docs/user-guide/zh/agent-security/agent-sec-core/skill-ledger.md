@@ -601,6 +601,11 @@ agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 | `agent-sec-cli skill-ledger audit <dir>` | 深度验证版本链 |
 | `agent-sec-cli skill-ledger list-scanners` | 查看已注册的扫描器列表 |
 
+`decide` 是记录单个 Skill 用户决策的唯一受支持命令。早期隐藏的 `set-policy`
+占位命令从未实现且现已移除；继续调用会得到 unknown-command 用法错误和退出码 2。
+`rotate-keys` 仍是隐藏的预留接口：调用时会在 stderr 报告 `not implemented`，以非零
+退出码结束，且不会修改 `key.enc`、`key.pub` 或 keyring。
+
 ## 关键路径
 
 | 路径 | 用途 |

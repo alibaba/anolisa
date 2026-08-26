@@ -14,7 +14,7 @@ Test groups:
    G6  scan --all
    G7  audit
    G8  status (human-readable)
-   G9  stubs & edge cases
+   G9  Reserved commands & edge cases
    G10 SKILL.md contract assertions
    G11 Passphrase-protected key lifecycle
    G12 cosh hook integration
@@ -124,6 +124,17 @@ def write_findings_file(parent: Path, name: str, findings: list | dict) -> Path:
     return path
 
 
+def snapshot_file_tree(root: Path) -> dict[str, bytes]:
+    """Return relative paths and contents for every file below *root*."""
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 # ── Workspace ──────────────────────────────────────────────────────────────
 
 
@@ -194,6 +205,8 @@ def case_help_available(ws: Workspace):
     assert (
         "skill-ledger" in r.stdout.lower()
     ), f"Expected 'skill-ledger' in help output: {r.stdout[:200]}"
+    assert "rotate-keys" not in r.stdout
+    assert "set-policy" not in r.stdout
 
 
 # ── G2: init-keys ─────────────────────────────────────────────────────────
@@ -814,24 +827,44 @@ def case_status_drifted_shows_details(ws: Workspace):
     ), f"Expected health 'attention' after drift: {out['skills']}"
 
 
-# ── G9: stubs & edge cases ───────────────────────────────────────────────
+# ── G9: reserved commands & edge cases ───────────────────────────────────
 
 
-def case_set_policy_stub(ws: Workspace):
-    """set-policy → exit 0, 'coming soon' in output."""
-    skill = make_skill(ws.skills_dir, "stub-policy", {"x.txt": "x"})
+def case_set_policy_removed(ws: Workspace) -> None:
+    """The removed set-policy placeholder fails without creating ledger state."""
+    skill = make_skill(ws.skills_dir, "removed-policy", {"x.txt": "x"})
+    metadata_dir = skill / ".skill-meta"
+    assert not metadata_dir.exists()
+
     r = run_skill_ledger(
         ["set-policy", str(skill), "--policy", "allow"], env_extra=ws.env()
     )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 2, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    assert "no such command" in r.stderr.lower()
+    assert "set-policy" in r.stderr
+    assert not metadata_dir.exists()
 
 
-def case_rotate_keys_stub(ws: Workspace):
-    """rotate-keys → exit 0, 'coming soon' in output."""
+def case_rotate_keys_not_implemented(ws: Workspace) -> None:
+    """rotate-keys fails explicitly without changing the isolated key store."""
+    key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
+    before = snapshot_file_tree(key_dir)
+    keyring_existed = (key_dir / "keyring").is_dir()
+    assert {"key.enc", "key.pub"}.issubset(before)
+
     r = run_skill_ledger(["rotate-keys"], env_extra=ws.env())
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 1, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    assert r.stderr == (
+        "Error: rotate-keys is not implemented; no keys were changed.\n"
+    )
+    assert snapshot_file_tree(key_dir) == before
+    assert (key_dir / "keyring").is_dir() is keyring_existed
+
+    help_result = run_skill_ledger(["rotate-keys", "--help"], env_extra=ws.env())
+    assert help_result.returncode == 0, help_result.stderr
+    assert "not implemented" in help_result.stdout.lower()
 
 
 def case_list_scanners(ws: Workspace):
@@ -1564,8 +1597,8 @@ E2E_CASES = [
     E2ECase("G7: --verify-snapshots", case_audit_verify_snapshots),
     E2ECase("G8: human-readable output", case_status_human_readable_output),
     E2ECase("G8: drifted details", case_status_drifted_shows_details),
-    E2ECase("G9: set-policy stub", case_set_policy_stub),
-    E2ECase("G9: rotate-keys stub", case_rotate_keys_stub),
+    E2ECase("G9: set-policy removed", case_set_policy_removed),
+    E2ECase("G9: rotate-keys unavailable", case_rotate_keys_not_implemented),
     E2ECase("G9: list-scanners", case_list_scanners),
     E2ECase("G9: certify empty skill dir", case_certify_empty_skill_dir),
     E2ECase("G10: empty passphrase env", case_contract_init_keys_empty_passphrase_env),

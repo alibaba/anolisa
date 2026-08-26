@@ -628,6 +628,13 @@ Per-version verification: schema → hash integrity → signature validity → s
 | `agent-sec-cli skill-ledger audit <dir>` | Deep-verify the version chain |
 | `agent-sec-cli skill-ledger list-scanners` | List registered scanners |
 
+`decide` is the only supported command for recording a per-Skill user decision.
+The former hidden `set-policy` placeholder was never implemented and has been
+removed; invoking it is now an unknown-command usage error with exit code 2.
+`rotate-keys` remains a hidden, reserved interface: invoking it reports
+`not implemented` on stderr, exits non-zero, and does not change `key.enc`,
+`key.pub`, or the keyring.
+
 ## Key Paths
 
 | Path | Purpose |
