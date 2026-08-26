@@ -92,6 +92,28 @@ The scanner aggregates layer results into one verdict:
 
 > In `fast` mode, any L1 rule hit maps directly to `deny` because the ML layer is not run.
 
+## What each layer can and cannot catch
+
+L1 is a rule engine. It matches wording that has been written down as a pattern, which makes it
+fast and explainable — every hit names a rule id — but it does not generalise. Rewording an
+attack while keeping its intent can slip past L1 until a rule covers that phrasing. The rules are
+also deliberately narrow: L1 is tuned so ordinary prompts are never flagged, and that tuning costs
+recall.
+
+L2 and L4 are model-backed and cover what rules cannot: paraphrased instructions, wording nobody
+anticipated, and intent that only becomes visible across several turns.
+
+What this means in practice:
+
+- `fast` mode runs L1 only. It trades detection coverage for latency — choose it when the latency
+  budget requires it, not as a lighter equivalent of `standard`.
+- If the model backend is unreachable, `standard` keeps scanning with the layers that survived
+  instead of failing. The result then carries `degraded: true` and lists the unavailable layer in
+  `layers_failed`, and the summary is prefixed with `Scan degraded:`. Check those fields before
+  reading `pass` as "nothing to worry about".
+- `pass` means no layer that actually ran reported a threat. It is not a proof of safety, which is
+  why the `prompt_scan` Security Event is recorded either way.
+
 ## Host hook policy
 
 Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip host prompt scanner hooks entirely. When enabled,
