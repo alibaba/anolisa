@@ -2,7 +2,7 @@
 //! [`PackageQuery`] fake plus in-memory state, so no live rpmdb/dnf is required.
 
 use super::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
@@ -13,6 +13,7 @@ use anolisa_core::state::{
     InstalledObject, ObjectStatus, Ownership, RpmMetadata, SubscriptionScope,
 };
 use anolisa_core::state_migration::migrate_state;
+use anolisa_core::state_store::StateStore;
 
 use super::super::UpdateArgs;
 use super::render::build_motd;
@@ -32,6 +33,11 @@ struct FakeHost {
     available_errors: HashSet<String>,
     /// packages whose `query_installed` reports a multi-version drift.
     installed_multi: HashSet<String>,
+    /// packages whose installed query cannot start rpm.
+    installed_command_missing: HashSet<String>,
+    /// packages whose installed query reports a hard rpmdb failure.
+    installed_errors: HashSet<String>,
+    installed_queries: RefCell<Vec<String>>,
     /// capabilities whose `what_provides_installed` returns a query error.
     provides_errors: HashSet<String>,
     /// capability → available repo provider package names.
@@ -56,10 +62,25 @@ impl FakeHost {
 
 impl PackageQuery for FakeHost {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+        self.installed_queries
+            .borrow_mut()
+            .push(package.to_string());
         if self.installed_multi.contains(package) {
             return Err(PackageQueryError::UnexpectedOutput {
                 command: "rpm".to_string(),
                 detail: "2 installed versions".to_string(),
+            });
+        }
+        if self.installed_command_missing.contains(package) {
+            return Err(PackageQueryError::CommandMissing {
+                command: "rpm".to_string(),
+            });
+        }
+        if self.installed_errors.contains(package) {
+            return Err(PackageQueryError::QueryFailed {
+                command: "rpm".to_string(),
+                code: Some(1),
+                stderr: "rpmdb unavailable".to_string(),
             });
         }
         Ok(self.installed.get(package).cloned())
@@ -250,8 +271,16 @@ fn run_with_index_and_backend(
     component_index: Option<&crate::resolution::ComponentIndex>,
     rpm_backend: Option<&crate::repo_config::BackendConfig>,
 ) -> UpdateCheckReport {
+    let ctx = system_ctx();
+    let view = StateView::load_with_writable_state(
+        &ctx,
+        CHECK_COMMAND,
+        StateVisibility::UserPlusSystem,
+        installed.clone(),
+    )
+    .expect("test state view");
     run_update_check(CheckInputs {
-        installed,
+        view: &view,
         query: host,
         cli_exe_path: "/usr/bin/anolisa",
         arch: "x86_64",
@@ -260,6 +289,7 @@ fn run_with_index_and_backend(
         component_index,
         rpm_backend,
     })
+    .expect("update check report")
 }
 
 /// Identity-only component index naming `components`, so profile defaults
@@ -461,6 +491,14 @@ fn update_check_raw_component_is_unsupported() {
         host.txn_calls.get(),
         0,
         "raw component must not run a transaction"
+    );
+    assert!(
+        !host
+            .installed_queries
+            .borrow()
+            .iter()
+            .any(|package| package == "tokenless"),
+        "owned component must not request native package evidence"
     );
 }
 
@@ -1234,6 +1272,100 @@ fn update_check_component_missing_from_rpmdb_is_item_error() {
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_ERROR);
     assert!(item.error.as_deref().unwrap().contains("forget"));
+    assert_eq!(report.summary.errors, 1);
+}
+
+#[test]
+fn update_check_component_native_probe_runs_once() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "1.0.0", Some("1.al4")),
+    );
+    let state = state_with(vec![rpm_component(
+        "cosh",
+        "copilot-shell",
+        "1.0.0-1.al4",
+        Ownership::RpmObserved,
+    )]);
+
+    let report = run(&host, &state, None, None);
+
+    assert_eq!(report.components[0].action, ACTION_NOOP);
+    assert_eq!(
+        host.installed_queries
+            .borrow()
+            .iter()
+            .filter(|package| package.as_str() == "copilot-shell")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn update_check_component_multiple_versions_remains_item_error() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed_multi.insert("copilot-shell".to_string());
+    let state = state_with(vec![rpm_component(
+        "cosh",
+        "copilot-shell",
+        "1.0.0-1.al4",
+        Ownership::RpmObserved,
+    )]);
+
+    let report = run(&host, &state, None, None);
+    let item = &report.components[0];
+
+    assert_eq!(item.action, ACTION_ERROR);
+    assert_eq!(
+        item.error.as_deref(),
+        Some("rpmdb reports multiple installed versions for this package")
+    );
+    assert_eq!(report.summary.errors, 1);
+}
+
+#[test]
+fn update_check_component_missing_rpm_command_keeps_existing_error() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed_command_missing
+        .insert("copilot-shell".to_string());
+    let state = state_with(vec![rpm_component(
+        "cosh",
+        "copilot-shell",
+        "1.0.0-1.al4",
+        Ownership::RpmObserved,
+    )]);
+
+    let report = run(&host, &state, None, None);
+    let item = &report.components[0];
+
+    assert_eq!(item.action, ACTION_ERROR);
+    assert_eq!(
+        item.error.as_deref(),
+        Some("rpm/dnf not found; cannot query the installed version")
+    );
+    assert_eq!(report.summary.errors, 1);
+}
+
+#[test]
+fn update_check_component_rpm_failure_keeps_source_detail() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed_errors.insert("copilot-shell".to_string());
+    let state = state_with(vec![rpm_component(
+        "cosh",
+        "copilot-shell",
+        "1.0.0-1.al4",
+        Ownership::RpmObserved,
+    )]);
+
+    let report = run(&host, &state, None, None);
+    let item = &report.components[0];
+
+    assert_eq!(item.action, ACTION_ERROR);
+    assert_eq!(
+        item.error.as_deref(),
+        Some("rpm query failed: rpm failed (code Some(1)): rpmdb unavailable")
+    );
     assert_eq!(report.summary.errors, 1);
 }
 

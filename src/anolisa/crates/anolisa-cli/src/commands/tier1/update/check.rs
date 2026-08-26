@@ -47,13 +47,17 @@ use serde::{Deserialize, Serialize};
 use anolisa_core::domain::{Installation, ManagementRelation, ProviderBinding};
 use anolisa_core::self_update;
 use anolisa_core::state::ObjectKind;
-use anolisa_core::state_store::StateStore;
+use anolisa_core::{
+    ComponentSnapshot, NativePackageProvenance, NativePackageSnapshot, ProbeEvidence, StateSnapshot,
+};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError, PackageVersion, rpm_evr_cmp};
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use super::UpdateArgs;
 use crate::commands::common;
+use crate::commands::state_view::{ScopedInstalledObject, StateView, StateVisibility};
+use crate::commands::tier1::component_observation::{self, AggregateSelection};
 use crate::context::CliContext;
 use crate::progress;
 use crate::repo_config::{BackendConfig, RepoConfig};
@@ -216,7 +220,7 @@ impl TargetProfile {
 /// Read-only inputs for [`run_update_check`]; injected so tests drive the whole
 /// report without a live rpmdb/dnf.
 struct CheckInputs<'a> {
-    installed: &'a StateStore,
+    view: &'a StateView,
     query: &'a dyn PackageQuery,
     /// Path of the running executable, used to find its owning RPM.
     cli_exe_path: &'a str,
@@ -328,6 +332,12 @@ pub(crate) fn compute_update_check_report(
     )?;
     let query = RpmPackageQuery::system_with_repo(repo);
     let installed = common::load_state_store(ctx, CHECK_COMMAND)?;
+    let view = StateView::load_with_writable_state(
+        ctx,
+        CHECK_COMMAND,
+        StateVisibility::UserPlusSystem,
+        installed,
+    )?;
 
     let exe = self_update::resolve_current_exe().map_err(|err| CliError::Runtime {
         command: CHECK_COMMAND.to_string(),
@@ -357,8 +367,8 @@ pub(crate) fn compute_update_check_report(
     let component_index =
         crate::resolution::load_optional_component_index(layout, &env, &repo_config);
 
-    Ok(run_update_check(CheckInputs {
-        installed: &installed,
+    run_update_check(CheckInputs {
+        view: &view,
         query: &query,
         cli_exe_path: &exe_path,
         arch: &env.arch,
@@ -366,7 +376,7 @@ pub(crate) fn compute_update_check_report(
         target: Some(target_profile),
         component_index: component_index.as_ref(),
         rpm_backend: repo_config.backends.get("rpm"),
-    }))
+    })
 }
 
 /// Load repo config without ever writing it, keeping `--check` read-only.
@@ -386,24 +396,27 @@ fn load_repo_config_read_only(ctx: &CliContext, layout: &FsLayout) -> Result<Rep
 }
 
 /// Pure report builder over the injected read-only inputs.
-fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
+fn run_update_check(inputs: CheckInputs<'_>) -> Result<UpdateCheckReport, CliError> {
     let mut summary = CheckSummary::default();
 
     let cli = build_cli_check(inputs.query, inputs.cli_exe_path, inputs.arch, &mut summary);
 
     let mut components = Vec::new();
-    for installation in &inputs.installed.installations {
-        if installation.kind != ObjectKind::Component {
-            continue;
-        }
+    let observed_at = super::now_iso8601();
+    for record in component_observation::select_visible_components(
+        inputs.view,
+        None,
+        AggregateSelection::ActiveOnly,
+    ) {
         components.push(check_component(
             inputs.query,
             inputs.component_index,
             inputs.rpm_backend,
-            installation,
+            &record,
             inputs.arch,
+            &observed_at,
             &mut summary,
-        ));
+        )?);
     }
 
     // Profile defaults absent from ANOLISA state are surfaced as a gap (issue
@@ -424,7 +437,13 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
             // was already checked by the installed loop above, and must not
             // be re-normalized into a second identity — or, with no index,
             // into a spurious validation error.
-            if inputs.installed.find(ObjectKind::Component, name).is_some() {
+            if inputs
+                .view
+                .writable
+                .state
+                .find(ObjectKind::Component, name)
+                .is_some()
+            {
                 seen_defaults.insert(name.clone());
                 continue;
             }
@@ -455,7 +474,9 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
             };
             if !seen_defaults.insert(canonical.clone())
                 || inputs
-                    .installed
+                    .view
+                    .writable
+                    .state
                     .find(ObjectKind::Component, &canonical)
                     .is_some()
             {
@@ -475,7 +496,7 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
     let upgrade_available = summary.updates > 0;
     let action_required =
         upgrade_available || summary.reconciliations > 0 || summary.missing_defaults > 0;
-    UpdateCheckReport {
+    Ok(UpdateCheckReport {
         target: inputs.target_name,
         backend: "rpm".to_string(),
         upgrade_available,
@@ -483,7 +504,7 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
         cli,
         components,
         summary,
-    }
+    })
 }
 
 /// Determine whether the running CLI binary is RPM-owned and, if so, whether a
@@ -584,18 +605,21 @@ fn check_component(
     query: &dyn PackageQuery,
     component_index: Option<&ComponentIndex>,
     rpm_backend: Option<&BackendConfig>,
-    installation: &Installation,
+    record: &ScopedInstalledObject<'_>,
     arch: &str,
+    observed_at: &str,
     summary: &mut CheckSummary,
-) -> ComponentCheck {
+) -> Result<ComponentCheck, CliError> {
+    let state_snapshot = update_check_snapshot(record, ProbeEvidence::NotRequested)?;
+    let installation = active_snapshot_installation(&state_snapshot)?;
     let component = installation.name.clone();
 
     // Owned components are explicitly out of the RPM upgrade path. Nothing is
     // queried, touched, or migrated — only reported.
-    let (identity, relation, last_observed) = match &installation.binding {
+    let (manager, identity, relation, last_observed) = match &installation.binding {
         ProviderBinding::Owned { artifact } => {
             summary.unsupported += 1;
-            return ComponentCheck {
+            return Ok(ComponentCheck {
                 component,
                 package: artifact.raw_package.clone(),
                 ownership: Some("owned".to_string()),
@@ -605,14 +629,15 @@ fn check_component(
                 error: None,
                 absent_from_state: false,
                 backfill_rpm_metadata: false,
-            };
+            });
         }
         ProviderBinding::Delegated {
+            pm,
             package,
             relation,
             last_observed,
             ..
-        } => (package, relation, last_observed),
+        } => (*pm, package, relation, last_observed),
     };
 
     let ownership_label = relation.label().to_string();
@@ -633,66 +658,104 @@ fn check_component(
                 Ok(package) => (package, true),
                 Err(reason) => {
                     summary.errors += 1;
-                    return component_error(
+                    return Ok(component_error(
                         component,
                         None,
                         ownership_label,
                         recorded_version,
                         reason,
-                    );
+                    ));
                 }
             }
         }
     };
 
-    let installed = match query.query_installed(&package) {
-        Ok(Some(info)) => info.version,
+    let native =
+        component_observation::observe_native_package(manager, &package, query, observed_at);
+    let installed_version = native.installed_version;
+    let query_error = native.query_error;
+    let snapshot = update_check_snapshot(record, native.evidence)?;
+    let installed = match snapshot.native_package() {
+        ProbeEvidence::Present {
+            value: NativePackageSnapshot::Installed(observation),
+            ..
+        } => {
+            let version = installed_version.ok_or_else(|| CliError::Runtime {
+                command: CHECK_COMMAND.to_string(),
+                reason: format!(
+                    "component snapshot for '{}' lost the structured native package version",
+                    snapshot.request().component()
+                ),
+            })?;
+            (
+                version,
+                observation
+                    .evr
+                    .clone()
+                    .unwrap_or_else(|| observation.version.clone()),
+            )
+        }
         // rpmdb no longer has the package (e.g. removed with `rpm -e`): item
         // error, not a crash — the rest of the check continues.
-        Ok(None) => {
+        ProbeEvidence::Absent { .. } => {
             summary.errors += 1;
-            return component_error(
+            return Ok(component_error(
                 component,
                 Some(package),
                 ownership_label,
                 recorded_version.clone(),
                 "package recorded in ANOLISA state is not present in rpmdb; run `anolisa forget` or reinstall".to_string(),
-            );
+            ));
         }
-        Err(PackageQueryError::UnexpectedOutput { .. }) => {
+        ProbeEvidence::Present {
+            value:
+                NativePackageSnapshot::MultipleVersions | NativePackageSnapshot::UnexpectedOutput { .. },
+            ..
+        } => {
             summary.errors += 1;
-            return component_error(
+            return Ok(component_error(
                 component,
                 Some(package),
                 ownership_label,
                 recorded_version.clone(),
                 "rpmdb reports multiple installed versions for this package".to_string(),
-            );
+            ));
         }
-        Err(PackageQueryError::CommandMissing { .. }) => {
+        ProbeEvidence::Unavailable { .. }
+            if matches!(query_error, Some(PackageQueryError::CommandMissing { .. })) =>
+        {
             summary.errors += 1;
-            return component_error(
+            return Ok(component_error(
                 component,
                 Some(package),
                 ownership_label,
                 recorded_version.clone(),
                 "rpm/dnf not found; cannot query the installed version".to_string(),
-            );
+            ));
         }
-        Err(err) => {
+        ProbeEvidence::Unavailable { reason, .. } => {
             summary.errors += 1;
-            return component_error(
+            return Ok(component_error(
                 component,
                 Some(package),
                 ownership_label,
                 recorded_version.clone(),
-                format!("rpm query failed: {err}"),
-            );
+                format!("rpm query failed: {reason}"),
+            ));
+        }
+        ProbeEvidence::NotRequested => {
+            return Err(CliError::Runtime {
+                command: CHECK_COMMAND.to_string(),
+                reason: format!(
+                    "component snapshot for '{}' did not request native package evidence",
+                    snapshot.request().component()
+                ),
+            });
         }
     };
-    let installed_evr = installed.to_string();
+    let installed_evr = installed.1;
 
-    match repo_upgrade(query, &package, arch, &installed) {
+    Ok(match repo_upgrade(query, &package, arch, &installed.0) {
         Ok(Some(available)) => {
             summary.updates += 1;
             ComponentCheck {
@@ -736,6 +799,46 @@ fn check_component(
                 format!("repo candidate query failed: {err}"),
             )
         }
+    })
+}
+
+fn update_check_snapshot(
+    record: &ScopedInstalledObject<'_>,
+    native_package: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
+) -> Result<ComponentSnapshot, CliError> {
+    component_observation::snapshot_from_record(
+        record,
+        ProbeEvidence::NotRequested,
+        native_package,
+        ProbeEvidence::NotRequested,
+        ProbeEvidence::NotRequested,
+        ProbeEvidence::NotRequested,
+    )
+    .map_err(|error| CliError::Runtime {
+        command: CHECK_COMMAND.to_string(),
+        reason: format!("failed to assemble component snapshot: {error}"),
+    })
+}
+
+fn active_snapshot_installation(snapshot: &ComponentSnapshot) -> Result<&Installation, CliError> {
+    match snapshot.state() {
+        ProbeEvidence::Present {
+            value: StateSnapshot::Active(installation),
+            ..
+        } => Ok(installation),
+        ProbeEvidence::Absent { .. }
+        | ProbeEvidence::Unavailable { .. }
+        | ProbeEvidence::NotRequested
+        | ProbeEvidence::Present {
+            value: StateSnapshot::Quarantined(_),
+            ..
+        } => Err(CliError::Runtime {
+            command: CHECK_COMMAND.to_string(),
+            reason: format!(
+                "component snapshot for '{}' does not contain active state",
+                snapshot.request().component()
+            ),
+        }),
     }
 }
 

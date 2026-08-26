@@ -12,7 +12,7 @@ use anolisa_core::{
     PendingJournalSnapshot, ProbeEvidence, SnapshotContractError, SnapshotProbe, StateProvenance,
     StateRootScope, StateSnapshot, StateVisibilitySnapshot,
 };
-use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
+use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError, PackageVersion};
 use thiserror::Error;
 
 use crate::commands::common;
@@ -47,6 +47,13 @@ pub(crate) enum RpmDrift {
     Drifted { reason: String },
     /// The recorded native package is absent.
     Missing,
+}
+
+/// Native-package evidence plus the backend-native version from the same query.
+pub(crate) struct NativePackageObservation {
+    pub(crate) evidence: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
+    pub(crate) installed_version: Option<PackageVersion>,
+    pub(crate) query_error: Option<PackageQueryError>,
 }
 
 /// Apply the read-only state normalization shared by status and doctor.
@@ -102,7 +109,8 @@ pub(crate) fn snapshot_from_record(
         mutable_by_current_invocation: record.mutable_by_current_invocation,
         shadowed_by: record.shadowed_by.map(snapshot_scope),
     };
-    let mut probes = vec![SnapshotProbe::State, SnapshotProbe::OwnedFiles];
+    let mut probes = vec![SnapshotProbe::State];
+    push_requested_probe(&mut probes, SnapshotProbe::OwnedFiles, &owned_files);
     push_requested_probe(&mut probes, SnapshotProbe::NativePackage, &native_package);
     push_requested_probe(&mut probes, SnapshotProbe::ManifestHealth, &manifest_health);
     push_requested_probe(&mut probes, SnapshotProbe::Adapters, &adapters);
@@ -198,30 +206,56 @@ pub(crate) fn native_package_evidence(
     query: &dyn PackageQuery,
     observed_at: &str,
 ) -> ProbeEvidence<NativePackageSnapshot, NativePackageProvenance> {
+    observe_native_package(manager, package, query, observed_at).evidence
+}
+
+/// Query one native package once and retain its structured version for ordering.
+pub(crate) fn observe_native_package(
+    manager: NativePm,
+    package: &str,
+    query: &dyn PackageQuery,
+    observed_at: &str,
+) -> NativePackageObservation {
     let provenance = NativePackageProvenance {
         manager,
         package: package.to_string(),
     };
     match query.query_installed(package) {
-        Ok(Some(info)) => ProbeEvidence::Present {
-            provenance,
-            value: NativePackageSnapshot::Installed(Observation {
-                version: info.version.version.clone(),
-                evr: Some(info.version.to_string()),
-                arch: Some(info.arch),
-                source_repo: info.origin,
-                observed_at: observed_at.to_string(),
-            }),
+        Ok(Some(info)) => NativePackageObservation {
+            installed_version: Some(info.version.clone()),
+            query_error: None,
+            evidence: ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::Installed(Observation {
+                    version: info.version.version.clone(),
+                    evr: Some(info.version.to_string()),
+                    arch: Some(info.arch),
+                    source_repo: info.origin,
+                    observed_at: observed_at.to_string(),
+                }),
+            },
         },
-        Ok(None) => ProbeEvidence::Absent { provenance },
-        Err(PackageQueryError::UnexpectedOutput { detail, .. }) => ProbeEvidence::Present {
-            provenance,
-            value: NativePackageSnapshot::UnexpectedOutput { detail },
+        Ok(None) => NativePackageObservation {
+            evidence: ProbeEvidence::Absent { provenance },
+            installed_version: None,
+            query_error: None,
         },
-        Err(error) => ProbeEvidence::Unavailable {
-            provenance,
-            reason: error.to_string(),
+        Err(PackageQueryError::UnexpectedOutput { detail, .. }) => NativePackageObservation {
+            evidence: ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::UnexpectedOutput { detail },
+            },
+            installed_version: None,
+            query_error: None,
         },
+        Err(error) => {
+            let reason = error.to_string();
+            NativePackageObservation {
+                evidence: ProbeEvidence::Unavailable { provenance, reason },
+                installed_version: None,
+                query_error: Some(error),
+            }
+        }
     }
 }
 
@@ -465,6 +499,18 @@ mod tests {
                     && value.files[0].path == binary
                     && value.files[0].status == IntegrityStatus::Unverified
         ));
+
+        let state_only = snapshot_from_record(
+            &selected[0],
+            ProbeEvidence::NotRequested,
+            ProbeEvidence::NotRequested,
+            ProbeEvidence::NotRequested,
+            ProbeEvidence::NotRequested,
+            ProbeEvidence::NotRequested,
+        )
+        .expect("state-only component snapshot");
+        assert_eq!(state_only.owned_files(), &ProbeEvidence::NotRequested);
+        assert!(!state_only.request().requests(SnapshotProbe::OwnedFiles));
     }
 
     #[derive(Clone, Copy)]
@@ -508,14 +554,18 @@ mod tests {
 
     #[test]
     fn native_package_evidence_preserves_query_outcomes() {
-        let present = native_package_evidence(
+        let present = observe_native_package(
             NativePm::Rpm,
             "tokenless",
             &ScriptedQuery(InstalledReply::Present),
             "2026-08-25T00:00:00Z",
         );
+        assert_eq!(
+            present.installed_version.as_ref().map(ToString::to_string),
+            Some("1.2.3-1.al4".to_string())
+        );
         assert!(matches!(
-            present,
+            present.evidence,
             ProbeEvidence::Present {
                 value: NativePackageSnapshot::Installed(Observation { evr: Some(evr), .. }),
                 ..
@@ -530,14 +580,18 @@ mod tests {
         );
         assert!(matches!(absent, ProbeEvidence::Absent { .. }));
 
-        let unavailable = native_package_evidence(
+        let unavailable = observe_native_package(
             NativePm::Rpm,
             "tokenless",
             &ScriptedQuery(InstalledReply::Unavailable),
             "2026-08-25T00:00:00Z",
         );
         assert!(matches!(
-            unavailable,
+            unavailable.query_error,
+            Some(PackageQueryError::CommandMissing { command }) if command == "rpm"
+        ));
+        assert!(matches!(
+            unavailable.evidence,
             ProbeEvidence::Unavailable { reason, .. } if reason == "command not found: rpm"
         ));
 
