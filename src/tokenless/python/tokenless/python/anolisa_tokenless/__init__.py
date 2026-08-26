@@ -16,6 +16,7 @@ from anolisa_tokenless.sdk import (
     ToolStatus,
 )
 from anolisa_tokenless.stats import (
+    StatsAttribution,
     StatsComparison,
     StatsContentDiff,
     StatsDiff,
@@ -49,6 +50,7 @@ __all__ = [
     "ModelRequest",
     "RetrievalError",
     "RetrieveRequest",
+    "StatsAttribution",
     "StatsComparison",
     "StatsContentDiff",
     "StatsDiff",

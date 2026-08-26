@@ -321,7 +321,7 @@ fn test_array_truncation_with_stash_round_trip() {
     assert_eq!(arr_result[1], json!(2));
     assert_eq!(arr_result[2], json!(3));
     let marker = arr_result[3].as_str().unwrap();
-    assert!(marker.contains("retrieve with"));
+    assert!(marker.contains("run: tokenless retrieve"));
     let hash = extract_hash(marker).expect("marker should embed a hash");
 
     // Retrieved payload is the JSON array of the dropped items [4..=10].

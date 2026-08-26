@@ -832,6 +832,79 @@ fn retrieve_stdout_is_byte_exact_without_extra_trailing_newline() {
 }
 
 #[test]
+fn retrieve_records_events_and_summary_reports_attribution() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let request = post_tool_request_json(
+        &format!(
+            r#"{{"records":[{}]}}"#,
+            (0..200)
+                .map(|i| format!(r#"{{"id":{i},"name":"row-{i}"}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        "Bash",
+        false,
+        "retrieve-attribution",
+    );
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "1")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(output.status.success());
+    let response: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let marker_text = response["output"].as_str().unwrap();
+    let marker_start = marker_text
+        .find("<<tokenless:")
+        .expect("array truncation should emit a stash marker");
+    let marker_end = marker_text[marker_start..]
+        .find(">>")
+        .map(|i| marker_start + i + 2)
+        .expect("stash marker should be closed");
+    let marker = &marker_text[marker_start..marker_end];
+
+    let hit = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .args(["retrieve", marker])
+        .output()
+        .unwrap();
+    assert!(hit.status.success());
+    let miss = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .args(["retrieve", "000000000000000000000000"])
+        .output()
+        .unwrap();
+    assert!(!miss.status.success());
+
+    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
+    let totals = recorder.retrieve_totals().unwrap();
+    assert_eq!(totals.hits, 1);
+    assert_eq!(totals.misses, 1);
+    assert!(totals.retrieved_tokens > 0);
+
+    let summary = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+    assert!(summary.status.success());
+    let text = String::from_utf8_lossy(&summary.stdout);
+    assert!(text.contains("Attribution:"));
+    assert!(text.contains("Retrieves:      1 hits / 1 misses / 0 errors"));
+}
+
+#[test]
 fn compress_response_no_savings_rolls_back_orphan_stash() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
@@ -1862,6 +1935,17 @@ fn compress_records_stats_by_the_winning_operation() {
     assert_eq!(
         cleanup_records[0].operation,
         OperationType::CompressResponse
+    );
+    // §4.6 attribution columns arrive with the row.
+    assert_eq!(cleanup_records[0].seam.as_deref(), Some("post_tool"));
+    assert!(cleanup_records[0].content_type.is_some());
+    assert_eq!(
+        cleanup_records[0].compressor_chain.as_deref(),
+        Some(r#"["response-cleanup"]"#)
+    );
+    assert_eq!(
+        cleanup_records[0].tokenizer_id.as_deref(),
+        Some("heuristic-v1")
     );
     let toon_records = recorder.records_by_session("winner-toon", None).unwrap();
     assert_eq!(toon_records.len(), 1);

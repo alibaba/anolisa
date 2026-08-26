@@ -121,10 +121,16 @@ impl PyStatsQuery {
     #[pyo3(signature = (limit=None))]
     fn summary_json(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<String> {
         let recorder = self.require_recorder()?;
-        let records = py
-            .allow_threads(|| recorder.all_records(limit))
+        let (records, retrieve) = py
+            .allow_threads(|| {
+                let records = recorder.all_records(limit)?;
+                // Fail-soft: a broken retrieve aggregate degrades the report,
+                // never the query.
+                let retrieve = recorder.retrieve_totals().ok();
+                Ok((records, retrieve))
+            })
             .map_err(to_stats_error)?;
-        Ok(format_summary_json(&records, None))
+        Ok(format_summary_json(&records, None, retrieve.as_ref()))
     }
 
     #[pyo3(signature = (limit=20))]
@@ -465,6 +471,11 @@ fn record_metadata_json(record: &StatsRecord) -> serde_json::Value {
         "stash_writes": record.stash_writes,
         "stash_errors": record.stash_errors,
         "stash_size": record.stash_size,
+        "content_type": record.content_type,
+        "seam": record.seam,
+        "compressor_chain": record.compressor_chain,
+        "tokenizer_id": record.tokenizer_id,
+        "unrecoverable_truncations": record.unrecoverable_truncations,
     })
 }
 

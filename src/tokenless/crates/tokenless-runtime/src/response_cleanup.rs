@@ -64,6 +64,12 @@ impl ResponseCleanup {
         self.inner.unrecoverable_truncations()
     }
 
+    /// Total truncation events of the last `compress` call, counted whether
+    /// or not a stash store is attached.
+    pub(crate) fn truncations(&self) -> usize {
+        self.inner.truncations()
+    }
+
     /// Takes the retained candidate of the last `compress` call.
     pub(crate) fn take_candidate(&self) -> Option<String> {
         self.candidate.take()

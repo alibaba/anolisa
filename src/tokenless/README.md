@@ -316,7 +316,7 @@ tokenless retrieve c30ccf5ed1125e0ed871ba8e
 
 # Or paste the whole truncation line — the hash is extracted automatically.
 # (Use the FULL 24-hex hash from your output; the value below is shorthand.)
-tokenless retrieve "<... 160 items truncated, retrieve with <<tokenless:c30ccf5ed1125e0ed871ba8e>>"
+tokenless retrieve "<... 160 items truncated, run: tokenless retrieve '<<tokenless:c30ccf5ed1125e0ed871ba8e>>'>"
 ```
 
 ### compress-toon / decompress-toon

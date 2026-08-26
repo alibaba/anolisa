@@ -31,7 +31,7 @@ pub fn parse_marker(s: &str) -> Option<&str> {
 
 /// Extract the first **valid** marker's hash from arbitrary text. Useful
 /// when the LLM quotes a whole truncation line such as
-/// `<... 12 items truncated, retrieve with <<tokenless:abcd…>>`.
+/// `<... 12 items truncated, run: tokenless retrieve '<<tokenless:abcd…>>'>`.
 ///
 /// Scans past malformed markers (wrong-length or non-hex content between a
 /// prefix/suffix pair) so a hallucinated or partial marker earlier in the
@@ -113,7 +113,7 @@ mod tests {
     fn parse_rejects_embedded_marker() {
         // parse_marker requires the whole string to be a marker; use
         // extract_hash for embedded forms.
-        let line = "<... 12 items truncated, retrieve with <<tokenless:0123456789abcdef01234567>>";
+        let line = "<... 12 items truncated, run: tokenless retrieve '<<tokenless:0123456789abcdef01234567>>'>";
         assert_eq!(parse_marker(line), None);
         assert_eq!(extract_hash(line), Some("0123456789abcdef01234567"));
     }

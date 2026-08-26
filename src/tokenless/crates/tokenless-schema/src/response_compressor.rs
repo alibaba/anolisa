@@ -5,9 +5,16 @@ use std::sync::Arc;
 use tokenless_ccr::{StashStore, StashWrite, marker_for};
 
 /// Build the stash-augmented truncation suffix for `key`:
-/// `… (truncated, retrieve with <<tokenless:KEY>>)`.
+/// `… (truncated, run: tokenless retrieve '<<tokenless:KEY>>')`.
+///
+/// The prose names the actual command so a model with only a shell tool can
+/// recover the payload without out-of-band instructions; the single quotes
+/// keep the copy-pasted marker from parsing as a shell heredoc.
 pub(crate) fn stash_suffix(key: &str) -> String {
-    format!("… (truncated, retrieve with {})", marker_for(key))
+    format!(
+        "… (truncated, run: tokenless retrieve '{}')",
+        marker_for(key)
+    )
 }
 
 /// Char-length of [`stash_suffix`]. Constant because the key is always 24
@@ -323,7 +330,7 @@ impl ResponseCompressor {
                 if let Ok(serialized) = serde_json::to_string(value) {
                     if let Some(key) = self.stash_payload(&serialized) {
                         return Value::String(format!(
-                            "<{type_name} truncated at depth {depth}, retrieve with {}>",
+                            "<{type_name} truncated at depth {depth}, run: tokenless retrieve '{}'>",
                             marker_for(&key)
                         ));
                     }
@@ -467,7 +474,7 @@ impl ResponseCompressor {
             let dropped = &arr[head_end..tail_start];
             let marker = match self.stash_dropped(dropped) {
                 Some(key) => format!(
-                    "<... {} items truncated, retrieve with {}>",
+                    "<... {} items truncated, run: tokenless retrieve '{}'>",
                     remaining,
                     marker_for(&key)
                 ),

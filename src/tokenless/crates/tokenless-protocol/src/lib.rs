@@ -91,6 +91,20 @@ pub enum Seam {
     Proxy,
 }
 
+impl Seam {
+    /// The `snake_case` wire name, identical to this enum's serde encoding.
+    /// The stable vocabulary for language bindings, logs, and statistics.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::BeforeModel => "before_model",
+            Self::PreTool => "pre_tool",
+            Self::PostTool => "post_tool",
+            Self::Proxy => "proxy",
+        }
+    }
+}
+
 /// What the requesting adapter's host can actually do with the result.
 ///
 /// The pipeline intersects compressor candidates with these capabilities

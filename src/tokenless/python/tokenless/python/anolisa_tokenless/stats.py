@@ -71,12 +71,36 @@ class StatsSavings:
 
 
 @dataclass(frozen=True)
+class StatsAttribution:
+    """Net-savings attribution over the active records of a summary.
+
+    The retrieve fields are ``None`` when retrieve totals were unavailable
+    (the summary then reports gross savings only).
+    """
+
+    gross_savings_tokens: int
+    compressions_with_unrecoverable_truncations: int
+    unrecoverable_truncation_events: int
+    retrieved_tokens: int | None
+    net_savings_tokens: int | None
+    retrieve_hits: int | None
+    retrieve_misses: int | None
+    retrieve_errors: int | None
+
+
+@dataclass(frozen=True)
 class StatsSummary:
-    """Overall savings with a breakdown by operation."""
+    """Overall savings with a breakdown by operation.
+
+    Aggregates active records only; ``dry_run_records_excluded`` counts the
+    dry-run rows the summary left out.
+    """
 
     schema_version: str
     total: StatsSavings
     by_operation: Mapping[StatsOperation, StatsSavings]
+    dry_run_records_excluded: int
+    attribution: StatsAttribution
 
 
 @dataclass(frozen=True)
@@ -102,6 +126,11 @@ class StatsRecord:
     stash_writes: int | None
     stash_errors: int | None
     stash_size: int | None
+    content_type: str | None
+    seam: str | None
+    compressor_chain: str | None
+    tokenizer_id: str | None
+    unrecoverable_truncations: int | None
 
     @property
     def chars_saved(self) -> int:
@@ -279,10 +308,26 @@ class TokenlessStats:
         """
         _validate_limit(limit, optional=True)
         value = _load_json(self._native.summary_json(limit))
+        attribution = value["attribution"]
         return StatsSummary(
             schema_version=value["schema_version"],
             total=_parse_savings(value["total"]),
             by_operation=_operation_mapping(value["by_operation"], _parse_savings),
+            dry_run_records_excluded=value["dry_run_records_excluded"],
+            attribution=StatsAttribution(
+                gross_savings_tokens=attribution["gross_savings_tokens"],
+                compressions_with_unrecoverable_truncations=attribution[
+                    "compressions_with_unrecoverable_truncations"
+                ],
+                unrecoverable_truncation_events=attribution[
+                    "unrecoverable_truncation_events"
+                ],
+                retrieved_tokens=attribution.get("retrieved_tokens"),
+                net_savings_tokens=attribution.get("net_savings_tokens"),
+                retrieve_hits=attribution.get("retrieve_hits"),
+                retrieve_misses=attribution.get("retrieve_misses"),
+                retrieve_errors=attribution.get("retrieve_errors"),
+            ),
         )
 
     def list(self, *, limit: int = 20) -> tuple[StatsRecord, ...]:
@@ -454,6 +499,11 @@ def _parse_record(value: Mapping[str, Any]) -> StatsRecord:
         stash_writes=value["stash_writes"],
         stash_errors=value["stash_errors"],
         stash_size=value["stash_size"],
+        content_type=value.get("content_type"),
+        seam=value.get("seam"),
+        compressor_chain=value.get("compressor_chain"),
+        tokenizer_id=value.get("tokenizer_id"),
+        unrecoverable_truncations=value.get("unrecoverable_truncations"),
     )
 
 

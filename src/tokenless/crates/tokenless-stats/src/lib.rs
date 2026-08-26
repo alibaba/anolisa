@@ -16,7 +16,7 @@ pub mod tokenizer;
 
 pub use record::{CompressionMode, OperationType, StatsRecord};
 
-pub use recorder::{StatsError, StatsRecorder, StatsResult, StatsSummary};
+pub use recorder::{RetrieveTotals, StatsError, StatsRecorder, StatsResult, StatsSummary};
 
 pub use query::{
     format_compare, format_compare_json, format_list, format_show, format_summary,

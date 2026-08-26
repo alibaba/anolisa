@@ -12,7 +12,8 @@ use tokenless_ccr::{SqliteStore, StashStore};
 use tokenless_protocol::CompressionRequest;
 use tokenless_runtime::{
     CompressOptions, CompressResult, Disposition, EntryOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS,
-    compress_response_with_store, compress_toon, compress_with_store, retrieve_from_store,
+    compress_response_with_store, compress_toon, compress_with_store, record_compression,
+    retrieve_recorded,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
@@ -552,7 +553,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 );
             }
 
-            let mode = resolve_mode(
+            // Kept for its dry-run stderr notice only; the recorded mode is
+            // derived from the response disposition inside record_compression.
+            let _ = resolve_mode(
                 compression_on,
                 outcome.response.before_tokens as usize,
                 outcome.response.after_tokens as usize,
@@ -560,19 +563,16 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let response_json = outcome.response.to_json().map_err(|e| (e.to_string(), 1))?;
             println!("{response_json}");
 
-            record_compression_stats(
-                &config,
-                &database_paths,
-                outcome.stats_op,
-                Some(request.agent_id),
-                request.session_id,
-                request.tool_use_id,
-                request.content,
-                outcome.stats_after_text,
-                mode,
-                outcome.stash_writes,
-                outcome.stash_errors,
-                outcome.stash_size,
+            let recorder = if config.is_stats_enabled() {
+                open_recorder_with(&database_paths).ok()
+            } else {
+                None
+            };
+            record_compression(
+                &request,
+                &outcome,
+                recorder.as_ref(),
+                config.is_sls_enabled(),
             );
         }
         Commands::CompressSchema {
@@ -764,7 +764,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     return Err((format!("stash unavailable: {e}"), 1));
                 }
             };
-            let payload = retrieve_from_store(store.as_ref(), &hash)
+            // Retrieve events are attribution, never a gate: a recorder that
+            // fails to open degrades to unrecorded retrieval.
+            let recorder = if TokenlessConfig::load().is_stats_enabled() {
+                open_recorder_with(&DatabasePathResolver::default()).ok()
+            } else {
+                None
+            };
+            let payload = retrieve_recorded(store.as_ref(), &hash, recorder.as_ref(), "cli")
                 .map_err(|error| (error.to_string(), 1))?;
             // Byte-exact restore: do not append a trailing newline.
             let mut out = io::stdout().lock();
@@ -812,12 +819,23 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     let records = recorder
                         .all_records(limit)
                         .map_err(|e| (format!("Failed to query records: {e}"), 1))?;
+                    let retrieve = recorder
+                        .retrieve_totals()
+                        .map_err(|e| (format!("Failed to query retrieve events: {e}"), 1))?;
                     if json {
-                        println!("{}", tokenless_stats::format_summary_json(&records, None));
+                        println!(
+                            "{}",
+                            tokenless_stats::format_summary_json(&records, None, Some(&retrieve))
+                        );
                     } else {
                         println!(
                             "{}",
-                            format_summary(&records, Some("Tokenless Statistics Summary"), None)
+                            format_summary(
+                                &records,
+                                Some("Tokenless Statistics Summary"),
+                                None,
+                                Some(&retrieve)
+                            )
                         );
                     }
                 }

@@ -353,21 +353,12 @@ impl TokenlessRuntime {
             stash_enabled: true,
         };
         let outcome = compress_with_store(request, &options, self.stash_store.as_ref());
-        let result = CompressResult {
-            output: outcome.response.output.clone(),
-            compressed_output: outcome.stats_after_text.clone(),
-            disposition: outcome.response.disposition,
-            before_tokens: outcome.response.before_tokens as usize,
-            after_tokens: outcome.response.after_tokens as usize,
-            stash_writes: outcome.stash_writes,
-            stash_errors: outcome.stash_errors,
-            unrecoverable_truncations: None,
-            stash_size: outcome.stash_size,
-        };
-        let mut attribution = Attribution::new(request.agent_id.clone());
-        attribution.session_id = request.session_id.clone();
-        attribution.tool_use_id = request.tool_use_id.clone();
-        self.record_stats(outcome.stats_op, &request.content, &result, &attribution);
+        record_compression(
+            request,
+            &outcome,
+            self.stats_recorder.as_ref(),
+            self.config.sls_enabled,
+        );
         outcome.response
     }
 
@@ -385,7 +376,12 @@ impl TokenlessRuntime {
                     .unwrap_or_else(|| "stash is not configured".to_string()),
             )
         })?;
-        retrieve_from_store(store, hash_or_marker)
+        retrieve_recorded(
+            store,
+            hash_or_marker,
+            self.stats_recorder.as_ref(),
+            "embedded",
+        )
     }
 
     /// Validated state directory used by this runtime.
@@ -769,6 +765,10 @@ struct ResponsePipelineRun {
     stash_errors: Option<usize>,
     unrecoverable_truncations: Option<usize>,
     stash_size: Option<usize>,
+    /// Total truncation events, measured with or without an attached store —
+    /// unlike `unrecoverable_truncations`, whose store-attached-only measure
+    /// is the legacy [`CompressResult`] contract.
+    truncations: usize,
 }
 
 /// Runs the response cleanup behind the pipeline over `request.content`,
@@ -851,6 +851,7 @@ fn run_response_pipeline(
         stash_errors,
         unrecoverable_truncations,
         stash_size,
+        truncations: adapter.truncations(),
     }
 }
 
@@ -864,19 +865,138 @@ pub fn retrieve_from_store(
     store: &dyn StashStore,
     hash_or_marker: &str,
 ) -> Result<String, RuntimeError> {
-    let hash = match extract_hash(hash_or_marker) {
-        Some(hash) => hash.to_ascii_lowercase(),
-        None if is_valid_hash(hash_or_marker) => hash_or_marker.to_ascii_lowercase(),
-        None => {
-            return Err(RuntimeError::InvalidHash {
-                value: hash_or_marker.to_string(),
-            });
-        }
-    };
-    match store.retrieve(&hash) {
+    retrieve_recorded(store, hash_or_marker, None, "")
+}
+
+/// Normalize retrieve input — a bare hash or text containing a
+/// `<<tokenless:HASH>>` marker — to the lowercase stash key.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError::InvalidHash`] when neither form is present.
+pub fn normalize_hash(hash_or_marker: &str) -> Result<String, RuntimeError> {
+    match extract_hash(hash_or_marker) {
+        Some(hash) => Ok(hash.to_ascii_lowercase()),
+        None if is_valid_hash(hash_or_marker) => Ok(hash_or_marker.to_ascii_lowercase()),
+        None => Err(RuntimeError::InvalidHash {
+            value: hash_or_marker.to_string(),
+        }),
+    }
+}
+
+/// The single retrieval implementation with §4.6 event recording, shared by
+/// the CLI (`"cli"`), the MCP server (`"mcp"`), and
+/// [`TokenlessRuntime::retrieve`] (`"embedded"`). Every store lookup records
+/// one `retrieve_events` row — `hit`, `miss`, or `error` — when a recorder
+/// is attached; invalid input never reaches the store and records nothing.
+/// Recording is fail-silent and never affects the returned payload or error.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] for malformed input, a missing/expired entry,
+/// or a backend failure.
+pub fn retrieve_recorded(
+    store: &dyn StashStore,
+    hash_or_marker: &str,
+    recorder: Option<&StatsRecorder>,
+    source: &str,
+) -> Result<String, RuntimeError> {
+    let hash = normalize_hash(hash_or_marker)?;
+    let result = store.retrieve(&hash);
+    if let Some(recorder) = recorder {
+        let (outcome, payload_tokens) = match &result {
+            Ok(Some(payload)) => ("hit", Some(estimate_tokens(payload) as i64)),
+            Ok(None) => ("miss", None),
+            Err(_) => ("error", None),
+        };
+        let tokenizer_id = payload_tokens
+            .is_some()
+            .then_some(tokenless_protocol::TOKENIZER_ID);
+        let _ =
+            recorder.record_retrieve_event(&hash, outcome, source, payload_tokens, tokenizer_id);
+    }
+    match result {
         Ok(Some(payload)) => Ok(payload),
         Ok(None) => Err(RuntimeError::StashEntryNotFound { hash }),
         Err(error) => Err(RuntimeError::StashRetrieve(error.to_string())),
+    }
+}
+
+/// The single §5.5 recording path for unified-entry compressions, shared by
+/// [`TokenlessRuntime::compress`] and the CLI `compress` subcommand.
+///
+/// Writes at most one `stats` row per invocation — only when the invocation
+/// measured a saving — carrying the §4.6 attribution columns, then attaches
+/// one `compression_artifacts` row per stash key emitted by an applied
+/// result (the chain head is the single stash-writing compressor today).
+/// `retrieve_events` and artifacts live only in stats.db; SLS mirrors the
+/// scalar record fields. Fail-silent throughout.
+pub fn record_compression(
+    request: &CompressionRequest,
+    outcome: &EntryOutcome,
+    recorder: Option<&StatsRecorder>,
+    sls_enabled: bool,
+) {
+    if recorder.is_none() && !sls_enabled {
+        return;
+    }
+    let response = &outcome.response;
+    let before = &request.content;
+    let after = &outcome.stats.measured_text;
+    let before_tokens = estimate_tokens(before);
+    let after_tokens = estimate_tokens(after);
+    if after_tokens >= before_tokens {
+        return;
+    }
+
+    let mode = match response.disposition {
+        Disposition::DryRun => CompressionMode::DryRun,
+        _ => CompressionMode::Active,
+    };
+    let chain_json = (!response.compressor_chain.is_empty())
+        .then(|| serde_json::to_string(&response.compressor_chain).ok())
+        .flatten();
+    let mut record = StatsRecord::new(
+        outcome.stats.op.clone(),
+        request.agent_id.clone(),
+        before.len(),
+        before_tokens,
+        after.len(),
+        after_tokens,
+    )
+    .with_before_text(before.clone())
+    .with_after_text(after.clone())
+    .with_source_pid(std::process::id() as i64)
+    .with_mode(mode)
+    .with_stash(
+        outcome.stash_writes,
+        outcome.stash_errors,
+        outcome.stash_size,
+    )
+    .with_entry_metadata(
+        request.seam.wire_str(),
+        response.content_type.clone(),
+        chain_json,
+        response.tokenizer_id.clone(),
+        outcome.stats.unrecoverable_truncations.map(|n| n as i64),
+    );
+    if let Some(session_id) = &request.session_id {
+        record = record.with_session_id(session_id.clone());
+    }
+    if let Some(tool_use_id) = &request.tool_use_id {
+        record = record.with_tool_use_id(tool_use_id.clone());
+    }
+
+    if let Some(recorder) = recorder
+        && let Ok(stats_id) = recorder.record(&record)
+        && response.disposition == Disposition::Applied
+        && !response.stash_keys.is_empty()
+        && let Some(compressor_id) = response.compressor_chain.first()
+    {
+        let _ = recorder.record_artifacts(stats_id, compressor_id, &response.stash_keys);
+    }
+    if sls_enabled {
+        SlsWriter::new().write(&record);
     }
 }
 
@@ -1525,5 +1645,234 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.output, input);
+    }
+
+    fn entry_request(content: &str, seam: Seam) -> CompressionRequest {
+        let mut request = CompressionRequest::new(content, "test-agent", seam);
+        request.capabilities.replace_output = true;
+        request.session_id = Some("session-r".into());
+        request.tool_use_id = Some("tool-r".into());
+        request
+    }
+
+    fn verbose_tools_json() -> String {
+        let description =
+            "Read a file from the workspace and return its contents as text. ".repeat(12);
+        serde_json::to_string(&serde_json::json!([
+            {"type": "function", "function": {"name": "read_file", "description": description,
+             "parameters": {"type": "object", "properties": {}}}},
+        ]))
+        .unwrap()
+    }
+
+    fn compressible_api_json() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "url": "https://example.com/data",
+            "status": 200,
+            "debug": "trace=9f2e11c0 backend_latency_ms=184 retries=0 tls=reused pool=warm shard=eu-central-1a cache=miss",
+            "results": (0..6).map(|i| serde_json::json!({
+                "name": format!("pkg-{i}"),
+                "version": "1.0.0",
+                "license": null,
+                "homepage": "",
+            })).collect::<Vec<_>>(),
+            "count": 6,
+        }))
+        .unwrap()
+    }
+
+    const ENTRY_ENABLED: EntryOptions = EntryOptions {
+        compression_enabled: true,
+        stash_enabled: true,
+    };
+
+    #[test]
+    fn record_compression_writes_attribution_and_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+
+        let request = entry_request(&verbose_tools_json(), Seam::BeforeModel);
+        let outcome = compress_with_store(&request, &ENTRY_ENABLED, Some(&store));
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        record_compression(&request, &outcome, Some(&recorder), false);
+
+        let records = recorder.records_by_session("session-r", None).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.operation, OperationType::CompressSchema);
+        assert_eq!(record.seam.as_deref(), Some("before_model"));
+        assert_eq!(record.content_type, None);
+        assert_eq!(
+            record.compressor_chain.as_deref(),
+            Some(r#"["schema-compress"]"#)
+        );
+        assert_eq!(
+            record.tokenizer_id.as_deref(),
+            Some(tokenless_protocol::TOKENIZER_ID)
+        );
+        assert_eq!(record.mode, CompressionMode::Active);
+
+        let expected: Vec<(i64, String, String)> = outcome
+            .response
+            .stash_keys
+            .iter()
+            .map(|key| (record.id, key.clone(), "schema-compress".to_string()))
+            .collect();
+        assert!(!expected.is_empty());
+        let conn = rusqlite::Connection::open(directory.path().join("stats.db")).unwrap();
+        let rows: Vec<(i64, String, String)> = conn
+            .prepare(
+                "SELECT stats_id, hash, compressor_id FROM compression_artifacts ORDER BY hash",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut expected_sorted = expected;
+        expected_sorted.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(rows, expected_sorted);
+    }
+
+    #[test]
+    fn record_compression_attributes_the_detected_content_type() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+
+        let mut request = entry_request(&compressible_api_json(), Seam::PostTool);
+        request.tool_name = Some("WebFetch".into());
+        let outcome = compress_with_store(&request, &ENTRY_ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        record_compression(&request, &outcome, Some(&recorder), false);
+
+        let records = recorder.records_by_session("session-r", None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seam.as_deref(), Some("post_tool"));
+        assert!(records[0].content_type.is_some());
+        assert!(records[0].compressor_chain.is_some());
+    }
+
+    #[test]
+    fn record_compression_counts_unmarked_truncations_without_a_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+
+        // 200 rows against the shell threshold (128 head + 8 tail): the
+        // cleanup truncates the array, and with no store attached the drop
+        // is unmarked. publish_retrieve_tool stays false, so even an
+        // available store would not be attached.
+        let content = serde_json::to_string(&serde_json::json!({
+            "records": (0..200).map(|i| serde_json::json!({
+                "id": i, "name": format!("row-{i}"),
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let mut request = entry_request(&content, Seam::PostTool);
+        request.tool_name = Some("Bash".into());
+        let outcome = compress_with_store(&request, &ENTRY_ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(outcome.stats.unrecoverable_truncations, Some(1));
+        record_compression(&request, &outcome, Some(&recorder), false);
+        let records = recorder.records_by_session("session-r", None).unwrap();
+        assert_eq!(records[0].unrecoverable_truncations, Some(1));
+
+        // Dry-run attaches no store either, but records NULL: a count there
+        // would misstate what an active run with stash attached emits.
+        let dry = compress_with_store(
+            &request,
+            &EntryOptions {
+                compression_enabled: false,
+                stash_enabled: true,
+            },
+            None,
+        );
+        assert_eq!(dry.response.disposition, Disposition::DryRun);
+        assert_eq!(dry.stats.unrecoverable_truncations, None);
+    }
+
+    #[test]
+    fn record_compression_dry_run_rows_carry_no_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+
+        let request = entry_request(&verbose_tools_json(), Seam::BeforeModel);
+        let outcome = compress_with_store(
+            &request,
+            &EntryOptions {
+                compression_enabled: false,
+                stash_enabled: true,
+            },
+            None,
+        );
+        assert_eq!(outcome.response.disposition, Disposition::DryRun);
+        record_compression(&request, &outcome, Some(&recorder), false);
+
+        let records = recorder.records_by_session("session-r", None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].mode, CompressionMode::DryRun);
+        let conn = rusqlite::Connection::open(directory.path().join("stats.db")).unwrap();
+        let artifacts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM compression_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(artifacts, 0);
+    }
+
+    #[test]
+    fn record_compression_skips_rows_without_savings() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+
+        let request = entry_request("plain text passthrough content", Seam::PostTool);
+        let outcome = compress_with_store(&request, &ENTRY_ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+        record_compression(&request, &outcome, Some(&recorder), false);
+        assert_eq!(recorder.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn retrieve_recorded_logs_each_store_outcome() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        let store = InMemoryStore::new();
+        let write = store.stash("recorded payload").unwrap();
+
+        let payload = retrieve_recorded(&store, &write.key, Some(&recorder), "cli").unwrap();
+        assert_eq!(payload, "recorded payload");
+        let miss = retrieve_recorded(&store, &"0".repeat(24), Some(&recorder), "mcp");
+        assert!(matches!(miss, Err(RuntimeError::StashEntryNotFound { .. })));
+
+        struct FailingRetrieve;
+        impl StashStore for FailingRetrieve {
+            fn stash(&self, _payload: &str) -> Result<tokenless_ccr::StashWrite, StashError> {
+                unreachable!()
+            }
+            fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
+                Err(StashError::Backend("simulated".to_string()))
+            }
+            fn len(&self) -> usize {
+                0
+            }
+            fn evict_expired(&self) -> Result<usize, StashError> {
+                Ok(0)
+            }
+            fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
+                Ok(false)
+            }
+        }
+        let error = retrieve_recorded(&FailingRetrieve, &write.key, Some(&recorder), "embedded");
+        assert!(matches!(error, Err(RuntimeError::StashRetrieve(_))));
+
+        // Invalid input never reaches the store: no event.
+        let invalid = retrieve_recorded(&store, "not-a-hash", Some(&recorder), "cli");
+        assert!(matches!(invalid, Err(RuntimeError::InvalidHash { .. })));
+
+        let totals = recorder.retrieve_totals().unwrap();
+        assert_eq!(totals.hits, 1);
+        assert_eq!(totals.misses, 1);
+        assert_eq!(totals.errors, 1);
+        assert!(totals.retrieved_tokens > 0);
     }
 }

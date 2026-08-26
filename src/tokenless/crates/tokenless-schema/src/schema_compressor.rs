@@ -138,6 +138,13 @@ impl SchemaCompressor {
         self.stash_errors.get()
     }
 
+    /// Keys of stash rows created this session, pending commit or rollback.
+    /// Each corresponds to a marker embedded in the compressed output, so on
+    /// an applied result these are exactly the emitted keys.
+    pub fn stash_keys(&self) -> Vec<String> {
+        self.stash_keys_created.borrow().keys().cloned().collect()
+    }
+
     /// Delete stash entries created during this compressor session.
     ///
     /// Call this when the compressed output (and its embedded markers) will

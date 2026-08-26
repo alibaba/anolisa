@@ -206,6 +206,7 @@ fn all_seams_and_dispositions_round_trip() {
     ] {
         assert_eq!(serde_json::to_string(&seam).unwrap(), wire);
         assert_eq!(serde_json::from_str::<Seam>(wire).unwrap(), seam);
+        assert_eq!(format!("\"{}\"", seam.wire_str()), wire);
     }
     for (disp, wire) in [
         (Disposition::Applied, "\"applied\""),

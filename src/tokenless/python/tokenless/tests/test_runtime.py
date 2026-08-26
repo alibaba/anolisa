@@ -221,7 +221,17 @@ class TokenlessRuntimeTests(unittest.TestCase):
         self.assertEqual(Path(status.data_dir), data_dir)
 
         summary = stats.summary()
-        self.assertEqual(summary.total.records, 2)
+        # Summaries report active rows only; the dry-run baseline is excluded.
+        self.assertEqual(summary.total.records, 1)
+        self.assertEqual(summary.dry_run_records_excluded, 1)
+        self.assertEqual(
+            summary.attribution.gross_savings_tokens, summary.total.tokens_saved
+        )
+        self.assertEqual(summary.attribution.retrieve_hits, 0)
+        self.assertEqual(summary.attribution.retrieved_tokens, 0)
+        self.assertEqual(
+            summary.attribution.net_savings_tokens, summary.total.tokens_saved
+        )
         self.assertGreater(summary.total.tokens_saved, 0)
         self.assertIn(StatsOperation.COMPRESS_RESPONSE, summary.by_operation)
         self.assertEqual(stats.summary(limit=1).total.records, 1)

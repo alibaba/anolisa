@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
-use tokenless_ccr::{StashStore, extract_hash, is_valid_hash};
+use tokenless_ccr::StashStore;
+use tokenless_runtime::{normalize_hash, retrieve_recorded};
+use tokenless_stats::{StatsRecorder, TokenlessConfig};
 
 use crate::open_stash_store;
 
@@ -32,6 +34,17 @@ pub fn serve() -> Result<(), (String, i32)> {
     // still serves tools/list + protocol handshake; retrieve returns a clear
     // "stash unavailable" tool error.
     let store = open_stash_store(None);
+    // Retrieve-event recorder, opened once like the store and equally
+    // fail-open: attribution must never gate retrieval.
+    let recorder = if TokenlessConfig::load().is_stats_enabled() {
+        crate::open_recorder()
+            .map_err(|(message, _)| {
+                eprintln!("[tokenless] retrieve stats disabled: {message}");
+            })
+            .ok()
+    } else {
+        None
+    };
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -86,7 +99,7 @@ pub fn serve() -> Result<(), (String, i32)> {
             "tools/list" => ok(id, json!({"tools": [retrieve_tool()]})),
             "tools/call" => {
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
-                ok(id, handle_tool_call(params, &store))
+                ok(id, handle_tool_call(params, &store, &recorder))
             }
             other => err(id, -32601, &format!("method not found: {other}")),
         };
@@ -128,55 +141,48 @@ fn retrieve_tool() -> Value {
 }
 
 /// Dispatch a `tools/call` to the named tool. Returns the MCP
-/// `CallToolResult` object (content + isError). The stash store is opened
-/// once at `serve()` startup and passed in — see the comment there.
-fn handle_tool_call(params: Value, store: &Option<Arc<dyn StashStore>>) -> Value {
+/// `CallToolResult` object (content + isError). The stash store and the
+/// retrieve-event recorder are opened once at `serve()` startup and passed
+/// in — see the comment there.
+fn handle_tool_call(
+    params: Value,
+    store: &Option<Arc<dyn StashStore>>,
+    recorder: &Option<StatsRecorder>,
+) -> Value {
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
     match name {
-        "tokenless_retrieve" => retrieve(args, store),
+        "tokenless_retrieve" => retrieve(args, store, recorder),
         other => tool_error(&format!("unknown tool: {other}")),
     }
 }
 
-fn retrieve(args: Value, store: &Option<Arc<dyn StashStore>>) -> Value {
+fn retrieve(
+    args: Value,
+    store: &Option<Arc<dyn StashStore>>,
+    recorder: &Option<StatsRecorder>,
+) -> Value {
     let hash = args.get("hash").and_then(|h| h.as_str()).unwrap_or("");
     if hash.is_empty() {
         return tool_error("missing required argument: hash");
     }
-    // Extract the stash key once: accepts a bare 24-hex hash or a line
-    // containing a <<tokenless:KEY>> marker. Reject malformed input before
-    // the DB round-trip so a non-hash argument gets a clear format error
-    // instead of a misleading "no stashed payload".
-    let key = match extract_hash(hash) {
-        Some(k) => k,
-        None if is_valid_hash(hash) => hash,
-        None => {
-            return tool_error(&format!(
-                "invalid stash hash: {hash:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)"
-            ));
-        }
+    // Normalize first: a non-hash argument gets a clear format error before
+    // the store-availability check or any DB round-trip.
+    let key = match normalize_hash(hash) {
+        Ok(key) => key,
+        Err(error) => return tool_error(&error.to_string()),
     };
     // The store was opened once at startup (fail-open: the specific cause was
     // logged to stderr there). If it's unavailable, every retrieve reports so.
     let Some(store) = store.as_ref() else {
         return tool_error("stash unavailable: no trusted home directory or cannot open stash db");
     };
-    retrieve_from_store(store, key)
-}
-
-/// Core retrieve against an explicit store, by the exact stash key. Split out
-/// so the dispatch logic is unit-testable without touching the real stash db
-/// path resolution. `key` must already be the final 24-hex stash key; marker
-/// extraction happens in `retrieve` so the key is not re-scanned here.
-fn retrieve_from_store(store: &Arc<dyn StashStore>, key: &str) -> Value {
-    match store.retrieve(key) {
-        Ok(Some(payload)) => json!({
+    match retrieve_recorded(store.as_ref(), &key, recorder.as_ref(), "mcp") {
+        Ok(payload) => json!({
             "content": [{"type":"text","text":payload}],
             "isError": false
         }),
-        Ok(None) => tool_error(&format!("no stashed payload for hash: {key}")),
-        Err(e) => tool_error(&format!("stash retrieve failed: {e}")),
+        Err(error) => tool_error(&error.to_string()),
     }
 }
 

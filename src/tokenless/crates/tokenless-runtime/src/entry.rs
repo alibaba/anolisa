@@ -43,18 +43,13 @@ pub struct EntryOptions {
     pub stash_enabled: bool,
 }
 
-/// A [`CompressionResponse`] plus the legacy side channels the CLI still
-/// records statistics from (removed with the §5.5 statistics migration).
+/// A [`CompressionResponse`] plus the payload the §5.5 recording path
+/// ([`crate::record_compression`]) turns into one statistics row.
 pub struct EntryOutcome {
     /// The protocol response to hand back to the adapter.
     pub response: CompressionResponse,
-    /// Historical operation type of the winning path: TOON win records as
-    /// [`OperationType::CompressToon`], cleanup as `CompressResponse`,
-    /// before-model as `CompressSchema`.
-    pub stats_op: OperationType,
-    /// Measured candidate for statistics — meaningful in dry-run, where
-    /// `response.output` is the original content.
-    pub stats_after_text: String,
+    /// Attribution consumed only by [`crate::record_compression`].
+    pub(crate) stats: EntryStats,
     /// Successful stash writes still live after all rollbacks, or `None`
     /// when no store was attached.
     pub stash_writes: Option<usize>,
@@ -65,6 +60,20 @@ pub struct EntryOutcome {
     pub stash_size: Option<usize>,
 }
 
+/// Per-invocation statistics attribution of the winning path.
+pub(crate) struct EntryStats {
+    /// Historical operation type of the winning path: TOON win records as
+    /// [`OperationType::CompressToon`], cleanup as `CompressResponse`,
+    /// before-model as `CompressSchema`.
+    pub(crate) op: OperationType,
+    /// Measured candidate — meaningful in dry-run, where `response.output`
+    /// is the original content.
+    pub(crate) measured_text: String,
+    /// Truncations without an emitted recovery marker; `None` for seams
+    /// and dispositions that cannot truncate.
+    pub(crate) unrecoverable_truncations: Option<usize>,
+}
+
 impl EntryOutcome {
     fn passthrough(request: &CompressionRequest, diagnostic: Option<String>) -> Self {
         let mut response =
@@ -72,11 +81,14 @@ impl EntryOutcome {
         response.diagnostic = diagnostic;
         Self {
             response,
-            stats_op: match request.seam {
-                Seam::BeforeModel => OperationType::CompressSchema,
-                _ => OperationType::CompressResponse,
+            stats: EntryStats {
+                op: match request.seam {
+                    Seam::BeforeModel => OperationType::CompressSchema,
+                    _ => OperationType::CompressResponse,
+                },
+                measured_text: request.content.clone(),
+                unrecoverable_truncations: None,
             },
-            stats_after_text: request.content.clone(),
             stash_writes: None,
             stash_errors: None,
             stash_size: None,
@@ -408,10 +420,29 @@ fn finish_post_tool(
             response.output = output;
             response.disposition = disposition;
             response.before_tokens = before_tokens as u64;
+            // Truncations reach the model only while the cleanup candidate
+            // is part of the emitted text; a TOON-over-original win
+            // discarded them with the rollback above. Without an attached
+            // store (retrieve unpublished, stash disabled or unavailable)
+            // every truncation in an emitted candidate is unmarked; dry-run
+            // stays unmeasured (NULL) because it never attaches a store, so
+            // a count would misstate what an active run with stash records.
+            let unrecoverable_truncations = if !winner.keeps_cleanup {
+                None
+            } else if run.unrecoverable_truncations.is_some() {
+                run.unrecoverable_truncations
+            } else if options.compression_enabled {
+                Some(run.truncations)
+            } else {
+                None
+            };
             EntryOutcome {
                 response,
-                stats_op: winner.op,
-                stats_after_text: winner.text,
+                stats: EntryStats {
+                    op: winner.op,
+                    measured_text: winner.text,
+                    unrecoverable_truncations,
+                },
                 stash_writes,
                 stash_errors,
                 stash_size,
@@ -434,8 +465,11 @@ fn finish_post_tool(
             response.stash_keys = Vec::new();
             EntryOutcome {
                 response,
-                stats_op: OperationType::CompressResponse,
-                stats_after_text: request.content.clone(),
+                stats: EntryStats {
+                    op: OperationType::CompressResponse,
+                    measured_text: request.content.clone(),
+                    unrecoverable_truncations: None,
+                },
                 stash_writes,
                 stash_errors,
                 stash_size,
@@ -476,6 +510,10 @@ fn before_model(
     let Ok(compressed_output) = serde_json::to_string(&compressed_value) else {
         return EntryOutcome::passthrough(request, Some("serialize failed".into()));
     };
+    // Capture before the disposition ladder rolls back or clears the
+    // session: on Applied these are exactly the emitted keys (every schema
+    // stash write has a marker in the applied output).
+    let pending_keys = compressor.stash_keys();
     let result = finish_schema_compression(
         &request.content,
         compressed_output,
@@ -504,13 +542,19 @@ fn before_model(
     } else {
         Reversibility::Lossless
     };
+    if applied {
+        response.stash_keys = pending_keys;
+    }
     EntryOutcome {
         response,
-        stats_op: OperationType::CompressSchema,
-        stats_after_text: if measured {
-            result.compressed_output
-        } else {
-            request.content.clone()
+        stats: EntryStats {
+            op: OperationType::CompressSchema,
+            measured_text: if measured {
+                result.compressed_output
+            } else {
+                request.content.clone()
+            },
+            unrecoverable_truncations: None,
         },
         stash_writes: result.stash_writes,
         stash_errors: result.stash_errors,
@@ -646,7 +690,7 @@ mod tests {
         );
         assert_eq!(outcome.response.disposition, Disposition::Applied);
         assert_eq!(outcome.response.compressor_chain, ["response-cleanup"]);
-        assert_eq!(outcome.stats_op, OperationType::CompressResponse);
+        assert_eq!(outcome.stats.op, OperationType::CompressResponse);
         let output: serde_json::Value = serde_json::from_str(&outcome.response.output).unwrap();
         assert!(output.get("debug").is_none());
         // Nested empties stay dropped; only top-level schema fields return.
@@ -687,7 +731,7 @@ mod tests {
         let outcome = compress_with_store(&text_slot, &ENABLED, None);
         assert_eq!(outcome.response.disposition, Disposition::Applied);
         assert_eq!(outcome.response.compressor_chain, ["toon"]);
-        assert_eq!(outcome.stats_op, OperationType::CompressToon);
+        assert_eq!(outcome.stats.op, OperationType::CompressToon);
         assert_eq!(outcome.response.reversibility, Reversibility::Lossless);
         assert!(!outcome.response.output.starts_with('{'));
 
@@ -724,7 +768,7 @@ mod tests {
             outcome.response.compressor_chain,
             ["response-cleanup", "toon"]
         );
-        assert_eq!(outcome.stats_op, OperationType::CompressToon);
+        assert_eq!(outcome.stats.op, OperationType::CompressToon);
     }
 
     #[test]
@@ -744,7 +788,7 @@ mod tests {
         let outcome = compress_with_store(&post_tool_request(&content, "WebFetch"), &DRY_RUN, None);
         assert_eq!(outcome.response.disposition, Disposition::DryRun);
         assert_eq!(outcome.response.output, content);
-        assert_ne!(outcome.stats_after_text, content);
+        assert_ne!(outcome.stats.measured_text, content);
         assert!(outcome.response.after_tokens < outcome.response.before_tokens);
         assert_eq!(outcome.stash_writes, None);
     }
@@ -771,6 +815,7 @@ mod tests {
             stash_errors: Some(0),
             unrecoverable_truncations: Some(0),
             stash_size: Some(1),
+            truncations: 0,
         };
         let outcome = finish_post_tool(&req, &ENABLED, Some(&store), run, None);
         assert_eq!(outcome.response.disposition, Disposition::NoSavings);
@@ -798,12 +843,18 @@ mod tests {
         );
         assert_eq!(outcome.response.disposition, Disposition::Applied);
         assert_eq!(outcome.response.compressor_chain, ["schema-compress"]);
-        assert_eq!(outcome.stats_op, OperationType::CompressSchema);
+        assert_eq!(outcome.stats.op, OperationType::CompressSchema);
         assert_eq!(outcome.response.reversibility, Reversibility::Retrievable);
         let output: serde_json::Value = serde_json::from_str(&outcome.response.output).unwrap();
         assert!(output.is_array());
         assert!(outcome.response.output.contains("<<tokenless:"));
         assert!(outcome.response.after_tokens < outcome.response.before_tokens);
+        // Applied schema results expose their emitted keys for the
+        // artifacts ledger; every key's marker is in the output.
+        assert!(!outcome.response.stash_keys.is_empty());
+        for key in &outcome.response.stash_keys {
+            assert!(outcome.response.output.contains(key.as_str()));
+        }
     }
 
     #[test]
@@ -829,6 +880,10 @@ mod tests {
         assert_eq!(outcome.response.disposition, Disposition::NoSavings);
         assert_eq!(outcome.response.output, content);
         assert_eq!(store.len(), 0, "no-savings rolls the stash session back");
+        assert!(
+            outcome.response.stash_keys.is_empty(),
+            "unapplied schema results expose no artifact keys"
+        );
     }
 
     #[test]
@@ -837,7 +892,7 @@ mod tests {
         let outcome = compress_with_store(&request(&content, Seam::BeforeModel), &DRY_RUN, None);
         assert_eq!(outcome.response.disposition, Disposition::DryRun);
         assert_eq!(outcome.response.output, content);
-        assert_ne!(outcome.stats_after_text, content);
+        assert_ne!(outcome.stats.measured_text, content);
     }
 
     #[test]

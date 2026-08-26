@@ -132,7 +132,7 @@
           "entry-125 status=ok elapsed=6ms",
           "entry-126 status=ok elapsed=7ms",
           "entry-127 status=ok elapsed=8ms",
-          "<... 64 items truncated, retrieve with <<tokenless:f342a271808e91dd4af042e0>>>",
+          "<... 64 items truncated, run: tokenless retrieve '<<tokenless:f342a271808e91dd4af042e0>>'>",
           "entry-192 status=ok elapsed=5ms",
           "entry-193 status=ok elapsed=6ms",
           "entry-194 status=ok elapsed=7ms",

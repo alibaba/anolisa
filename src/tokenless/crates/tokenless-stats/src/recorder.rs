@@ -69,8 +69,53 @@ impl StatsRecorder {
                 mode TEXT,
                 stash_writes INTEGER,
                 stash_errors INTEGER,
-                stash_size INTEGER
+                stash_size INTEGER,
+                content_type TEXT,
+                seam TEXT,
+                compressor_chain TEXT,
+                tokenizer_id TEXT,
+                unrecoverable_truncations INTEGER
             )",
+            [],
+        )?;
+
+        // Stash ownership, normalized (roadmap §4.6): one row per hash kept
+        // in an applied, emitted result. Rows are inserted only after the
+        // final acceptance verdict, so candidate rollback never has pending
+        // artifact rows to remove.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS compression_artifacts (
+                stats_id       INTEGER NOT NULL,
+                hash           TEXT    NOT NULL,
+                compressor_id  TEXT    NOT NULL,
+                emitted        INTEGER NOT NULL,
+                PRIMARY KEY (stats_id, hash)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_compression_artifacts_hash
+                ON compression_artifacts(hash)",
+            [],
+        )?;
+
+        // Retrieve operations, recorded locally so attribution needs no
+        // cross-database join (roadmap §4.6).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS retrieve_events (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp      TEXT    NOT NULL,
+                hash           TEXT    NOT NULL,
+                outcome        TEXT    NOT NULL,
+                source         TEXT    NOT NULL,
+                payload_tokens INTEGER,
+                tokenizer_id   TEXT
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retrieve_events_hash
+                ON retrieve_events(hash)",
             [],
         )?;
 
@@ -106,6 +151,11 @@ impl StatsRecorder {
             ("stash_writes", "INTEGER"),
             ("stash_errors", "INTEGER"),
             ("stash_size", "INTEGER"),
+            ("content_type", "TEXT"),
+            ("seam", "TEXT"),
+            ("compressor_chain", "TEXT"),
+            ("tokenizer_id", "TEXT"),
+            ("unrecoverable_truncations", "INTEGER"),
         ] {
             let exists: bool = conn
                 .query_row(
@@ -156,8 +206,10 @@ impl StatsRecorder {
                 before_chars, before_tokens, after_chars, after_tokens,
                 before_text, after_text,
                 before_output, after_output, mode,
-                stash_writes, stash_errors, stash_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                stash_writes, stash_errors, stash_size,
+                content_type, seam, compressor_chain, tokenizer_id,
+                unrecoverable_truncations
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 record.timestamp.to_rfc3339(),
                 record.operation.as_str(),
@@ -177,6 +229,11 @@ impl StatsRecorder {
                 record.stash_writes,
                 record.stash_errors,
                 record.stash_size,
+                record.content_type,
+                record.seam,
+                record.compressor_chain,
+                record.tokenizer_id,
+                record.unrecoverable_truncations,
             ],
         )?;
 
@@ -197,7 +254,8 @@ impl StatsRecorder {
         "session_id, tool_use_id, before_chars, before_tokens, ",
         "after_chars, after_tokens, before_text, after_text, ",
         "before_output, after_output, mode, stash_writes, ",
-        "stash_errors, stash_size"
+        "stash_errors, stash_size, content_type, seam, ",
+        "compressor_chain, tokenizer_id, unrecoverable_truncations"
     );
 
     /// Query all records, newest first, with optional limit
@@ -343,6 +401,8 @@ impl StatsRecorder {
                 NULL AS before_output, NULL AS after_output,
                 ordered.mode, ordered.stash_writes, ordered.stash_errors,
                 ordered.stash_size,
+                NULL AS content_type, NULL AS seam, NULL AS compressor_chain,
+                NULL AS tokenizer_id, NULL AS unrecoverable_truncations,
                 CASE
                     WHEN ordered.tool_use_id IS NOT NULL
                         AND COALESCE(previous.mode, 'active')
@@ -383,7 +443,9 @@ impl StatsRecorder {
             rusqlite::params![session_id, Self::DEFAULT_LIMIT as i64],
             |row| {
                 let record = Self::row_to_record(row)?;
-                let linked_to_previous = row.get::<_, i64>(19)? != 0;
+                // linked_to_previous sits right after the SELECT_COLS span —
+                // its index is the SELECT_COLS column count.
+                let linked_to_previous = row.get::<_, i64>(24)? != 0;
                 Ok((record, linked_to_previous))
             },
         )?;
@@ -419,8 +481,97 @@ impl StatsRecorder {
     pub fn clear(&self) -> StatsResult<()> {
         let conn = self.lock_conn();
 
-        conn.execute_batch("DELETE FROM stats; DELETE FROM sqlite_sequence WHERE name='stats';")?;
+        conn.execute_batch(
+            "DELETE FROM stats;
+             DELETE FROM compression_artifacts;
+             DELETE FROM retrieve_events;
+             DELETE FROM sqlite_sequence WHERE name IN ('stats', 'retrieve_events');",
+        )?;
         Ok(())
+    }
+
+    /// Record the stash artifacts of one applied, emitted compression
+    /// (roadmap §4.6). `stats_id` is the row id `record` returned;
+    /// `compressor_id` is the stable id of the compressor that created the
+    /// keys — today always the chain head, the single stash writer of a
+    /// pipeline run. Emitted is always true: callers insert only keys whose
+    /// markers reached the final output, after the acceptance verdict, so
+    /// pending artifact rows never exist and candidate rollback has nothing
+    /// to remove here.
+    pub fn record_artifacts(
+        &self,
+        stats_id: i64,
+        compressor_id: &str,
+        hashes: &[String],
+    ) -> StatsResult<()> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "INSERT INTO compression_artifacts (stats_id, hash, compressor_id, emitted)
+             VALUES (?, ?, ?, 1)",
+        )?;
+        for hash in hashes {
+            stmt.execute(rusqlite::params![stats_id, hash, compressor_id])?;
+        }
+        Ok(())
+    }
+
+    /// Record one retrieve operation (roadmap §4.6). `outcome` is `hit`,
+    /// `miss`, or `error`; `source` names the frontend (`cli`, `mcp`,
+    /// `embedded`). `payload_tokens` is the estimated size of the returned
+    /// payload on a hit.
+    pub fn record_retrieve_event(
+        &self,
+        hash: &str,
+        outcome: &str,
+        source: &str,
+        payload_tokens: Option<i64>,
+        tokenizer_id: Option<&str>,
+    ) -> StatsResult<i64> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO retrieve_events (
+                timestamp, hash, outcome, source, payload_tokens, tokenizer_id
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                chrono::Local::now().to_rfc3339(),
+                hash,
+                outcome,
+                source,
+                payload_tokens,
+                tokenizer_id,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Whole-table retrieve aggregates for the summary's attribution block.
+    pub fn retrieve_totals(&self) -> StatsResult<RetrieveTotals> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT outcome, COUNT(*), COALESCE(SUM(payload_tokens), 0)
+             FROM retrieve_events GROUP BY outcome",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut totals = RetrieveTotals::default();
+        for row in rows {
+            let (outcome, count, tokens) = row?;
+            match outcome.as_str() {
+                "hit" => {
+                    totals.hits = count as u64;
+                    totals.retrieved_tokens = tokens as u64;
+                }
+                "miss" => totals.misses = count as u64,
+                "error" => totals.errors = count as u64,
+                _ => {}
+            }
+        }
+        Ok(totals)
     }
 
     /// Convert a database row to StatsRecord
@@ -460,8 +611,23 @@ impl StatsRecorder {
             stash_writes: row.get(16)?,
             stash_errors: row.get(17)?,
             stash_size: row.get(18)?,
+            content_type: row.get(19)?,
+            seam: row.get(20)?,
+            compressor_chain: row.get(21)?,
+            tokenizer_id: row.get(22)?,
+            unrecoverable_truncations: row.get(23)?,
         })
     }
+}
+
+/// Whole-table aggregates over `retrieve_events` (roadmap §4.6 report).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RetrieveTotals {
+    pub hits: u64,
+    pub misses: u64,
+    pub errors: u64,
+    /// Sum of `payload_tokens` over hits: tokens read back out of the stash.
+    pub retrieved_tokens: u64,
 }
 
 /// Summary statistics
@@ -525,12 +691,16 @@ impl StatsSummary {
 
     /// Build summary from a slice of records
     pub fn from_records(records: &[StatsRecord]) -> Self {
-        let mut summary = Self {
-            total_records: records.len(),
-            ..Default::default()
-        };
+        Self::from_record_refs(records)
+    }
+
+    /// Like [`Self::from_records`], but over borrowed records — lets callers
+    /// summarize a filtered view without cloning text-blob-carrying rows.
+    pub fn from_record_refs<'a, I: IntoIterator<Item = &'a StatsRecord>>(records: I) -> Self {
+        let mut summary = Self::default();
 
         for record in records {
+            summary.total_records += 1;
             summary.total_before_chars += record.before_chars;
             summary.total_after_chars += record.after_chars;
             summary.total_before_tokens += record.before_tokens;

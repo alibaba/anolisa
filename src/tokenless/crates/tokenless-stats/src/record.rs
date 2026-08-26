@@ -127,6 +127,26 @@ pub struct StatsRecord {
     /// Stash entry count at record time (a gauge of stash growth). `None` for
     /// pre-stash records or operations without a stash store attached.
     pub stash_size: Option<i64>,
+    /// Detected content taxonomy (protocol `content_type` wire string).
+    /// `None` for legacy paths and seams without a detector (before_model).
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Protocol seam wire string (`before_model`, `pre_tool`, `post_tool`,
+    /// `proxy`). `None` for rows written outside the unified entry point.
+    #[serde(default)]
+    pub seam: Option<String>,
+    /// JSON array of stable compressor IDs applied, in order (e.g.
+    /// `["response-cleanup","toon"]`). `None` outside the unified entry.
+    #[serde(default)]
+    pub compressor_chain: Option<String>,
+    /// Token counter identity used for this row's estimates. `None` outside
+    /// the unified entry.
+    #[serde(default)]
+    pub tokenizer_id: Option<String>,
+    /// Truncations without an emitted recovery marker. `None` outside the
+    /// unified entry or when the operation cannot truncate.
+    #[serde(default)]
+    pub unrecoverable_truncations: Option<i64>,
 }
 
 impl StatsRecord {
@@ -159,6 +179,11 @@ impl StatsRecord {
             stash_writes: None,
             stash_errors: None,
             stash_size: None,
+            content_type: None,
+            seam: None,
+            compressor_chain: None,
+            tokenizer_id: None,
+            unrecoverable_truncations: None,
         }
     }
 
@@ -225,6 +250,25 @@ impl StatsRecord {
         self.stash_writes = writes.map(|w| w as i64);
         self.stash_errors = errors.map(|e| e as i64);
         self.stash_size = size.map(|s| s as i64);
+        self
+    }
+
+    /// Set the unified-entry attribution written by the §5.5 recording path:
+    /// seam, detected content type, applied compressor chain (JSON array of
+    /// stable IDs), tokenizer identity, and unmarked-truncation count.
+    pub fn with_entry_metadata(
+        mut self,
+        seam: impl Into<String>,
+        content_type: Option<String>,
+        compressor_chain: Option<String>,
+        tokenizer_id: impl Into<String>,
+        unrecoverable_truncations: Option<i64>,
+    ) -> Self {
+        self.seam = Some(seam.into());
+        self.content_type = content_type;
+        self.compressor_chain = compressor_chain;
+        self.tokenizer_id = Some(tokenizer_id.into());
+        self.unrecoverable_truncations = unrecoverable_truncations;
         self
     }
 

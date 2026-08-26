@@ -9,7 +9,7 @@ fn tool_list_exposes_retrieve() {
 
 #[test]
 fn dispatch_unknown_tool_is_error() {
-    let r = handle_tool_call(json!({"name":"nope","arguments":{}}), &None);
+    let r = handle_tool_call(json!({"name":"nope","arguments":{}}), &None, &None);
     assert_eq!(r["isError"], json!(true));
     assert!(
         r["content"][0]["text"]
@@ -21,7 +21,7 @@ fn dispatch_unknown_tool_is_error() {
 
 #[test]
 fn retrieve_missing_hash_is_error() {
-    let r = retrieve(json!({}), &None);
+    let r = retrieve(json!({}), &None, &None);
     assert_eq!(r["isError"], json!(true));
     assert!(
         r["content"][0]["text"]
@@ -35,7 +35,7 @@ fn retrieve_missing_hash_is_error() {
 fn retrieve_invalid_hash_format_is_error() {
     // A non-hash argument (e.g. a file path) gets a format error before
     // any DB round-trip, not a misleading "no stashed payload".
-    let r = retrieve(json!({"hash": "/some/path"}), &None);
+    let r = retrieve(json!({"hash": "/some/path"}), &None, &None);
     assert_eq!(r["isError"], json!(true));
     assert!(
         r["content"][0]["text"]
@@ -49,7 +49,7 @@ fn retrieve_invalid_hash_format_is_error() {
 fn retrieve_round_trips_via_store() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
     let key = store.stash("payload-body").unwrap().key;
-    let r = retrieve_from_store(&store, &key);
+    let r = retrieve(json!({"hash": key}), &Some(store), &None);
     assert_eq!(r["isError"], json!(false));
     assert_eq!(r["content"][0]["text"], json!("payload-body"));
 }
@@ -58,17 +58,17 @@ fn retrieve_round_trips_via_store() {
 fn retrieve_accepts_marker_line() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
     let key = store.stash("dropped items").unwrap().key;
-    let marker_line = format!("<... 5 items truncated, retrieve with <<tokenless:{key}>>");
+    let marker_line = format!("<... 5 items truncated, run: tokenless retrieve '<<tokenless:{key}>>'>");
     // Exercise the public entry point so marker extraction in `retrieve`
     // is covered, not just the bare-key path of `retrieve_from_store`.
-    let r = retrieve(json!({"hash": marker_line}), &Some(store));
+    let r = retrieve(json!({"hash": marker_line}), &Some(store), &None);
     assert_eq!(r["content"][0]["text"], json!("dropped items"));
 }
 
 #[test]
 fn retrieve_missing_payload_is_error() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-    let r = retrieve_from_store(&store, "000000000000000000000000");
+    let r = retrieve(json!({"hash": "000000000000000000000000"}), &Some(store), &None);
     assert_eq!(r["isError"], json!(true));
     assert!(
         r["content"][0]["text"]
@@ -100,7 +100,7 @@ fn err_envelope_has_jsonrpc_and_error() {
 #[test]
 fn retrieve_stash_unavailable_when_store_is_none() {
     let valid_hash = "abcdef0123456789abcdef01";
-    let r = retrieve(json!({"hash": valid_hash}), &None);
+    let r = retrieve(json!({"hash": valid_hash}), &None, &None);
     assert_eq!(r["isError"], json!(true));
     assert!(
         r["content"][0]["text"]
@@ -118,14 +118,14 @@ fn handle_tool_call_dispatches_retrieve_with_store() {
         "name": "tokenless_retrieve",
         "arguments": {"hash": key}
     });
-    let r = handle_tool_call(params, &Some(store));
+    let r = handle_tool_call(params, &Some(store), &None);
     assert_eq!(r["isError"], json!(false));
     assert_eq!(r["content"][0]["text"], "mcp-payload");
 }
 
 #[test]
 fn handle_tool_call_missing_name_is_error() {
-    let r = handle_tool_call(json!({}), &None);
+    let r = handle_tool_call(json!({}), &None, &None);
     assert_eq!(r["isError"], json!(true));
     assert!(
         r["content"][0]["text"]
