@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-08-26
+
+### Fixed
+- Registry slash commands such as `/skills list`, `/hooks`, and `/extensions` now discover project-level resources when no Agent turn has run yet and the process working directory differs from the shell cwd, e.g. after `cd` or daemon-style startup (#2686)
+- Shell commands that produce very large output no longer exhaust memory: output is capped at 32 MB, oversized commands are stopped automatically, and the Agent sees a truncation notice with the start of the output instead of a bare error; when a hook's output exceeds the cap, the affected command stays blocked (safe side) instead of the hook's decision being silently ignored (#2880)
+- Gateway tasks now start correctly on hosts running systemd 255, where the packaged service previously failed at startup because one of its security hardening settings is incompatible with that systemd version; workspace isolation is unchanged: task files stay confined to the workspace, host files remain read-only, and daemon state stays private to the service (#2843)
+
 ## [0.21.0] — 2026-08-25
 
 ### Added
