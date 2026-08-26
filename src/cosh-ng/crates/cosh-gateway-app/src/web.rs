@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::*;
-use security::{canonical_workspace, read_token, validate_token_scope};
+use security::{attest_gateway, canonical_workspace, read_token, validate_token_scope};
 
 const MAX_HTTP_HEAD_BYTES: usize = 16 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
@@ -34,9 +34,6 @@ pub(super) struct WebArgs {
     /// Canonical workspace admitted by the paired Gateway daemon.
     #[arg(long, value_name = "PATH")]
     workspace: PathBuf,
-    /// Closed Gateway capability profile; development is intentionally unavailable.
-    #[arg(long, value_enum, default_value_t = WebCapabilityProfile::TaskOnlyV1)]
-    capability_profile: WebCapabilityProfile,
     /// Absolute 0600 root- or current-user-owned Bearer token file outside the admitted workspace.
     #[arg(long, value_name = "PATH")]
     token_file: PathBuf,
@@ -45,27 +42,13 @@ pub(super) struct WebArgs {
     pub(super) output: Output,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum WebCapabilityProfile {
-    TaskOnlyV1,
-    WorkspaceCheckpointV1,
-}
-
-impl WebCapabilityProfile {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::TaskOnlyV1 => "task-only-v1",
-            Self::WorkspaceCheckpointV1 => "workspace-checkpoint-v1",
-        }
-    }
-}
-
 pub(super) fn web(args: WebArgs, reporter: &Reporter) -> Result<u8, CliError> {
     validate_bind(args.bind)?;
     let workspace = canonical_workspace(&args.workspace)?;
     let token = read_token(&args.token_file)?;
     validate_token_scope(&token.path, &workspace)?;
     let socket = daemon_socket_path(args.socket.as_ref())?;
+    attest_gateway(&LocalGatewayClient::new(socket.clone()), &workspace)?;
     let listener =
         TcpListener::bind(args.bind).map_err(|error| CliError::Web(error.to_string()))?;
     listener
@@ -80,7 +63,6 @@ pub(super) fn web(args: WebArgs, reporter: &Reporter) -> Result<u8, CliError> {
         "web_ready",
         json!({
             "url": format!("http://{address}/"),
-            "capability_profile": args.capability_profile.as_str(),
         }),
     )?;
     while !interrupted.load(Ordering::Relaxed) {

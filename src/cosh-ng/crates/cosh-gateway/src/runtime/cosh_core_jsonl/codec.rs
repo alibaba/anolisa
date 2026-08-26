@@ -69,6 +69,21 @@ impl CoshCoreJsonlCodec {
         Ok(codec)
     }
 
+    /// Creates a codec that requires the exact brokered workspace-write v5 acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidLimit` when `max_frame_bytes` is zero.
+    pub fn new_gateway_brokered_workspace_write(
+        initialize_request_id: impl Into<String>,
+        max_frame_bytes: usize,
+    ) -> Result<Self, CoshCoreCodecError> {
+        let mut codec = Self::new(initialize_request_id, max_frame_bytes)?;
+        codec.profile = CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1;
+        codec.capability_profile = Some(GatewayCapabilityProfile::workspace_write_v1().identity());
+        Ok(codec)
+    }
+
     /// Returns the current private protocol phase.
     pub fn phase(&self) -> CoshCoreProtocolPhase {
         self.phase
@@ -192,6 +207,36 @@ impl CoshCoreJsonlCodec {
                         behavior: "deny",
                         message: safe_message,
                     },
+                },
+            },
+            self.max_frame_bytes,
+        )
+    }
+
+    /// Encodes an allow-once response for an approval-gated private Core callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-phase, profile, serialization, or frame-bound error.
+    pub fn core_permission_allow_frame(
+        &self,
+        request_id: &str,
+    ) -> Result<String, CoshCoreCodecError> {
+        if !self.profile.allows_workspace_write() {
+            return Err(CoshCoreCodecError::ProfileMismatch {
+                operation: "core_permission_allow_frame",
+            });
+        }
+        if self.phase != CoshCoreProtocolPhase::Ready {
+            return Err(self.invalid_phase("core_permission_allow_frame"));
+        }
+        encode_frame(
+            &BrokeredControlResponseInput {
+                message_type: "control_response",
+                response: BrokeredControlResponse {
+                    subtype: "success",
+                    request_id,
+                    response: BrokeredControlResponseBody::Allow { behavior: "allow" },
                 },
             },
             self.max_frame_bytes,
@@ -444,10 +489,19 @@ impl CoshCoreJsonlCodec {
                 .as_ref()
                 .ok_or(CoshCoreCodecError::InitializeCapabilitiesMissing)?;
             let runtime_tools = runtime_tools.iter().map(String::as_str).collect::<Vec<_>>();
-            let profile = if self.profile.hosts_checkpoint() {
-                GatewayCapabilityProfile::workspace_checkpoint_v1()
-            } else {
-                GatewayCapabilityProfile::task_only_v1()
+            let profile = match self.profile {
+                CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1 => {
+                    GatewayCapabilityProfile::workspace_checkpoint_v1()
+                }
+                CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => {
+                    GatewayCapabilityProfile::workspace_write_v1()
+                }
+                CoshCoreExecutionProfile::GatewayBrokeredV1 => {
+                    GatewayCapabilityProfile::task_only_v1()
+                }
+                CoshCoreExecutionProfile::Legacy => {
+                    return Err(CoshCoreCodecError::InitializeCapabilitiesInvalid);
+                }
             };
             profile
                 .verify_runtime_tools(&runtime_tools)

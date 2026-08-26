@@ -12,6 +12,8 @@ pub(crate) enum ExecutionProfile {
     GatewayBrokeredV1,
     /// Gateway owns the checkpoint side effect through private protocol v4.
     GatewayBrokeredCheckpointV1,
+    /// Core owns one approval-gated workspace write through private protocol v5.
+    GatewayBrokeredWorkspaceWriteV1,
 }
 
 impl ExecutionProfile {
@@ -22,18 +24,27 @@ impl ExecutionProfile {
             Self::GatewayBrokeredCheckpointV1 => {
                 crate::protocol::GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE
             }
+            Self::GatewayBrokeredWorkspaceWriteV1 => {
+                crate::protocol::GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE
+            }
         }
     }
 
     pub(crate) const fn is_brokered(self) -> bool {
         matches!(
             self,
-            Self::GatewayBrokeredV1 | Self::GatewayBrokeredCheckpointV1
+            Self::GatewayBrokeredV1
+                | Self::GatewayBrokeredCheckpointV1
+                | Self::GatewayBrokeredWorkspaceWriteV1
         )
     }
 
     pub(crate) const fn hosts_checkpoint(self) -> bool {
         matches!(self, Self::GatewayBrokeredCheckpointV1)
+    }
+
+    pub(crate) const fn writes_workspace(self) -> bool {
+        matches!(self, Self::GatewayBrokeredWorkspaceWriteV1)
     }
 }
 

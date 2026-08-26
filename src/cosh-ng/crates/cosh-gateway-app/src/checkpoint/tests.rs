@@ -1,23 +1,116 @@
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::thread;
 
 use cosh_gateway::capability::{ExecutionTarget, ExecutionTargetOutcome};
 use cosh_gateway_contracts::capability::RuntimeExecutionFence;
-use cosh_gateway_contracts::common::{BoundedName, BoundedOpaque, Digest, TargetRef};
-use cosh_gateway_contracts::ids::RuntimeBindingId;
+use cosh_gateway_contracts::common::{BoundedName, BoundedOpaque, Digest, TargetRef, WorkspaceRef};
+use cosh_gateway_contracts::ids::{ApprovalId, CheckpointId, RunId, RuntimeBindingId, TaskId};
 use cosh_gateway_contracts::runtime::{
     BrokeredOperationResult, WorkspaceCheckpointCreateV1Outcome,
 };
 use cosh_types::checkpoint::{
-    GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, GuardedCheckpointRejectionCodeV2,
+    ChangeType, DiffEntry, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
+    GuardedCheckpointRejectionCodeV2, GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2,
     WorkspaceGenerationTokenV2, WsCkptRequest, WsCkptResponse,
+    GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
 };
 
 use super::*;
 
 enum DaemonReply {
-    Response(WsCkptResponse),
+    Response(Box<WsCkptResponse>),
+    Identity,
+    CreatedFromRequest,
+    EvidenceFromRequest,
+    CreatedWithWrongPath,
+    GuardedPreviewFromRequest(Vec<DiffEntry>),
+    GuardedRollbackFromRequest,
+}
+
+#[test]
+fn task_snapshot_preview_recovery_and_switch_use_exact_ids() {
+    let task_id = TaskId::new();
+    let snapshot_id = CheckpointId::new();
+    let recovery_id = CheckpointId::new();
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::GuardedPreviewFromRequest(vec![DiffEntry {
+            path: "managed/1.txt".to_owned(),
+            change_type: ChangeType::Deleted,
+            detail: None,
+        }]),
+        DaemonReply::Identity,
+        DaemonReply::CreatedFromRequest,
+        DaemonReply::Identity,
+        DaemonReply::GuardedPreviewFromRequest(vec![DiffEntry {
+            path: "managed/1.txt".to_owned(),
+            change_type: ChangeType::Deleted,
+            detail: None,
+        }]),
+        DaemonReply::GuardedRollbackFromRequest,
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = TaskSnapshotAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = TaskSnapshotProviderRequest {
+        task_id,
+        snapshot_id: snapshot_id.clone(),
+        workspace,
+    };
+
+    let preview = adapter.preview(&request).unwrap();
+    assert_eq!(preview.changes.len(), 1);
+    assert_eq!(preview.changes[0].path.as_str(), "managed/1.txt");
+    adapter
+        .create_recovery(&request, &recovery_id, &preview.preview_digest)
+        .unwrap();
+    let operation_id = recovery_id.clone();
+    let operation_digest = digest(9);
+    let switched = adapter
+        .switch(
+            &request,
+            &preview.preview_digest,
+            &operation_id,
+            &operation_digest,
+        )
+        .unwrap();
+    let TaskSnapshotProviderSwitchResult::Switched(switched) = switched else {
+        panic!("expected successful guarded switch")
+    };
+    assert_eq!(switched.from.as_str(), hex_bytes(&[7; 32]));
+    assert_eq!(switched.to, snapshot_id);
+
+    let requests = daemon.join().unwrap();
+    assert!(matches!(
+        &requests[2],
+        WsCkptRequest::GuardedRollbackPreviewV2 { target_snapshot_id, .. }
+            if target_snapshot_id == snapshot_id.as_str()
+    ));
+    assert!(matches!(
+        &requests[4],
+        WsCkptRequest::GuardedCheckpointV2 { checkpoint_id, .. }
+            if checkpoint_id == recovery_id.as_str()
+    ));
+    assert!(matches!(
+        &requests[7],
+        WsCkptRequest::GuardedRollbackV2 {
+            target_snapshot_id,
+            operation_id: actual_operation_id,
+            operation_digest: actual_operation_digest,
+            ..
+        } if target_snapshot_id == snapshot_id.as_str()
+            && actual_operation_id == operation_id.as_str()
+            && actual_operation_digest == &digest_bytes(&operation_digest).unwrap()
+    ));
 }
 
 fn spawn_daemon(
@@ -38,9 +131,9 @@ fn spawn_daemon(
             stream.read_exact(&mut length).unwrap();
             let mut payload = vec![0_u8; u32::from_le_bytes(length) as usize];
             stream.read_exact(&mut payload).unwrap();
-            requests.push(bincode::deserialize(&payload).unwrap());
-
-            let DaemonReply::Response(response) = reply;
+            let request: WsCkptRequest = bincode::deserialize(&payload).unwrap();
+            let response = daemon_response(reply, &request);
+            requests.push(request);
             let payload = bincode::serialize(&response).unwrap();
             stream
                 .write_all(&(payload.len() as u32).to_le_bytes())
@@ -54,6 +147,176 @@ fn spawn_daemon(
         socket_path.to_string_lossy().into_owned(),
         handle,
     )
+}
+
+fn daemon_response(reply: DaemonReply, request: &WsCkptRequest) -> WsCkptResponse {
+    match reply {
+        DaemonReply::Response(response) => *response,
+        DaemonReply::Identity => WsCkptResponse::WorkspaceIdentityV2Ok {
+            protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+            ws_id: "ws-abc123".to_owned(),
+            registered_path: "/workspace".to_owned(),
+            generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+        },
+        DaemonReply::CreatedFromRequest => {
+            let WsCkptRequest::GuardedCheckpointV2 {
+                ws_id,
+                expected_generation,
+                checkpoint_id,
+                operation_digest,
+                ..
+            } = request
+            else {
+                panic!("expected guarded checkpoint request")
+            };
+            WsCkptResponse::GuardedCheckpointV2Ok {
+                evidence: guarded_evidence(
+                    ws_id,
+                    *expected_generation,
+                    checkpoint_id,
+                    *operation_digest,
+                ),
+            }
+        }
+        DaemonReply::EvidenceFromRequest => {
+            let WsCkptRequest::CheckpointEvidenceV2 {
+                ws_id,
+                expected_generation,
+                checkpoint_id,
+                operation_digest,
+            } = request
+            else {
+                panic!("expected checkpoint evidence request")
+            };
+            WsCkptResponse::CheckpointEvidenceV2Ok {
+                evidence: Some(guarded_evidence(
+                    ws_id,
+                    *expected_generation,
+                    checkpoint_id,
+                    *operation_digest,
+                )),
+            }
+        }
+        DaemonReply::CreatedWithWrongPath => {
+            let WsCkptRequest::GuardedCheckpointV2 {
+                ws_id,
+                expected_generation,
+                checkpoint_id,
+                operation_digest,
+                ..
+            } = request
+            else {
+                panic!("expected guarded checkpoint request")
+            };
+            let mut evidence = guarded_evidence(
+                ws_id,
+                *expected_generation,
+                checkpoint_id,
+                *operation_digest,
+            );
+            evidence.registered_path = "/wrong-workspace".to_owned();
+            WsCkptResponse::GuardedCheckpointV2Ok { evidence }
+        }
+        DaemonReply::GuardedPreviewFromRequest(changes) => {
+            let WsCkptRequest::GuardedRollbackPreviewV2 {
+                registered_path,
+                ws_id,
+                expected_generation,
+                target_snapshot_id,
+            } = request
+            else {
+                panic!("expected guarded rollback preview request")
+            };
+            WsCkptResponse::GuardedRollbackPreviewV2Ok {
+                protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+                registered_path: registered_path.clone(),
+                ws_id: ws_id.clone(),
+                generation: *expected_generation,
+                target_snapshot_id: target_snapshot_id.clone(),
+                diff_digest: [6; 32],
+                changes,
+                caller_uid: nix::unistd::Uid::effective().as_raw(),
+            }
+        }
+        DaemonReply::GuardedRollbackFromRequest => {
+            let WsCkptRequest::GuardedRollbackV2 {
+                registered_path,
+                ws_id,
+                expected_generation,
+                target_snapshot_id,
+                expected_diff_digest,
+                operation_id,
+                operation_digest,
+            } = request
+            else {
+                panic!("expected guarded rollback request")
+            };
+            WsCkptResponse::GuardedRollbackV2Ok {
+                evidence: GuardedRollbackEvidenceV2 {
+                    ws_id: ws_id.clone(),
+                    registered_path: registered_path.clone(),
+                    expected_generation: *expected_generation,
+                    target_snapshot_id: target_snapshot_id.clone(),
+                    expected_diff_digest: *expected_diff_digest,
+                    operation_id: operation_id.clone(),
+                    operation_digest: *operation_digest,
+                    caller_uid: nix::unistd::Uid::effective().as_raw(),
+                    outcome: GuardedRollbackOutcomeV2::Succeeded {
+                        resulting_generation: WorkspaceGenerationTokenV2::from_bytes([8; 32]),
+                    },
+                },
+            }
+        }
+    }
+}
+
+#[test]
+fn task_switch_recovery_rejects_wrong_registered_path_evidence() {
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::CreatedWithWrongPath,
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = TaskSnapshotAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = TaskSnapshotProviderRequest {
+        task_id: TaskId::new(),
+        snapshot_id: CheckpointId::new(),
+        workspace,
+    };
+
+    let error = adapter
+        .create_recovery(&request, &CheckpointId::new(), &digest(3))
+        .unwrap_err();
+
+    assert_eq!(error.code.as_str(), "checkpoint_recovery_not_created");
+    assert_eq!(daemon.join().unwrap().len(), 3);
+}
+
+fn guarded_evidence(
+    ws_id: &str,
+    generation: WorkspaceGenerationTokenV2,
+    checkpoint_id: &str,
+    operation_digest: [u8; 32],
+) -> GuardedCheckpointEvidenceV2 {
+    GuardedCheckpointEvidenceV2 {
+        ws_id: ws_id.to_owned(),
+        registered_path: "/workspace".to_owned(),
+        generation,
+        checkpoint_id: checkpoint_id.to_owned(),
+        operation_digest,
+        caller_uid: nix::unistd::Uid::effective().as_raw(),
+        outcome: GuardedCheckpointOutcomeV2::Created {
+            snapshot_id: checkpoint_id.to_owned(),
+        },
+    }
 }
 
 fn digest(byte: u8) -> Digest {
@@ -178,11 +441,11 @@ fn created_checkpoint_commits_the_exact_typed_receipt() {
     .unwrap();
     let (outcome, requests) = execute(
         &operation,
-        vec![DaemonReply::Response(
+        vec![DaemonReply::Response(Box::new(
             WsCkptResponse::GuardedCheckpointV2Ok {
                 evidence: evidence.clone(),
             },
-        )],
+        ))],
     );
 
     let ExecutionTargetOutcome::Conclusive {
@@ -219,12 +482,12 @@ fn possibly_applied_reconciles_with_evidence_without_replay() {
     let (outcome, requests) = execute(
         &operation,
         vec![
-            DaemonReply::Response(WsCkptResponse::GuardedCheckpointV2Ok {
+            DaemonReply::Response(Box::new(WsCkptResponse::GuardedCheckpointV2Ok {
                 evidence: mismatched_evidence,
-            }),
-            DaemonReply::Response(WsCkptResponse::CheckpointEvidenceV2Ok {
+            })),
+            DaemonReply::Response(Box::new(WsCkptResponse::CheckpointEvidenceV2Ok {
                 evidence: Some(evidence),
-            }),
+            })),
         ],
     );
 
@@ -249,10 +512,12 @@ fn missing_reconcile_evidence_is_unknown_and_never_replayed() {
     let (outcome, requests) = execute(
         &operation,
         vec![
-            DaemonReply::Response(WsCkptResponse::GuardedCheckpointV2Ok {
+            DaemonReply::Response(Box::new(WsCkptResponse::GuardedCheckpointV2Ok {
                 evidence: mismatched_evidence,
-            }),
-            DaemonReply::Response(WsCkptResponse::CheckpointEvidenceV2Ok { evidence: None }),
+            })),
+            DaemonReply::Response(Box::new(WsCkptResponse::CheckpointEvidenceV2Ok {
+                evidence: None,
+            })),
         ],
     );
 
@@ -267,12 +532,12 @@ fn explicit_v2_rejection_is_a_conclusive_failure() {
     let operation = operation();
     let (outcome, requests) = execute(
         &operation,
-        vec![DaemonReply::Response(
+        vec![DaemonReply::Response(Box::new(
             WsCkptResponse::GuardedCheckpointV2Rejected {
                 code: GuardedCheckpointRejectionCodeV2::GenerationMismatch,
                 message: "daemon-private generation detail".to_owned(),
             },
-        )],
+        ))],
     );
 
     let ExecutionTargetOutcome::Conclusive {
@@ -290,4 +555,387 @@ fn explicit_v2_rejection_is_a_conclusive_failure() {
     assert!(!safe_detail.as_str().contains("daemon-private"));
     assert_eq!(requests.len(), 1);
     assert_guarded_request(&requests[0], &operation);
+}
+
+fn pre_runtime_workspace() -> WorkspaceRef {
+    WorkspaceRef {
+        scope_digest: digest(3),
+        display_name: None,
+    }
+}
+
+fn pre_runtime_request(workspace: WorkspaceRef) -> PreRuntimeCheckpointRequest {
+    PreRuntimeCheckpointRequest {
+        baseline_id: CheckpointId::new(),
+        task_id: TaskId::new(),
+        run_id: RunId::new(),
+        workspace,
+    }
+}
+
+fn approval_checkpoint_request(workspace: WorkspaceRef) -> ApprovalCheckpointRequest {
+    ApprovalCheckpointRequest {
+        checkpoint_id: CheckpointId::new(),
+        approval_id: ApprovalId::new(),
+        task_id: TaskId::new(),
+        run_id: RunId::new(),
+        workspace,
+        runtime_fence: RuntimeExecutionFence {
+            binding_id: RuntimeBindingId::new(),
+            runtime_generation: 21,
+            lease_generation: 22,
+            lease_revision: 23,
+        },
+    }
+}
+
+#[test]
+fn pre_runtime_create_dispatches_guarded_checkpoint_once() {
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::CreatedFromRequest,
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = PreRuntimeCheckpointAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = pre_runtime_request(workspace);
+    let binding = adapter.prepare_baseline(&request).unwrap();
+
+    let result = adapter.create_baseline(&request, &binding).unwrap();
+
+    assert!(matches!(
+        result,
+        PreRuntimeCheckpointCreateResult::Created { ref evidence }
+            if evidence.baseline_id == request.baseline_id
+                && evidence.provider_generation.as_str() == "07".repeat(32)
+    ));
+    let requests = daemon.join().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::WorkspaceIdentityV2 { .. }))
+            .count(),
+        2,
+        "create must consume the prepared workspace generation"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::GuardedCheckpointV2 { .. }))
+            .count(),
+        1
+    );
+    drop(directory);
+}
+
+#[test]
+fn pre_runtime_possibly_applied_reconciles_only_with_evidence() {
+    let mismatched = GuardedCheckpointEvidenceV2 {
+        ws_id: "ws-abc123".to_owned(),
+        registered_path: "/workspace".to_owned(),
+        generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+        checkpoint_id: "different-baseline".to_owned(),
+        operation_digest: [6; 32],
+        caller_uid: nix::unistd::Uid::effective().as_raw(),
+        outcome: GuardedCheckpointOutcomeV2::Created {
+            snapshot_id: "different-baseline".to_owned(),
+        },
+    };
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::Response(Box::new(WsCkptResponse::GuardedCheckpointV2Ok {
+            evidence: mismatched,
+        })),
+        DaemonReply::EvidenceFromRequest,
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = PreRuntimeCheckpointAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = pre_runtime_request(workspace);
+    let binding = adapter.prepare_baseline(&request).unwrap();
+
+    assert!(matches!(
+        adapter.create_baseline(&request, &binding).unwrap(),
+        PreRuntimeCheckpointCreateResult::PossiblyApplied { .. }
+    ));
+    assert!(matches!(
+        adapter.reconcile_baseline(&request, &binding).unwrap(),
+        PreRuntimeCheckpointReconcileResult::Created { .. }
+    ));
+
+    let requests = daemon.join().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::WorkspaceIdentityV2 { .. }))
+            .count(),
+        2,
+        "reconciliation must not resolve a new workspace generation"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::GuardedCheckpointV2 { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::CheckpointEvidenceV2 { .. }))
+            .count(),
+        1
+    );
+    drop(directory);
+}
+
+#[test]
+fn pre_runtime_missing_exact_evidence_remains_unknown() {
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::Response(Box::new(WsCkptResponse::CheckpointEvidenceV2Ok {
+            evidence: None,
+        })),
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = PreRuntimeCheckpointAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = pre_runtime_request(workspace);
+    let binding = adapter.prepare_baseline(&request).unwrap();
+
+    assert!(matches!(
+        adapter.reconcile_baseline(&request, &binding).unwrap(),
+        PreRuntimeCheckpointReconcileResult::Unknown { .. }
+    ));
+
+    let requests = daemon.join().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::CheckpointEvidenceV2 { .. }))
+            .count(),
+        1
+    );
+    drop(directory);
+}
+
+#[test]
+fn approval_checkpoint_guarded_create_binds_ids_fence_and_safe_metadata() {
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::CreatedFromRequest,
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = PreRuntimeCheckpointAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = approval_checkpoint_request(workspace);
+    let ApprovalCheckpointPrepareResult::Prepared(binding) =
+        adapter.prepare_approval_checkpoint(&request).unwrap()
+    else {
+        panic!("approval checkpoint must prepare a durable binding")
+    };
+
+    assert!(matches!(
+        adapter
+            .create_approval_checkpoint(&request, &binding)
+            .unwrap(),
+        ApprovalCheckpointCreateResult::Created { ref evidence }
+            if evidence.checkpoint_id == request.checkpoint_id
+                && evidence.provider_generation == binding.provider_generation
+    ));
+
+    let requests = daemon.join().unwrap();
+    let guarded = requests
+        .iter()
+        .find(|request| matches!(request, WsCkptRequest::GuardedCheckpointV2 { .. }))
+        .expect("approval create must issue one guarded checkpoint request");
+    let WsCkptRequest::GuardedCheckpointV2 {
+        ws_id,
+        expected_generation,
+        checkpoint_id,
+        operation_digest,
+        message,
+        metadata,
+        pin,
+    } = guarded
+    else {
+        unreachable!()
+    };
+    assert_eq!(ws_id, binding.provider_workspace_id.as_str());
+    assert_eq!(
+        expected_generation,
+        &WorkspaceGenerationTokenV2::from_bytes([7; 32])
+    );
+    assert_eq!(checkpoint_id, request.checkpoint_id.as_str());
+    let fence = serde_json::to_vec(&request.runtime_fence).unwrap();
+    let expected_digest = digest_parts(&[
+        APPROVAL_OPERATION_DOMAIN,
+        request.checkpoint_id.as_str().as_bytes(),
+        request.approval_id.as_str().as_bytes(),
+        request.task_id.as_str().as_bytes(),
+        request.run_id.as_str().as_bytes(),
+        request.workspace.scope_digest.as_str().as_bytes(),
+        &fence,
+        ws_id.as_bytes(),
+        b"/workspace",
+        &[7; 32],
+        &nix::unistd::Uid::effective().as_raw().to_le_bytes(),
+    ])
+    .unwrap();
+    assert_eq!(operation_digest, &digest_bytes(&expected_digest).unwrap());
+    assert_eq!(
+        message.as_deref(),
+        Some("COSH Task pre-approval checkpoint")
+    );
+    let metadata: serde_json::Value = serde_json::from_str(
+        metadata
+            .as_deref()
+            .expect("metadata must identify the approval"),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata,
+        serde_json::json!({
+            "task_id": request.task_id.as_str(),
+            "run_id": request.run_id.as_str(),
+            "approval_id": request.approval_id.as_str(),
+        })
+    );
+    assert_eq!(metadata.as_object().unwrap().len(), 3);
+    assert!(!pin);
+
+    let mut changed_fence = request.clone();
+    changed_fence.runtime_fence.lease_revision += 1;
+    assert!(adapter
+        .create_approval_checkpoint(&changed_fence, &binding)
+        .is_err());
+    drop(directory);
+}
+
+#[test]
+fn approval_checkpoint_possibly_applied_reconciles_evidence_without_second_create() {
+    let mismatched = GuardedCheckpointEvidenceV2 {
+        ws_id: "ws-abc123".to_owned(),
+        registered_path: "/workspace".to_owned(),
+        generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+        checkpoint_id: "different-approval-checkpoint".to_owned(),
+        operation_digest: [6; 32],
+        caller_uid: nix::unistd::Uid::effective().as_raw(),
+        outcome: GuardedCheckpointOutcomeV2::Created {
+            snapshot_id: "different-approval-checkpoint".to_owned(),
+        },
+    };
+    let (directory, socket_path, daemon) = spawn_daemon(vec![
+        DaemonReply::Identity,
+        DaemonReply::Identity,
+        DaemonReply::Response(Box::new(WsCkptResponse::GuardedCheckpointV2Ok {
+            evidence: mismatched,
+        })),
+        DaemonReply::EvidenceFromRequest,
+    ]);
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = pre_runtime_workspace();
+    let mut adapter = PreRuntimeCheckpointAdapter::admit(
+        PathBuf::from(socket_path),
+        Path::new("/workspace"),
+        workspace.clone(),
+        nix::unistd::Uid::effective().as_raw(),
+    )
+    .unwrap();
+    let request = approval_checkpoint_request(workspace);
+    let ApprovalCheckpointPrepareResult::Prepared(binding) =
+        adapter.prepare_approval_checkpoint(&request).unwrap()
+    else {
+        panic!("approval checkpoint must prepare a durable binding")
+    };
+
+    assert!(matches!(
+        adapter
+            .create_approval_checkpoint(&request, &binding)
+            .unwrap(),
+        ApprovalCheckpointCreateResult::PossiblyApplied { .. }
+    ));
+    assert!(matches!(
+        adapter
+            .reconcile_approval_checkpoint(&request, &binding)
+            .unwrap(),
+        ApprovalCheckpointReconcileResult::Created { ref evidence }
+            if evidence.checkpoint_id == request.checkpoint_id
+                && evidence.provider_generation == binding.provider_generation
+    ));
+
+    let requests = daemon.join().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::GuardedCheckpointV2 { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| matches!(request, WsCkptRequest::CheckpointEvidenceV2 { .. }))
+            .count(),
+        1
+    );
+    let guarded = requests
+        .iter()
+        .find(|request| matches!(request, WsCkptRequest::GuardedCheckpointV2 { .. }))
+        .unwrap();
+    let evidence = requests
+        .iter()
+        .find(|request| matches!(request, WsCkptRequest::CheckpointEvidenceV2 { .. }))
+        .unwrap();
+    let (
+        WsCkptRequest::GuardedCheckpointV2 {
+            ws_id: guarded_ws,
+            expected_generation: guarded_generation,
+            checkpoint_id: guarded_checkpoint,
+            operation_digest: guarded_digest,
+            ..
+        },
+        WsCkptRequest::CheckpointEvidenceV2 {
+            ws_id: evidence_ws,
+            expected_generation: evidence_generation,
+            checkpoint_id: evidence_checkpoint,
+            operation_digest: evidence_digest,
+        },
+    ) = (guarded, evidence)
+    else {
+        unreachable!()
+    };
+    assert_eq!(evidence_ws, guarded_ws);
+    assert_eq!(evidence_generation, guarded_generation);
+    assert_eq!(evidence_checkpoint, guarded_checkpoint);
+    assert_eq!(evidence_digest, guarded_digest);
+    drop(directory);
 }

@@ -164,6 +164,29 @@ pub enum Request {
         checkpoint_id: String,
         operation_digest: [u8; 32],
     },
+    /// Preview an exact rollback target and bind the result to workspace identity.
+    GuardedRollbackPreviewV2 {
+        registered_path: String,
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        target_snapshot_id: String,
+    },
+    /// Atomically revalidate a preview and roll back to its exact target.
+    GuardedRollbackV2 {
+        registered_path: String,
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        target_snapshot_id: String,
+        expected_diff_digest: [u8; 32],
+        operation_id: String,
+        operation_digest: [u8; 32],
+    },
+    /// Query durable evidence for a guarded rollback operation.
+    GuardedRollbackEvidenceV2 {
+        ws_id: String,
+        operation_id: String,
+        operation_digest: [u8; 32],
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -291,6 +314,34 @@ pub enum Response {
         code: GuardedCheckpointRejectionCodeV2,
         message: String,
     },
+    /// Exact rollback preview produced for a guarded caller.
+    GuardedRollbackPreviewV2Ok {
+        protocol_version: u16,
+        registered_path: String,
+        ws_id: String,
+        generation: WorkspaceGenerationTokenV2,
+        target_snapshot_id: String,
+        diff_digest: [u8; 32],
+        changes: Vec<DiffEntry>,
+        caller_uid: u32,
+    },
+    /// Durable proof that a guarded rollback completed.
+    GuardedRollbackV2Ok {
+        evidence: GuardedRollbackEvidenceV2,
+    },
+    /// Durable proof that a guarded rollback may have started but is not confirmed complete.
+    GuardedRollbackV2Uncertain {
+        evidence: GuardedRollbackEvidenceV2,
+    },
+    /// Durable evidence lookup for a guarded rollback operation.
+    GuardedRollbackEvidenceV2Ok {
+        evidence: Option<GuardedRollbackEvidenceV2>,
+    },
+    /// A guarded rollback rejected before backend execution, with known no-switch effect.
+    GuardedRollbackV2Rejected {
+        code: GuardedRollbackRejectionCodeV2,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -383,6 +434,67 @@ pub enum GuardedCheckpointRejectionCodeV2 {
     WriteLockConflict,
     CallerMismatch,
     EvidenceCapacityReached,
+}
+
+/// Outcome durably bound to one guarded rollback operation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum GuardedRollbackOutcomeV2 {
+    /// The operation intent is durable and backend execution may have started.
+    Started,
+    /// The backend and index update both completed durably.
+    Succeeded {
+        /// Kernel-backed identity of the new writable workspace generation.
+        resulting_generation: WorkspaceGenerationTokenV2,
+    },
+    /// Backend execution may have taken effect, but completion could not be proven.
+    Unknown {
+        /// Actionable diagnostic retained with the evidence.
+        reason: String,
+    },
+}
+
+/// Durable proof binding a caller operation to an exact guarded rollback.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GuardedRollbackEvidenceV2 {
+    /// Exact daemon workspace identifier used for the operation.
+    pub ws_id: String,
+    /// Verbatim path stored in the daemon registration and supplied by the caller.
+    pub registered_path: String,
+    /// Live writable-subvolume generation that was previewed and revalidated.
+    pub expected_generation: WorkspaceGenerationTokenV2,
+    /// Full snapshot identifier; prefixes are never accepted by this API.
+    pub target_snapshot_id: String,
+    /// Digest of the live diff recomputed immediately before rollback.
+    pub expected_diff_digest: [u8; 32],
+    /// Caller-defined idempotency identifier.
+    pub operation_id: String,
+    /// Caller-defined digest binding the higher-level operation identity.
+    pub operation_digest: [u8; 32],
+    /// Effective UID obtained from Unix peer credentials.
+    pub caller_uid: u32,
+    /// Durable rollback outcome.
+    pub outcome: GuardedRollbackOutcomeV2,
+}
+
+/// Reasons a guarded rollback can be rejected before backend execution.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedRollbackRejectionCodeV2 {
+    DaemonNotReady,
+    PeerCredentialsUnavailable,
+    InvalidRegistrationPath,
+    InvalidWorkspaceId,
+    InvalidSnapshotId,
+    InvalidOperationId,
+    WorkspaceNotFound,
+    SnapshotNotFound,
+    GenerationMismatch,
+    DiffMismatch,
+    OperationConflict,
+    WriteLockConflict,
+    CallerMismatch,
+    EvidenceCapacityReached,
+    CwdOccupied,
+    CwdScanFailed,
 }
 
 /// Validates the canonical `ws-xxxxxx` identifier and optional `-N` collision suffix.
@@ -510,6 +622,9 @@ pub struct SnapshotIndex {
     /// Durable guarded-operation evidence keyed by checkpoint identifier.
     #[serde(default)]
     pub governed_evidence: HashMap<String, GuardedCheckpointEvidenceV2>,
+    /// Durable guarded rollback receipts keyed by caller idempotency identifier.
+    #[serde(default)]
+    pub guarded_rollbacks: HashMap<String, GuardedRollbackEvidenceV2>,
 }
 
 impl SnapshotIndex {
@@ -519,6 +634,7 @@ impl SnapshotIndex {
             snapshots: HashMap::new(),
             head: None,
             governed_evidence: HashMap::new(),
+            guarded_rollbacks: HashMap::new(),
         }
     }
 }
@@ -3184,9 +3300,29 @@ mod tests {
                 checkpoint_id: "turn-42".to_string(),
                 operation_digest: [0x22; 32],
             },
+            Request::GuardedRollbackPreviewV2 {
+                registered_path: "/workspace".to_string(),
+                ws_id: "ws-abcdef-2".to_string(),
+                expected_generation: generation,
+                target_snapshot_id: "turn-41".to_string(),
+            },
+            Request::GuardedRollbackV2 {
+                registered_path: "/workspace".to_string(),
+                ws_id: "ws-abcdef-2".to_string(),
+                expected_generation: generation,
+                target_snapshot_id: "turn-41".to_string(),
+                expected_diff_digest: [0x33; 32],
+                operation_id: "switch-42".to_string(),
+                operation_digest: [0x44; 32],
+            },
+            Request::GuardedRollbackEvidenceV2 {
+                ws_id: "ws-abcdef-2".to_string(),
+                operation_id: "switch-42".to_string(),
+                operation_digest: [0x44; 32],
+            },
         ];
 
-        for (request, expected_discriminant) in requests.iter().zip(19_u32..=21) {
+        for (request, expected_discriminant) in requests.iter().zip(19_u32..=24) {
             let encoded = bincode::serialize(request).unwrap();
             assert_eq!(&encoded[..4], &expected_discriminant.to_le_bytes());
             let decoded: Request = bincode::deserialize(&encoded).unwrap();
@@ -3215,6 +3351,17 @@ mod tests {
                 snapshot_id: "turn-42".to_string(),
             },
         };
+        let rollback_evidence = GuardedRollbackEvidenceV2 {
+            ws_id: "ws-abcdef".to_string(),
+            registered_path: "/workspace".to_string(),
+            expected_generation: evidence.generation,
+            target_snapshot_id: "turn-41".to_string(),
+            expected_diff_digest: [0x55; 32],
+            operation_id: "switch-42".to_string(),
+            operation_digest: [0x66; 32],
+            caller_uid: 1000,
+            outcome: GuardedRollbackOutcomeV2::Started,
+        };
         let responses = [
             Response::WorkspaceIdentityV2Ok {
                 protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
@@ -3226,15 +3373,43 @@ mod tests {
                 evidence: evidence.clone(),
             },
             Response::CheckpointEvidenceV2Ok {
-                evidence: Some(evidence),
+                evidence: Some(evidence.clone()),
             },
             Response::GuardedCheckpointV2Rejected {
                 code: GuardedCheckpointRejectionCodeV2::GenerationMismatch,
                 message: "workspace generation changed".to_string(),
             },
+            Response::GuardedRollbackPreviewV2Ok {
+                protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+                registered_path: "/workspace".to_string(),
+                ws_id: "ws-abcdef".to_string(),
+                generation: evidence.generation,
+                target_snapshot_id: "turn-41".to_string(),
+                diff_digest: [0x55; 32],
+                changes: vec![],
+                caller_uid: 1000,
+            },
+            Response::GuardedRollbackV2Ok {
+                evidence: GuardedRollbackEvidenceV2 {
+                    outcome: GuardedRollbackOutcomeV2::Succeeded {
+                        resulting_generation: WorkspaceGenerationTokenV2::from_bytes([0x77; 32]),
+                    },
+                    ..rollback_evidence.clone()
+                },
+            },
+            Response::GuardedRollbackV2Uncertain {
+                evidence: rollback_evidence.clone(),
+            },
+            Response::GuardedRollbackEvidenceV2Ok {
+                evidence: Some(rollback_evidence),
+            },
+            Response::GuardedRollbackV2Rejected {
+                code: GuardedRollbackRejectionCodeV2::DiffMismatch,
+                message: "live diff changed".to_string(),
+            },
         ];
 
-        for (response, expected_discriminant) in responses.iter().zip(17_u32..=20) {
+        for (response, expected_discriminant) in responses.iter().zip(17_u32..=25) {
             let encoded = bincode::serialize(response).unwrap();
             assert_eq!(&encoded[..4], &expected_discriminant.to_le_bytes());
             let decoded: Response = bincode::deserialize(&encoded).unwrap();
@@ -3294,6 +3469,31 @@ mod tests {
         let token = WorkspaceGenerationTokenV2::from_bytes([0x55; 32]);
         assert_eq!(bincode::serialize(&token).unwrap(), vec![0x55; 32]);
         assert_eq!(token.into_bytes(), [0x55; 32]);
+
+        let rollback_rejections = [
+            GuardedRollbackRejectionCodeV2::DaemonNotReady,
+            GuardedRollbackRejectionCodeV2::PeerCredentialsUnavailable,
+            GuardedRollbackRejectionCodeV2::InvalidRegistrationPath,
+            GuardedRollbackRejectionCodeV2::InvalidWorkspaceId,
+            GuardedRollbackRejectionCodeV2::InvalidSnapshotId,
+            GuardedRollbackRejectionCodeV2::InvalidOperationId,
+            GuardedRollbackRejectionCodeV2::WorkspaceNotFound,
+            GuardedRollbackRejectionCodeV2::SnapshotNotFound,
+            GuardedRollbackRejectionCodeV2::GenerationMismatch,
+            GuardedRollbackRejectionCodeV2::DiffMismatch,
+            GuardedRollbackRejectionCodeV2::OperationConflict,
+            GuardedRollbackRejectionCodeV2::WriteLockConflict,
+            GuardedRollbackRejectionCodeV2::CallerMismatch,
+            GuardedRollbackRejectionCodeV2::EvidenceCapacityReached,
+            GuardedRollbackRejectionCodeV2::CwdOccupied,
+            GuardedRollbackRejectionCodeV2::CwdScanFailed,
+        ];
+        for (code, expected_discriminant) in rollback_rejections.iter().zip(0_u32..=15) {
+            assert_eq!(
+                bincode::serialize(code).unwrap(),
+                expected_discriminant.to_le_bytes()
+            );
+        }
     }
 
     #[test]
@@ -3307,6 +3507,7 @@ mod tests {
         let index: SnapshotIndex = serde_json::from_str(old_json).unwrap();
         assert_eq!(index.workspace_path, PathBuf::from("/workspace"));
         assert!(index.governed_evidence.is_empty());
+        assert!(index.guarded_rollbacks.is_empty());
     }
 
     #[test]

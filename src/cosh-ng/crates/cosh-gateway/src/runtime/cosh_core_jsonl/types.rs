@@ -12,10 +12,15 @@ pub const PRIVATE_COSH_CONTROL_PROTOCOL_VERSION: u32 = 1;
 pub const BROKERED_COSH_CONTROL_PROTOCOL_VERSION: u32 = 3;
 /// Exact private protocol version for the Gateway checkpoint profile.
 pub const BROKERED_CHECKPOINT_COSH_CONTROL_PROTOCOL_VERSION: u32 = 4;
+/// Exact private protocol version for the Gateway workspace-write profile.
+pub const BROKERED_WORKSPACE_WRITE_COSH_CONTROL_PROTOCOL_VERSION: u32 = 5;
 /// Exact launch and acknowledgement name for the brokered Core profile.
 pub const GATEWAY_BROKERED_EXECUTION_PROFILE: &str = "gateway_brokered_v1";
 /// Exact launch and acknowledgement name for the brokered checkpoint profile.
 pub const GATEWAY_BROKERED_CHECKPOINT_EXECUTION_PROFILE: &str = "gateway_brokered_checkpoint_v1";
+/// Exact launch and acknowledgement name for the brokered workspace-write profile.
+pub const GATEWAY_BROKERED_WORKSPACE_WRITE_EXECUTION_PROFILE: &str =
+    "gateway_brokered_workspace_write_v1";
 
 /// Private Core execution boundary selected before process launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,6 +32,8 @@ pub enum CoshCoreExecutionProfile {
     GatewayBrokeredV1,
     /// Gateway owns the closed checkpoint profile using private protocol v4.
     GatewayBrokeredCheckpointV1,
+    /// Gateway owns the approval-gated workspace-write profile using private protocol v5.
+    GatewayBrokeredWorkspaceWriteV1,
 }
 
 impl CoshCoreExecutionProfile {
@@ -35,6 +42,9 @@ impl CoshCoreExecutionProfile {
             Self::Legacy => PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
             Self::GatewayBrokeredV1 => BROKERED_COSH_CONTROL_PROTOCOL_VERSION,
             Self::GatewayBrokeredCheckpointV1 => BROKERED_CHECKPOINT_COSH_CONTROL_PROTOCOL_VERSION,
+            Self::GatewayBrokeredWorkspaceWriteV1 => {
+                BROKERED_WORKSPACE_WRITE_COSH_CONTROL_PROTOCOL_VERSION
+            }
         }
     }
 
@@ -45,18 +55,27 @@ impl CoshCoreExecutionProfile {
             Self::GatewayBrokeredCheckpointV1 => {
                 Some(GATEWAY_BROKERED_CHECKPOINT_EXECUTION_PROFILE)
             }
+            Self::GatewayBrokeredWorkspaceWriteV1 => {
+                Some(GATEWAY_BROKERED_WORKSPACE_WRITE_EXECUTION_PROFILE)
+            }
         }
     }
 
     pub(super) const fn is_brokered(self) -> bool {
         matches!(
             self,
-            Self::GatewayBrokeredV1 | Self::GatewayBrokeredCheckpointV1
+            Self::GatewayBrokeredV1
+                | Self::GatewayBrokeredCheckpointV1
+                | Self::GatewayBrokeredWorkspaceWriteV1
         )
     }
 
     pub(super) const fn hosts_checkpoint(self) -> bool {
         matches!(self, Self::GatewayBrokeredCheckpointV1)
+    }
+
+    pub(super) const fn allows_workspace_write(self) -> bool {
+        matches!(self, Self::GatewayBrokeredWorkspaceWriteV1)
     }
 }
 

@@ -23,6 +23,7 @@ fn migration_is_repeatable_and_enables_all_tables() {
     assert_eq!(
         tables,
         [
+            "approval_checkpoint_barriers",
             "approvals",
             "brokered_execution_results",
             "brokered_requests",
@@ -35,6 +36,7 @@ fn migration_is_repeatable_and_enables_all_tables() {
             "legacy_runtime_start_recoveries",
             "outbox",
             "permits",
+            "pre_runtime_baselines",
             "provider_permission_dispatches",
             "run_leases",
             "runtime_bindings",
@@ -43,6 +45,7 @@ fn migration_is_repeatable_and_enables_all_tables() {
             "schema_migrations",
             "security_audit_proofs",
             "task_events",
+            "task_snapshot_switches",
             "tasks"
         ]
     );
@@ -72,7 +75,10 @@ fn existing_v1_database_migrates_without_rewriting_v1() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    assert_eq!(
+        versions,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    );
     let v1_checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=1",
@@ -107,7 +113,7 @@ fn existing_v8_database_adds_private_runtime_input_tables() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 16);
     let tables = connection
         .prepare(
             "SELECT name FROM sqlite_schema
@@ -209,6 +215,24 @@ fn existing_v9_database_adds_provider_recovery_binding() {
 
     let after = columns(&connection, "brokered_requests");
     assert!(after.iter().any(|column| column == "provider_binding"));
+}
+
+#[test]
+fn existing_v12_database_adds_nullable_pre_runtime_provider_binding() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    migrate_to_for_test(&mut connection, 12).unwrap();
+    assert!(!columns(&connection, "pre_runtime_baselines")
+        .iter()
+        .any(|column| column == "binding_json"));
+
+    migrate(&mut connection).unwrap();
+
+    assert!(columns(&connection, "pre_runtime_baselines")
+        .iter()
+        .any(|column| column == "binding_json"));
 }
 
 fn columns(connection: &Connection, table: &str) -> Vec<String> {
@@ -370,4 +394,45 @@ created_at_ms, delivered_at_ms
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn v15_migration_preserves_only_proven_recovery_states() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    migrate_to_for_test(&mut connection, 15).unwrap();
+    connection.execute(
+        "INSERT INTO tasks(task_id,owner_actor_id,target_ref,revision,state,snapshot_json,created_at_ms,updated_at_ms)
+         VALUES ('task','actor','{}',1,'cancelled','{}',1,1)", [],
+    ).unwrap();
+    let states = [
+        "intent",
+        "recovery_created",
+        "switch_started",
+        "succeeded",
+        "unknown",
+        "failed",
+    ];
+    for state in states {
+        connection.execute(
+            "INSERT INTO task_snapshot_switches(actor_id,idempotency_key,command_digest,task_id,snapshot_id,
+             preview_digest,expected_revision,recovery_snapshot_id,state,created_at_ms,updated_at_ms)
+             VALUES ('actor',?1,'digest','task','snapshot','preview',1,?1,?1,1,1)",
+            params![state],
+        ).unwrap();
+    }
+    migrate(&mut connection).unwrap();
+    migrate(&mut connection).unwrap();
+    for state in states {
+        let proven: bool = connection
+            .query_row(
+                "SELECT recovery_proven FROM task_snapshot_switches WHERE state=?1",
+                params![state],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(proven, !matches!(state, "intent" | "failed"), "{state}");
+    }
 }

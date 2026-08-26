@@ -18,11 +18,421 @@ use cosh_gateway_contracts::runtime::ToolSummary;
 use tempfile::TempDir;
 
 use super::*;
-use crate::daemon::{actor_id_for_uid, now_ms, CancelTask, SubmitTask};
+use crate::daemon::{
+    actor_id_for_uid, actor_ref_for_uid, now_ms, CancelTask, LaunchReadiness,
+    PreRuntimeBaselineView, PreRuntimeCheckpointReconcileRequest, RetryTask, SubmitLaunch,
+    SubmitTask,
+};
 use crate::runtime::{
     AcpRuntimeProfileId, InstalledAcpRuntimePortFactory, LocalOsActorResolver,
     ScheduledAgentRuntimeFactory, TrustedWorkspaceResolver,
 };
+
+struct CheckpointDriver {
+    prepares: Arc<AtomicUsize>,
+    creates: Arc<AtomicUsize>,
+    reconciles: Arc<AtomicUsize>,
+    create_result: PreRuntimeCheckpointCreateResult,
+    reconcile_result: PreRuntimeCheckpointReconcileResult,
+}
+
+impl PreRuntimeCheckpointDriver for CheckpointDriver {
+    fn prepare_baseline(
+        &mut self,
+        _request: &PreRuntimeCheckpointRequest,
+    ) -> Result<PreRuntimeCheckpointBinding, ContractError> {
+        let preparation = self.prepares.fetch_add(1, Ordering::Relaxed);
+        Ok(PreRuntimeCheckpointBinding {
+            provider_workspace_id: BoundedOpaque::new("test-workspace").unwrap(),
+            provider_generation: BoundedOpaque::new(
+                if preparation == 0 { "07" } else { "08" }.repeat(32),
+            )
+            .unwrap(),
+            operation_digest: sha256_digest(b"test-checkpoint-operation"),
+        })
+    }
+
+    fn create_baseline(
+        &mut self,
+        _request: &PreRuntimeCheckpointRequest,
+        _binding: &PreRuntimeCheckpointBinding,
+    ) -> Result<PreRuntimeCheckpointCreateResult, ContractError> {
+        self.creates.fetch_add(1, Ordering::Relaxed);
+        Ok(self.create_result.clone())
+    }
+
+    fn reconcile_baseline(
+        &mut self,
+        _request: &PreRuntimeCheckpointReconcileRequest,
+        binding: &PreRuntimeCheckpointBinding,
+    ) -> Result<PreRuntimeCheckpointReconcileResult, ContractError> {
+        assert_eq!(binding.provider_generation.as_str(), "07".repeat(32));
+        self.reconciles.fetch_add(1, Ordering::Relaxed);
+        Ok(self.reconcile_result.clone())
+    }
+}
+
+struct ApprovalBarrierDriver {
+    prepares: Arc<AtomicUsize>,
+    creates: Arc<AtomicUsize>,
+    reconciles: Arc<AtomicUsize>,
+    prepare_result: ApprovalCheckpointPrepareResult,
+    create_result: ApprovalCheckpointCreateResult,
+    reconcile_result: ApprovalCheckpointReconcileResult,
+}
+
+impl PreRuntimeCheckpointDriver for ApprovalBarrierDriver {
+    fn prepare_baseline(
+        &mut self,
+        _request: &PreRuntimeCheckpointRequest,
+    ) -> Result<PreRuntimeCheckpointBinding, ContractError> {
+        Err(runtime_lost_error("unexpected_baseline", "unexpected baseline").unwrap())
+    }
+
+    fn create_baseline(
+        &mut self,
+        _request: &PreRuntimeCheckpointRequest,
+        _binding: &PreRuntimeCheckpointBinding,
+    ) -> Result<PreRuntimeCheckpointCreateResult, ContractError> {
+        unreachable!("approval barrier tests do not create a pre-Runtime baseline")
+    }
+
+    fn reconcile_baseline(
+        &mut self,
+        _request: &PreRuntimeCheckpointReconcileRequest,
+        _binding: &PreRuntimeCheckpointBinding,
+    ) -> Result<PreRuntimeCheckpointReconcileResult, ContractError> {
+        unreachable!("approval barrier tests do not reconcile a pre-Runtime baseline")
+    }
+
+    fn prepare_approval_checkpoint(
+        &mut self,
+        _request: &ApprovalCheckpointRequest,
+    ) -> Result<ApprovalCheckpointPrepareResult, ContractError> {
+        self.prepares.fetch_add(1, Ordering::Relaxed);
+        Ok(self.prepare_result.clone())
+    }
+
+    fn create_approval_checkpoint(
+        &mut self,
+        request: &ApprovalCheckpointRequest,
+        _binding: &PreRuntimeCheckpointBinding,
+    ) -> Result<ApprovalCheckpointCreateResult, ContractError> {
+        self.creates.fetch_add(1, Ordering::Relaxed);
+        let mut result = self.create_result.clone();
+        if let ApprovalCheckpointCreateResult::Created { evidence } = &mut result {
+            evidence.checkpoint_id = request.checkpoint_id.clone();
+        }
+        Ok(result)
+    }
+
+    fn reconcile_approval_checkpoint(
+        &mut self,
+        request: &ApprovalCheckpointRequest,
+        _binding: &PreRuntimeCheckpointBinding,
+    ) -> Result<ApprovalCheckpointReconcileResult, ContractError> {
+        self.reconciles.fetch_add(1, Ordering::Relaxed);
+        let mut result = self.reconcile_result.clone();
+        if let ApprovalCheckpointReconcileResult::Created { evidence } = &mut result {
+            evidence.checkpoint_id = request.checkpoint_id.clone();
+        }
+        Ok(result)
+    }
+}
+
+fn approval_binding() -> PreRuntimeCheckpointBinding {
+    PreRuntimeCheckpointBinding {
+        provider_workspace_id: BoundedOpaque::new("approval-workspace").unwrap(),
+        provider_generation: BoundedOpaque::new("09".repeat(32)).unwrap(),
+        operation_digest: sha256_digest(b"approval-checkpoint-operation"),
+    }
+}
+
+fn approval_evidence(checkpoint_id: CheckpointId) -> ApprovalCheckpointEvidence {
+    ApprovalCheckpointEvidence {
+        checkpoint_id,
+        provider_generation: BoundedOpaque::new("09".repeat(32)).unwrap(),
+        evidence_digest: sha256_digest(b"approval-checkpoint-evidence"),
+    }
+}
+
+fn launch_catalog(workspace: WorkspaceRef) -> TaskLaunchCatalog {
+    TaskLaunchCatalog::new(
+        workspace,
+        LaunchReadiness::Ready,
+        LaunchReadiness::Ready,
+        LaunchReadiness::Ready,
+    )
+}
+
+#[test]
+fn runtime_start_v4_rejects_a_launch_runtime_that_disagrees_with_its_route() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let workspace = WorkspaceRef {
+        scope_digest: sha256_digest(b"runtime-route-workspace"),
+        display_name: None,
+    };
+    let catalog = launch_catalog(workspace.clone());
+    let mut coordinator = TaskCoordinator::open_for_launch_catalog(
+        &database,
+        Some(installation.clone()),
+        catalog.clone(),
+    )
+    .unwrap();
+    let actor = actor_ref_for_uid(&installation, 1000).unwrap();
+    coordinator
+        .submit_launch_admitted(
+            &actor,
+            &catalog,
+            SubmitLaunch {
+                request_id: RequestId::new(),
+                idempotency_key: IdempotencyKey::new("tampered-v4-route").unwrap(),
+                launch: TaskLaunchSpecV1::new(
+                    BoundedText::new("inspect workspace").unwrap(),
+                    TaskRuntime::Core,
+                    workspace,
+                    CheckpointPolicy::Off,
+                    ApprovalPolicy::AllowAll,
+                ),
+            },
+        )
+        .unwrap();
+    let mut payload = coordinator
+        .store
+        .peek_ready_outbox(
+            &runtime_start_delivery_kind(),
+            now_ms().unwrap().saturating_add(1),
+        )
+        .unwrap()
+        .unwrap()
+        .payload;
+    payload["launch"]["runtime"] = serde_json::json!("codex");
+
+    assert!(matches!(
+        decode_runtime_start_intent(payload, &catalog),
+        Err(GatewayDaemonError::Protocol(message))
+            if message.contains("exact Runtime route")
+    ));
+}
+
+#[test]
+fn checkpoint_possibly_applied_reconciles_without_recreating_or_starting_runtime() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let workspace = WorkspaceRef {
+        scope_digest: sha256_digest(b"checkpoint-unknown-workspace"),
+        display_name: None,
+    };
+    let catalog = launch_catalog(workspace.clone());
+    let mut coordinator = TaskCoordinator::open_for_launch_catalog(
+        &database,
+        Some(installation.clone()),
+        catalog.clone(),
+    )
+    .unwrap();
+    let actor = actor_ref_for_uid(&installation, 1000).unwrap();
+    let view = coordinator
+        .submit_launch_admitted(
+            &actor,
+            &catalog,
+            SubmitLaunch {
+                request_id: RequestId::new(),
+                idempotency_key: IdempotencyKey::new("checkpoint-unknown").unwrap(),
+                launch: TaskLaunchSpecV1::new(
+                    BoundedText::new("inspect workspace").unwrap(),
+                    TaskRuntime::Core,
+                    workspace.clone(),
+                    CheckpointPolicy::On,
+                    ApprovalPolicy::AllowAll,
+                ),
+            },
+        )
+        .unwrap();
+    let task_id = view.task_id.clone();
+    let run_id = view.active_run_id.clone().unwrap();
+    assert_eq!(
+        view.baseline.as_ref().unwrap().state,
+        PreRuntimeBaselineState::Pending
+    );
+
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let creates = Arc::new(AtomicUsize::new(0));
+    let reconciles = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let error = ContractError::new(
+        "checkpoint_transport_lost",
+        ErrorCategory::RuntimeUnavailable,
+        false,
+        "checkpoint response was lost",
+    )
+    .unwrap();
+    let mut scheduler = TaskScheduler::open_for_launch_catalog(
+        &database,
+        Some(installation),
+        BoundedOpaque::new("checkpoint-unknown-worker").unwrap(),
+        catalog,
+        NeverStartFactory(Arc::clone(&starts)),
+    )
+    .unwrap()
+    .with_pre_runtime_checkpoint_driver(Box::new(CheckpointDriver {
+        prepares: Arc::clone(&prepares),
+        creates: Arc::clone(&creates),
+        reconciles: Arc::clone(&reconciles),
+        create_result: PreRuntimeCheckpointCreateResult::PossiblyApplied { error },
+        reconcile_result: PreRuntimeCheckpointReconcileResult::Unknown {
+            reason: BoundedText::new("no exact checkpoint evidence").unwrap(),
+        },
+    }));
+    let now = now_ms().unwrap().saturating_add(1);
+    assert_eq!(scheduler.tick(now).unwrap(), SchedulerTick::Idle);
+    assert!(matches!(
+        scheduler.tick(now + 1).unwrap(),
+        SchedulerTick::Progressed(TaskView {
+            state: TaskState::Suspended,
+            baseline: Some(PreRuntimeBaselineView {
+                state: PreRuntimeBaselineState::Unknown,
+                ..
+            }),
+            ..
+        })
+    ));
+    assert_eq!(creates.load(Ordering::Relaxed), 1);
+    assert_eq!(prepares.load(Ordering::Relaxed), 1);
+    assert_eq!(reconciles.load(Ordering::Relaxed), 1);
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    assert_eq!(scheduler.tick(now + 2).unwrap(), SchedulerTick::Idle);
+    assert_eq!(creates.load(Ordering::Relaxed), 1);
+    let events = scheduler
+        .coordinator
+        .events(&actor.actor_id, &task_id, None, 10)
+        .unwrap();
+    assert!(events.events.iter().any(|event| matches!(
+        event.event,
+        TaskEvent::RunSuspended {
+            reason: SuspensionCode::OperatorRequired,
+            ..
+        }
+    )));
+    let retry = scheduler.coordinator.retry_admitted(
+        &actor,
+        &GatewayCapabilityProfile::task_only_v1().governed_target(),
+        &workspace,
+        &RuntimeSelector {
+            runtime: BoundedName::new("core").unwrap(),
+            profile: Some(BoundedName::new("gateway-brokered-v1").unwrap()),
+        },
+        RetryTask {
+            request_id: RequestId::new(),
+            idempotency_key: IdempotencyKey::new("retry-uncertain-checkpoint").unwrap(),
+            task_id,
+            previous_run_id: run_id,
+            expected_revision: None,
+        },
+    );
+    assert!(matches!(
+        retry,
+        Err(GatewayDaemonError::Protocol(message))
+            if message.contains("uncertain checkpoint creation")
+    ));
+}
+
+#[test]
+fn auto_skips_known_unavailable_but_on_fails_closed_before_runtime() {
+    for (policy, expected_state, should_start) in [
+        (
+            CheckpointPolicy::Auto,
+            PreRuntimeBaselineState::Skipped,
+            true,
+        ),
+        (CheckpointPolicy::On, PreRuntimeBaselineState::Failed, false),
+    ] {
+        let root = TempDir::new().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let database = root.path().join("gateway.db");
+        let installation = InstallationId::new();
+        let workspace = WorkspaceRef {
+            scope_digest: sha256_digest(format!("checkpoint-{policy:?}").as_bytes()),
+            display_name: None,
+        };
+        let catalog = launch_catalog(workspace.clone());
+        let mut coordinator = TaskCoordinator::open_for_launch_catalog(
+            &database,
+            Some(installation.clone()),
+            catalog.clone(),
+        )
+        .unwrap();
+        let actor = actor_ref_for_uid(&installation, 1000).unwrap();
+        let submitted = coordinator
+            .submit_launch_admitted(
+                &actor,
+                &catalog,
+                SubmitLaunch {
+                    request_id: RequestId::new(),
+                    idempotency_key: IdempotencyKey::new(format!("checkpoint-{policy:?}")).unwrap(),
+                    launch: TaskLaunchSpecV1::new(
+                        BoundedText::new("inspect workspace").unwrap(),
+                        TaskRuntime::Core,
+                        workspace,
+                        policy,
+                        ApprovalPolicy::AllowAll,
+                    ),
+                },
+            )
+            .unwrap();
+        let task_id = submitted.task_id;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let mut scheduler = TaskScheduler::open_for_launch_catalog(
+            &database,
+            Some(installation),
+            BoundedOpaque::new(format!("checkpoint-{policy:?}-worker")).unwrap(),
+            catalog,
+            NeverStartFactory(Arc::clone(&starts)),
+        )
+        .unwrap();
+        let now = now_ms().unwrap().saturating_add(1);
+        assert!(matches!(
+            scheduler.tick(now).unwrap(),
+            SchedulerTick::Progressed(TaskView {
+                state: task_state,
+                baseline: Some(PreRuntimeBaselineView {
+                    state: baseline_state,
+                    ..
+                }),
+                ..
+            }) if baseline_state == expected_state
+                && task_state == if policy == CheckpointPolicy::On {
+                    TaskState::Failed
+                } else {
+                    TaskState::Queued
+                }
+        ));
+        let next = scheduler.tick(now + 1);
+        if should_start {
+            assert!(matches!(next.unwrap(), SchedulerTick::Settled(_)));
+            assert_eq!(starts.load(Ordering::Relaxed), 1);
+        } else {
+            assert_eq!(next.unwrap(), SchedulerTick::Idle);
+            assert_eq!(starts.load(Ordering::Relaxed), 0);
+            let events = scheduler
+                .coordinator
+                .events(&actor.actor_id, &task_id, None, 10)
+                .unwrap();
+            assert!(events
+                .events
+                .iter()
+                .any(|event| matches!(event.event, TaskEvent::RunFailed { .. })));
+            assert!(events
+                .events
+                .iter()
+                .any(|event| matches!(event.event, TaskEvent::TaskFailed { .. })));
+        }
+    }
+}
 
 fn submission(key: &str) -> SubmitTask {
     SubmitTask {
@@ -200,6 +610,7 @@ struct PermissionFactory {
     decisions: Arc<Mutex<Vec<RuntimePermissionDecision>>>,
     expires_at_ms: u64,
     abandon_before_decision: bool,
+    core_native: bool,
 }
 
 impl RuntimeFactory for PermissionFactory {
@@ -232,7 +643,7 @@ impl RuntimeFactory for PermissionFactory {
             turn_id: TurnId::new(),
             tool_use_id: None,
             request_id: request.request_id.clone(),
-            callback: Some(
+            callback: (!self.core_native).then(|| {
                 cosh_gateway_contracts::runtime::ProviderPermissionCallbackV2 {
                     provider_session_digest: test_digest(),
                     provider_request_id_digest: test_digest(),
@@ -240,8 +651,16 @@ impl RuntimeFactory for PermissionFactory {
                     ordered_option_set_digest: test_digest(),
                     callback_payload_digest: test_digest(),
                     normalized_operation_digest: request.operation_digest.clone(),
-                },
-            ),
+                }
+            }),
+            core_callback: self.core_native.then(|| {
+                cosh_gateway_contracts::runtime::CorePermissionCallbackV1 {
+                    private_request_id_digest: test_digest(),
+                    private_tool_use_id_digest: test_digest(),
+                    callback_payload_digest: test_digest(),
+                    normalized_operation_digest: request.operation_digest.clone(),
+                }
+            }),
         };
         Ok(StartedRuntime {
             binding,
@@ -288,6 +707,7 @@ impl RuntimeHandle for PermissionHandle {
                 },
             }
         } else if self.emitted
+            && self.permission.callback.is_some()
             && !self.terminal_emitted
             && self
                 .decisions
@@ -336,6 +756,436 @@ fn test_digest() -> Digest {
     Digest::parse("a".repeat(64)).unwrap()
 }
 
+fn pending_permission_with_barrier(
+    policy: CheckpointPolicy,
+    driver: ApprovalBarrierDriver,
+    core_native: bool,
+) -> (
+    TempDir,
+    TaskScheduler<PermissionFactory>,
+    ActorId,
+    Arc<Mutex<Vec<RuntimePermissionDecision>>>,
+    ApprovalId,
+    u64,
+) {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let mut coordinator = TaskCoordinator::open(&database, Some(installation.clone())).unwrap();
+    let actor = actor_id_for_uid(&installation, 1000).unwrap();
+    coordinator
+        .submit(&actor, submission("approval-checkpoint-barrier"))
+        .unwrap();
+    let decisions = Arc::new(Mutex::new(Vec::new()));
+    let mut scheduler = TaskScheduler::open(
+        &database,
+        Some(installation),
+        BoundedOpaque::new("approval-checkpoint-worker").unwrap(),
+        PermissionFactory {
+            decisions: Arc::clone(&decisions),
+            expires_at_ms: i64::MAX as u64,
+            abandon_before_decision: false,
+            core_native,
+        },
+    )
+    .unwrap()
+    .with_pre_runtime_checkpoint_driver(Box::new(driver));
+    let now = now_ms().unwrap().saturating_add(1);
+    assert!(matches!(
+        scheduler.tick(now).unwrap(),
+        SchedulerTick::Started(_)
+    ));
+    scheduler
+        .active
+        .as_mut()
+        .unwrap()
+        .scheduled
+        .launch
+        .checkpoint = policy;
+    assert!(matches!(
+        scheduler.tick(now + 1).unwrap(),
+        SchedulerTick::Progressed(TaskView {
+            state: TaskState::WaitingApproval,
+            ..
+        })
+    ));
+    let approval_id = scheduler
+        .active
+        .as_ref()
+        .unwrap()
+        .pending_permission
+        .as_ref()
+        .unwrap()
+        .approval
+        .approval_id
+        .clone();
+    let decision_at = scheduler
+        .coordinator
+        .store
+        .load_approval_record(&approval_id)
+        .unwrap()
+        .updated_at_ms
+        .saturating_add(1);
+    (root, scheduler, actor, decisions, approval_id, decision_at)
+}
+
+fn approval_barrier_driver(
+    prepare_result: ApprovalCheckpointPrepareResult,
+    create_result: ApprovalCheckpointCreateResult,
+    reconcile_result: ApprovalCheckpointReconcileResult,
+) -> (
+    ApprovalBarrierDriver,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let creates = Arc::new(AtomicUsize::new(0));
+    let reconciles = Arc::new(AtomicUsize::new(0));
+    (
+        ApprovalBarrierDriver {
+            prepares: Arc::clone(&prepares),
+            creates: Arc::clone(&creates),
+            reconciles: Arc::clone(&reconciles),
+            prepare_result,
+            create_result,
+            reconcile_result,
+        },
+        prepares,
+        creates,
+        reconciles,
+    )
+}
+
+#[test]
+fn approval_checkpoint_is_created_before_runtime_allow_dispatch() {
+    let binding = approval_binding();
+    let (driver, prepares, creates, reconciles) = approval_barrier_driver(
+        ApprovalCheckpointPrepareResult::Prepared(binding),
+        ApprovalCheckpointCreateResult::Created {
+            evidence: approval_evidence(CheckpointId::new()),
+        },
+        ApprovalCheckpointReconcileResult::Unknown {
+            reason: BoundedText::new("unexpected reconcile").unwrap(),
+        },
+    );
+    let (_root, mut scheduler, actor, decisions, approval_id, now) =
+        pending_permission_with_barrier(CheckpointPolicy::On, driver, false);
+    scheduler
+        .resolve_approval(
+            &actor,
+            IdempotencyKey::new("approval-checkpoint-created").unwrap(),
+            &approval_id,
+            ApprovalDecision::Approve,
+            now,
+        )
+        .unwrap();
+    assert_eq!(prepares.load(Ordering::Relaxed), 1);
+    assert_eq!(creates.load(Ordering::Relaxed), 1);
+    assert_eq!(reconciles.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        decisions.lock().unwrap().as_slice(),
+        [RuntimePermissionDecision::ProviderNativeAllowOnce]
+    );
+    assert_eq!(
+        scheduler
+            .coordinator
+            .store
+            .load_approval_checkpoint_record(&approval_id)
+            .unwrap()
+            .state,
+        ApprovalCheckpointState::Created
+    );
+    assert_eq!(
+        scheduler
+            .coordinator
+            .store
+            .load_provider_permission_dispatch_record(&approval_id)
+            .unwrap()
+            .state,
+        ProviderPermissionDispatchState::Written
+    );
+}
+
+#[test]
+fn core_approval_checkpoint_is_created_before_runtime_native_allow_dispatch() {
+    let binding = approval_binding();
+    let (driver, prepares, creates, reconciles) = approval_barrier_driver(
+        ApprovalCheckpointPrepareResult::Prepared(binding),
+        ApprovalCheckpointCreateResult::Created {
+            evidence: approval_evidence(CheckpointId::new()),
+        },
+        ApprovalCheckpointReconcileResult::Unknown {
+            reason: BoundedText::new("unexpected reconcile").unwrap(),
+        },
+    );
+    let (_root, mut scheduler, actor, decisions, approval_id, now) =
+        pending_permission_with_barrier(CheckpointPolicy::On, driver, true);
+
+    scheduler
+        .resolve_approval(
+            &actor,
+            IdempotencyKey::new("core-approval-checkpoint-created").unwrap(),
+            &approval_id,
+            ApprovalDecision::Approve,
+            now,
+        )
+        .unwrap();
+
+    assert_eq!(prepares.load(Ordering::Relaxed), 1);
+    assert_eq!(creates.load(Ordering::Relaxed), 1);
+    assert_eq!(reconciles.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        scheduler
+            .coordinator
+            .store
+            .load_approval_checkpoint_record(&approval_id)
+            .unwrap()
+            .state,
+        ApprovalCheckpointState::Created
+    );
+    assert_eq!(
+        decisions.lock().unwrap().as_slice(),
+        [RuntimePermissionDecision::RuntimeNativeAllowOnce]
+    );
+}
+
+#[test]
+fn approval_checkpoint_off_skips_driver_and_auto_skips_unavailable() {
+    for (policy, expected_prepares, expected_state) in [
+        (CheckpointPolicy::Off, 0, None),
+        (
+            CheckpointPolicy::Auto,
+            1,
+            Some(ApprovalCheckpointState::Skipped),
+        ),
+    ] {
+        let (driver, prepares, creates, _) = approval_barrier_driver(
+            ApprovalCheckpointPrepareResult::Unavailable {
+                reason: BoundedText::new("checkpoint unavailable").unwrap(),
+            },
+            ApprovalCheckpointCreateResult::Unavailable {
+                reason: BoundedText::new("checkpoint unavailable").unwrap(),
+            },
+            ApprovalCheckpointReconcileResult::NotApplied,
+        );
+        let (_root, mut scheduler, actor, decisions, approval_id, now) =
+            pending_permission_with_barrier(policy, driver, false);
+        scheduler
+            .resolve_approval(
+                &actor,
+                IdempotencyKey::new(format!("approval-checkpoint-{policy:?}")).unwrap(),
+                &approval_id,
+                ApprovalDecision::Approve,
+                now,
+            )
+            .unwrap();
+        assert_eq!(prepares.load(Ordering::Relaxed), expected_prepares);
+        assert_eq!(creates.load(Ordering::Relaxed), 0);
+        assert_eq!(decisions.lock().unwrap().len(), 1);
+        match expected_state {
+            Some(state) => assert_eq!(
+                scheduler
+                    .coordinator
+                    .store
+                    .load_approval_checkpoint_record(&approval_id)
+                    .unwrap()
+                    .state,
+                state
+            ),
+            None => assert!(matches!(
+                scheduler
+                    .coordinator
+                    .store
+                    .load_approval_checkpoint_record(&approval_id),
+                Err(StoreError::LedgerNotFound { .. })
+            )),
+        }
+    }
+}
+
+#[test]
+fn approval_checkpoint_on_unavailable_keeps_approval_pending_without_dispatch() {
+    let (driver, _, creates, _) = approval_barrier_driver(
+        ApprovalCheckpointPrepareResult::Unavailable {
+            reason: BoundedText::new("checkpoint unavailable").unwrap(),
+        },
+        ApprovalCheckpointCreateResult::Unavailable {
+            reason: BoundedText::new("checkpoint unavailable").unwrap(),
+        },
+        ApprovalCheckpointReconcileResult::NotApplied,
+    );
+    let (_root, mut scheduler, actor, decisions, approval_id, now) =
+        pending_permission_with_barrier(CheckpointPolicy::On, driver, false);
+    assert!(matches!(
+        scheduler.resolve_approval(
+            &actor,
+            IdempotencyKey::new("approval-checkpoint-on-failed").unwrap(),
+            &approval_id,
+            ApprovalDecision::Approve,
+            now,
+        ),
+        Err(GatewayDaemonError::Protocol(message))
+            if message == "approval checkpoint barrier did not authorize Runtime Permission"
+    ));
+    assert_eq!(creates.load(Ordering::Relaxed), 0);
+    assert!(decisions.lock().unwrap().is_empty());
+    assert_eq!(
+        scheduler
+            .coordinator
+            .store
+            .load_approval_record(&approval_id)
+            .unwrap()
+            .state,
+        ApprovalState::Pending
+    );
+    assert_eq!(
+        scheduler
+            .coordinator
+            .store
+            .load_approval_checkpoint_record(&approval_id)
+            .unwrap()
+            .state,
+        ApprovalCheckpointState::Failed
+    );
+    assert!(scheduler
+        .coordinator
+        .store
+        .load_provider_permission_dispatch_record(&approval_id)
+        .is_err());
+}
+
+#[test]
+fn started_approval_checkpoint_replay_reconciles_without_create() {
+    let binding = approval_binding();
+    let (driver, prepares, creates, reconciles) = approval_barrier_driver(
+        ApprovalCheckpointPrepareResult::Prepared(binding.clone()),
+        ApprovalCheckpointCreateResult::PossiblyApplied {
+            error: runtime_lost_error("unexpected_create", "unexpected create").unwrap(),
+        },
+        ApprovalCheckpointReconcileResult::Created {
+            evidence: approval_evidence(CheckpointId::new()),
+        },
+    );
+    let (_root, mut scheduler, actor, decisions, approval_id, now) =
+        pending_permission_with_barrier(CheckpointPolicy::On, driver, false);
+    let active = scheduler.active.as_ref().unwrap();
+    let fence = RuntimeExecutionFence {
+        binding_id: active.binding.binding_id.clone(),
+        runtime_generation: active.binding.runtime_generation,
+        lease_generation: active.lease.generation,
+        lease_revision: active.lease.revision,
+    };
+    let checkpoint_id = CheckpointId::new();
+    scheduler
+        .coordinator
+        .store
+        .record_approval_checkpoint_intent(
+            &approval_id,
+            &active.scheduled.task_id,
+            &active.scheduled.run_id,
+            &checkpoint_id,
+            CheckpointPolicy::On,
+            &fence,
+            now,
+        )
+        .unwrap();
+    assert!(scheduler
+        .coordinator
+        .store
+        .start_approval_checkpoint(&approval_id, &binding, now)
+        .unwrap());
+    scheduler
+        .resolve_approval(
+            &actor,
+            IdempotencyKey::new("approval-checkpoint-reconcile").unwrap(),
+            &approval_id,
+            ApprovalDecision::Approve,
+            now + 1,
+        )
+        .unwrap();
+    assert_eq!(prepares.load(Ordering::Relaxed), 0);
+    assert_eq!(creates.load(Ordering::Relaxed), 0);
+    assert_eq!(reconciles.load(Ordering::Relaxed), 1);
+    assert_eq!(decisions.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn started_not_applied_checkpoint_skips_auto_but_blocks_on() {
+    for (policy, expected_state, expected_dispatches) in [
+        (CheckpointPolicy::Auto, ApprovalCheckpointState::Skipped, 1),
+        (CheckpointPolicy::On, ApprovalCheckpointState::Failed, 0),
+    ] {
+        let binding = approval_binding();
+        let (driver, prepares, creates, reconciles) = approval_barrier_driver(
+            ApprovalCheckpointPrepareResult::Prepared(binding.clone()),
+            ApprovalCheckpointCreateResult::PossiblyApplied {
+                error: runtime_lost_error("unexpected_create", "unexpected create").unwrap(),
+            },
+            ApprovalCheckpointReconcileResult::NotApplied,
+        );
+        let (_root, mut scheduler, actor, decisions, approval_id, now) =
+            pending_permission_with_barrier(policy, driver, false);
+        let active = scheduler.active.as_ref().unwrap();
+        let fence = RuntimeExecutionFence {
+            binding_id: active.binding.binding_id.clone(),
+            runtime_generation: active.binding.runtime_generation,
+            lease_generation: active.lease.generation,
+            lease_revision: active.lease.revision,
+        };
+        scheduler
+            .coordinator
+            .store
+            .record_approval_checkpoint_intent(
+                &approval_id,
+                &active.scheduled.task_id,
+                &active.scheduled.run_id,
+                &CheckpointId::new(),
+                policy,
+                &fence,
+                now,
+            )
+            .unwrap();
+        assert!(scheduler
+            .coordinator
+            .store
+            .start_approval_checkpoint(&approval_id, &binding, now)
+            .unwrap());
+
+        let resolution = scheduler.resolve_approval(
+            &actor,
+            IdempotencyKey::new(format!("approval-checkpoint-not-applied-{policy:?}")).unwrap(),
+            &approval_id,
+            ApprovalDecision::Approve,
+            now + 1,
+        );
+        if policy == CheckpointPolicy::Auto {
+            assert!(resolution.is_ok());
+        } else {
+            assert!(matches!(
+                resolution,
+                Err(GatewayDaemonError::Protocol(message))
+                    if message
+                        == "approval checkpoint barrier did not authorize Runtime Permission"
+            ));
+        }
+        assert_eq!(prepares.load(Ordering::Relaxed), 0);
+        assert_eq!(creates.load(Ordering::Relaxed), 0);
+        assert_eq!(reconciles.load(Ordering::Relaxed), 1);
+        assert_eq!(decisions.lock().unwrap().len(), expected_dispatches);
+        assert_eq!(
+            scheduler
+                .coordinator
+                .store
+                .load_approval_checkpoint_record(&approval_id)
+                .unwrap()
+                .state,
+            expected_state
+        );
+    }
+}
+
 #[test]
 fn invalid_start_intents_are_rejected_before_outbox_claim() {
     for case in ["profile-drift", "v2-target", "v2-runtime", "future-schema"] {
@@ -366,6 +1216,8 @@ fn invalid_start_intents_are_rejected_before_outbox_claim() {
                     .as_object_mut()
                     .unwrap()
                     .remove("capability_profile");
+                payload.as_object_mut().unwrap().remove("launch");
+                payload.as_object_mut().unwrap().remove("baseline_id");
                 payload["target"]["identifier"] = serde_json::json!("another-target");
             }
             "v2-runtime" => {
@@ -374,9 +1226,11 @@ fn invalid_start_intents_are_rejected_before_outbox_claim() {
                     .as_object_mut()
                     .unwrap()
                     .remove("capability_profile");
+                payload.as_object_mut().unwrap().remove("launch");
+                payload.as_object_mut().unwrap().remove("baseline_id");
                 payload["runtime"] = serde_json::json!({"runtime": "acp", "profile": "codex"});
             }
-            "future-schema" => payload["schema_version"] = serde_json::json!(4),
+            "future-schema" => payload["schema_version"] = serde_json::json!(5),
             _ => unreachable!(),
         }
         coordinator
@@ -432,6 +1286,8 @@ fn exact_task_only_v2_intent_maps_to_current_profile() {
         .as_object_mut()
         .unwrap()
         .remove("capability_profile");
+    payload.as_object_mut().unwrap().remove("launch");
+    payload.as_object_mut().unwrap().remove("baseline_id");
     coordinator
         .store
         .replace_outbox_payload_for_test(&candidate.delivery_id, &payload)
@@ -762,6 +1618,7 @@ fn provider_approval_is_dispatched_once_and_delivered_replay_is_read_only() {
             decisions: Arc::clone(&decisions),
             expires_at_ms: i64::MAX as u64,
             abandon_before_decision: false,
+            core_native: false,
         },
     )
     .unwrap();
@@ -922,6 +1779,7 @@ fn denied_provider_permission_accepts_only_its_matching_cancelled_terminal() {
             decisions: Arc::clone(&decisions),
             expires_at_ms: i64::MAX as u64,
             abandon_before_decision: false,
+            core_native: false,
         },
     )
     .unwrap();
@@ -988,6 +1846,85 @@ fn denied_provider_permission_accepts_only_its_matching_cancelled_terminal() {
 }
 
 #[test]
+fn denied_core_permission_keeps_the_runtime_active_without_expected_cancellation() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database_path = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let mut coordinator =
+        TaskCoordinator::open(&database_path, Some(installation.clone())).unwrap();
+    let actor = actor_id_for_uid(&installation, 1000).unwrap();
+    coordinator
+        .submit(&actor, submission("core-denial-continues"))
+        .unwrap();
+    let decisions = Arc::new(Mutex::new(Vec::new()));
+    let mut scheduler = TaskScheduler::open(
+        &database_path,
+        Some(installation),
+        BoundedOpaque::new("worker-core-denial").unwrap(),
+        PermissionFactory {
+            decisions: Arc::clone(&decisions),
+            expires_at_ms: i64::MAX as u64,
+            abandon_before_decision: false,
+            core_native: true,
+        },
+    )
+    .unwrap();
+    let started_at = now_ms().unwrap().saturating_add(1);
+    scheduler.tick(started_at).unwrap();
+    scheduler.tick(started_at + 1).unwrap();
+    let approval_id = scheduler
+        .active
+        .as_ref()
+        .unwrap()
+        .pending_permission
+        .as_ref()
+        .unwrap()
+        .approval
+        .approval_id
+        .clone();
+    let decision_at = scheduler
+        .coordinator
+        .store
+        .load_approval_record(&approval_id)
+        .unwrap()
+        .updated_at_ms
+        .saturating_add(1);
+
+    assert!(matches!(
+        scheduler
+            .resolve_approval(
+                &actor,
+                IdempotencyKey::new("deny-core-once").unwrap(),
+                &approval_id,
+                ApprovalDecision::Deny,
+                decision_at,
+            )
+            .unwrap(),
+        SchedulerTick::Progressed(TaskView {
+            state: TaskState::Running,
+            ..
+        })
+    ));
+    assert!(scheduler
+        .active
+        .as_ref()
+        .unwrap()
+        .expected_provider_terminal
+        .is_none());
+    assert!(matches!(
+        decisions.lock().unwrap().as_slice(),
+        [RuntimePermissionDecision::Deny { safe_message, .. }]
+            if safe_message.as_str() == "The Runtime operation was denied"
+    ));
+    assert!(!matches!(
+        scheduler.tick(decision_at.saturating_add(1)).unwrap(),
+        SchedulerTick::Settled(_)
+    ));
+    assert!(scheduler.active.is_some());
+}
+
+#[test]
 fn provider_cancel_atomically_abandons_pending_approval_before_terminal() {
     let root = TempDir::new().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -1008,6 +1945,7 @@ fn provider_cancel_atomically_abandons_pending_approval_before_terminal() {
             decisions: Arc::clone(&decisions),
             expires_at_ms: i64::MAX as u64,
             abandon_before_decision: true,
+            core_native: false,
         },
     )
     .unwrap();
@@ -1102,6 +2040,7 @@ fn delegated_acp_profile_durably_allows_provider_callbacks_once() {
             decisions: Arc::clone(&decisions),
             expires_at_ms: i64::MAX as u64,
             abandon_before_decision: false,
+            core_native: false,
         },
     )
     .unwrap();
@@ -1177,7 +2116,11 @@ while IFS= read -r line; do
         4)
             printf '%s\n' "$line" > '{}'
             printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"delegated-session","update":{{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed"}}}}}}'
-            printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"delegated-session","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"finished"}}}}}}}}'
+            i=0
+            while [ "$i" -lt 64 ]; do
+                printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"delegated-session","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"chunk-%s|"}}}}}}}}\n' "$i"
+                i=$((i + 1))
+            done
             printf '%s\n' '{{"jsonrpc":"2.0","id":"cosh-acp-3","result":{{"stopReason":"end_turn"}}}}' ;;
     esac
 done
@@ -1250,11 +2193,23 @@ done
     assert!(permission_response.contains("\"optionId\":\"allow\""));
     assert!(!permission_response.contains("always"));
 
-    let (events, _) = scheduler
-        .coordinator
-        .store
-        .load_task_events_for_owner(&task.task_id, &actor, None, 64)
-        .unwrap();
+    let mut events = Vec::new();
+    let mut after_revision = None;
+    loop {
+        let (page, revision) = scheduler
+            .coordinator
+            .store
+            .load_task_events_for_owner(&task.task_id, &actor, after_revision, 64)
+            .unwrap();
+        let Some(last) = page.last() else {
+            break;
+        };
+        after_revision = Some(last.revision);
+        events.extend(page);
+        if after_revision == Some(revision) {
+            break;
+        }
+    }
     let progress = events
         .iter()
         .filter_map(|event| match &event.event {
@@ -1265,7 +2220,14 @@ done
             _ => None,
         })
         .collect::<String>();
-    assert_eq!(progress, "started finished");
+    let chunks = (0..64)
+        .map(|index| format!("chunk-{index}|"))
+        .collect::<String>();
+    assert_eq!(progress, format!("started {chunks}"));
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        TaskEvent::RunFailed { .. } | TaskEvent::TaskFailed { .. }
+    )));
     let requested = events
         .iter()
         .position(|event| matches!(event.event, TaskEvent::ApprovalRequested { .. }))
@@ -1299,8 +2261,11 @@ done
     let replayed = scheduler
         .resolve_approval(
             &actor,
-            IdempotencyKey::new(format!("delegated-acp-allow-once-{}", approval_id.as_str()))
-                .unwrap(),
+            IdempotencyKey::new(format!(
+                "runtime-permission-allow-once-{}",
+                approval_id.as_str()
+            ))
+            .unwrap(),
             &approval_id,
             ApprovalDecision::Approve,
             now_ms().unwrap(),
@@ -1350,6 +2315,7 @@ fn expired_provider_approval_fails_closed_instead_of_renewing_forever() {
             decisions: Arc::clone(&decisions),
             expires_at_ms: started_at + 10_000,
             abandon_before_decision: false,
+            core_native: false,
         },
     )
     .unwrap();
@@ -1409,6 +2375,7 @@ fn resolving_at_provider_approval_deadline_expires_without_dispatch() {
             decisions: Arc::clone(&decisions),
             expires_at_ms,
             abandon_before_decision: false,
+            core_native: false,
         },
     )
     .unwrap();
@@ -1498,6 +2465,7 @@ fn durable_cancellation_takes_priority_over_pending_approval() {
             decisions: Arc::new(Mutex::new(Vec::new())),
             expires_at_ms: i64::MAX as u64,
             abandon_before_decision: false,
+            core_native: false,
         },
     )
     .unwrap();

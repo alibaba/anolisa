@@ -690,6 +690,19 @@ fn correlates_provider_native_approval_only_to_offered_allow_once() {
         AgentRuntimeEvent::ExecutionPermissionRequested { ref request, .. }
             if request.request_id == request_id
     ));
+    assert_eq!(
+        port.dispatch(
+            AgentRuntimeCommand::ResolvePermission {
+                request_id: request_id.clone(),
+                decision: RuntimePermissionDecision::RuntimeNativeAllowOnce,
+            },
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::Unsupported {
+            operation: "runtime-native permission decision"
+        })
+    );
+    assert!(state.lock().unwrap().answers.is_empty());
     port.dispatch(
         AgentRuntimeCommand::ResolvePermission {
             request_id,

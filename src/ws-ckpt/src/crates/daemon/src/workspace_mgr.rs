@@ -68,6 +68,7 @@ async fn adopt_existing_subvol(
                 // Re-adoption may recover orphan snapshot metadata, but it
                 // must not discard guarded receipts loaded from index.json.
                 rebuilt.governed_evidence = index.governed_evidence.clone();
+                rebuilt.guarded_rollbacks = index.guarded_rollbacks.clone();
                 info!(
                     "Recovered {} snapshot(s) from filesystem for {}",
                     rebuilt.snapshots.len(),

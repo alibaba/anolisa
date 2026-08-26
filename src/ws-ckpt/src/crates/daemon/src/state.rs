@@ -671,6 +671,7 @@ impl DaemonState {
                     // Filesystem recovery reconstructs snapshot metadata only;
                     // retained guarded receipts must survive the rebuild.
                     rebuilt.governed_evidence = index.governed_evidence.clone();
+                    rebuilt.guarded_rollbacks = index.guarded_rollbacks.clone();
                     info!(
                         "Rebuilt {} snapshot(s) from filesystem for {}",
                         rebuilt.snapshots.len(),

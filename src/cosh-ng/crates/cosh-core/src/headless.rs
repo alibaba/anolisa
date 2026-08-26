@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::brokered_profile::{
     verify_task_only_runtime_tools, verify_workspace_checkpoint_runtime_tools,
-    BrokeredCapabilityProfileIdentity,
+    verify_workspace_write_runtime_tools, BrokeredCapabilityProfileIdentity,
 };
 use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
@@ -20,7 +20,8 @@ use crate::extension::{
 use crate::metrics::TurnMetrics;
 use crate::protocol::{
     InputMessage, OutputMessage, ShellControlRequest, BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION,
-    BROKERED_CONTROL_PROTOCOL_VERSION, CONTROL_PROTOCOL_VERSION,
+    BROKERED_CONTROL_PROTOCOL_VERSION, BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION,
+    CONTROL_PROTOCOL_VERSION,
 };
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 use crate::sls;
@@ -74,19 +75,37 @@ pub async fn run(
         }
     }
     let snapshot = if args.execution_profile.is_brokered() {
-        let tools = if args.execution_profile.hosts_checkpoint() {
-            crate::tool::ToolRegistry::gateway_brokered_checkpoint_v1()
-        } else {
-            crate::tool::ToolRegistry::gateway_brokered_v1()
+        let tools = match args.execution_profile {
+            crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => {
+                crate::tool::ToolRegistry::gateway_brokered_checkpoint_v1()
+            }
+            crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => {
+                crate::tool::ToolRegistry::gateway_brokered_workspace_write_v1()
+            }
+            crate::cli::ExecutionProfile::GatewayBrokeredV1 => {
+                crate::tool::ToolRegistry::gateway_brokered_v1()
+            }
+            crate::cli::ExecutionProfile::Legacy => {
+                unreachable!("brokered snapshot branch excludes legacy execution")
+            }
         };
         RuntimeSnapshot::bootstrap(
             RuntimeGeneration::healthy(
                 0,
-                if args.execution_profile.hosts_checkpoint() {
-                    "gateway-brokered-checkpoint-v1"
-                } else {
-                    // Preserve the private v3 runtime projection byte-for-byte.
-                    "gateway-brokered-v1"
+                match args.execution_profile {
+                    crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => {
+                        "gateway-brokered-checkpoint-v1"
+                    }
+                    crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => {
+                        "gateway-brokered-workspace-write-v1"
+                    }
+                    crate::cli::ExecutionProfile::GatewayBrokeredV1 => {
+                        // Preserve the private v3 runtime projection byte-for-byte.
+                        "gateway-brokered-v1"
+                    }
+                    crate::cli::ExecutionProfile::Legacy => {
+                        unreachable!("brokered snapshot branch excludes legacy execution")
+                    }
                 },
             ),
             Arc::new(tools),
@@ -385,16 +404,28 @@ fn negotiate_profile(
         let requested_capability_profile = requested_capability_profile.ok_or_else(|| {
             "gateway brokered profile requires a capability_profile identity".to_string()
         })?;
-        if profile.hosts_checkpoint() {
-            requested_capability_profile
-                .verify_workspace_checkpoint_v1()
-                .map_err(str::to_owned)?;
-            verify_workspace_checkpoint_runtime_tools(runtime_tools).map_err(str::to_owned)?;
-        } else {
-            requested_capability_profile
-                .verify_task_only_v1()
-                .map_err(str::to_owned)?;
-            verify_task_only_runtime_tools(runtime_tools).map_err(str::to_owned)?;
+        match profile {
+            crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => {
+                requested_capability_profile
+                    .verify_workspace_checkpoint_v1()
+                    .map_err(str::to_owned)?;
+                verify_workspace_checkpoint_runtime_tools(runtime_tools).map_err(str::to_owned)?;
+            }
+            crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => {
+                requested_capability_profile
+                    .verify_workspace_write_v1()
+                    .map_err(str::to_owned)?;
+                verify_workspace_write_runtime_tools(runtime_tools).map_err(str::to_owned)?;
+            }
+            crate::cli::ExecutionProfile::GatewayBrokeredV1 => {
+                requested_capability_profile
+                    .verify_task_only_v1()
+                    .map_err(str::to_owned)?;
+                verify_task_only_runtime_tools(runtime_tools).map_err(str::to_owned)?;
+            }
+            crate::cli::ExecutionProfile::Legacy => {
+                unreachable!("brokered negotiation excludes legacy execution")
+            }
         }
         return Ok(());
     }
@@ -415,20 +446,34 @@ fn negotiate_profile(
 }
 
 fn brokered_protocol_version(profile: crate::cli::ExecutionProfile) -> u32 {
-    if profile.hosts_checkpoint() {
-        BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION
-    } else {
-        BROKERED_CONTROL_PROTOCOL_VERSION
+    match profile {
+        crate::cli::ExecutionProfile::GatewayBrokeredV1 => BROKERED_CONTROL_PROTOCOL_VERSION,
+        crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => {
+            BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION
+        }
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => {
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION
+        }
+        crate::cli::ExecutionProfile::Legacy => CONTROL_PROTOCOL_VERSION,
     }
 }
 
 fn brokered_capability_profile(
     profile: crate::cli::ExecutionProfile,
 ) -> BrokeredCapabilityProfileIdentity {
-    if profile.hosts_checkpoint() {
-        BrokeredCapabilityProfileIdentity::workspace_checkpoint_v1()
-    } else {
-        BrokeredCapabilityProfileIdentity::task_only_v1()
+    match profile {
+        crate::cli::ExecutionProfile::GatewayBrokeredV1 => {
+            BrokeredCapabilityProfileIdentity::task_only_v1()
+        }
+        crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => {
+            BrokeredCapabilityProfileIdentity::workspace_checkpoint_v1()
+        }
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => {
+            BrokeredCapabilityProfileIdentity::workspace_write_v1()
+        }
+        crate::cli::ExecutionProfile::Legacy => {
+            unreachable!("legacy execution has no brokered capability profile")
+        }
     }
 }
 
@@ -1197,6 +1242,46 @@ mod tests {
                 "ask_user_question".to_string(),
                 "workspace_checkpoint_create".to_string(),
             ],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn workspace_write_profile_requires_exact_v5_profile_and_inventory() {
+        let profile = crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1;
+        let capability_profile = BrokeredCapabilityProfileIdentity::workspace_write_v1();
+        let runtime_tools = vec!["ask_user_question".to_string(), "write_file".to_string()];
+
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &runtime_tools,
+        )
+        .is_ok());
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &runtime_tools,
+        )
+        .is_err());
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&BrokeredCapabilityProfileIdentity::task_only_v1()),
+            &runtime_tools,
+        )
+        .is_err());
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &["write_file".to_string(), "ask_user_question".to_string()],
         )
         .is_err());
     }

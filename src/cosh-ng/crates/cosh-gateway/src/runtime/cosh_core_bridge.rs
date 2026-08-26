@@ -24,9 +24,10 @@ use cosh_gateway_contracts::{
     },
     runtime::{
         AgentRuntimeCommand, AgentRuntimeEvent, BrokeredExecutionDelivery,
-        BrokeredExecutionOutcome, BrokeredOperationResult, ExecutionAuthority,
-        RuntimeEventEnvelope, RuntimeInputOption, RuntimeInputRequest, RuntimeInputResponse,
-        ToolInvocationSnapshot, ToolInvocationStatus, ToolSummary, TurnOutcome,
+        BrokeredExecutionOutcome, BrokeredOperationResult, CorePermissionCallbackV1,
+        ExecutionAuthority, RuntimeEventEnvelope, RuntimeInputOption, RuntimeInputRequest,
+        RuntimeInputResponse, RuntimePermissionDecision, ToolInvocationSnapshot,
+        ToolInvocationStatus, ToolSummary, TurnOutcome,
     },
 };
 use sha2::{Digest as _, Sha256};

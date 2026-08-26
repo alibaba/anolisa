@@ -11,8 +11,9 @@ use tokio::net::{UnixListener, UnixStream};
 use ws_ckpt_common::{
     decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry,
     EffectivePolicy, GlobalPolicySnapshot, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
-    PolicyFieldOp, Request, Response, SnapshotEntry, SnapshotMeta, StatusReport,
-    WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy,
+    GuardedRollbackEvidenceV2, GuardedRollbackOutcomeV2, PolicyFieldOp, Request, Response,
+    SnapshotEntry, SnapshotMeta, StatusReport, WorkspaceGenerationTokenV2, WorkspaceInfo,
+    WorkspacePolicy,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -251,6 +252,61 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 outcome: GuardedCheckpointOutcomeV2::Skipped {
                     reason: "empty workspace".to_string(),
                 },
+            }),
+        },
+        Request::GuardedRollbackPreviewV2 {
+            registered_path,
+            ws_id,
+            expected_generation,
+            target_snapshot_id,
+        } => Response::GuardedRollbackPreviewV2Ok {
+            protocol_version: 2,
+            registered_path,
+            ws_id,
+            generation: expected_generation,
+            target_snapshot_id,
+            diff_digest: [8; 32],
+            changes: vec![],
+            caller_uid: 1000,
+        },
+        Request::GuardedRollbackV2 {
+            registered_path,
+            ws_id,
+            expected_generation,
+            target_snapshot_id,
+            expected_diff_digest,
+            operation_id,
+            operation_digest,
+        } => Response::GuardedRollbackV2Ok {
+            evidence: GuardedRollbackEvidenceV2 {
+                ws_id,
+                registered_path,
+                expected_generation,
+                target_snapshot_id,
+                expected_diff_digest,
+                operation_id,
+                operation_digest,
+                caller_uid: 1000,
+                outcome: GuardedRollbackOutcomeV2::Succeeded {
+                    resulting_generation: WorkspaceGenerationTokenV2::from_bytes([9; 32]),
+                },
+            },
+        },
+        Request::GuardedRollbackEvidenceV2 {
+            ws_id,
+            operation_id,
+            operation_digest,
+        } => Response::GuardedRollbackEvidenceV2Ok {
+            evidence: Some(GuardedRollbackEvidenceV2 {
+                ws_id,
+                registered_path: "/tmp/ws".to_string(),
+                expected_generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                target_snapshot_id: "target".to_string(),
+                expected_diff_digest: [8; 32],
+                operation_id,
+                operation_digest,
+                caller_uid: 1000,
+                outcome: GuardedRollbackOutcomeV2::Started,
             }),
         },
     };

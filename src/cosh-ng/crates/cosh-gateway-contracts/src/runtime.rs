@@ -85,6 +85,15 @@ mod tests {
     }
 
     #[test]
+    fn runtime_native_allow_is_distinct_from_provider_native_allow() {
+        let value = serde_json::to_value(RuntimePermissionDecision::RuntimeNativeAllowOnce)
+            .expect("Runtime decision serializes");
+        assert_eq!(value["decision"], "runtime_native_allow_once");
+        assert_ne!(value["decision"], "provider_native_allow_once");
+        assert!(value.get("permit_id").is_none());
+    }
+
+    #[test]
     fn legacy_permission_refs_deserialize_without_new_callback_authority() {
         let legacy = RuntimePermissionRef {
             binding_id: RuntimeBindingId::new(),
@@ -95,6 +104,7 @@ mod tests {
             tool_use_id: None,
             request_id: RequestId::new(),
             callback: None,
+            core_callback: None,
         };
         let value = serde_json::to_value(&legacy).expect("legacy ref serializes");
         assert!(value.get("callback").is_none());
@@ -102,5 +112,6 @@ mod tests {
         let decoded: RuntimePermissionRef =
             serde_json::from_value(value).expect("legacy ref remains readable");
         assert!(decoded.callback.is_none());
+        assert!(decoded.core_callback.is_none());
     }
 }

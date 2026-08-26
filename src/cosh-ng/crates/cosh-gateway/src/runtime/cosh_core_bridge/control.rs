@@ -1,4 +1,49 @@
 impl CoshCoreBridge {
+    fn resolve_core_permission(
+        &mut self,
+        request_id: RequestId,
+        decision: RuntimePermissionDecision,
+    ) -> Result<(), AgentRuntimePortError> {
+        if self.config.execution_profile
+            != CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1
+        {
+            return Err(AgentRuntimePortError::Unsupported {
+                operation: "resolve_permission",
+            });
+        }
+        self.require_state(BridgeState::PromptActive, "resolve_permission")?;
+        let pending = self
+            .pending_permission
+            .as_ref()
+            .ok_or(AgentRuntimePortError::IdentityMismatch)?;
+        if pending.request_id != request_id
+            || pending.callback.private_request_id_digest
+                != sha256_digest(pending.private_request_id.as_bytes())
+        {
+            return Err(AgentRuntimePortError::IdentityMismatch);
+        }
+        let frame = match decision {
+            RuntimePermissionDecision::RuntimeNativeAllowOnce => self
+                .codec
+                .core_permission_allow_frame(&pending.private_request_id),
+            RuntimePermissionDecision::ProviderNativeAllowOnce => {
+                return Err(AgentRuntimePortError::Unsupported {
+                    operation: "provider-native permission decision",
+                });
+            }
+            RuntimePermissionDecision::Deny { safe_message, .. } => self
+                .codec
+                .brokered_denial_frame(&pending.private_request_id, safe_message.as_str()),
+        }
+        .map_err(|_| AgentRuntimePortError::Protocol)?;
+        if self.supervisor.write_frame(&frame).is_err() {
+            self.fail_transport("core_permission_response_write_failed");
+            return Err(AgentRuntimePortError::Transport);
+        }
+        self.pending_permission = None;
+        Ok(())
+    }
+
     fn acknowledge_brokered_request(
         &mut self,
         acknowledgement: cosh_gateway_contracts::runtime::BrokeredRequestAcknowledgement,

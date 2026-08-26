@@ -36,6 +36,12 @@ pub(crate) enum CheckpointAdmissionError {
     Audit,
 }
 
+impl CheckpointAdmissionError {
+    pub(crate) const fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Socket | Self::Identity)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CheckpointBinding {

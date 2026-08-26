@@ -224,6 +224,58 @@ pub(crate) async fn dispatch_with_context(
             )
             .await;
         }
+        Request::GuardedRollbackPreviewV2 {
+            registered_path,
+            ws_id,
+            expected_generation,
+            target_snapshot_id,
+        } => {
+            return crate::guarded_checkpoint::rollback_preview(
+                state,
+                context.peer_uid(),
+                &registered_path,
+                &ws_id,
+                expected_generation,
+                &target_snapshot_id,
+            )
+            .await;
+        }
+        Request::GuardedRollbackV2 {
+            registered_path,
+            ws_id,
+            expected_generation,
+            target_snapshot_id,
+            expected_diff_digest,
+            operation_id,
+            operation_digest,
+        } => {
+            return crate::guarded_checkpoint::rollback(
+                state,
+                context.peer_uid(),
+                &registered_path,
+                &ws_id,
+                expected_generation,
+                &target_snapshot_id,
+                expected_diff_digest,
+                &operation_id,
+                operation_digest,
+            )
+            .await;
+        }
+        Request::GuardedRollbackEvidenceV2 {
+            ws_id,
+            operation_id,
+            operation_digest,
+        } => {
+            return crate::guarded_checkpoint::rollback_evidence(
+                state,
+                context.peer_uid(),
+                &ws_id,
+                &operation_id,
+                operation_digest,
+            )
+            .await;
+        }
     };
 
     match result {

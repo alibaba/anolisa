@@ -126,6 +126,7 @@ impl CoshCoreBridge {
             CoshCoreObservation::Result(result) => {
                 if self.current_message.is_some()
                     || self.pending_input.is_some()
+                    || self.pending_permission.is_some()
                     || self.pending_brokered.is_some()
                 {
                     return Err(AgentRuntimePortError::Protocol);
@@ -176,11 +177,14 @@ impl CoshCoreBridge {
         if self.config.execution_profile != CoshCoreExecutionProfile::GatewayBrokeredV1
             && self.config.execution_profile
                 != CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1
+            && self.config.execution_profile
+                != CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1
         {
             return Err(AgentRuntimePortError::Protocol);
         }
         if self.state != BridgeState::PromptActive
             || self.pending_input.is_some()
+            || self.pending_permission.is_some()
             || self.pending_brokered.is_some()
         {
             return Err(AgentRuntimePortError::Protocol);
@@ -262,6 +266,26 @@ impl CoshCoreBridge {
                     hook_requires_approval,
                 );
             }
+            CoshCoreControlRequest::CanUseTool {
+                tool_name,
+                input,
+                description,
+                tool_use_id,
+                audit_ref,
+                hook_requires_approval,
+            } if self.config.execution_profile
+                == CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1 =>
+            {
+                return self.map_workspace_write_request(
+                    private_request_id,
+                    tool_name,
+                    input,
+                    description,
+                    tool_use_id,
+                    audit_ref,
+                    hook_requires_approval,
+                );
+            }
             _ => {}
         }
         // The task-only Core inventory contains no hosted side-effect tool.
@@ -271,6 +295,130 @@ impl CoshCoreBridge {
         Err(AgentRuntimePortError::Unsupported {
             operation: "task-only core tool request",
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn map_workspace_write_request(
+        &mut self,
+        private_request_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+        description: Option<String>,
+        private_tool_use_id: String,
+        audit_ref: Option<String>,
+        hook_requires_approval: bool,
+    ) -> Result<Option<RuntimeEventEnvelope>, AgentRuntimePortError> {
+        let input_object = input.as_object().ok_or(AgentRuntimePortError::Protocol)?;
+        if tool_name != "write_file"
+            || input_object
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            || input_object
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            || hook_requires_approval
+        {
+            return Err(AgentRuntimePortError::Unsupported {
+                operation: "workspace-write core tool request",
+            });
+        }
+        let observed_tool = self
+            .tool_ids
+            .get(&private_tool_use_id)
+            .ok_or(AgentRuntimePortError::Protocol)?;
+        if observed_tool.name.as_str() != "write_file" {
+            return Err(AgentRuntimePortError::IdentityMismatch);
+        }
+        let tool_use_id = observed_tool.tool_use_id.clone();
+        let turn_id = self
+            .active_turn
+            .clone()
+            .ok_or(AgentRuntimePortError::Protocol)?;
+        let context = self
+            .config
+            .brokered_context
+            .as_ref()
+            .ok_or(AgentRuntimePortError::Protocol)?;
+        let request_id = RequestId::new();
+        let input_digest = digest_json(&input)?;
+        let operation = OperationDescriptor {
+            namespace: BoundedName::new("workspace")
+                .map_err(|_| AgentRuntimePortError::Protocol)?,
+            name: BoundedName::new("write_file").map_err(|_| AgentRuntimePortError::Protocol)?,
+            arguments_digest: input_digest.clone(),
+        };
+        let operation_digest = digest_json(&(
+            "cosh.core-private.workspace-write.v1",
+            &context.target,
+            &operation,
+        ))?;
+        let callback_payload_digest = digest_json(&(
+            &private_request_id,
+            &tool_name,
+            &input,
+            &description,
+            &private_tool_use_id,
+            &audit_ref,
+            hook_requires_approval,
+        ))?;
+        let callback = CorePermissionCallbackV1 {
+            private_request_id_digest: sha256_digest(private_request_id.as_bytes()),
+            private_tool_use_id_digest: sha256_digest(private_tool_use_id.as_bytes()),
+            callback_payload_digest,
+            normalized_operation_digest: operation_digest.clone(),
+        };
+        let now = now_ms();
+        let remaining = self
+            .prompt_deadline
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+            .ok_or(AgentRuntimePortError::Deadline {
+                operation: "workspace_write_request",
+            })?;
+        let lifetime_ms =
+            u64::try_from(remaining.as_millis()).map_err(|_| AgentRuntimePortError::Protocol)?;
+        let expires_at_ms = now
+            .checked_add(lifetime_ms)
+            .filter(|expires| *expires > now)
+            .ok_or(AgentRuntimePortError::Deadline {
+                operation: "workspace_write_request",
+            })?;
+        let request = CapabilityRequest {
+            request_id: request_id.clone(),
+            task_id: self.config.identity.task_id.clone(),
+            run_id: self.config.identity.run_id.clone(),
+            actor: context.actor.clone(),
+            target: context.target.clone(),
+            operation,
+            operation_digest,
+            requested_scope: CapabilityScope {
+                resource: BoundedName::new("workspace")
+                    .map_err(|_| AgentRuntimePortError::Protocol)?,
+                access: BoundedName::new("write").map_err(|_| AgentRuntimePortError::Protocol)?,
+            },
+            input_digest,
+            expires_at_ms,
+        };
+        self.pending_permission = Some(PendingCorePermission {
+            private_request_id,
+            request_id,
+            callback: callback.clone(),
+        });
+        Ok(Some(
+            self.event(AgentRuntimeEvent::CoreExecutionPermissionRequested {
+                turn_id,
+                tool_use_id,
+                summary: ToolSummary {
+                    name: BoundedName::new("write_file")
+                        .map_err(|_| AgentRuntimePortError::Protocol)?,
+                    summary: BoundedText::new("Write one file in the bound workspace")
+                        .map_err(|_| AgentRuntimePortError::Protocol)?,
+                },
+                request,
+                callback,
+            }),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

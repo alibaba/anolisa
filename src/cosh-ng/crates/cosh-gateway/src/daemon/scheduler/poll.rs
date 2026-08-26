@@ -205,9 +205,9 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                     .as_ref()
                     .ok_or_else(no_active_run)?
                     .scheduled
-                    .capability_profile
-                    .profile_id
-                    == GatewayCapabilityProfileId::DelegatedAcpV1
+                    .launch
+                    .approval
+                    == ApprovalPolicy::AllowAll
                 {
                     let active = self.active.as_ref().ok_or_else(no_active_run)?;
                     let actor_id = active.scheduled.actor.actor_id.clone();
@@ -219,7 +219,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                         .approval_id
                         .clone();
                     let key = IdempotencyKey::new(format!(
-                        "delegated-acp-allow-once-{}",
+                        "runtime-permission-allow-once-{}",
                         approval_id.as_str()
                     ))
                     .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
@@ -421,7 +421,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                         self.finish_failed(
                             runtime_lost_error(
                                 "provider_permission_denied",
-                                "The provider-native operation was denied",
+                                "The Runtime operation was denied",
                             )?,
                             polled_at_ms,
                         )
@@ -646,7 +646,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         )?;
         let expiry_error = runtime_lost_error(
             "provider_permission_expired",
-            "The provider-native approval expired before it was resolved",
+            "The Runtime Permission expired before it was resolved",
         )?;
         let shutdown_acknowledged = self
             .active

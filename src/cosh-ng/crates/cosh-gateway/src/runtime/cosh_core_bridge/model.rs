@@ -89,6 +89,14 @@ impl CoshCoreBridgeConfig {
         self.brokered_context = Some(context);
         self
     }
+
+    /// Selects the fail-closed Gateway-brokered workspace-write profile.
+    #[must_use]
+    pub fn gateway_brokered_workspace_write(mut self, context: CoshCoreBrokeredContext) -> Self {
+        self.execution_profile = CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1;
+        self.brokered_context = Some(context);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +138,7 @@ pub struct CoshCoreBridge {
     prompt_deadline: Option<Instant>,
     terminal_delivered: bool,
     pending_input: Option<PendingInputRequest>,
+    pending_permission: Option<PendingCorePermission>,
     pending_brokered: Option<PendingBrokeredRequest>,
 }
 
@@ -141,6 +150,12 @@ struct PendingInputRequest {
 struct ObservedToolUse {
     tool_use_id: ToolUseId,
     name: BoundedName,
+}
+
+struct PendingCorePermission {
+    private_request_id: String,
+    request_id: RequestId,
+    callback: CorePermissionCallbackV1,
 }
 
 struct PendingBrokeredRequest {

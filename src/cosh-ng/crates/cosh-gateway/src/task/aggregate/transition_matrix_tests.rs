@@ -303,6 +303,8 @@ fn expected(state: TaskState, kind: TaskEventKind) -> bool {
             TaskEventKind::RunStarted
                 | TaskEventKind::CancellationRequested
                 | TaskEventKind::RunCancelled
+                | TaskEventKind::RunSuspended
+                | TaskEventKind::RunFailed
                 | TaskEventKind::TaskCancelled
         ),
         TaskState::Running => matches!(

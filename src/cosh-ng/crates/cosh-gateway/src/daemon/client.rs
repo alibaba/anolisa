@@ -19,6 +19,28 @@ impl LocalGatewayClient {
         })
     }
 
+    /// Reads safe Runtime, workspace, checkpoint, and authority capabilities.
+    pub fn capabilities(
+        &self,
+        request_id: RequestId,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::Capabilities {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request_id,
+        })
+    }
+
+    /// Creates and queues one catalog-selected durable Task.
+    pub fn submit_launch(
+        &self,
+        request: SubmitLaunch,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::SubmitLaunch {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request,
+        })
+    }
+
     /// Creates and queues one durable Task.
     pub fn submit(&self, request: SubmitTask) -> Result<GatewayResult, GatewayDaemonError> {
         self.request(GatewayRequest::Submit {
@@ -67,6 +89,56 @@ impl LocalGatewayClient {
             task_id,
             after_revision,
             limit,
+        })
+    }
+
+    /// Lists proven-created checkpoints owned by one authorized Task.
+    pub fn task_snapshots(
+        &self,
+        request_id: RequestId,
+        task_id: TaskId,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::ListTaskSnapshots {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request_id,
+            task_id,
+        })
+    }
+
+    /// Previews one exact Task-owned checkpoint against the live workspace.
+    pub fn preview_task_snapshot(
+        &self,
+        request_id: RequestId,
+        request: InspectTaskSnapshot,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::PreviewTaskSnapshot {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request_id,
+            request,
+        })
+    }
+
+    /// Returns the same bounded change projection used by switch confirmation.
+    pub fn diff_task_snapshot(
+        &self,
+        request_id: RequestId,
+        request: InspectTaskSnapshot,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::DiffTaskSnapshot {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request_id,
+            request,
+        })
+    }
+
+    /// Switches to one exact Task-owned checkpoint after recovery creation.
+    pub fn switch_task_snapshot(
+        &self,
+        request: SwitchTaskSnapshot,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::SwitchTaskSnapshot {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request,
         })
     }
 
@@ -143,7 +215,7 @@ impl LocalGatewayClient {
             ));
         }
         match response.outcome {
-            GatewayResponseOutcome::Ok { result } => Ok(result),
+            GatewayResponseOutcome::Ok { result } => Ok(*result),
             GatewayResponseOutcome::Error { error } => Err(GatewayDaemonError::Remote {
                 code: error.code,
                 message: error.message,

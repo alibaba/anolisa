@@ -15,7 +15,7 @@ use cosh_gateway_contracts::{
     external::{ExternalRef, ExternalRefKind},
     ids::{
         ActorId, AgentSessionId, ApprovalId, CheckpointId, InputRequestId, InstallationId,
-        MessageId, RequestId, RunId, RuntimeBindingId, RuntimeInstanceId, TaskId,
+        MessageId, RequestId, RunId, RuntimeBindingId, RuntimeInstanceId, TaskId, ToolUseId,
     },
     runtime::{
         AgentRuntimeCommand, AgentRuntimeEvent, BrokeredExecutionDelivery,
@@ -63,6 +63,10 @@ impl AgentRuntimePort for FakePort {
                     AgentRuntimeEvent::TurnStarted { turn_id: observed }
                     | AgentRuntimeEvent::ExecutionPermissionRequested {
                         turn_id: observed, ..
+                    }
+                    | AgentRuntimeEvent::CoreExecutionPermissionRequested {
+                        turn_id: observed,
+                        ..
                     }
                     | AgentRuntimeEvent::ExecutionPermissionsAbandoned {
                         turn_id: observed, ..
@@ -151,6 +155,13 @@ impl Fixture {
                 capability_profile:
                     cosh_gateway_contracts::profile::GatewayCapabilityProfile::task_only_v1()
                         .identity(),
+                launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+                    BoundedText::new("inspect the workspace").unwrap(),
+                    cosh_gateway_contracts::task::TaskRuntime::Codex,
+                    workspace.clone(),
+                    cosh_gateway_contracts::task::CheckpointPolicy::Off,
+                    cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+                ),
                 lease_generation: 1,
             },
             workspace,
@@ -351,6 +362,91 @@ fn provider_permission_pauses_polling_until_allow_once_is_dispatched() {
             ..
         }
     )));
+    assert_eq!(started.handle.poll(), RuntimePoll::Succeeded);
+}
+
+#[test]
+fn core_permission_uses_only_the_runtime_native_callback_fence() {
+    let fixture = Fixture::new();
+    let request = capability_request(&fixture);
+    let tool_use_id = ToolUseId::new();
+    let events = VecDeque::from([
+        fixture.session_opened(),
+        fixture.event(
+            2,
+            AgentRuntimeEvent::TurnStarted {
+                turn_id: TurnId::new(),
+            },
+        ),
+        fixture.event(
+            3,
+            AgentRuntimeEvent::CoreExecutionPermissionRequested {
+                turn_id: TurnId::new(),
+                tool_use_id: tool_use_id.clone(),
+                summary: cosh_gateway_contracts::runtime::ToolSummary {
+                    name: BoundedName::new("write_file").unwrap(),
+                    summary: BoundedText::new("Write one workspace file").unwrap(),
+                },
+                callback: cosh_gateway_contracts::runtime::CorePermissionCallbackV1 {
+                    private_request_id_digest: digest('r'),
+                    private_tool_use_id_digest: digest('t'),
+                    callback_payload_digest: digest('c'),
+                    normalized_operation_digest: request.operation_digest.clone(),
+                },
+                request: request.clone(),
+            },
+        ),
+        fixture.event(
+            4,
+            AgentRuntimeEvent::Completed {
+                turn_id: TurnId::new(),
+                outcome: TurnOutcome::Completed,
+            },
+        ),
+    ]);
+    let mut factory = ScheduledAgentRuntimeFactory::new(FakePortFactory {
+        port: Some(FakePort {
+            binding_id: fixture.binding.binding_id.clone(),
+            events,
+            commands: Arc::clone(&fixture.commands),
+        }),
+        workspace: fixture.workspace.clone(),
+    });
+    let mut started = factory.open(&fixture.run).unwrap();
+    started.handle.begin().unwrap();
+    assert_eq!(started.handle.poll(), RuntimePoll::Observed { sequence: 2 });
+    let RuntimePoll::PermissionRequested {
+        permission,
+        request: observed,
+        ..
+    } = started.handle.poll()
+    else {
+        panic!("Core permission must be returned to the scheduler")
+    };
+    assert_eq!(*observed, request);
+    assert_eq!(permission.tool_use_id, Some(tool_use_id));
+    assert!(permission.callback.is_none());
+    assert!(permission.core_callback.is_some());
+    assert_eq!(started.handle.poll(), RuntimePoll::Pending);
+    started
+        .handle
+        .resolve_provider_permission(
+            &permission,
+            RuntimePermissionDecision::RuntimeNativeAllowOnce,
+        )
+        .unwrap();
+    assert!(fixture
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| matches!(
+            command,
+            AgentRuntimeCommand::ResolvePermission {
+                decision: RuntimePermissionDecision::RuntimeNativeAllowOnce,
+                ..
+            }
+        )));
     assert_eq!(started.handle.poll(), RuntimePoll::Succeeded);
 }
 

@@ -9,8 +9,8 @@ use cosh_gateway_contracts::{
     common::{
         ActorKind, ActorRef, AuthAssurance, BoundedName, BoundedOpaque, BoundedStringError,
         BoundedText, ContentPart, ContractHeader, ContractSchema, Correlation, Digest,
-        IdempotencyKey, TargetRef, CONTRACT_SCHEMA_VERSION, MAX_OPAQUE_BYTES, MAX_TEXT_BYTES,
-        RUNTIME_CONTRACT_SCHEMA_VERSION, TASK_EVENT_SCHEMA_VERSION,
+        IdempotencyKey, TargetRef, WorkspaceRef, CONTRACT_SCHEMA_VERSION, MAX_OPAQUE_BYTES,
+        MAX_TEXT_BYTES, RUNTIME_CONTRACT_SCHEMA_VERSION, TASK_EVENT_SCHEMA_VERSION,
     },
     error::{ContractError, ErrorCategory},
     ids::{
@@ -28,7 +28,9 @@ use cosh_gateway_contracts::{
         MAX_RUNTIME_INPUT_REQUEST_TEXT_BYTES, MAX_RUNTIME_INPUT_SELECTIONS,
     },
     task::{
-        GatewayCommandEnvelope, TaskCommand, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskState,
+        ApprovalPolicy, CheckpointPolicy, GatewayCommandEnvelope, TaskCommand, TaskEvent,
+        TaskEventEnvelope, TaskEventKind, TaskLaunchDescriptorV1, TaskLaunchSpecV1, TaskRuntime,
+        TaskState, TASK_LAUNCH_SPEC_V1,
     },
 };
 
@@ -645,4 +647,61 @@ fn contract_errors_are_bounded_during_construction_and_deserialization() {
     let mut oversized = serde_json::to_value(error).expect("error serializes");
     oversized["safe_message"] = serde_json::json!("x".repeat(MAX_TEXT_BYTES + 1));
     assert!(serde_json::from_value::<ContractError>(oversized).is_err());
+}
+
+#[test]
+fn task_launch_spec_v1_is_strict_and_round_trips() {
+    let launch = TaskLaunchSpecV1::new(
+        BoundedText::new("summarize the repository").expect("goal is bounded"),
+        TaskRuntime::Codex,
+        WorkspaceRef {
+            scope_digest: digest('f'),
+            display_name: Some(BoundedText::new("workspace").expect("label is bounded")),
+        },
+        CheckpointPolicy::Auto,
+        ApprovalPolicy::AllowAll,
+    );
+    let value = serde_json::to_value(&launch).expect("launch serializes");
+    assert_eq!(value["schema_version"], TASK_LAUNCH_SPEC_V1);
+    assert_eq!(
+        serde_json::from_value::<TaskLaunchSpecV1>(value.clone()).expect("launch deserializes"),
+        launch
+    );
+
+    let mut unknown_version = value.clone();
+    unknown_version["schema_version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<TaskLaunchSpecV1>(unknown_version).is_err());
+
+    let mut unknown_field = value;
+    unknown_field["provider"] = serde_json::json!("client-selected");
+    assert!(serde_json::from_value::<TaskLaunchSpecV1>(unknown_field).is_err());
+}
+
+#[test]
+fn task_launch_descriptor_v1_omits_the_private_goal() {
+    let launch = TaskLaunchSpecV1::new(
+        BoundedText::new("private repository goal").expect("goal is bounded"),
+        TaskRuntime::Core,
+        WorkspaceRef {
+            scope_digest: digest('e'),
+            display_name: None,
+        },
+        CheckpointPolicy::Off,
+        ApprovalPolicy::AllowAll,
+    );
+    let descriptor = TaskLaunchDescriptorV1::from_spec(digest('d'), &launch);
+    let value = serde_json::to_value(&descriptor).expect("descriptor serializes");
+
+    assert_eq!(value["schema_version"], TASK_LAUNCH_SPEC_V1);
+    assert_eq!(value["goal_digest"], digest('d').as_str());
+    assert!(value.get("goal").is_none());
+    assert_eq!(
+        serde_json::from_value::<TaskLaunchDescriptorV1>(value.clone())
+            .expect("descriptor deserializes"),
+        descriptor
+    );
+
+    let mut unknown_version = value;
+    unknown_version["schema_version"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<TaskLaunchDescriptorV1>(unknown_version).is_err());
 }

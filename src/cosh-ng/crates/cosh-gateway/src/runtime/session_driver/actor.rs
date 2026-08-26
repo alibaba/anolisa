@@ -89,14 +89,25 @@ fn run_actor(
                         | AcpV1Observation::PromptCancelledWithPendingPermissions { .. }
                         | AcpV1Observation::RequestFailed { .. }
                 );
-                if events.emit(observation).is_err() {
+                let Some(deadline) = prompt_deadline else {
                     fail_terminal(
                         &mut bridge,
                         &config,
                         &terminal,
-                        AcpSessionDriverError::ObservationBackpressure,
+                        AcpSessionDriverError::ActorUnavailable,
                     );
                     break;
+                };
+                match events.emit(observation, &cancel, deadline, "prompt") {
+                    Ok(()) => {}
+                    Err(AcpSessionDriverError::Cancelled) => {
+                        settle_cancel(&mut bridge, &config, &terminal, state);
+                        break;
+                    }
+                    Err(error) => {
+                        fail_terminal(&mut bridge, &config, &terminal, error);
+                        break;
+                    }
                 }
                 if finished {
                     state = ActorState::SessionOpen;
@@ -248,7 +259,7 @@ fn wait_for(
             AcpV1BridgeRead::Observation(observation) => {
                 settle_unsupported(bridge, &observation)?;
                 let matched = expected(&observation);
-                events.emit(observation)?;
+                events.emit(observation, cancel, deadline, operation)?;
                 if matched {
                     return Ok(());
                 }

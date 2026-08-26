@@ -18,7 +18,10 @@ grep -Fxq \
     "$SPEC"
 grep -Fq "systemctl stop 'cosh-gateway@*.service' 'cosh-gateway-acp@*.service'" "$SPEC"
 grep -Fxq '%systemd_preun cosh-gateway@.service' "$SPEC"
-grep -Fxq '%systemd_preun cosh-gateway-acp@.service' "$SPEC"
+if grep -Fxq '%systemd_preun cosh-gateway-acp@.service' "$SPEC"; then
+    echo "ERROR: removed legacy ACP unit still has a lifecycle macro" >&2
+    exit 1
+fi
 grep -q '^%post -p <lua>$' "$SPEC"
 # the extraction below slices on section boundaries, so the sections must
 # keep their order: %preun, then %post, then %postun
@@ -146,8 +149,7 @@ install -d -m 0755 "$SYSTEMD_RUNTIME"
 
 PREDICATE="$(sed -n 's/^%define cosh_replacement_ready //p' "$SPEC")"
 PREUN_RAW="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
-    sed -e '/^%systemd_preun cosh-gateway@\.service$/d' \
-        -e '/^%systemd_preun cosh-gateway-acp@\.service$/d')"
+    sed -e '/^%systemd_preun cosh-gateway@\.service$/d')"
 # Bash 5.2 enables patsub_replacement by default, which would expand every
 # unquoted '&' in the substituted predicate to the matched pattern text;
 # keep the replacement strings verbatim.

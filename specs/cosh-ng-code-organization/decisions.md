@@ -177,3 +177,38 @@ Revisit trigger: if a second natural-language pre-submit route is introduced,
 extract a dedicated routing-policy owner and inject its decision into
 `raw_input`; do not grow `input/` into a general natural-language parser or
 move execution vetoes back into Shell tracing hooks.
+
+## D20: Gateway binary composition root
+
+The Gateway application owner maintains the binary-only `cosh-gateway-app`
+crate. Its [design note](../../src/cosh-ng/docs/design/gateway-app-composition.md)
+records callers, dependency direction, the executable surface, test boundaries,
+the in-package alternative, and concrete revisit conditions. This is a
+composition boundary, not a public Rust library or a policy duplication.
+
+## D21: Task presentation test ownership and growth
+
+The `ui` owner maintains `ui/question_presentation_tests.rs`, mounted privately
+under `#[cfg(test)]` in `lib.rs`. The `slash/task` owner maintains
+`slash/task/tests.rs`, `slash/task/form/tests.rs`, and
+`slash/task/snapshot/tests.rs`, each mounted privately by its production owner.
+These are process-free private presentation/state tests allowed by the scoped
+AGENTS testing strategy. They need no heavy-test waiver and must not expose
+production APIs solely to move tests. New subprocess or PTY checks belong in
+the existing integration targets; the source heavy-test inventory is unchanged.
+
+Task presentation currently occupies 572 lines in `slash/task.rs`, 684 in
+`slash/task/form.rs`, and 678 in `slash/task/snapshot.rs`. Before adding another
+flow to the near-threshold form/snapshot owners, extract the relevant submit or
+switch orchestration into child modules, preserving the existing
+navigation/render and contract/view separation. Keep `task.rs` as dispatch;
+move additional Gateway request/response handling into a child owner as needed.
+This is a growth condition, not a waiver of the 700-line threshold.
+
+The runtime owner co-locates `task_form` and `task_snapshot` in `InlineState`
+with other active interactive state. `runtime/state.rs` is 991 lines at this
+revision; the advisory inventory is updated to that count. Before further
+Task state growth, extract a Task presentation state holder with its owning
+fields and lifecycle together; continue the existing per-domain state split
+before reaching the 1000-line growth bar. Do not move the two fields alone
+into a new cross-owner interface.

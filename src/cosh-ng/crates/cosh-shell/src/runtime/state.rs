@@ -88,6 +88,8 @@ pub(crate) struct InlineState {
     pub(crate) handled_selections: HashSet<String>,
     pub(crate) approvals: ApprovalState,
     pub(crate) auth: crate::auth::runtime::AuthState,
+    pub(crate) task_form: crate::slash::TaskFormState,
+    pub(crate) task_snapshot: crate::slash::TaskSnapshotState,
     pub(crate) questions: QuestionState,
     pub(crate) control: ControlState,
     pub(crate) activity: ActivityState,

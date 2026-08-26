@@ -76,6 +76,8 @@ mod slash;
 mod startup;
 #[path = "support/mod.rs"]
 mod support;
+#[path = "raw_cli/task.rs"]
+mod task;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;

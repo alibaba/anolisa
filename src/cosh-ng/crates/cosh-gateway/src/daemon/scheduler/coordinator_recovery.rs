@@ -171,7 +171,7 @@ impl TaskCoordinator {
         };
         let intent = decode_runtime_start_intent(
             candidate.payload.clone(),
-            self.expected_profile,
+            &self.launch_catalog,
         )?;
         if intent.task_id != candidate.task_id {
             return Err(GatewayDaemonError::Protocol(

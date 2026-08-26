@@ -352,6 +352,55 @@ fn checkpoint_brokered_profile_acks_exact_v4_inventory() {
 }
 
 #[test]
+fn workspace_write_brokered_profile_acks_exact_v5_inventory() {
+    let corpus = private_wire_corpus();
+    let initialize =
+        json_line(&corpus["gateway_brokered_workspace_write_v5"]["initialize_request"]);
+    let home = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let output = run_process_at_home_args(
+        home.path(),
+        &[
+            "--headless",
+            "--execution-profile",
+            "gateway-brokered-workspace-write-v1",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+        ],
+        &[
+            &initialize,
+            r#"{"type":"control_request","request_id":"shutdown","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let response = messages
+        .iter()
+        .find(|message| message["type"] == "control_response")
+        .expect("profile acknowledgement");
+    assert_eq!(
+        response,
+        &corpus["gateway_brokered_workspace_write_v5"]["initialize_ack"]
+    );
+    let init = messages
+        .iter()
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .expect("system init");
+    assert_eq!(
+        init["tools"],
+        serde_json::json!(["ask_user_question", "write_file"])
+    );
+}
+
+#[test]
 fn checkpoint_brokered_profile_rejects_v3_identity_without_fallback() {
     let corpus = private_wire_corpus();
     let initialize = json_line(&corpus["gateway_brokered_v3"]["initialize_request"]);

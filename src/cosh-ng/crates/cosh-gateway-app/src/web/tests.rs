@@ -24,6 +24,93 @@ fn private_tempdir() -> tempfile::TempDir {
 }
 
 #[test]
+fn web_attests_workspace_and_authority_before_binding_http() {
+    let directory = private_tempdir();
+    let admitted = directory.path().join("admitted");
+    let declared = directory.path().join("declared");
+    fs::create_dir(&admitted).unwrap();
+    fs::create_dir(&declared).unwrap();
+    fs::set_permissions(&admitted, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&declared, fs::Permissions::from_mode(0o700)).unwrap();
+    let token = admitted.join("token");
+    fs::write(&token, "0123456789abcdef0123456789abcdef").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let resolver = TrustedWorkspaceResolver::new(
+        GatewayCapabilityProfile::task_only_v1().governed_target(),
+        &admitted,
+    )
+    .unwrap();
+    let socket = directory.path().join("gateway.sock");
+    let mut daemon = GatewayDaemon::bind(GatewayDaemonConfig {
+        socket_path: socket.clone(),
+        database_path: directory.path().join("gateway.db"),
+        installation_id: None,
+        launch_catalog: TaskLaunchCatalog::new(
+            resolver.workspace_ref().clone(),
+            LaunchReadiness::ready(),
+            LaunchReadiness::ready(),
+            LaunchReadiness::ready(),
+        ),
+    })
+    .unwrap();
+    // An occupied port makes a missing admission check fail immediately, not hang.
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let args = WebArgs {
+        bind: occupied.local_addr().unwrap(),
+        socket: Some(socket.clone()),
+        workspace: declared,
+        token_file: token.clone(),
+        output: Output::Jsonl,
+    };
+    let external_token = directory.path().join("token");
+    fs::copy(token, &external_token).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let daemon_stop = Arc::clone(&stop);
+    let server = std::thread::spawn(move || daemon.serve_until(&daemon_stop));
+    let mismatch = web(
+        args.clone(),
+        &Reporter {
+            output: Output::Jsonl,
+        },
+    );
+    let authority = web(
+        WebArgs {
+            workspace: admitted,
+            token_file: external_token,
+            ..args.clone()
+        },
+        &Reporter {
+            output: Output::Jsonl,
+        },
+    );
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap().unwrap();
+    let mismatch = mismatch.unwrap_err().to_string();
+    assert!(
+        mismatch.contains("admitted workspace does not match"),
+        "{mismatch}"
+    );
+    let authority = authority.unwrap_err().to_string();
+    assert!(
+        authority.contains("brokered-only token boundary"),
+        "{authority}"
+    );
+    let unavailable = web(
+        WebArgs {
+            token_file: directory.path().join("token"),
+            ..args
+        },
+        &Reporter {
+            output: Output::Jsonl,
+        },
+    );
+    assert!(unavailable
+        .unwrap_err()
+        .to_string()
+        .contains("cannot attest Gateway capabilities"));
+}
+
+#[test]
 fn token_file_requires_exact_private_mode_and_owner() {
     let directory = private_tempdir();
     let path = directory.path().join("token");

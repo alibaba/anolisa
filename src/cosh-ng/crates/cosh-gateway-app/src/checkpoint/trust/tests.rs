@@ -4,6 +4,20 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use super::*;
 
+#[test]
+fn only_transient_checkpoint_admission_failures_are_unavailable() {
+    assert!(CheckpointAdmissionError::Socket.is_unavailable());
+    assert!(CheckpointAdmissionError::Identity.is_unavailable());
+    for failure in [
+        CheckpointAdmissionError::Profile,
+        CheckpointAdmissionError::SocketTrust,
+        CheckpointAdmissionError::Workspace,
+        CheckpointAdmissionError::Audit,
+    ] {
+        assert!(!failure.is_unavailable(), "{failure}");
+    }
+}
+
 fn owner_uid() -> u32 {
     nix::unistd::Uid::effective().as_raw()
 }

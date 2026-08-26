@@ -6,7 +6,72 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
+use cosh_gateway::daemon::{GatewayCapabilities, GatewayResult, LocalGatewayClient};
+use cosh_gateway::runtime::TrustedWorkspaceResolver;
+use cosh_gateway_contracts::{
+    common::WorkspaceRef,
+    ids::RequestId,
+    profile::GatewayCapabilityProfile,
+    task::{TaskRuntime, TASK_LAUNCH_SPEC_V1},
+};
+
 use super::{CliError, MAX_TOKEN_BYTES};
+
+pub(super) fn attest_gateway(
+    client: &LocalGatewayClient,
+    workspace: &Path,
+) -> Result<(), CliError> {
+    let resolver = TrustedWorkspaceResolver::new(
+        GatewayCapabilityProfile::task_only_v1().governed_target(),
+        workspace,
+    )
+    .map_err(|error| CliError::Web(error.safe_message.as_str().to_owned()))?;
+    let result = client
+        .capabilities(RequestId::new())
+        .map_err(|error| CliError::Web(format!("cannot attest Gateway capabilities: {error}")))?;
+    let GatewayResult::Capabilities(capabilities) = result else {
+        return Err(CliError::Web(
+            "Gateway did not return capabilities".to_owned(),
+        ));
+    };
+    validate_capabilities(&capabilities, resolver.workspace_ref())
+}
+
+fn validate_capabilities(
+    capabilities: &GatewayCapabilities,
+    workspace: &WorkspaceRef,
+) -> Result<(), CliError> {
+    if capabilities.launch_schema_version != TASK_LAUNCH_SPEC_V1
+        || capabilities.default_workspace.scope_digest != workspace.scope_digest
+    {
+        return Err(CliError::Web(
+            "Gateway launch schema or admitted workspace does not match Web configuration"
+                .to_owned(),
+        ));
+    }
+    // Unavailable entries still describe authority of recoverable historical Tasks.
+    // Moving the token outside a workspace cannot isolate it from local-user authority.
+    if capabilities.runtimes.len() != 2
+        || [TaskRuntime::Core, TaskRuntime::Codex]
+            .into_iter()
+            .any(|runtime| {
+                capabilities
+                    .runtimes
+                    .iter()
+                    .filter(|entry| entry.runtime == runtime)
+                    .count()
+                    != 1
+            })
+        || capabilities.runtimes.iter().any(|entry| {
+            entry.security.delegated_local_authority || !entry.security.gateway_brokered_effects
+        })
+    {
+        return Err(CliError::Web(
+            "Gateway cannot attest a brokered-only token boundary; current Core/Codex local-user authority is unsupported by Web; use the Task CLI".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub(super) struct LoadedToken {
@@ -112,8 +177,47 @@ fn validate_token_ancestors(path: &Path, effective_uid: u32) -> Result<(), CliEr
 pub(super) fn validate_token_scope(token_path: &Path, workspace: &Path) -> Result<(), CliError> {
     if token_path.starts_with(workspace) {
         return Err(CliError::Web(
-            "Bearer token must be outside the operator-declared workspace".to_owned(),
+            "Bearer token must be outside the admitted workspace".to_owned(),
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosh_gateway::daemon::{LaunchReadiness, TaskLaunchCatalog};
+    use cosh_gateway_contracts::common::{BoundedText, Digest};
+
+    #[test]
+    fn attestation_rejects_unknown_catalogs_and_unavailable_delegated_authority() {
+        let workspace = WorkspaceRef {
+            scope_digest: Digest::parse("a".repeat(64)).unwrap(),
+            display_name: None,
+        };
+        let unavailable = LaunchReadiness::unavailable(BoundedText::new("disabled").unwrap());
+        let mut capabilities = TaskLaunchCatalog::new(
+            workspace.clone(),
+            unavailable.clone(),
+            unavailable.clone(),
+            unavailable,
+        )
+        .capabilities();
+        assert!(validate_capabilities(&capabilities, &workspace).is_err());
+        for entry in &mut capabilities.runtimes {
+            entry.security.delegated_local_authority = false;
+            entry.security.gateway_brokered_effects = true;
+        }
+        assert!(validate_capabilities(&capabilities, &workspace).is_ok());
+        capabilities.launch_schema_version += 1;
+        assert!(validate_capabilities(&capabilities, &workspace).is_err());
+        capabilities.launch_schema_version = TASK_LAUNCH_SPEC_V1;
+        capabilities.runtimes[0].security.gateway_brokered_effects = false;
+        assert!(validate_capabilities(&capabilities, &workspace).is_err());
+        capabilities.runtimes[0].security.gateway_brokered_effects = true;
+        capabilities.runtimes[0].runtime = TaskRuntime::Codex;
+        assert!(validate_capabilities(&capabilities, &workspace).is_err());
+        capabilities.runtimes.clear();
+        assert!(validate_capabilities(&capabilities, &workspace).is_err());
+    }
 }

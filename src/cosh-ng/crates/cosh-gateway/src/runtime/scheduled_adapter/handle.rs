@@ -100,6 +100,42 @@ impl ScheduledAgentRuntimeHandle {
                     tool_use_id,
                     request_id: request.request_id.clone(),
                     callback: Some(callback),
+                    core_callback: None,
+                };
+                self.pending_permission = Some(permission.clone());
+                RuntimePoll::PermissionRequested {
+                    permission,
+                    request: Box::new(request),
+                    summary,
+                }
+            }
+            AgentRuntimeEvent::CoreExecutionPermissionRequested {
+                turn_id,
+                tool_use_id,
+                request,
+                summary,
+                callback,
+            } if self.turn_started
+                && turn_id == self.turn_id
+                && request.task_id == self.task_id
+                && request.run_id == self.run_id
+                && request.actor.actor_id == self.actor_id
+                && request.target == self.target
+                && callback.normalized_operation_digest == request.operation_digest
+                && self.pending_permission.is_none()
+                && self.pending_brokered.is_none()
+                && self.pending_input.is_none() =>
+            {
+                let permission = RuntimePermissionRef {
+                    binding_id: self.binding_id.clone(),
+                    runtime_generation: self.binding.runtime_generation,
+                    event_sequence: self.last_sequence,
+                    run_id: self.run_id.clone(),
+                    turn_id,
+                    tool_use_id: Some(tool_use_id),
+                    request_id: request.request_id.clone(),
+                    callback: None,
+                    core_callback: Some(callback),
                 };
                 self.pending_permission = Some(permission.clone());
                 RuntimePoll::PermissionRequested {
