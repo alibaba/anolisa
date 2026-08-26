@@ -7,6 +7,10 @@
 //! - `AGENT_SEC_MODEL_SERVICE_BASE_URL` (default `http://localhost:11434`)
 //! - `AGENT_SEC_MODEL_SERVICE_TIMEOUT` seconds (default `30`, max `300`)
 //!
+//! The model service must be local: a non-loopback `base_url` is refused.
+//! Scanned prompts can carry credentials and PII, and the URL comes from the
+//! environment, so anything but loopback is treated as exfiltration.
+//!
 //! Consumers (prompt-scanner, future code/pii scanners) inject a
 //! [`ModelClient`] so their transport stays decoupled from this crate.
 
@@ -14,6 +18,7 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use thiserror::Error;
+use url::{Host, Url};
 
 const ENV_BACKEND: &str = "AGENT_SEC_MODEL_SERVICE_BACKEND";
 const ENV_BASE_URL: &str = "AGENT_SEC_MODEL_SERVICE_BASE_URL";
@@ -299,42 +304,60 @@ fn ollama_from_env() -> Result<OllamaClient, ModelServiceError> {
     ))
 }
 
-/// Reject a base URL whose scheme is not `http://` or `https://`, and warn
-/// when it targets a non-loopback host.  The URL comes from an environment
-/// variable, so a hijacked value (compromised orchestration config, injected
-/// `.env`) would silently exfiltrate every scanned prompt to that host.
+/// Reject a base URL that is unparseable, whose scheme is not `http://` or
+/// `https://`, or which targets a host other than loopback.
+///
+/// The URL comes from an environment variable, so a hijacked value
+/// (compromised orchestration config, injected `.env`) would otherwise
+/// exfiltrate every scanned prompt — credentials and PII included — to that
+/// host.  Only a locally hosted model service is supported, so refusing here
+/// turns that silent egress into a startup error.
+///
+/// Parsing goes through [`Url`], the same crate `ureq` resolves requests with,
+/// so this check cannot disagree with the transport about which host is being
+/// contacted.  A hand-rolled host scan does: in
+/// `http://localhost:8080@attacker.example/` the leading label is userinfo and
+/// the real destination is `attacker.example`.
+///
+/// # Errors
+///
+/// [`ModelServiceError::Config`] when the URL does not parse, the scheme is
+/// neither `http://` nor `https://`, or the host is not loopback.
 fn validate_base_url(base_url: &str) -> Result<(), ModelServiceError> {
-    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+    let url = Url::parse(base_url).map_err(|error| {
+        ModelServiceError::Config(format!("base_url is not a valid URL {base_url:?}: {error}"))
+    })?;
+    // `Url::parse` accepts any scheme, so `localhost:11434` parses with scheme
+    // `localhost` rather than failing.
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(ModelServiceError::Config(format!(
             "base_url must use http:// or https:// scheme: {base_url:?}"
         )));
     }
-    if !is_loopback_url(base_url) {
-        log::warn!(
-            "Model service base_url points to a non-local host: {base_url}; \
-             scanned prompts will be sent to it"
-        );
+    if !is_loopback_host(&url) {
+        return Err(ModelServiceError::Config(format!(
+            "refusing non-loopback model service base_url {base_url:?}: only a local model \
+             service is supported, and scanned prompts must not leave the host"
+        )));
     }
     Ok(())
 }
 
-/// Whether the URL's host is `localhost` or a loopback IP (any `127.x.x.x`
-/// or `::1`).  Assumes a valid `http(s)://` prefix has already been checked.
-fn is_loopback_url(base_url: &str) -> bool {
-    let after_scheme = base_url
-        .split_once("://")
-        .map_or(base_url, |(_, rest)| rest);
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    // Bracketed IPv6 keeps its colons inside `[...]`; otherwise the first
-    // colon separates host from port.
-    let host = match authority.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(""),
-        None => authority.split(':').next().unwrap_or(""),
-    };
-    host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+/// Whether the parsed URL's host is `localhost` or a loopback IP.
+///
+/// [`Url`] normalises the many spellings of a loopback address — `127.1`,
+/// `2130706433`, `0x7f.0.0.1`, a trailing dot — into the same [`Host::Ipv4`],
+/// so all of them are accepted here.  That matches what the transport would
+/// have resolved them to, which is the point of not enumerating hosts by hand.
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(name)) => name == "localhost",
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        // Schemes without an authority (`file:`) never reach here, but a
+        // hostless URL is not local either way.
+        None => false,
+    }
 }
 
 /// Parse a timeout in seconds, falling back to [`DEFAULT_TIMEOUT_SECS`] when
@@ -556,20 +579,84 @@ mod tests {
     }
 
     #[test]
-    fn base_url_with_http_scheme_is_accepted() {
+    fn loopback_base_url_is_accepted() {
         assert!(validate_base_url("http://localhost:11434").is_ok());
-        assert!(validate_base_url("https://model.internal:8443").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:11434").is_ok());
+        assert!(validate_base_url("http://[::1]:11434").is_ok());
+    }
+
+    /// Regression guard for the exfiltration path: a hijacked env var pointing
+    /// at an arbitrary host must fail closed rather than ship prompts there.
+    #[test]
+    fn non_loopback_base_url_is_rejected() {
+        for remote in [
+            "https://model.internal:8443",
+            "http://attacker.example:11434",
+            "http://10.0.0.5:18099",
+            "http://[2001:db8::1]:11434",
+        ] {
+            let error = validate_base_url(remote).expect_err("must be rejected");
+            let ModelServiceError::Config(message) = &error else {
+                panic!("{remote:?} must fail with Config, got {error:?}");
+            };
+            assert!(
+                message.contains(remote),
+                "rejection must name the offending URL so operators can fix it; got {message:?}"
+            );
+        }
     }
 
     #[test]
     fn loopback_detection_matches_local_hosts_only() {
-        assert!(is_loopback_url("http://localhost:11434"));
-        assert!(is_loopback_url("http://127.0.0.1:11434"));
-        assert!(is_loopback_url("http://127.1.2.3:11434/api"));
-        assert!(is_loopback_url("http://[::1]:11434"));
-        assert!(!is_loopback_url("http://attacker.example:11434"));
-        assert!(!is_loopback_url("http://10.0.0.5:11434"));
-        assert!(!is_loopback_url("http://[2001:db8::1]:11434"));
+        for local in [
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+            "http://127.1.2.3:11434/api",
+            "http://[::1]:11434",
+        ] {
+            assert!(
+                validate_base_url(local).is_ok(),
+                "{local:?} must be accepted"
+            );
+        }
+        for remote in [
+            "http://attacker.example:11434",
+            "http://10.0.0.5:11434",
+            "http://[2001:db8::1]:11434",
+        ] {
+            assert!(
+                validate_base_url(remote).is_err(),
+                "{remote:?} must be refused"
+            );
+        }
+    }
+
+    /// Userinfo makes the authority's leading label a red herring: in
+    /// `http://localhost:8080@attacker.example/` the host is `attacker.example`,
+    /// which is where `ureq` sends the body.  Verified against a live listener:
+    /// the request arrived with `Host: <post-@ authority>` and the fake
+    /// loopback label demoted to an `Authorization: Basic` header.
+    #[test]
+    fn userinfo_does_not_disguise_a_remote_host() {
+        for disguised in [
+            "http://localhost@attacker.example:11434",
+            "http://localhost:8080@attacker.example:11434",
+            "http://127.0.0.1:8080@attacker.example/api",
+            "http://[::1]:8080@attacker.example",
+            "http://user:pass@attacker.example",
+        ] {
+            let error = validate_base_url(disguised).expect_err("must be refused");
+            let ModelServiceError::Config(message) = &error else {
+                panic!("{disguised:?} must fail with Config, got {error:?}");
+            };
+            assert!(
+                message.contains(disguised),
+                "rejection must name the offending URL; got {message:?}"
+            );
+        }
+        // Userinfo itself is not the thing being refused: here the real host is
+        // loopback, so the credential never leaves the machine.
+        assert!(validate_base_url("http://user:pass@127.0.0.1:11434").is_ok());
     }
 
     #[test]

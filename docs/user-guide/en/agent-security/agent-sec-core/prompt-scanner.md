@@ -46,6 +46,29 @@ Ollama from the project's ModelScope repository. Pull it once with
 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` — then
 run `agent-sec-cli scan-prompt warmup` to verify the model is available before the first scan.
 
+### The model service must be local
+
+The L2/L4 model service endpoint comes from `AGENT_SEC_MODEL_SERVICE_BASE_URL`
+(default `http://localhost:11434`). Only loopback hosts — `localhost`,
+`127.x.x.x`, `::1` — are accepted. Prompts handed to the scanner routinely
+contain credentials and personal data, so the scanner refuses to send them
+anywhere but the local machine. The host is resolved with the same URL parser
+the HTTP client uses, so `http://localhost@attacker.example/` is refused too:
+the real host is whatever follows `@`.
+
+Pointing the variable at any other host makes `scan-prompt` fail at construction
+with an `error` verdict and exit `1`, naming the rejected URL in the message. A
+non-default port is fine as long as the host stays loopback:
+
+```bash
+export AGENT_SEC_MODEL_SERVICE_BASE_URL=http://127.0.0.1:18434
+```
+
+Because the six host hooks are fail-open on a non-zero `scan-prompt` exit, a
+remote endpoint leaves that host running with no prompt scanning — audited as a
+failed `prompt_scan` event and blocking nothing. Check stderr from
+`agent-sec-cli scan-prompt warmup` after changing the variable.
+
 ### Switching the L2 backend
 
 Set `PROMPT_SCANNER_L2_MODEL` to run L2 on the Warden-Gen model instead (or use

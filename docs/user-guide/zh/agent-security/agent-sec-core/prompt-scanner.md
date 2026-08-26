@@ -45,6 +45,27 @@ ModelScope 仓库拉取。执行一次
 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 即可（无需重命名），
 再执行 `agent-sec-cli scan-prompt warmup` 验证模型可用，避免首次扫描时才发现模型缺失。
 
+### 模型服务必须部署在本机
+
+L2/L4 的模型服务地址来自 `AGENT_SEC_MODEL_SERVICE_BASE_URL`（默认
+`http://localhost:11434`），只接受 loopback 主机——`localhost`、`127.x.x.x`、
+`::1`。交给扫描器的 prompt 经常含有凭据与个人数据，因此扫描器拒绝将它们
+发往本机以外的任何地址。主机由 HTTP 客户端所用的同一个 URL 解析器解析，因此
+`http://localhost@attacker.example/` 这类值也会被拒绝——真正的主机是 `@`
+之后的部分。
+
+把该变量指向其他主机时，`scan-prompt` 会在构造期失败，输出 `error` verdict
+并以 `1` 退出，报错信息会指明被拒绝的地址。只要主机仍为 loopback，使用
+非默认端口是允许的：
+
+```bash
+export AGENT_SEC_MODEL_SERVICE_BASE_URL=http://127.0.0.1:18434
+```
+
+由于六个宿主 hook 在 `scan-prompt` 非零退出时均为 fail-open，配置为远程地址后，
+该宿主将处于「完全没有 prompt 扫描」的状态——仅被审计为一次失败的 `prompt_scan` 事件，
+不拦截任何内容。改动该变量后，请检查 `agent-sec-cli scan-prompt warmup` 的 stderr 输出。
+
 ### 切换 L2 后端
 
 设置 `PROMPT_SCANNER_L2_MODEL` 可把 L2 换成 Warden-Gen（也可用 `--model` 临时指定，优先级 `--model` > 环境变量 > 默认）：

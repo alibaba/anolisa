@@ -200,10 +200,43 @@ class TestCreateClient(unittest.TestCase):
 
     def test_env_var_base_url(self) -> None:
         with patch.dict(
-            os.environ, {"AGENT_SEC_MODEL_SERVICE_BASE_URL": "http://env:9999"}
+            os.environ,
+            {"AGENT_SEC_MODEL_SERVICE_BASE_URL": "http://127.0.0.1:9999"},
         ):
             client = create_client()
-            self.assertEqual(client._base_url, "http://env:9999")
+            self.assertEqual(client._base_url, "http://127.0.0.1:9999")
+
+    def test_env_var_non_loopback_base_url_rejected(self) -> None:
+        # Regression: a hijacked env var must not silently ship scanned content
+        # (which may carry credentials/PII) to an arbitrary host.
+        for remote in (
+            "http://env:9999",
+            "https://model.internal:8443",
+            "http://10.0.0.5:18099",
+        ):
+            with patch.dict(
+                os.environ,
+                {"AGENT_SEC_MODEL_SERVICE_BASE_URL": remote},
+            ):
+                with self.assertRaises(ValueError) as ctx:
+                    create_client()
+                self.assertIn(remote, str(ctx.exception))
+
+    def test_env_var_base_url_rejects_non_http_scheme(self) -> None:
+        for bad in ("ftp://localhost:11434", "file:///etc/passwd", "localhost:11434"):
+            with patch.dict(
+                os.environ,
+                {"AGENT_SEC_MODEL_SERVICE_BASE_URL": bad},
+            ):
+                with self.assertRaises(ValueError):
+                    create_client()
+
+    def test_explicit_base_url_bypasses_env_validation(self) -> None:
+        # Programmatic callers are trusted, mirroring the Rust crate where
+        # OllamaClient::new() is likewise unvalidated; only env-derived values
+        # are attacker-influenced.
+        client = create_client(base_url="http://explicit.remote:8080")
+        self.assertEqual(client._base_url, "http://explicit.remote:8080")
 
     def test_env_var_timeout(self) -> None:
         with patch.dict(os.environ, {"AGENT_SEC_MODEL_SERVICE_TIMEOUT": "45"}):
