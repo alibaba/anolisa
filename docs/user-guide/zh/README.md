@@ -60,6 +60,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | [资产验证](agent-security/agent-sec-core/asset-verification.md) | agent-sec-core | GPG 签名的 Skill 分发验证与发现结果 |
 | [Skill Ledger 用户指南](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | 技能账本完整性链与签名工作流 |
 | [OpenClaw 兼容部署与升级](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw 插件部署与升级指南 |
+| [内部命令](agent-security/agent-sec-core/internal-commands.md) | agent-sec-core | hook 调用的隐藏命令契约与清单 |
 
 ### Token 节省 `token-saving/`
 
