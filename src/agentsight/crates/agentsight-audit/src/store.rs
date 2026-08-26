@@ -663,7 +663,7 @@ impl AuditStore {
     ) -> Result<HashMap<(String, String, String), Uuid>, AuditError> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT agent_id, policy_id, COALESCE(policy_revision, ''), case_id \
+            "SELECT agent_id, policy_id, CAST(policy_revision AS TEXT), case_id \
              FROM risk_cases ORDER BY updated_at_ns DESC",
         )?;
         let mut index = HashMap::new();
