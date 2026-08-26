@@ -342,7 +342,11 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000
             .expect("send synchronous run result");
     });
 
-    let run_result = match result_rx.recv_timeout(Duration::from_secs(3)) {
+    // The 2 MB prompt and 256 KB tool-name output are intentionally larger
+    // than pipe buffers, so this test exercises drain-while-write behavior.
+    // Shell reads of multi-megabyte lines can take ~2 s even on fast hosts
+    // and longer under parallel test load, so give the transport ample headroom.
+    let run_result = match result_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(result) => result,
         Err(error) => {
             let pid = fs::read_to_string(&pid_file)
