@@ -29,9 +29,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/scripts/compress-response",
-            "timeout": 15,
-            "statusMessage": "Compressing tool response..."
+            "command": "${PLUGIN_ROOT}/scripts/response-diagnostics",
+            "timeout": 10,
+            "statusMessage": "Checking tool response..."
           }
         ]
       }

@@ -127,7 +127,10 @@ Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，�
 
 ### 路径 6：Codex 插件（`PostToolUse` hook）
 
-独立的 Python hook 脚本 `compress-response`，实现完整的压缩+TOON+环境错误检测流水线。与 copilot-shell 的 hook 不同，Codex 的 PostToolUse **不能抑制原始输出**（`suppressOutput` 被拒绝），因此注入压缩摘要作为 `additionalContext`。
+Codex 的 PostToolUse 不能替换或抑制原始输出。通过 `additionalContext` 追加压缩内容
+会同时保留原文，增加模型首轮可见 Payload，因此 Codex Adapter 不运行响应压缩或
+TOON。独立脚本 `response-diagnostics` 只在识别出环境失败时追加修复提示。支持的 Shell
+命令由 PreToolUse Hook 通过 RTK 在执行前重写，工具从源头产生更小的输出。
 
 ### 路径 7：CLI 直接使用
 
@@ -316,7 +319,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 | Hermes 插件 | `adapters/tokenless/hermes/__init__.py` |
 | Qoder 插件配置 | `adapters/tokenless/qoder/hooks/hooks.json` |
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
-| Codex 压缩 hook | `adapters/tokenless/codex/scripts/compress-response` |
+| Codex 响应诊断 Hook | `adapters/tokenless/codex/scripts/response-diagnostics` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
 | 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |

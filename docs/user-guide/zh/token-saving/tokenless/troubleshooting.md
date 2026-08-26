@@ -269,7 +269,7 @@ tokenless retrieve <hash> --stash-db ~/.tokenless/stash.db
 
 ## 有统计记录但 Prompt 没有变小
 
-先查看[支持矩阵](framework-integration.md#agent-adapter-支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段，Codex 则有意保留原始结果，只追加分析或压缩备选。这些路径可以记录变小的候选内容，但不一定减少最终 Prompt。
+先查看[支持矩阵](framework-integration.md#agent-adapter-支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段。Codex 无法替换原始结果，因此有意不执行响应压缩；其 PostToolUse 上下文仅包含识别出的环境失败。Codex 的实际节省应在经过 RTK 重写的 Shell 调用上测量。
 
 Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。OpenClaw 会替换持久化结果，但只有设置 `toon_compression_enabled=true` 才会启用 TOON。
 

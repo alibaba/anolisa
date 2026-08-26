@@ -249,7 +249,7 @@ test-integration:
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_compress_toon_hook.py
-	python3 tests/test_codex_toon_threshold.py
+	python3 tests/test_codex_response_diagnostics.py
 	python3 tests/test_hermes_toon_threshold.py
 	python3 tests/test_compress_schema_hook.py
 	python3 tests/test_hermes_plugin_import.py

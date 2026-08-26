@@ -90,7 +90,7 @@ After the tool: response compression → optional Stash → TOON encoding → st
 Before the model: schema compression
 ```
 
-This is a capability map, not a pipeline that every framework runs. For example, OpenClaw disables TOON by default, Codex adds compressed context instead of replacing the original tool result, and schema compression only runs on cosh/Cosh-NG (`BeforeModel` hook) and OpenCode (per tool definition). See [Framework integration](framework-integration.md).
+This is a capability map, not a pipeline that every framework runs. For example, OpenClaw disables TOON by default, Codex relies on RTK source reduction and does not run response compression, and schema compression only runs on cosh/Cosh-NG (`BeforeModel` hook) and OpenCode (per tool definition). See [Framework integration](framework-integration.md).
 
 ## Behaviors to understand
 
@@ -148,7 +148,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Hermes | Plugin | Hard-disabled Tool Ready, block-and-retry rewrite, result replacement with response + TOON; no Schema |
 | Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`; no Schema |
 | Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
-| Codex | Plugin | Hard-disabled Tool Ready, rewrite, response/TOON analysis added as context; the original result is retained; no Schema |
+| Codex | Plugin | Hard-disabled Tool Ready, RTK rewrite, environment-failure diagnostics; no response/TOON replacement or Schema |
 | OpenCode | Plugin | Hard-disabled Tool Ready, Bash rewrite, tool-output replacement with response + TOON, Schema |
 | Qwen Code | Extension | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`, Schema |
 

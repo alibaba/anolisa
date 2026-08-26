@@ -121,7 +121,7 @@ No statistics record is added when:
 - The hook or plugin cannot find `tokenless`.
 - The input did not pass through a supported Tokenless hook.
 
-An additive adapter can create a record even though the host also retains the original result. In particular, the current Codex PostToolUse hook records compression candidates but does not replace the original tool output.
+An additive adapter can create a record even though the host also retains the original result. Codex avoids this ambiguity: its PostToolUse hook does not run compression or record a response candidate because the host cannot replace the original output. Measure Codex savings from RTK rewrite records instead.
 
 Start with:
 

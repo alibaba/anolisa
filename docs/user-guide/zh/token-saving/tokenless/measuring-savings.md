@@ -121,7 +121,7 @@ Session 总览只包含指标。tool-use 报告会显示内容差异；只有 se
 - Hook/Plugin 无法找到 `tokenless`。
 - 输入没有经过 Tokenless 支持的 Hook。
 
-追加型 Adapter 即使让宿主保留了原始结果，也可能产生统计记录。尤其是当前 Codex PostToolUse Hook 只记录压缩候选，不替换原始工具输出。
+追加型 Adapter 即使让宿主保留了原始结果，也可能产生统计记录。Codex 避免了这种歧义：宿主无法替换原始输出，因此其 PostToolUse Hook 不执行压缩，也不记录响应候选。Codex 的节省应通过 RTK 重写记录衡量。
 
 先运行：
 

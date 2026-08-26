@@ -274,7 +274,7 @@ Expired or never-successfully-written content cannot be recovered.
 
 ## Statistics exist but the prompt is not smaller
 
-First check the framework's response-delivery path in the [support matrix](framework-integration.md#agent-adapter-support-matrix). Qoder and Qwen Code emit `additionalContext`; legacy Copilot Shell appends it; Codex intentionally retains the original result and adds only analysis or a compressed alternative. These paths can record a smaller candidate without reducing the final prompt.
+First check the framework's response-delivery path in the [support matrix](framework-integration.md#agent-adapter-support-matrix). Qoder and Qwen Code emit `additionalContext`, and legacy Copilot Shell appends it. Codex intentionally avoids response compression because it cannot replace the original result; its PostToolUse context is limited to classified environment failures. Actual Codex savings should be measured on RTK-rewritten shell calls.
 
 For Claude Code, response replacement requires version 2.1.121 or later. Older or unrecognized versions pass the original through. OpenClaw replaces persisted results, but TOON remains off unless `toon_compression_enabled=true`.
 

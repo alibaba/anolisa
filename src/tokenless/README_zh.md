@@ -79,7 +79,8 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
-- **Codex 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
+  协议不支持替换原始输出，因此不追加压缩副本
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
 - **DeepSeek Harness 插件**。通过 DSH 原生 `tools/post-execute` 接入响应压缩和环境错误归因
 

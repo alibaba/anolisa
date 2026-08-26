@@ -99,8 +99,7 @@
         "hooks": [
           "tool-ready",
           "rewrite",
-          "compress-response",
-          "compress-toon"
+          "response-diagnostics"
         ]
       },
       "actions": {

@@ -18,7 +18,7 @@ Agent adapters are available for:
 - **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and registered but hard-disabled Tool Ready via Hermes's native plugin system.
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, and response compression via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
-- **Codex plugin** — response compression, TOON encoding, registered but hard-disabled Tool Ready, and command rewriting via Codex's native hook system.
+- **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
 - **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
 - **DeepSeek Harness plugin** — native response compression and environment-error attribution through DSH's `tools/post-execute` seam.
 
@@ -40,7 +40,7 @@ cover schema compression, RTK rewriting, response compression, TOON, retrieval, 
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
-| Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
+| Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
 | DeepSeek Harness plugin | — | Response compression ✅, Environment-error attribution ✅ |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
@@ -571,9 +571,12 @@ The plugin registers hooks at four Codex events, covering four strategies:
 | Session check | `SessionStart` | Verifies tokenless CLI is installed and functional (non-blocking) | ✅ Active |
 | Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
-| Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format, injects compressed summary as `additionalContext` | ✅ Active |
+| Environment diagnostics | `PostToolUse` | Adds actionable context only for classified environment failures | ✅ Active |
 
-> **Codex Protocol Constraint**: PostToolUse hooks cannot suppress the original tool output. The plugin injects a compressed *summary* as `additionalContext` — the model sees both the original output and the compressed summary.
+> **Codex protocol constraint**: `PostToolUse` cannot replace or suppress the
+> original tool output. Tokenless therefore does not append compressed content,
+> which would make the model-visible payload larger. First-pass savings for
+> supported shell commands come from RTK rewriting the command before execution.
 
 ### Install
 

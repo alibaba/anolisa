@@ -191,7 +191,7 @@ install -m 0755 adapters/tokenless/claude-code/scripts/uninstall.sh %{buildroot}
 install -m 0644 adapters/tokenless/codex/.codex-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin/
 install -m 0644 adapters/tokenless/codex/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/hooks/
 install -m 0755 adapters/tokenless/codex/scripts/check-tokenless %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
-install -m 0755 adapters/tokenless/codex/scripts/compress-response %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
+install -m 0755 adapters/tokenless/codex/scripts/response-diagnostics %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/rewrite-hook %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/tool-ready %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
@@ -309,7 +309,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin/plugin.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/hooks/hooks.json
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/check-tokenless
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/compress-response
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/response-diagnostics
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/rewrite-hook
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/tool-ready
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/detect.sh

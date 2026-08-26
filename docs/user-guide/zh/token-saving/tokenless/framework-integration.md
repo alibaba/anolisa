@@ -15,7 +15,7 @@ Python 框架包。
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并要求 Agent 重试 | 替换结果字符串 | 在响应压缩后尝试 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 仅在替换结果可保持文本时使用 | — |
-| Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文，追加分析或压缩备选内容 | 用于生成该备选内容 | — |
+| Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 只在结果更小时替换已接受的单文本块 JSON 结果 | 未注册 | 未注册 |
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 在响应压缩后尝试 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
@@ -41,7 +41,7 @@ OpenCode 当前使用下文说明的随附生命周期脚本，本版本尚未�
 | Shell/exec | 字符串 65,536 字符、数组保留 128 项、深度 8 |
 | 其他结构化工具 | 字符串 1,048,576 字符、数组保留 65,536 项、深度 32 |
 
-共享响应 Hook、OpenClaw 和 Hermes 会跳过短于 200 字符的输入。Codex 会跳过短于 500 字符的输入；只有输入至少为 4,000 字符时才附加压缩内容，否则只追加诊断或摘要。共享路径还会跳过带 YAML frontmatter、形似 Skill 的文本。TOON 编码仅对至少 500 字符的负载执行（当前实现的阈值，后续可能调整）；更小的负载保留压缩后的形式，因为 TOON 对小型 JSON 的节省可以忽略不计。该阈值适用于所有支持 TOON 的管线：共享响应 Hook、独立 TOON Hook、Codex、OpenClaw 和 Hermes。
+共享响应 Hook、OpenClaw 和 Hermes 会跳过短于 200 字符的输入。共享路径还会跳过带 YAML frontmatter、形似 Skill 的文本。TOON 编码仅对至少 500 字符的负载执行（当前实现的阈值，后续可能调整）；更小的负载保留压缩后的形式，因为 TOON 对小型 JSON 的节省可以忽略不计。该阈值适用于所有支持 TOON 的管线：共享响应 Hook、独立 TOON Hook、OpenClaw 和 Hermes。Codex 的 PostToolUse Hook 不能替换原始输出，因此不执行响应压缩或 TOON。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
@@ -270,7 +270,7 @@ Marketplace Plugin 在 Claude Code 重启后生效，也可以按照安装脚本
 
 ### Codex
 
-Plugin 在新的 Codex 会话中加载。关闭旧会话并重新启动后验证统计。它的 PostToolUse Hook 是追加型的：统计只能作为压缩候选遥测，不能证明原始 Codex 工具结果已离开 Prompt。
+Plugin 在新的 Codex 会话中加载。关闭旧会话并重新启动后验证行为。Codex 的 PostToolUse Hook 不能替换或抑制原始输出，因此 Plugin 不追加压缩内容，也不记录响应压缩候选，只对识别出的环境失败追加上下文。真正的首轮节省来自 RTK 在执行前重写受支持的 Shell 命令。
 
 ### DeepSeek Harness
 

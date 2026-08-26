@@ -15,7 +15,7 @@ Python framework package that application developers install and register explic
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
-| Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
+| Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Replaces an accepted single-text JSON result when the replacement is smaller | — | — |
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
@@ -41,7 +41,7 @@ The standalone `compress-response` defaults are not the defaults used by most ad
 | Shell/exec | 65,536-character strings, 128 retained array items, depth 8 |
 | Other structured tools | 1,048,576-character strings, 65,536 retained array items, depth 32 |
 
-The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Codex skips inputs shorter than 500 characters; it includes compressed content only for inputs of at least 4,000 characters and otherwise adds diagnostics or a summary. Skill-like text with YAML frontmatter is also skipped by the shared paths. The TOON encoding step only runs on payloads of at least 500 characters (the current implementation threshold, which may be adjusted later); smaller payloads keep the compressed form, because TOON savings on small JSON are negligible. The threshold applies to every TOON-capable pipeline: the shared response hook, the standalone TOON hook, Codex, OpenClaw, and Hermes.
+The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Skill-like text with YAML frontmatter is also skipped by the shared paths. The TOON encoding step only runs on payloads of at least 500 characters (the current implementation threshold, which may be adjusted later); smaller payloads keep the compressed form, because TOON savings on small JSON are negligible. The threshold applies to every TOON-capable pipeline: the shared response hook, the standalone TOON hook, OpenClaw, and Hermes. Codex does not run response compression or TOON because its PostToolUse hook cannot replace the original output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
@@ -284,7 +284,7 @@ The marketplace plugin takes effect after restarting Claude Code. The install sc
 
 ### Codex
 
-The plugin loads in a new Codex session. Close the old session and start a new one before verifying statistics. Its PostToolUse hook is additive: use statistics as candidate-compression telemetry, not as proof that the original Codex tool output left the prompt.
+The plugin loads in a new Codex session. Close the old session and start a new one before verifying behavior. Codex PostToolUse cannot replace or suppress the original output, so the plugin does not append compressed content or record response-compression candidates. It adds context only for classified environment failures. Actual first-pass savings come from RTK rewriting supported shell commands before execution.
 
 ### DeepSeek Harness
 

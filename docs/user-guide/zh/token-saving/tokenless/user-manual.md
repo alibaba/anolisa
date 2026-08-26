@@ -88,7 +88,7 @@ Python API 默认采用可逆 fail-open 策略：请求使用 Stash，但数据�
 模型调用前：Schema 压缩
 ```
 
-这是能力示意，不是所有框架都会完整执行的固定流水线。例如 OpenClaw 默认关闭 TOON，Codex 追加压缩上下文而不替换原始工具结果，Schema 压缩只在 cosh/Cosh-NG（`BeforeModel` Hook）和 OpenCode（逐工具定义）上运行。具体见[框架集成](framework-integration.md)。
+这是能力示意，不是所有框架都会完整执行的固定流水线。例如 OpenClaw 默认关闭 TOON，Codex 依靠 RTK 从源头缩减输出且不运行响应压缩，Schema 压缩只在 cosh/Cosh-NG（`BeforeModel` Hook）和 OpenCode（逐工具定义）上运行。具体见[框架集成](framework-integration.md)。
 
 ## 需要特别理解的行为
 
@@ -146,7 +146,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | Hermes | Plugin | Tool Ready（已硬关闭）、阻止后重试的命令重写、用响应压缩 + TOON 替换结果；无 Schema |
 | Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON；无 Schema |
 | Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
-| Codex | Plugin | Tool Ready（已硬关闭）、命令重写；把响应/TOON 分析追加为上下文，保留原始结果；无 Schema |
+| Codex | Plugin | Tool Ready（已硬关闭）、RTK 命令重写、环境失败诊断；不替换响应/TOON，无 Schema |
 | OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Schema |
 | Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON、Schema |
 

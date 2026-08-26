@@ -231,9 +231,9 @@ def get_thresholds(tool_name: str) -> tuple[int, int, int]:
 
 # -- Shared environment error patterns ----------------------------------------
 #
-# Superset of patterns from both the codex and hook adapters. Uses regex
+# Superset of patterns from both the Codex diagnostics and shared hook adapters. Uses regex
 # matching (case-insensitive) so patterns like "/bin/sh:.*: not found" work
-# correctly. Both codex/scripts/compress-response and compress_response_hook
+# correctly. Both codex/scripts/response-diagnostics and compress_response_hook
 # import this list and the classify_env_error() function below.
 
 ENV_PATTERNS: list[tuple[list[str], str, str]] = [
@@ -315,7 +315,7 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
     Accepts either a parsed dict (with stderr/error/exit_code fields) or a
     plain string. Returns (category_tag, fix_hint) or (None, None).
 
-    Shared by codex/scripts/compress-response and compress_response_hook.
+    Shared by codex/scripts/response-diagnostics and compress_response_hook.
     """
     if isinstance(tool_response, dict):
         text = str(tool_response.get("stderr", "")) + str(tool_response.get("error", ""))
