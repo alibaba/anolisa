@@ -313,6 +313,20 @@ The observability stream uses its own JSONL file, lock file, SQLite database,
 rotation limit, backup count, and 7-day SQLite retention policy; it does not
 write to `security-events.jsonl` or `security-events.db`.
 
+### Local JSONL File Permissions
+
+The local `security-events.jsonl`, `observability.jsonl`, and `cli.jsonl`
+writers create active data files and their advisory lock files with mode
+`0600`, independently of the process umask. Existing active data and lock
+files are tightened to `0600` when a writer opens them. On the first write,
+recognized timestamped backups retained from older releases are also tightened
+to `0600`; backups created by the current writer inherit the tightened mode.
+
+Unprivileged direct readers must run as the file-owning user. Operators with
+existing group/other read workflows should move those readers to the owning
+user or a controlled export path instead of broadening the source log
+permissions.
+
 ---
 
 ## Security
