@@ -491,7 +491,6 @@ def _start_daemon(
     env = os.environ.copy()
     env.pop("AGENT_SEC_DAEMON_SOCKET", None)
     env["AGENT_SEC_DATA_DIR"] = str(tmp_path / "data")
-    env["AGENT_SEC_DAEMON_PROMPT_PRELOAD"] = "0"
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg_config")
     env["XDG_DATA_HOME"] = str(tmp_path / "xdg_data")
     env["PYTHONUNBUFFERED"] = "1"
