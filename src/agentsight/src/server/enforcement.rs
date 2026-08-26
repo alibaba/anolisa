@@ -168,11 +168,20 @@ pub(super) async fn preview_agent_protection(
             );
         }
     };
-    let source_paths = discover_sensitive_files(&root, 3, 64);
+    // Run the recursive filesystem scan on the blocking pool so a large or slow
+    // directory never ties up an async Actix worker.
+    let workspace_path = root.to_string_lossy().into_owned();
+    let scan_root = root.clone();
+    let source_paths = web::block(move || discover_sensitive_files(&scan_root, 3, 64))
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("sensitive-file scan worker failed: {error}");
+            Vec::new()
+        });
     HttpResponse::Ok().json(ProtectionPreview {
         agent_id: agent.agent_name,
         root_pid: pid,
-        workspace_path: root.to_string_lossy().into_owned(),
+        workspace_path,
         source_paths,
         trusted_endpoints: Vec::new(),
         mode: PolicyMode::Audit,
@@ -244,17 +253,29 @@ fn common_source_directory(source_paths: &[String]) -> Option<PathBuf> {
 }
 
 fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<String> {
-    fn visit(root: &Path, depth: usize, max_depth: usize, limit: usize, out: &mut Vec<String>) {
-        if depth > max_depth || out.len() >= limit {
+    fn visit(
+        root: &Path,
+        depth: usize,
+        max_depth: usize,
+        limit: usize,
+        visited: &mut usize,
+        out: &mut Vec<String>,
+    ) {
+        // Bound the total directory entries inspected so a huge or slow tree
+        // with no matches still returns promptly instead of tying up the
+        // scanning worker indefinitely.
+        const MAX_ENTRIES_VISITED: usize = 20_000;
+        if depth > max_depth || out.len() >= limit || *visited >= MAX_ENTRIES_VISITED {
             return;
         }
         let Ok(entries) = fs::read_dir(root) else {
             return;
         };
         for entry in entries.flatten() {
-            if out.len() >= limit {
+            if out.len() >= limit || *visited >= MAX_ENTRIES_VISITED {
                 break;
             }
+            *visited += 1;
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -263,7 +284,7 @@ fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<
                     name.as_ref(),
                     ".git" | "node_modules" | "target" | "dist" | "build" | ".cache"
                 ) {
-                    visit(&path, depth + 1, max_depth, limit, out);
+                    visit(&path, depth + 1, max_depth, limit, visited, out);
                 }
             } else if path.is_file()
                 && (name == ".env"
@@ -279,7 +300,8 @@ fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<
         }
     }
     let mut files = Vec::new();
-    visit(root, 0, max_depth, limit, &mut files);
+    let mut visited = 0usize;
+    visit(root, 0, max_depth, limit, &mut visited, &mut files);
     files.sort();
     files.dedup();
     files
