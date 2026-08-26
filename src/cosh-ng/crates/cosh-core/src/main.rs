@@ -153,6 +153,9 @@ async fn run() {
             cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => eprintln!(
                 "[cosh-core] gateway-brokered-checkpoint-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
             ),
+            cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => eprintln!(
+                "[cosh-core] gateway-brokered-workspace-write-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
+            ),
             cli::ExecutionProfile::Legacy => unreachable!(
                 "legacy execution cannot enter the brokered launch validation branch"
             ),

@@ -1,17 +1,24 @@
 # Rendered for the selected package layout before systemd consumes the unit.
 [Unit]
 Description=COSH Gateway daemon (%i)
+Conflicts=cosh-gateway-acp@%i.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=exec
 User=%i
+# The required root-managed file selects the canonical workspace and may enable
+# Codex and checkpoint support. Empty standalone $COSH_GATEWAY_*_ARG variables
+# expand to no argument in ExecStart.
+Environment=COSH_GATEWAY_ACP_ARG=
+Environment=COSH_GATEWAY_CHECKPOINT_ARG=
+Environment=COSH_GATEWAY_SECURITY_AUDIT_ARG=
 EnvironmentFile=/etc/cosh/gateway-%i.env
 # Brokered Core disables its own session persistence but still initializes a
 # rolling logger. Keep that private write below the systemd-managed state root.
 Environment=HOME=/var/lib/cosh-gateway-%i/core-home
-ExecStart="{libexecdir}/cosh-ng/cosh-gateway" serve --systemd-unit=cosh-gateway@%i.service --socket=/run/cosh-gateway-%i/gateway.sock --database=/var/lib/cosh-gateway-%i/gateway.sqlite --core-executable="{libexecdir}/cosh-ng/cosh-core" --workspace=${COSH_GATEWAY_WORKSPACE}
+ExecStart="{libexecdir}/cosh-ng/cosh-gateway" serve --systemd-unit=cosh-gateway@%i.service --socket=/run/cosh-gateway-%i/gateway.sock --database=/var/lib/cosh-gateway-%i/gateway.sqlite --core-executable="{libexecdir}/cosh-ng/cosh-core" --workspace=${COSH_GATEWAY_WORKSPACE} $COSH_GATEWAY_ACP_ARG $COSH_GATEWAY_CHECKPOINT_ARG $COSH_GATEWAY_SECURITY_AUDIT_ARG
 RuntimeDirectory=cosh-gateway-%i
 RuntimeDirectoryMode=0700
 StateDirectory=cosh-gateway-%i
@@ -29,22 +36,16 @@ RestartSec=2
 
 NoNewPrivileges=true
 PrivateTmp=true
-# Replace the host device tree, then cover the separately mounted /dev/shm
-# with an explicitly read-only private filesystem. This closes writable paths
-# outside ProtectSystem without blocking Core's openat2 confinement.
-PrivateDevices=true
-TemporaryFileSystem=/dev/shm:ro,nosuid,nodev,noexec
-# The closed Core profile has no workspace write capability. Keeping every
-# non-systemd-managed path read-only preserves the effect of SUID/SGID
-# creation hardening without blocking Core's read-only openat2 confinement.
-ProtectSystem=strict
+# The unified service can host Core and an explicitly configured ACP adapter.
+# Protect system paths while leaving the admitted user workspace writable.
+ProtectSystem=full
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 InaccessiblePaths=/run/user
 # systemd implements this directive by rejecting every openat2 call because
-# seccomp cannot inspect its indirect mode argument. The strict read-only
-# filesystem boundary above leaves only private daemon state writable.
+# seccomp cannot inspect its indirect mode argument. Core requires openat2 for
+# its own target confinement, so the unified service cannot enable the filter.
 RestrictSUIDSGID=false
 LockPersonality=true
 

@@ -224,26 +224,66 @@ impl ObservationEmitter {
         }
     }
 
-    fn emit(&mut self, observation: AcpV1Observation) -> Result<(), AcpSessionDriverError> {
+    fn emit(
+        &mut self,
+        observation: AcpV1Observation,
+        cancel: &Receiver<()>,
+        deadline: Instant,
+        operation: &'static str,
+    ) -> Result<(), AcpSessionDriverError> {
         let sequence = self.next_sequence;
         let next_sequence = sequence
             .checked_add(1)
             .ok_or(AcpSessionDriverError::ObservationBackpressure)?;
         let bytes = serialized_observation_bytes(sequence, &observation);
-        let budget_lease = self
-            .budget
-            .reserve(bytes)
-            .map_err(|()| AcpSessionDriverError::ObservationBackpressure)?;
-        let event = AcpSessionEvent::Observation(AcpSessionObservation {
+        if bytes > self.budget.limit {
+            return Err(AcpSessionDriverError::ObservationBackpressure);
+        }
+        let budget_lease = loop {
+            match self.budget.reserve(bytes) {
+                Ok(lease) => break lease,
+                Err(()) => wait_for_observation_capacity(cancel, deadline, operation)?,
+            }
+        };
+        let mut event = AcpSessionEvent::Observation(AcpSessionObservation {
             sequence,
             observation,
             _budget_lease: Some(budget_lease),
         });
-        self.events
-            .try_send(event)
-            .map_err(|_| AcpSessionDriverError::ObservationBackpressure)?;
-        self.next_sequence = next_sequence;
-        Ok(())
+        loop {
+            match self.events.try_send(event) {
+                Ok(()) => {
+                    self.next_sequence = next_sequence;
+                    return Ok(());
+                }
+                Err(TrySendError::Full(returned)) => {
+                    event = returned;
+                    wait_for_observation_capacity(cancel, deadline, operation)?;
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(AcpSessionDriverError::ActorUnavailable);
+                }
+            }
+        }
+    }
+}
+
+fn wait_for_observation_capacity(
+    cancel: &Receiver<()>,
+    deadline: Instant,
+    operation: &'static str,
+) -> Result<(), AcpSessionDriverError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(AcpSessionDriverError::Deadline { operation });
+    }
+    let wait = remaining.min(CONTROL_POLL_INTERVAL);
+    match cancel.recv_timeout(wait) {
+        Ok(()) => Err(AcpSessionDriverError::Cancelled),
+        Err(RecvTimeoutError::Timeout) => Ok(()),
+        // The driver owns a sender for its entire lifetime, so disconnect is
+        // equivalent to losing the caller while the actor is backpressured.
+        Err(RecvTimeoutError::Disconnected) => Err(AcpSessionDriverError::Cancelled),
     }
 }
 

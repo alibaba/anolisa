@@ -41,6 +41,9 @@ struct BrokeredControlResponse<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum BrokeredControlResponseBody<'a> {
+    Allow {
+        behavior: &'static str,
+    },
     Deny {
         behavior: &'static str,
         message: &'a str,

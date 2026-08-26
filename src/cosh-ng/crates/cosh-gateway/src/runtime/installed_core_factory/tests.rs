@@ -101,8 +101,15 @@ fn admitted_with_profile(
         },
         intent: BoundedText::new("create a checkpoint").unwrap(),
         target: expected_target,
-        workspace: workspace_ref,
+        workspace: workspace_ref.clone(),
         capability_profile: profile.identity(),
+        launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+            BoundedText::new("create a checkpoint").unwrap(),
+            cosh_gateway_contracts::task::TaskRuntime::Core,
+            workspace_ref,
+            cosh_gateway_contracts::task::CheckpointPolicy::Off,
+            cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+        ),
         lease_generation: 9,
     };
     (factory, run)
@@ -212,6 +219,47 @@ fn factory_maps_the_checkpoint_selector_to_the_private_core_launch_profile() {
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
         "--headless --execution-profile gateway-brokered-checkpoint-v1|"
+    );
+    drop(port);
+}
+
+#[test]
+fn workspace_write_profile_requires_exact_selector_manifest_and_private_argv() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join("launch.marker");
+    let script = executable(root.path(), "fake-core.sh", &marker);
+    let core = root.path().join("cosh-core");
+    symlink("/bin/sh", &core).unwrap();
+    let (mut factory, mut run) = admitted_with_profile(
+        &root,
+        &core,
+        &script,
+        GatewayCapabilityProfile::workspace_write_v1(),
+        GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE,
+    );
+
+    assert_eq!(
+        admitted_execution_profile(&run).unwrap(),
+        GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE
+    );
+    run.runtime.profile = Some(BoundedName::new("gateway-brokered-workspace-write-v1").unwrap());
+    assert!(admitted_execution_profile(&run).is_err());
+    run.runtime.profile =
+        Some(BoundedName::new(GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE).unwrap());
+    run.capability_profile.manifest_digest = Digest::parse("b".repeat(64)).unwrap();
+    assert!(admitted_execution_profile(&run).is_err());
+    run.capability_profile = GatewayCapabilityProfile::workspace_write_v1().identity();
+
+    let port = factory.create(&run).unwrap();
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(marker).unwrap(),
+        "--headless --execution-profile gateway-brokered-workspace-write-v1|"
     );
     drop(port);
 }

@@ -246,12 +246,21 @@ fn require_provider_permission_context(
     expected_task_state: TaskState,
 ) -> Result<(), StoreError> {
     validate_permission_binding(approval, expected_permission)?;
-    let callback = expected_permission.callback.as_ref().ok_or_else(|| {
-        conflict("legacy provider permission binding cannot regain dispatch authority")
-    })?;
+    let callback_operation_digest = match (
+        &expected_permission.callback,
+        &expected_permission.core_callback,
+    ) {
+        (Some(callback), None) => &callback.normalized_operation_digest,
+        (None, Some(callback)) => &callback.normalized_operation_digest,
+        _ => {
+            return Err(conflict(
+                "live Runtime Permission must have exactly one callback",
+            ))
+        }
+    };
     if approval.actor_id != command.actor_id
         || approval.permission.as_ref() != Some(expected_permission)
-        || callback.normalized_operation_digest != approval.operation_digest
+        || *callback_operation_digest != approval.operation_digest
         || lease.task_id != approval.task_id
         || lease.run_id != approval.run_id
         || lease.generation != expected_permission.runtime_generation

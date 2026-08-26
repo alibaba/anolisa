@@ -227,6 +227,12 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
                 .map(|completion| completion.replacement.clone().into_boxed_str()),
         });
     }
+    if let Some(capture) = crate::slash::pending_task_form_capture(state) {
+        return Some(capture);
+    }
+    if let Some(capture) = crate::slash::pending_task_snapshot_capture(state) {
+        return Some(capture);
+    }
     if let Some(session_panel) = state.control.session().pending_panel() {
         return Some(RawInputCapture::Session {
             id: session_panel.id.clone(),

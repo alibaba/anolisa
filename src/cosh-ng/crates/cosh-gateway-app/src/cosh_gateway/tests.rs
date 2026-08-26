@@ -1,6 +1,7 @@
 use super::*;
 
 use super::acp_command::{abandoned_permission_fields, prompt_exit_code};
+use super::control::verify_expected_workspace;
 
 #[test]
 fn prompt_stop_reasons_map_to_stable_exit_codes() {
@@ -71,17 +72,26 @@ fn workspace_registration_path_is_lexically_normalized() {
 }
 
 #[test]
-fn delegated_acp_profile_selects_only_the_requested_adapter() {
-    let selector = super::serve::serve_runtime_selector(
-        GatewayCapabilityProfile::delegated_acp_v1(),
-        Profile::Codex,
+fn task_submit_fails_if_the_confirmed_workspace_changes() {
+    let workspace = cosh_gateway_contracts::common::WorkspaceRef {
+        scope_digest: cosh_gateway_contracts::common::Digest::parse(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap(),
+        display_name: None,
+    };
+
+    verify_expected_workspace(
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        &workspace,
     )
     .unwrap();
-    assert_eq!(selector.runtime.as_str(), "acp");
-    assert_eq!(
-        selector.profile.as_ref().map(BoundedName::as_str),
-        Some("codex")
-    );
+    let error = verify_expected_workspace(
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        &workspace,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Profile(_)));
 }
 
 #[test]
@@ -116,7 +126,7 @@ fn task_event_page_is_bounded_by_clap() {
 }
 
 #[test]
-fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
+fn task_submit_defaults_to_typed_core_auto_allow_all() {
     let defaults = Cli::try_parse_from([
         "cosh-gateway",
         "task",
@@ -132,26 +142,25 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
     else {
         panic!("expected task submit command");
     };
-    assert_eq!(defaults.runtime, "core");
-    assert_eq!(
-        defaults.runtime_profile,
-        GATEWAY_BROKERED_CORE_RUNTIME_PROFILE
-    );
-    assert_eq!(
-        task_only_target(),
-        GatewayCapabilityProfile::task_only_v1().governed_target()
-    );
+    assert!(matches!(defaults.runtime, TaskRuntimeArg::Core));
+    assert!(matches!(defaults.checkpoint, CheckpointArg::Auto));
+    assert!(matches!(
+        defaults.approval_policy,
+        ApprovalPolicyArg::AllowAll
+    ));
 
     let explicit = Cli::try_parse_from([
         "cosh-gateway",
         "task",
         "submit",
         "--idempotency-key",
-        "explicit-acp-key",
+        "explicit-codex-key",
         "--runtime",
-        "acp",
-        "--runtime-profile",
         "codex",
+        "--checkpoint",
+        "on",
+        "--approval-policy",
+        "allow-all",
     ])
     .unwrap();
     let Command::Task(TaskArgs {
@@ -161,17 +170,50 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
     else {
         panic!("expected explicit task submit command");
     };
-    assert_eq!(explicit.runtime, "acp");
-    assert_eq!(explicit.runtime_profile, "codex");
-    assert_eq!(
-        super::control::target_for_runtime_profile("codex").unwrap(),
-        GatewayCapabilityProfile::delegated_acp_v1().governed_target()
-    );
-    assert_eq!(
-        super::control::target_for_runtime_profile(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE)
-            .unwrap(),
-        GatewayCapabilityProfile::workspace_checkpoint_v1().governed_target()
-    );
+    assert!(matches!(explicit.runtime, TaskRuntimeArg::Codex));
+    assert!(matches!(explicit.checkpoint, CheckpointArg::On));
+    assert!(matches!(
+        explicit.approval_policy,
+        ApprovalPolicyArg::AllowAll
+    ));
+    assert!(Cli::try_parse_from([
+        "cosh-gateway",
+        "task",
+        "submit",
+        "--idempotency-key",
+        "raw-profile-key",
+        "--runtime-profile",
+        "codex",
+    ])
+    .is_err());
+}
+
+#[test]
+fn task_submit_rejects_a_noncanonical_expected_workspace_digest() {
+    assert!(Cli::try_parse_from([
+        "cosh-gateway",
+        "task",
+        "submit",
+        "--idempotency-key",
+        "stable-submit-key",
+        "--expected-workspace-digest",
+        "NOT-A-DIGEST",
+    ])
+    .is_err());
+}
+
+#[test]
+fn task_capabilities_is_a_first_class_command() {
+    let cli =
+        Cli::try_parse_from(["cosh-gateway", "task", "--output", "jsonl", "capabilities"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Task(TaskArgs {
+            output: Output::Jsonl,
+            command: TaskCommand::Capabilities,
+            ..
+        })
+    ));
 }
 
 #[test]

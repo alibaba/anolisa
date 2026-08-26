@@ -156,6 +156,7 @@ fn provider_permission(request: &CapabilityRequest) -> RuntimePermissionRef {
                 normalized_operation_digest: request.operation_digest.clone(),
             },
         ),
+        core_callback: None,
     }
 }
 

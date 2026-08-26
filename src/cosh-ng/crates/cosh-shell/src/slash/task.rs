@@ -11,42 +11,51 @@ use crate::config::Language;
 use crate::runtime::prelude::InlineState;
 use crate::slash::panel::render_notice_panel;
 
+mod form;
+mod snapshot;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use form::{pending_task_form_capture, render_task_form_actions, TaskFormState};
+pub(crate) use snapshot::{
+    pending_task_snapshot_capture, render_task_snapshot_actions, TaskSnapshotState,
+};
+
 const TASK_LIST_LIMIT: &str = "20";
 const TASK_EVENT_LIMIT: &str = "64";
 const MAX_TASK_EVENT_PAGES: usize = 256;
 const MAX_RENDERED_RESULT_BYTES: usize = 64 * 1024;
+const MAX_RENDERED_TASK_FIELD_BYTES: usize = 1024;
+const MAX_TASK_GOAL_BYTES: usize = 256 * 1024;
 
 pub(super) fn render_task_command<W: Write>(
     arguments: &str,
-    state: &InlineState,
+    state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<bool> {
-    let result = dispatch_task(arguments);
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return form::open_task_form(state, String::new(), output).map(|opened| !opened);
+    }
+    if trimmed == "snapshots" || trimmed.starts_with("snapshots ") {
+        return snapshot::render_snapshot_list_command(trimmed, state, output);
+    }
+    if trimmed == "snapshot" || trimmed.starts_with("snapshot ") {
+        return snapshot::render_snapshot_command(trimmed, state, output);
+    }
+    if !matches!(trimmed, "list" | "show") && !trimmed.starts_with("show ") {
+        return form::open_task_form(state, trimmed.to_owned(), output).map(|opened| !opened);
+    }
+
+    let result = dispatch_task_query(trimmed);
     let (title, body, footer) = match result {
-        Ok(TaskDisplay::Submitted { task_id }) => (
-            localized(state, "Persistent Task started", "持久 Task 已启动"),
-            vec![
-                format!("Task: {task_id}"),
-                localized(
-                    state,
-                    "Codex continues under the local Gateway after this SSH session exits. Run /task later to check it.",
-                    "退出当前 SSH 后，Codex 仍由本机 Gateway 托管。稍后重新进入 cosh，输入 /task 即可查看。",
-                )
-                .to_owned(),
-            ],
-            Some(localized(
-                state,
-                "Use /task show <task-id> for durable progress and results.",
-                "使用 /task show <task-id> 查看持久进度与结果。",
-            )),
-        ),
         Ok(TaskDisplay::List(lines)) => (
             localized(state, "Persistent Tasks", "持久 Tasks"),
             lines,
             Some(localized(
                 state,
-                "Submit with /task <goal>; inspect with /task show [task-id].",
-                "使用 /task <目标> 提交；使用 /task show [task-id] 查看。",
+                "Submit: /task <goal> · Details: /task show [task-id] · Snapshots: /task snapshots [task-id]",
+                "提交：/task <目标> · 详情：/task show [task-id] · 快照：/task snapshots [task-id]",
             )),
         ),
         Ok(TaskDisplay::Detail(lines)) => (
@@ -54,8 +63,8 @@ pub(super) fn render_task_command<W: Write>(
             lines,
             Some(localized(
                 state,
-                "This view is rebuilt from the Gateway's durable event cursor.",
-                "此视图由 Gateway 的持久事件游标重建。",
+                "Rebuilt from durable events · Snapshots: /task snapshots [task-id]",
+                "由持久事件重建 · 快照：/task snapshots [task-id]",
             )),
         ),
         Err(error) => (
@@ -63,8 +72,8 @@ pub(super) fn render_task_command<W: Write>(
             vec![safe_text(&error)],
             Some(localized(
                 state,
-                "Make sure the delegated-acp-v1 Gateway service is running.",
-                "请确认 delegated-acp-v1 Gateway 服务正在运行。",
+                "Make sure the unified local Gateway service is running.",
+                "请确认统一的本机 Gateway 服务正在运行。",
             )),
         ),
     };
@@ -73,14 +82,12 @@ pub(super) fn render_task_command<W: Write>(
 }
 
 enum TaskDisplay {
-    Submitted { task_id: String },
     List(Vec<String>),
     Detail(Vec<String>),
 }
 
-fn dispatch_task(arguments: &str) -> Result<TaskDisplay, String> {
-    let trimmed = arguments.trim();
-    if trimmed.is_empty() || trimmed == "list" {
+fn dispatch_task_query(trimmed: &str) -> Result<TaskDisplay, String> {
+    if trimmed == "list" {
         return list_tasks().map(TaskDisplay::List);
     }
     if trimmed == "show" {
@@ -93,11 +100,16 @@ fn dispatch_task(arguments: &str) -> Result<TaskDisplay, String> {
         }
         return show_task(task_id).map(TaskDisplay::Detail);
     }
-    submit_task(trimmed).map(|task_id| TaskDisplay::Submitted { task_id })
+    Err("usage: /task [list|show [task-id]|<goal>]".to_owned())
 }
 
-fn submit_task(goal: &str) -> Result<String, String> {
-    if goal.len() > 256 * 1024 {
+fn submit_task(
+    goal: &str,
+    runtime: form::TaskRuntime,
+    checkpoint: form::TaskCheckpoint,
+    expected_workspace_digest: &str,
+) -> Result<String, String> {
+    if goal.len() > MAX_TASK_GOAL_BYTES {
         return Err("Task goal exceeds the 256 KiB limit".to_owned());
     }
     let key = format!("cosh-shell-task-{}", Uuid::new_v4());
@@ -110,9 +122,13 @@ fn submit_task(goal: &str) -> Result<String, String> {
             "--idempotency-key",
             &key,
             "--runtime",
-            "acp",
-            "--runtime-profile",
-            "codex",
+            runtime.gateway_argument(),
+            "--checkpoint",
+            checkpoint.gateway_argument(),
+            "--approval-policy",
+            "allow-all",
+            "--expected-workspace-digest",
+            expected_workspace_digest,
         ],
         Some(goal.as_bytes()),
     )?;
@@ -122,6 +138,65 @@ fn submit_task(goal: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "Gateway response did not contain a Task ID".to_owned())
+}
+
+fn task_capabilities() -> Result<form::TaskCapabilities, String> {
+    let output = run_gateway(&["task", "--output", "jsonl", "capabilities"], None)?;
+    let value = json_output(&output)?;
+    form::parse_task_capabilities(&value)
+}
+
+fn render_submission_result<W: Write>(
+    result: Result<String, String>,
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let (title, body, footer) = match result {
+        Ok(task_id) => (
+            localized(state, "Persistent Task submitted", "持久 Task 已提交"),
+            vec![
+                format!("Task: {}", safe_task_field(&task_id)),
+                localized(
+                    state,
+                    "The Task continues under the local Gateway after this SSH session exits.",
+                    "退出当前 SSH 后，Task 仍由本机 Gateway 托管。",
+                )
+                .to_owned(),
+            ],
+            Some(localized(
+                state,
+                "Use /task show <task-id> for durable progress and results.",
+                "使用 /task show <task-id> 查看持久进度与结果。",
+            )),
+        ),
+        Err(error) => (
+            localized(state, "Persistent Task not submitted", "持久 Task 未提交"),
+            vec![safe_task_field(&error)],
+            Some(localized(
+                state,
+                "The Task was not submitted. Check the local Gateway and try again.",
+                "Task 未提交。请检查本机 Gateway 后重试。",
+            )),
+        ),
+    };
+    render_notice_panel(output, title, body, footer)
+}
+
+fn render_submission_progress<W: Write>(
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    render_notice_panel(
+        output,
+        localized(state, "Submitting persistent Task…", "正在提交持久 Task…"),
+        vec![localized(
+            state,
+            "Recording the launch policy with the local Gateway.",
+            "正在向本机 Gateway 记录启动策略。",
+        )
+        .to_owned()],
+        None,
+    )
 }
 
 fn list_tasks() -> Result<Vec<String>, String> {
@@ -147,10 +222,17 @@ fn list_tasks() -> Result<Vec<String>, String> {
     Ok(tasks
         .iter()
         .filter_map(|task| {
+            let launch = task.get("launch");
+            let launch_summary = launch.and_then(|launch| {
+                let runtime = launch.get("runtime").and_then(Value::as_str)?;
+                let checkpoint = launch.get("checkpoint").and_then(Value::as_str)?;
+                Some(format!("  {runtime}/{checkpoint}"))
+            });
             Some(format!(
-                "{}  {}  revision {}",
+                "{}  {}{}  revision {}",
                 task.get("task_id")?.as_str()?,
                 task.get("state")?.as_str()?,
+                launch_summary.as_deref().unwrap_or_default(),
                 task.get("revision")?.as_u64()?
             ))
         })
@@ -188,6 +270,35 @@ fn show_task(task_id: &str) -> Result<Vec<String>, String> {
             .and_then(Value::as_u64)
             .unwrap_or(0)
     )];
+    if let Some(launch) = projection.get("launch") {
+        let runtime = launch
+            .get("runtime")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let checkpoint = launch
+            .get("checkpoint")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let approval = launch
+            .get("approval")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "Runtime {runtime}  checkpoint {checkpoint}  approval {approval}"
+        ));
+    }
+    if let Some(baseline) = projection.get("baseline") {
+        let state = baseline
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let mut summary = format!("Baseline {state}");
+        if let Some(reason) = baseline.get("reason").and_then(Value::as_str) {
+            summary.push_str(": ");
+            summary.push_str(&safe_text(reason));
+        }
+        lines.push(summary);
+    }
     let mut cursor = 0_u64;
     let mut transcript = TaskTranscript::default();
     let mut truncated = false;
@@ -441,150 +552,21 @@ fn safe_text(value: &str) -> String {
         .replace(['\n', '\t'], " ")
 }
 
+fn safe_task_field(value: &str) -> String {
+    let value = safe_text(value);
+    if value.len() <= MAX_RENDERED_TASK_FIELD_BYTES {
+        return value;
+    }
+    let mut boundary = MAX_RENDERED_TASK_FIELD_BYTES;
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    format!("{}…", &value[..boundary])
+}
+
 fn localized<'a>(state: &InlineState, english: &'a str, chinese: &'a str) -> &'a str {
     match state.language {
         Language::EnUs => english,
         Language::ZhCn => chinese,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
-
-    use super::{list_tasks, safe_text, show_task, submit_task};
-
-    struct GatewayEnvironment;
-
-    impl GatewayEnvironment {
-        fn set(executable: &std::path::Path) -> Self {
-            std::env::set_var("COSH_GATEWAY_EXECUTABLE", executable);
-            std::env::set_var("COSH_GATEWAY_SOCKET", "/tmp/cosh-test-gateway.sock");
-            Self
-        }
-    }
-
-    impl Drop for GatewayEnvironment {
-        fn drop(&mut self) {
-            std::env::remove_var("COSH_GATEWAY_EXECUTABLE");
-            std::env::remove_var("COSH_GATEWAY_SOCKET");
-        }
-    }
-
-    fn environment_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
-    #[test]
-    fn task_submit_and_list_use_the_delegated_codex_defaults() {
-        let _lock = environment_lock();
-        let root = tempfile::tempdir().unwrap();
-        let gateway = root.path().join("cosh-gateway");
-        let argv = root.path().join("argv");
-        let goal = root.path().join("goal");
-        fs::write(
-            &gateway,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\ncase \" $* \" in *' submit '*) cat > '{}'; printf '%s\\n' '{{\"event\":\"task\",\"task_id\":\"tsk_00000000-0000-0000-0000-000000000001\"}}' ;; *) printf '%s\\n' '{{\"event\":\"tasks\",\"tasks\":[{{\"task_id\":\"tsk_00000000-0000-0000-0000-000000000001\",\"state\":\"succeeded\",\"revision\":7}}]}}' ;; esac\n",
-                argv.display(),
-                goal.display(),
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&gateway, fs::Permissions::from_mode(0o700)).unwrap();
-        let _environment = GatewayEnvironment::set(&gateway);
-
-        let task_id = submit_task("update dependencies").unwrap();
-        assert_eq!(task_id, "tsk_00000000-0000-0000-0000-000000000001");
-        assert_eq!(fs::read_to_string(&goal).unwrap(), "update dependencies");
-        let submitted_args = fs::read_to_string(&argv).unwrap();
-        assert!(submitted_args.contains("--runtime acp"), "{submitted_args}");
-        assert!(
-            submitted_args.contains("--runtime-profile codex"),
-            "{submitted_args}"
-        );
-        assert!(
-            submitted_args.contains("--socket /tmp/cosh-test-gateway.sock"),
-            "{submitted_args}"
-        );
-
-        assert_eq!(
-            list_tasks().unwrap(),
-            ["tsk_00000000-0000-0000-0000-000000000001  succeeded  revision 7"]
-        );
-    }
-
-    #[test]
-    fn task_show_replays_every_durable_event_page() {
-        let _lock = environment_lock();
-        let root = tempfile::tempdir().unwrap();
-        let gateway = root.path().join("cosh-gateway");
-        fs::write(
-            &gateway,
-            r#"#!/bin/sh
-case " $* " in
-  *' get '*)
-    printf '%s\n' '{"event":"task","task_id":"tsk_00000000-0000-0000-0000-000000000001","state":"succeeded","revision":5}'
-    ;;
-  *' events '*' --after 0 '*)
-    printf '%s\n' '{"event":"task_events","events":[{"revision":1,"event":{"event":"runtime_event_recorded","run_id":"run-1","update":{"update":"progress","summary":"我"}}},{"revision":2,"event":{"event":"runtime_event_recorded","run_id":"run-1","update":{"update":"progress","summary":"会"}}}],"has_more":true,"next_revision":2}'
-    ;;
-  *' events '*' --after 2 '*)
-    printf '%s\n' '{"event":"task_events","events":[{"revision":3,"event":{"event":"runtime_event_recorded","run_id":"run-1","update":{"update":"progress","summary":"读取"}}},{"revision":4,"event":{"event":"runtime_event_recorded","run_id":"run-1","update":{"update":"progress","summary":"文件"}}},{"revision":5,"event":{"event":"task_succeeded"}}],"has_more":false,"next_revision":5}'
-    ;;
-  *) exit 2 ;;
-esac
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&gateway, fs::Permissions::from_mode(0o700)).unwrap();
-        let _environment = GatewayEnvironment::set(&gateway);
-
-        assert_eq!(
-            show_task("tsk_00000000-0000-0000-0000-000000000001").unwrap(),
-            [
-                "tsk_00000000-0000-0000-0000-000000000001  succeeded  revision 5",
-                "我会读取文件",
-                "task succeeded",
-            ]
-        );
-    }
-
-    #[test]
-    fn task_transcript_breaks_paragraphs_at_non_progress_events() {
-        let mut transcript = super::TaskTranscript::default();
-        for event in [
-            serde_json::json!({
-                "event": "runtime_event_recorded",
-                "run_id": "run-1",
-                "update": {"update": "progress", "summary": "Run"}
-            }),
-            serde_json::json!({
-                "event": "runtime_event_recorded",
-                "run_id": "run-1",
-                "update": {"update": "progress", "summary": " tests"}
-            }),
-            serde_json::json!({"event": "approval_requested"}),
-            serde_json::json!({
-                "event": "runtime_event_recorded",
-                "run_id": "run-1",
-                "update": {"update": "progress", "summary": "Done\ncleanly"}
-            }),
-            serde_json::json!({"event": "task_succeeded"}),
-        ] {
-            transcript.record(&event);
-        }
-        assert_eq!(
-            transcript.finish().0,
-            ["Run tests", "Done cleanly", "task succeeded"]
-        );
-    }
-
-    #[test]
-    fn task_result_text_drops_terminal_controls() {
-        assert_eq!(safe_text("ok\u{1b}[31m\nnext"), "ok[31m next");
     }
 }

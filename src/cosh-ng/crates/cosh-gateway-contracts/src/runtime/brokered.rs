@@ -1,4 +1,3 @@
-
 /// Bounded token accounting reported by an Agent Runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeUsage {
@@ -136,6 +135,24 @@ pub struct ProviderPermissionCallbackV2 {
     pub normalized_operation_digest: crate::common::Digest,
 }
 
+/// Private cosh-core identities bound to one approval-gated tool callback.
+///
+/// Raw Core request and provider tool-use identifiers remain confined to the
+/// live bridge. This fence is deliberately distinct from the ACP callback
+/// contract because Core does not emit an ACP permission callback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorePermissionCallbackV1 {
+    /// Digest of the private Core control-request identifier.
+    pub private_request_id_digest: crate::common::Digest,
+    /// Digest of the provider-owned tool-use identifier carried by Core.
+    pub private_tool_use_id_digest: crate::common::Digest,
+    /// Digest of the complete normalized private callback carrier.
+    pub callback_payload_digest: crate::common::Digest,
+    /// Trusted bridge normalizer's operation digest for this callback.
+    pub normalized_operation_digest: crate::common::Digest,
+}
+
 /// Exact Runtime identity of one pending permission callback.
 ///
 /// Resolution callers must reproduce every field. A request identity alone is
@@ -163,6 +180,12 @@ pub struct RuntimePermissionRef {
     /// must never regain permission-dispatch authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback: Option<ProviderPermissionCallbackV2>,
+    /// Complete private Core callback fence emitted by workspace-write bridges.
+    ///
+    /// Legacy durable records deserialize with `None`. A live permission must
+    /// carry exactly one of `callback` or `core_callback` before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_callback: Option<CorePermissionCallbackV1>,
 }
 
 /// Exact Runtime identity of one pending COSH-brokered execution callback.

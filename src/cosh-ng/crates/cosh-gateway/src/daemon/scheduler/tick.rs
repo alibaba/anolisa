@@ -14,6 +14,10 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             return Ok(SchedulerTick::Idle);
         }
 
+        if let Some(tick) = self.process_pre_runtime_checkpoint(now_ms)? {
+            return Ok(tick);
+        }
+
         let lease_deadline = deadline(now_ms, self.config.lease_duration_ms)?;
         if let Some(view) = self.coordinator.recover_expired_active_run(
             self.brokered_driver.as_mut(),
@@ -45,6 +49,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             target: intent.target,
             workspace: intent.workspace,
             capability_profile: intent.capability_profile,
+            launch: intent.launch,
             lease_generation: lease.generation,
         };
         match self.factory.open(&scheduled) {

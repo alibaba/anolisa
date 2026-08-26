@@ -26,11 +26,10 @@ impl AgentRuntimePort for CoshCoreBridge {
             AgentRuntimeCommand::ResumeSession { .. } => Err(AgentRuntimePortError::Unsupported {
                 operation: "resume_session",
             }),
-            AgentRuntimeCommand::ResolvePermission { .. } => {
-                Err(AgentRuntimePortError::Unsupported {
-                    operation: "resolve_permission",
-                })
-            }
+            AgentRuntimeCommand::ResolvePermission {
+                request_id,
+                decision,
+            } => self.resolve_core_permission(request_id, decision),
             AgentRuntimeCommand::AcknowledgeBrokeredRequest { acknowledgement } => {
                 self.acknowledge_brokered_request(acknowledgement)
             }

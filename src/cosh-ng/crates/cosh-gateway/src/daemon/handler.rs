@@ -1,12 +1,14 @@
 //! Transport-neutral Task request admission and dispatch.
 
-use cosh_gateway_contracts::common::{ActorRef, RuntimeSelector, TargetRef, WorkspaceRef};
+use cosh_gateway_contracts::common::{ActorRef, WorkspaceRef};
 use cosh_gateway_contracts::ids::{ActorId, TaskId};
+use cosh_gateway_contracts::profile::GatewayCapabilityProfile;
 
 use super::{
     AppendTaskInput, CancelTask, GatewayDaemonError, GatewayRequest, GatewayResult,
-    ResolveApproval, ResolveApprovalForTask, RetryTask, SubmitTask, TaskEventPage, TaskListPage,
-    TaskView, GATEWAY_API_VERSION,
+    ResolveApproval, ResolveApprovalForTask, RetryTask, SubmitLaunch, SubmitTask,
+    SwitchTaskSnapshot, TaskEventPage, TaskLaunchCatalog, TaskListPage, TaskSnapshotList,
+    TaskSnapshotPreview, TaskSnapshotSwitchView, TaskView, GATEWAY_API_VERSION,
 };
 
 /// Mutating Task operations available to the transport handler.
@@ -18,6 +20,13 @@ pub(super) trait TaskCommandPort {
         request: SubmitTask,
     ) -> Result<TaskView, GatewayDaemonError>;
 
+    fn submit_launch(
+        &mut self,
+        actor: &ActorRef,
+        catalog: &TaskLaunchCatalog,
+        request: SubmitLaunch,
+    ) -> Result<TaskView, GatewayDaemonError>;
+
     fn cancel(
         &mut self,
         actor_id: &ActorId,
@@ -27,9 +36,7 @@ pub(super) trait TaskCommandPort {
     fn retry(
         &mut self,
         actor: &ActorRef,
-        target: &TargetRef,
-        workspace: &WorkspaceRef,
-        runtime: &RuntimeSelector,
+        catalog: &TaskLaunchCatalog,
         request: RetryTask,
     ) -> Result<TaskView, GatewayDaemonError>;
 
@@ -50,6 +57,12 @@ pub(super) trait TaskCommandPort {
         actor_id: &ActorId,
         request: AppendTaskInput,
     ) -> Result<TaskView, GatewayDaemonError>;
+
+    fn switch_snapshot(
+        &mut self,
+        actor_id: &ActorId,
+        request: SwitchTaskSnapshot,
+    ) -> Result<TaskSnapshotSwitchView, GatewayDaemonError>;
 }
 
 /// Read-only Task projections available to the transport handler.
@@ -65,13 +78,23 @@ pub(super) trait TaskProjectionPort {
         after_revision: Option<u64>,
         limit: u16,
     ) -> Result<TaskEventPage, GatewayDaemonError>;
+
+    fn snapshots(
+        &mut self,
+        actor_id: &ActorId,
+        task_id: &TaskId,
+    ) -> Result<TaskSnapshotList, GatewayDaemonError>;
+
+    fn snapshot_preview(
+        &mut self,
+        actor_id: &ActorId,
+        request: &super::InspectTaskSnapshot,
+    ) -> Result<TaskSnapshotPreview, GatewayDaemonError>;
 }
 
 /// Trusted admission values selected before request dispatch.
 pub(super) struct TaskAdmission<'a> {
-    pub(super) target: &'a TargetRef,
-    pub(super) workspace: &'a WorkspaceRef,
-    pub(super) runtime: &'a RuntimeSelector,
+    pub(super) catalog: &'a TaskLaunchCatalog,
 }
 
 /// Dispatches one authenticated request through Task command and projection ports.
@@ -91,10 +114,16 @@ where
     }
     match request {
         GatewayRequest::Ping { .. } => Ok(GatewayResult::Pong),
+        GatewayRequest::Capabilities { .. } => Ok(GatewayResult::Capabilities(
+            admission.catalog.capabilities(),
+        )),
+        GatewayRequest::SubmitLaunch { request, .. } => ports
+            .submit_launch(actor, admission.catalog, request)
+            .map(GatewayResult::Task),
         GatewayRequest::Submit { request, .. } => {
-            validate_submission_admission(&request, admission.target, admission.runtime)?;
+            validate_submission_admission(&request, admission.catalog)?;
             ports
-                .submit(actor, admission.workspace, request)
+                .submit(actor, &admission.catalog.default_workspace, request)
                 .map(GatewayResult::Task)
         }
         GatewayRequest::Get { task_id, .. } => ports
@@ -115,13 +144,7 @@ where
             .cancel(&actor.actor_id, request)
             .map(GatewayResult::Cancelled),
         GatewayRequest::Retry { request, .. } => ports
-            .retry(
-                actor,
-                admission.target,
-                admission.workspace,
-                admission.runtime,
-                request,
-            )
+            .retry(actor, admission.catalog, request)
             .map(GatewayResult::Retried),
         GatewayRequest::ResolveApproval { request, .. } => ports
             .resolve_approval(&actor.actor_id, request)
@@ -132,18 +155,28 @@ where
         GatewayRequest::AppendInput { request, .. } => ports
             .append_input(&actor.actor_id, request)
             .map(GatewayResult::InputAppended),
+        GatewayRequest::ListTaskSnapshots { task_id, .. } => ports
+            .snapshots(&actor.actor_id, &task_id)
+            .map(GatewayResult::TaskSnapshots),
+        GatewayRequest::PreviewTaskSnapshot { request, .. }
+        | GatewayRequest::DiffTaskSnapshot { request, .. } => ports
+            .snapshot_preview(&actor.actor_id, &request)
+            .map(GatewayResult::TaskSnapshotPreview),
+        GatewayRequest::SwitchTaskSnapshot { request, .. } => ports
+            .switch_snapshot(&actor.actor_id, request)
+            .map(GatewayResult::TaskSnapshotSwitched),
     }
 }
 
 pub(super) fn validate_submission_admission(
     request: &SubmitTask,
-    admitted_target: &TargetRef,
-    admitted_runtime: &RuntimeSelector,
-) -> Result<(), GatewayDaemonError> {
-    if request.target != *admitted_target || request.runtime != *admitted_runtime {
-        return Err(GatewayDaemonError::Protocol(
-            "Task target or Runtime is not admitted by this daemon".to_owned(),
-        ));
-    }
-    Ok(())
+    catalog: &TaskLaunchCatalog,
+) -> Result<GatewayCapabilityProfile, GatewayDaemonError> {
+    catalog
+        .legacy_admission(&request.target, &request.runtime)
+        .ok_or_else(|| {
+            GatewayDaemonError::Protocol(
+                "Task target or Runtime is not admitted by this daemon".to_owned(),
+            )
+        })
 }

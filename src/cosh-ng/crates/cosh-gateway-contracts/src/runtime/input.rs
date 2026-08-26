@@ -1,4 +1,3 @@
-
 /// Maximum number of choices carried by one Runtime input request.
 pub const MAX_RUNTIME_INPUT_OPTIONS: usize = 32;
 /// Maximum aggregate UTF-8 bytes across a question and all choice presentation.
@@ -291,6 +290,11 @@ pub enum RuntimePermissionDecision {
     /// This is observation-only authority. It must never create or consume a
     /// COSH execution permit because the side effect remains provider-owned.
     ProviderNativeAllowOnce,
+    /// Permit a non-ACP Runtime to execute its own local effect exactly once.
+    ///
+    /// This is observation-only authority and is intentionally distinct from
+    /// an ACP provider callback decision.
+    RuntimeNativeAllowOnce,
     /// Policy denied the Runtime request.
     Deny {
         /// Stable reason for denial.

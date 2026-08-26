@@ -24,6 +24,12 @@ use crate::ui::agent_render::{
 #[path = "question/cursor.rs"]
 mod cursor;
 pub use cursor::QuestionCursorPlacement;
+#[path = "question/presentation.rs"]
+mod presentation;
+pub use presentation::QuestionPanelPresentation;
+use presentation::{
+    instruction_rows as presented_instruction_rows, instruction_text as presented_instruction_text,
+};
 #[path = "question/styles.rs"]
 mod styles;
 use styles::{option_heading_style, option_marker_style, render_custom_option_lines};
@@ -68,8 +74,17 @@ impl RatatuiInlineRenderer {
         output: &mut W,
         model: QuestionPanelModel<'_>,
     ) -> io::Result<usize> {
+        self.write_question_panel_with_presentation(output, model, Default::default())
+    }
+
+    pub(crate) fn write_question_panel_with_presentation<W: Write>(
+        &self,
+        output: &mut W,
+        model: QuestionPanelModel<'_>,
+        presentation: QuestionPanelPresentation<'_>,
+    ) -> io::Result<usize> {
         let cursor = self.question_cursor_placement(&model);
-        let lines = self.question_panel_write_lines(model);
+        let lines = self.question_panel_write_lines_with_presentation(model, presentation);
         for line in &lines {
             writeln!(output, "{line}")?;
         }
@@ -87,30 +102,42 @@ impl RatatuiInlineRenderer {
     }
 
     pub fn question_panel_lines(&self, model: QuestionPanelModel<'_>) -> Vec<String> {
+        self.question_panel_lines_with_presentation(model, Default::default())
+    }
+
+    pub(crate) fn question_panel_lines_with_presentation(
+        &self,
+        model: QuestionPanelModel<'_>,
+        presentation: QuestionPanelPresentation<'_>,
+    ) -> Vec<String> {
         if self.plain {
-            return self.plain_question_panel_lines(model);
+            return self.plain_question_panel_lines(model, presentation);
         }
 
         let width = self.panel_standard_width();
         let i18n = self.i18n();
-        let height = question_panel_height(&model, i18n, width);
+        let height = question_panel_height(&model, i18n, width, presentation);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_question_panel(model, i18n, area, &mut buffer);
+        render_question_panel(model, i18n, presentation, area, &mut buffer);
         buffer_to_lines(&buffer, area)
     }
 
-    fn question_panel_write_lines(&self, model: QuestionPanelModel<'_>) -> Vec<String> {
+    fn question_panel_write_lines_with_presentation(
+        &self,
+        model: QuestionPanelModel<'_>,
+        presentation: QuestionPanelPresentation<'_>,
+    ) -> Vec<String> {
         if self.plain {
-            return self.plain_question_panel_lines(model);
+            return self.plain_question_panel_lines(model, presentation);
         }
 
         let width = self.panel_standard_width();
         let i18n = self.i18n();
-        let height = question_panel_height(&model, i18n, width);
+        let height = question_panel_height(&model, i18n, width, presentation);
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        render_question_panel(model, i18n, area, &mut buffer);
+        render_question_panel(model, i18n, presentation, area, &mut buffer);
         if self.styles_enabled() {
             buffer_to_styled_lines(&buffer, area)
         } else {
@@ -118,11 +145,18 @@ impl RatatuiInlineRenderer {
         }
     }
 
-    fn plain_question_panel_lines(&self, model: QuestionPanelModel<'_>) -> Vec<String> {
+    fn plain_question_panel_lines(
+        &self,
+        model: QuestionPanelModel<'_>,
+        presentation: QuestionPanelPresentation<'_>,
+    ) -> Vec<String> {
         let width = self.panel_standard_width();
         let content_width = question_content_width(width);
         let i18n = self.i18n();
-        let mut lines = vec![i18n.t(crate::MessageId::QuestionTitle).to_string()];
+        let mut lines = vec![presentation
+            .title
+            .unwrap_or_else(|| i18n.t(crate::MessageId::QuestionTitle))
+            .to_string()];
         lines.extend(wrap_plain_line(model.question, content_width));
         if !model.options.is_empty() {
             let selected = selected_option(&model);
@@ -147,13 +181,19 @@ impl RatatuiInlineRenderer {
                 lines.extend(wrap_option_text(&prefix, &label, content_width));
             }
             lines.extend(wrap_plain_line(
-                &instruction_text(&model, i18n, selected),
+                &presented_instruction_text(&model, i18n, selected, presentation, true),
                 content_width,
             ));
         } else {
             lines.extend(free_text_answer_lines(&model, i18n, content_width));
             lines.extend(wrap_plain_line(
-                &instruction_text(&model, i18n, selected_option(&model)),
+                &presented_instruction_text(
+                    &model,
+                    i18n,
+                    selected_option(&model),
+                    presentation,
+                    true,
+                ),
                 content_width,
             ));
         }
@@ -220,17 +260,23 @@ impl RatatuiInlineRenderer {
     }
 }
 
-fn question_panel_height(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: u16) -> u16 {
+fn question_panel_height(
+    model: &QuestionPanelModel<'_>,
+    i18n: crate::I18n,
+    width: u16,
+    presentation: QuestionPanelPresentation<'_>,
+) -> u16 {
     let content_width = question_content_width(width);
     question_rows(model, content_width)
         + option_rows(model, i18n, content_width)
-        + instruction_rows(model, i18n, content_width)
+        + presented_instruction_rows(model, i18n, content_width, presentation)
         + 2
 }
 
 fn render_question_panel(
     model: QuestionPanelModel<'_>,
     i18n: crate::I18n,
+    presentation: QuestionPanelPresentation<'_>,
     area: Rect,
     buffer: &mut Buffer,
 ) {
@@ -238,7 +284,12 @@ fn render_question_panel(
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(Span::styled(
-            format!(" {} ", i18n.t(crate::MessageId::QuestionTitle)),
+            format!(
+                " {} ",
+                presentation
+                    .title
+                    .unwrap_or_else(|| i18n.t(crate::MessageId::QuestionTitle))
+            ),
             Style::default().add_modifier(Modifier::BOLD),
         )))
         .border_set(ROUNDED)
@@ -249,7 +300,7 @@ fn render_question_panel(
     let content_width = inner.width as usize;
     let question_rows = question_rows(&model, content_width);
     let option_rows = option_rows(&model, i18n, content_width);
-    let instruction_rows = instruction_rows(&model, i18n, content_width);
+    let instruction_rows = presented_instruction_rows(&model, i18n, content_width, presentation);
     let chunks = Layout::vertical(vec![
         Constraint::Length(question_rows),
         Constraint::Length(option_rows),
@@ -293,10 +344,13 @@ fn render_question_panel(
             .render(chunks[1], buffer);
     }
 
-    let instruction = instruction_text(&model, i18n, selected_option);
+    let instruction =
+        presented_instruction_text(&model, i18n, selected_option, presentation, false);
     Paragraph::new(Line::from(vec![
         Span::styled(
-            i18n.t(crate::MessageId::QuestionKeysPrefix),
+            presentation
+                .keys_prefix
+                .unwrap_or_else(|| i18n.t(crate::MessageId::QuestionKeysPrefix)),
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(instruction),
@@ -333,46 +387,6 @@ fn option_rows(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: usize) 
             .map(|idx| wrapped_row_count(&custom_option_text(model, idx, i18n), width))
             .unwrap_or(0);
     1 + option_count
-}
-
-fn instruction_rows(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: usize) -> u16 {
-    wrapped_row_count(
-        &instruction_text(model, i18n, selected_option(model)),
-        width,
-    )
-}
-
-fn instruction_text(
-    model: &QuestionPanelModel<'_>,
-    i18n: crate::I18n,
-    selected_option: usize,
-) -> String {
-    if !model.options.is_empty() {
-        let custom_selected =
-            question_custom_answer_index(model.options.len(), model.allow_free_text)
-                .is_some_and(|idx| selected_option >= idx);
-        if model.selection_mode == QuestionSelectionMode::Multiple {
-            if custom_selected {
-                i18n.t(crate::MessageId::QuestionInstructionMoveTypeSend)
-                    .to_string()
-            } else {
-                i18n.t(crate::MessageId::QuestionInstructionMoveToggleSend)
-                    .to_string()
-            }
-        } else if custom_selected {
-            i18n.t(crate::MessageId::QuestionInstructionMoveTypeSend)
-                .to_string()
-        } else {
-            i18n.t(crate::MessageId::QuestionInstructionMoveSend)
-                .to_string()
-        }
-    } else if model.allow_free_text {
-        i18n.t(crate::MessageId::QuestionInstructionTypeSend)
-            .to_string()
-    } else {
-        i18n.t(crate::MessageId::QuestionInstructionNoAnswer)
-            .to_string()
-    }
 }
 
 fn wrapped_row_count(text: &str, width: usize) -> u16 {

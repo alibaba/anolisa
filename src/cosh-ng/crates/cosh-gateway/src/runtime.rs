@@ -46,7 +46,8 @@ pub use cosh_core_jsonl::{
     CoshCoreExecutionProfile, CoshCoreJsonlCodec, CoshCoreObservation, CoshCoreProtocolPhase,
     CoshCoreResult, CoshCoreShellContext, CoshCoreStreamEvent, CoshCoreSystemMessage,
     CoshCoreToolResult, CoshCoreUserTurn, BROKERED_COSH_CONTROL_PROTOCOL_VERSION,
-    GATEWAY_BROKERED_EXECUTION_PROFILE, PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
+    BROKERED_WORKSPACE_WRITE_COSH_CONTROL_PROTOCOL_VERSION, GATEWAY_BROKERED_EXECUTION_PROFILE,
+    GATEWAY_BROKERED_WORKSPACE_WRITE_EXECUTION_PROFILE, PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
 };
 pub use installed_acp_factory::{
     InstalledAcpRuntimePortFactory, LocalOsActorResolver, ResolvedWorkspace,
@@ -55,6 +56,7 @@ pub use installed_acp_factory::{
 pub use installed_core_factory::{
     InstalledBrokeredCoreRuntimePortFactory, ResolvedBrokeredCoreRuntimeProfile,
     GATEWAY_BROKERED_CORE_RUNTIME_PROFILE, GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
+    GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE,
 };
 pub use pinned_local::{PinnedDirectory, PinnedExecutable, PinnedFileIdentity};
 pub use port::{AgentRuntimePort, AgentRuntimePortError};

@@ -177,6 +177,11 @@ fn render_inline_guidance_from_batch<W: Write>(
         stop_active_agent_run_without_rendering(state, output)?;
         return Ok(());
     }
+    // Task forms reuse Question/TextQuestion captures. Route them first and
+    // reserve their answer events so QuestionConsumer never emits a false
+    // "No pending question" notice for Task-owned input.
+    crate::slash::render_task_form_actions(action_events, state, output, event_index_base)?;
+    crate::slash::render_task_snapshot_actions(action_events, state, output, event_index_base)?;
     let question_actions =
         QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
     RuntimeDispatcher::apply_actions(question_actions, state);

@@ -153,10 +153,25 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             .ok_or_else(no_active_run)?
             .pending_brokered = Some(PendingBrokered {
             brokered,
-            approval: plan.approval,
+            approval: plan.approval.clone(),
             resolution: None,
         });
-        Ok(SchedulerTick::Progressed(TaskView::from(&task)))
+        if scheduled.launch.approval == ApprovalPolicy::AllowAll {
+            let key = IdempotencyKey::new(format!(
+                "task-allow-all-brokered-{}",
+                plan.approval.approval_id.as_str()
+            ))
+            .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
+            self.resolve_approval(
+                &scheduled.actor.actor_id,
+                key,
+                &plan.approval.approval_id,
+                ApprovalDecision::Approve,
+                now_ms,
+            )
+        } else {
+            Ok(SchedulerTick::Progressed(TaskView::from(&task)))
+        }
     }
 
     fn replay_resolved_brokered_approval(

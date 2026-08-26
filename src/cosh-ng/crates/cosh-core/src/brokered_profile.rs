@@ -14,6 +14,10 @@ const WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST: &str =
     "6b3e7093e7b8656d4a7cf21faa85b9eed761ef415d002623cfc442f3ef3c8ae1";
 const WORKSPACE_CHECKPOINT_V1_RUNTIME_TOOLS: &[&str] =
     &["ask_user_question", "workspace_checkpoint_create"];
+const WORKSPACE_WRITE_V1_PROFILE: &str = "workspace-write-v1";
+const WORKSPACE_WRITE_V1_MANIFEST_DIGEST: &str =
+    "30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a";
+const WORKSPACE_WRITE_V1_RUNTIME_TOOLS: &[&str] = &["ask_user_question", "write_file"];
 
 /// Profile identity carried by the private brokered Core wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +46,14 @@ impl BrokeredCapabilityProfileIdentity {
         }
     }
 
+    /// Returns the closed workspace-write profile understood by private Core v5.
+    pub fn workspace_write_v1() -> Self {
+        Self {
+            profile_id: WORKSPACE_WRITE_V1_PROFILE.to_owned(),
+            manifest_digest: WORKSPACE_WRITE_V1_MANIFEST_DIGEST.to_owned(),
+        }
+    }
+
     /// Verifies that the requested identity is the closed private v3 profile.
     pub fn verify_task_only_v1(&self) -> Result<(), &'static str> {
         if self.profile_id != TASK_ONLY_V1_PROFILE {
@@ -59,6 +71,17 @@ impl BrokeredCapabilityProfileIdentity {
             return Err("capability profile identity does not match the brokered profile");
         }
         if self.manifest_digest != WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST {
+            return Err("capability profile manifest digest does not match the brokered profile");
+        }
+        Ok(())
+    }
+
+    /// Verifies that the requested identity is the closed private v5 profile.
+    pub fn verify_workspace_write_v1(&self) -> Result<(), &'static str> {
+        if self.profile_id != WORKSPACE_WRITE_V1_PROFILE {
+            return Err("capability profile identity does not match the brokered profile");
+        }
+        if self.manifest_digest != WORKSPACE_WRITE_V1_MANIFEST_DIGEST {
             return Err("capability profile manifest digest does not match the brokered profile");
         }
         Ok(())
@@ -84,6 +107,19 @@ pub fn verify_workspace_checkpoint_runtime_tools(actual: &[String]) -> Result<()
         .iter()
         .map(String::as_str)
         .eq(WORKSPACE_CHECKPOINT_V1_RUNTIME_TOOLS.iter().copied())
+    {
+        Ok(())
+    } else {
+        Err("Runtime tool inventory does not match the brokered capability profile")
+    }
+}
+
+/// Verifies the actual Core inventory against the private v5 workspace-write profile.
+pub fn verify_workspace_write_runtime_tools(actual: &[String]) -> Result<(), &'static str> {
+    if actual
+        .iter()
+        .map(String::as_str)
+        .eq(WORKSPACE_WRITE_V1_RUNTIME_TOOLS.iter().copied())
     {
         Ok(())
     } else {
@@ -151,6 +187,39 @@ mod tests {
             "ask_user_question".to_owned(),
             "workspace_checkpoint_create".to_owned(),
             "shell".to_owned(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn workspace_write_identity_and_inventory_are_exact() {
+        let identity = BrokeredCapabilityProfileIdentity::workspace_write_v1();
+        assert_eq!(identity.profile_id, "workspace-write-v1");
+        assert_eq!(identity.manifest_digest, WORKSPACE_WRITE_V1_MANIFEST_DIGEST);
+        assert_eq!(identity.verify_workspace_write_v1(), Ok(()));
+        assert_eq!(
+            verify_workspace_write_runtime_tools(&[
+                "ask_user_question".to_owned(),
+                "write_file".to_owned(),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn workspace_write_identity_and_inventory_reject_drift() {
+        let mut identity = BrokeredCapabilityProfileIdentity::workspace_write_v1();
+        identity.manifest_digest = "0".repeat(64);
+        assert!(identity.verify_workspace_write_v1().is_err());
+        assert!(verify_workspace_write_runtime_tools(&[
+            "write_file".to_owned(),
+            "ask_user_question".to_owned(),
+        ])
+        .is_err());
+        assert!(verify_workspace_write_runtime_tools(&[
+            "ask_user_question".to_owned(),
+            "write_file".to_owned(),
+            "edit".to_owned(),
         ])
         .is_err());
     }

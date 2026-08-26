@@ -12,6 +12,7 @@ use cosh_gateway_contracts::{
         ActorId, AgentSessionId, ApprovalId, CheckpointId, ExecutionId, InstallationId, RequestId,
         RunId, RuntimeBindingId, RuntimeInstanceId, RuntimeMessageId, TaskId, ToolUseId, TurnId,
     },
+    profile::GatewayCapabilityProfile,
     runtime::{
         AgentRuntimeCommand, AgentRuntimeEvent, BrokeredExecutionDelivery,
         BrokeredExecutionOutcome, BrokeredOperationResult, RuntimeInputResponse,
@@ -129,6 +130,44 @@ fn checkpoint_brokered_bridge(
     launch.arguments = vec!["-c".into(), script.into()];
     let mut config = CoshCoreBridgeConfig::new(launch, workspace_ref(), identity.clone())
         .gateway_brokered_checkpoint(CoshCoreBrokeredContext {
+            actor,
+            target: target.clone(),
+        });
+    config.prompt_timeout = Duration::from_secs(2);
+    config.shutdown_grace = Duration::from_millis(50);
+    (CoshCoreBridge::launch(config).unwrap(), identity, target)
+}
+
+#[cfg(unix)]
+fn workspace_write_brokered_bridge(
+    script: &str,
+    workspace: &tempfile::TempDir,
+) -> (CoshCoreBridge, CoshCoreBridgeIdentity, TargetRef) {
+    let actor = ActorRef {
+        actor_id: ActorId::new(),
+        actor_kind: ActorKind::Human,
+        issuer: BoundedName::new("local-os").unwrap(),
+        assurance: AuthAssurance::LocalOs,
+    };
+    let target = GatewayCapabilityProfile::workspace_write_v1().governed_target();
+    let identity = CoshCoreBridgeIdentity {
+        installation_id: InstallationId::new(),
+        actor_id: Some(actor.actor_id.clone()),
+        task_id: TaskId::new(),
+        run_id: RunId::new(),
+        agent_session_id: AgentSessionId::new(),
+        binding_id: RuntimeBindingId::new(),
+        runtime_instance_id: RuntimeInstanceId::new(),
+        runtime_generation: 13,
+        provider_authority: BoundedName::new("cosh-core").unwrap(),
+        provider_scope_digest: Digest::parse("1".repeat(64)).unwrap(),
+    };
+    let initialize_request_id = format!("init-{}", identity.runtime_instance_id);
+    let script = script.replace("__INIT_REQUEST_ID__", &initialize_request_id);
+    let mut launch = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
+    launch.arguments = vec!["-c".into(), script.into()];
+    let mut config = CoshCoreBridgeConfig::new(launch, workspace_ref(), identity.clone())
+        .gateway_brokered_workspace_write(CoshCoreBrokeredContext {
             actor,
             target: target.clone(),
         });
@@ -462,6 +501,133 @@ fn tool_identity_retention_is_bounded() {
         },
     });
     assert_eq!(result, Err(AgentRuntimePortError::Protocol));
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_write_profile_maps_one_core_fenced_permission_and_exact_allow() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+IFS= read -r line
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":5,"execution_profile":"gateway_brokered_workspace_write_v1","capability_profile":{"profile_id":"workspace-write-v1","manifest_digest":"30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a"},"runtime_tools":["ask_user_question","write_file"],"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_shell_evidence_tool":false,"can_handle_approval_receipt":true,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
+IFS= read -r line
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"write-call","name":"write_file"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_stop"}}'
+printf '%s\n' '{"type":"control_request","request_id":"private-write-1","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"path":"1.txt","content":"one"},"tool_use_id":"write-call"}}'
+IFS= read -r line
+test "$line" = '{"type":"control_response","response":{"subtype":"success","request_id":"private-write-1","response":{"behavior":"allow"}}}' || exit 51
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"provider-session"}'
+"#;
+    let (mut bridge, identity, expected_target) =
+        workspace_write_brokered_bridge(script, &workspace);
+    open(&mut bridge, &identity);
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let turn_id = TurnId::new();
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::Prompt {
+                run_id: identity.run_id.clone(),
+                turn_id: turn_id.clone(),
+                input: vec![ContentPart::Text {
+                    text: BoundedText::new("write one file").unwrap(),
+                }],
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let tool = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let AgentRuntimeEvent::ToolInvocationUpdated { snapshot } = tool.event else {
+        panic!("expected write tool observation")
+    };
+    assert_eq!(
+        snapshot.authority,
+        ExecutionAuthority::ProviderNativeObserved
+    );
+
+    let permission = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let AgentRuntimeEvent::CoreExecutionPermissionRequested {
+        turn_id: observed_turn,
+        tool_use_id,
+        request,
+        callback,
+        ..
+    } = permission.event
+    else {
+        panic!("expected Core-specific permission event")
+    };
+    assert_eq!(observed_turn, turn_id);
+    assert_eq!(tool_use_id, snapshot.tool_use_id);
+    assert_eq!(request.target, expected_target);
+    assert_eq!(request.operation.namespace.as_str(), "workspace");
+    assert_eq!(request.operation.name.as_str(), "write_file");
+    assert_eq!(request.requested_scope.resource.as_str(), "workspace");
+    assert_eq!(request.requested_scope.access.as_str(), "write");
+    assert_eq!(
+        callback.normalized_operation_digest,
+        request.operation_digest
+    );
+    assert_eq!(
+        callback.private_request_id_digest,
+        sha256_digest(b"private-write-1")
+    );
+    assert_eq!(
+        callback.private_tool_use_id_digest,
+        sha256_digest(b"write-call")
+    );
+
+    assert_eq!(
+        bridge.dispatch(
+            AgentRuntimeCommand::ResolvePermission {
+                request_id: RequestId::new(),
+                decision: RuntimePermissionDecision::RuntimeNativeAllowOnce,
+            },
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::IdentityMismatch)
+    );
+    assert_eq!(
+        bridge.dispatch(
+            AgentRuntimeCommand::ResolvePermission {
+                request_id: request.request_id.clone(),
+                decision: RuntimePermissionDecision::ProviderNativeAllowOnce,
+            },
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::Unsupported {
+            operation: "provider-native permission decision"
+        })
+    );
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::ResolvePermission {
+                request_id: request.request_id,
+                decision: RuntimePermissionDecision::RuntimeNativeAllowOnce,
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    let completed = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        completed.event,
+        AgentRuntimeEvent::Completed {
+            turn_id: observed,
+            outcome: TurnOutcome::Completed
+        } if observed == turn_id
+    ));
 }
 
 #[cfg(unix)]

@@ -19,12 +19,13 @@ use cosh_gateway_contracts::common::{
     RuntimeSelector, TargetRef, WorkspaceRef,
 };
 use cosh_gateway_contracts::error::{ContractError, ErrorCategory};
-use cosh_gateway_contracts::ids::{ActorId, InputRequestId, InstallationId, RunId, TaskId};
-use cosh_gateway_contracts::profile::{
-    GatewayCapabilityProfile, GatewayCapabilityProfileId, GatewayCapabilityProfileIdentity,
+use cosh_gateway_contracts::ids::{
+    ActorId, CheckpointId, DeliveryId, InputRequestId, InstallationId, RunId, TaskId,
 };
+use cosh_gateway_contracts::profile::{GatewayCapabilityProfile, GatewayCapabilityProfileIdentity};
 use cosh_gateway_contracts::task::{
-    ApprovalAbandonCause, CancelReason, CancellationStage, RuntimeUpdate, TaskEvent, TaskState,
+    ApprovalAbandonCause, ApprovalPolicy, CancelReason, CancellationStage, CheckpointPolicy,
+    RuntimeUpdate, SuspensionCode, TaskEvent, TaskLaunchSpecV1, TaskRuntime, TaskState,
 };
 use cosh_gateway_contracts::{
     capability::{
@@ -44,18 +45,28 @@ use crate::capability::DurableApprovalCoordinator;
 use crate::storage::{
     ApprovalRecord, ApprovalState, BrokeredRequestRecord, BrokeredRuntimeDispatchKind,
     BrokeredRuntimeDispatchRecord, BrokeredRuntimeDispatchState, ExecutionCompletion, LeaseClaim,
-    LeaseCommand, LedgerCommand, LedgerOutcome, OutboxClaim, ProviderPermissionDispatchDecision,
-    ProviderPermissionDispatchState, RuntimeInputDispatchRecord, RuntimeInputDispatchState,
-    RuntimeInputRequestRecord, RuntimeInputRequestState, SqliteTaskStore, StoreError, TaskCommit,
+    LeaseCommand, LedgerCommand, LedgerOutcome, OutboxClaim, OutboxIntent,
+    ProviderPermissionDispatchDecision, ProviderPermissionDispatchState,
+    RuntimeInputDispatchRecord, RuntimeInputDispatchState, RuntimeInputRequestRecord,
+    RuntimeInputRequestState, SqliteTaskStore, StoreError, TaskCommit,
 };
 
-use super::{digest_json, GatewayDaemonError, TaskCoordinator, TaskView};
+use super::{
+    digest_json, sha256_digest, ApprovalCheckpointCreateResult, ApprovalCheckpointEvidence,
+    ApprovalCheckpointPrepareResult, ApprovalCheckpointReconcileResult, ApprovalCheckpointRecord,
+    ApprovalCheckpointRequest, ApprovalCheckpointState, GatewayDaemonError,
+    PreRuntimeBaselineState, PreRuntimeCheckpointBinding, PreRuntimeCheckpointCreateResult,
+    PreRuntimeCheckpointDriver, PreRuntimeCheckpointReconcileResult, PreRuntimeCheckpointRequest,
+    TaskCoordinator, TaskLaunchCatalog, TaskView,
+};
 
 // Scheduler phases remain one private state-machine namespace so the file
 // split does not turn transition helpers into a wider internal API.
 include!("scheduler/model.rs");
 include!("scheduler/lifecycle.rs");
 include!("scheduler/tick.rs");
+include!("scheduler/checkpoint.rs");
+include!("scheduler/approval_checkpoint.rs");
 include!("scheduler/approval.rs");
 include!("scheduler/input.rs");
 include!("scheduler/poll.rs");

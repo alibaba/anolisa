@@ -62,23 +62,107 @@ fn dropping_consumed_observation_releases_aggregate_byte_budget() {
     let budget = serialized_observation_bytes(1, &first);
     let (sender, receiver) = mpsc::sync_channel(EVENT_CAPACITY);
     let mut emitter = ObservationEmitter::new(sender, budget);
-    emitter.emit(first).unwrap();
-    assert!(matches!(
-        emitter.emit(chunk("same-sized")),
-        Err(AcpSessionDriverError::ObservationBackpressure)
-    ));
+    let (_cancel_sender, cancel_receiver) = mpsc::sync_channel(CONTROL_CAPACITY);
+    emitter
+        .emit(
+            first,
+            &cancel_receiver,
+            Instant::now() + Duration::from_secs(1),
+            "test",
+        )
+        .unwrap();
 
     let AcpSessionEvent::Observation(first) = receiver.recv().unwrap() else {
         panic!("expected observation")
     };
     assert_eq!(first.sequence, 1);
+    let producer = std::thread::spawn(move || {
+        emitter.emit(
+            chunk("same-sized"),
+            &cancel_receiver,
+            Instant::now() + Duration::from_secs(1),
+            "test",
+        )
+    });
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(20)),
+        Err(RecvTimeoutError::Timeout)
+    ));
     drop(first);
 
-    emitter.emit(chunk("same-sized")).unwrap();
     let AcpSessionEvent::Observation(second) = receiver.recv().unwrap() else {
         panic!("expected observation")
     };
     assert_eq!(second.sequence, 2);
+    producer.join().unwrap().unwrap();
+}
+
+#[test]
+fn observation_backpressure_is_cancellation_responsive() {
+    fn chunk(text: &str) -> AcpV1Observation {
+        AcpV1Observation::SessionUpdate {
+            session_id: "session".to_owned(),
+            update: serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}
+            }),
+        }
+    }
+
+    let (sender, _receiver) = mpsc::sync_channel(1);
+    let mut emitter = ObservationEmitter::new(sender, DEFAULT_EVENT_BYTE_BUDGET);
+    let (cancel_sender, cancel_receiver) = mpsc::sync_channel(CONTROL_CAPACITY);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    emitter
+        .emit(chunk("first"), &cancel_receiver, deadline, "prompt")
+        .unwrap();
+    let producer = std::thread::spawn(move || {
+        emitter.emit(chunk("second"), &cancel_receiver, deadline, "prompt")
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+    cancel_sender.send(()).unwrap();
+    assert!(matches!(
+        producer.join().unwrap(),
+        Err(AcpSessionDriverError::Cancelled)
+    ));
+}
+
+#[test]
+fn observation_backpressure_preserves_operation_deadline() {
+    fn chunk(text: &str) -> AcpV1Observation {
+        AcpV1Observation::SessionUpdate {
+            session_id: "session".to_owned(),
+            update: serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}
+            }),
+        }
+    }
+
+    let (sender, _receiver) = mpsc::sync_channel(1);
+    let mut emitter = ObservationEmitter::new(sender, DEFAULT_EVENT_BYTE_BUDGET);
+    let (_cancel_sender, cancel_receiver) = mpsc::sync_channel(CONTROL_CAPACITY);
+    emitter
+        .emit(
+            chunk("first"),
+            &cancel_receiver,
+            Instant::now() + Duration::from_secs(1),
+            "prompt",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        emitter.emit(
+            chunk("second"),
+            &cancel_receiver,
+            Instant::now() + Duration::from_millis(20),
+            "prompt",
+        ),
+        Err(AcpSessionDriverError::Deadline {
+            operation: "prompt"
+        })
+    ));
 }
 
 #[cfg(unix)]
@@ -498,6 +582,7 @@ while IFS= read -r line; do
              printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"chunk"}}}}'
              i=$((i + 1))
            done
+           printf '%s\n' 'not-json'
            ;;
     esac
 done
@@ -516,14 +601,15 @@ done
             AcpSessionEvent::Observation(observation) => sequences.push(observation.sequence),
             AcpSessionEvent::Terminal(terminal) => {
                 assert_eq!(terminal.kind, AcpSessionTerminalKind::Failed);
+                assert!(terminal
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| !detail.contains("observation queue")));
                 break;
             }
         }
     }
-    assert_eq!(
-        sequences,
-        (3..=(EVENT_CAPACITY as u64 + 2)).collect::<Vec<_>>()
-    );
+    assert_eq!(sequences, (3..=42).collect::<Vec<_>>());
     assert!(driver.receive_timeout(Duration::from_millis(20)).is_err());
 }
 

@@ -159,7 +159,7 @@ fn verify_with(
 }
 
 fn validate_unit_name(unit: &str) -> Result<(), RuntimeContainmentError> {
-    let instance = ["cosh-gateway@", "cosh-gateway-acp@"]
+    let instance = ["cosh-gateway@", "cosh-gateway-acp@", "cosh-gateway-dev@"]
         .into_iter()
         .find_map(|prefix| unit.strip_prefix(prefix))
         .and_then(|value| value.strip_suffix(".service"));
@@ -446,6 +446,16 @@ mod tests {
         assert!(
             LinuxSystemdContainmentVerifier::validate_unit("cosh-gateway-acp@root.service").is_ok()
         );
+        assert!(LinuxSystemdContainmentVerifier::validate_unit(
+            "cosh-gateway-dev@developer.service"
+        )
+        .is_ok());
+        assert!(matches!(
+            LinuxSystemdContainmentVerifier::validate_unit(
+                "cosh-gateway-dev-extra@developer.service"
+            ),
+            Err(RuntimeContainmentError::InvalidUnit)
+        ));
         assert!(matches!(
             LinuxSystemdContainmentVerifier::validate_unit("cosh-gateway-untrusted@root.service"),
             Err(RuntimeContainmentError::InvalidUnit)

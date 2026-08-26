@@ -51,6 +51,48 @@ fn initialized_checkpoint_codec() -> CoshCoreJsonlCodec {
     codec
 }
 
+fn workspace_write_acknowledgement(request_id: &str) -> Value {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "subtype": "initialize",
+                "protocol_version": 5,
+                "execution_profile": "gateway_brokered_workspace_write_v1",
+                "capability_profile": {
+                    "profile_id": "workspace-write-v1",
+                    "manifest_digest": "30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a"
+                },
+                "runtime_tools": ["ask_user_question", "write_file"],
+                "capabilities": {
+                    "can_handle_can_use_tool": true,
+                    "can_handle_host_executed_shell_tool_result": false,
+                    "can_handle_shell_evidence_tool": false,
+                    "can_handle_approval_receipt": true,
+                    "can_handle_brokered_ask_user": true
+                }
+            }
+        }
+    })
+}
+
+fn initialized_workspace_write_codec() -> CoshCoreJsonlCodec {
+    let mut codec =
+        CoshCoreJsonlCodec::new_gateway_brokered_workspace_write("gateway-init-v5", 4096).unwrap();
+    codec.initialize_frame(false).unwrap();
+    assert!(matches!(
+        codec
+            .decode_frame(&fixture_frame(&workspace_write_acknowledgement(
+                "gateway-init-v5"
+            )))
+            .unwrap(),
+        CoshCoreObservation::Initialized(_)
+    ));
+    codec
+}
+
 #[test]
 fn initialize_is_explicitly_private_version_one() {
     let corpus = private_wire_corpus();
@@ -83,6 +125,74 @@ fn checkpoint_initialize_is_exact_private_v4_and_profile_bound() {
     assert_eq!(
         value,
         corpus["gateway_brokered_checkpoint_v4"]["initialize_request"]
+    );
+}
+
+#[test]
+fn workspace_write_initialize_is_exact_private_v5_and_profile_bound() {
+    let mut codec =
+        CoshCoreJsonlCodec::new_gateway_brokered_workspace_write("gateway-init-v5", 4096).unwrap();
+    let frame = codec.initialize_frame(false).unwrap();
+    let value: Value = serde_json::from_str(frame.trim()).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "type": "control_request",
+            "request_id": "gateway-init-v5",
+            "request": {
+                "subtype": "initialize",
+                "fire_session_start": false,
+                "protocol_version": 5,
+                "execution_profile": "gateway_brokered_workspace_write_v1",
+                "capability_profile": {
+                    "profile_id": "workspace-write-v1",
+                    "manifest_digest": "30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a"
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn workspace_write_initialize_rejects_inventory_or_profile_drift() {
+    for runtime_tools in [
+        serde_json::json!(["write_file", "ask_user_question"]),
+        serde_json::json!(["ask_user_question"]),
+    ] {
+        let mut acknowledgement = workspace_write_acknowledgement("gateway-init-v5");
+        acknowledgement["response"]["response"]["runtime_tools"] = runtime_tools;
+        let mut codec =
+            CoshCoreJsonlCodec::new_gateway_brokered_workspace_write("gateway-init-v5", 4096)
+                .unwrap();
+        codec.initialize_frame(false).unwrap();
+        assert!(matches!(
+            codec.decode_frame(&fixture_frame(&acknowledgement)),
+            Err(CoshCoreCodecError::InitializeCapabilitiesInvalid)
+        ));
+    }
+
+    let mut acknowledgement = workspace_write_acknowledgement("gateway-init-v5");
+    acknowledgement["response"]["response"]["capability_profile"]["profile_id"] =
+        serde_json::json!("task-only-v1");
+    let mut codec =
+        CoshCoreJsonlCodec::new_gateway_brokered_workspace_write("gateway-init-v5", 4096).unwrap();
+    codec.initialize_frame(false).unwrap();
+    assert!(matches!(
+        codec.decode_frame(&fixture_frame(&acknowledgement)),
+        Err(CoshCoreCodecError::InitializeProfileMismatch)
+    ));
+}
+
+#[test]
+fn workspace_write_permission_frames_are_closed_golden_shapes() {
+    let codec = initialized_workspace_write_codec();
+    assert_eq!(
+        codec.core_permission_allow_frame("write-1").unwrap(),
+        "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"write-1\",\"response\":{\"behavior\":\"allow\"}}}\n"
+    );
+    assert_eq!(
+        codec.brokered_denial_frame("write-1", "Denied safely").unwrap(),
+        "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"write-1\",\"response\":{\"behavior\":\"deny\",\"message\":\"Denied safely\"}}}\n"
     );
 }
 

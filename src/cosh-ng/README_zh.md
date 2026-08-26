@@ -118,100 +118,151 @@ printf '%s\n' 'summarize the current changes' | \
 `--permission deny` 时，COSH 会取消请求。Once-only decision 会以脱敏 evidence 形式记录到
 private local state directory。
 
-### 把持久 Task 委托给本机 Codex
+### 运行持久托管 Task
 
-先安装一次 pinned ACP Adapter，再为一个 canonical workspace 启用 package 提供的
-delegated Task unit。Environment file 同时提供 npm Adapter 查找 Node 所需的绝对 PATH。
+Linux 贡献者可以在 cosh-ng 源码根目录构建并启动独立的 development instance，
+再进入已经连接该 instance 的 Shell。
+
+```bash
+./scripts/managed-task-dev.sh setup
+./scripts/managed-task-dev.sh shell
+```
+
+默认 setup 会构建 debug binary，接纳当前目录的 canonical path，始终启用
+Core，并且只在检测到已安装的 pinned Adapter 时加入 Codex。它不会下载
+Adapter，会复用有效 `CODEX_HOME`，并在不回显值的情况下快照 allowlist 中的
+environment variable。Core-only setup 只继承 8 种大小写 proxy variable。启用 Codex
+后，setup 还会继承 Codex 文档变量、pinned Adapter 支持的变量，以及
+`CODEX_HOME/config.toml` 声明且当前已设置的 provider variable。含凭据的 variable
+会触发警告，因为 root-owned mode `0600` Gateway/Adapter environment 可能被同 UID
+process 读取。默认不配置 checkpoint provider。该 profile 使用 `allow_all`，具有
+持久的逐 effect decision。托管 Core 只提供 pinned workspace 内经过 approval 的
+`write_file`；Codex 则在 package containment 内保留 service-user authority，并不受
+workspace filesystem sandbox 限制。
+
+Development 使用独立的 transient `cosh-gateway-dev@` unit、socket、state 与
+environment file，不会覆盖 package file。Host 重启后需要重新运行 `setup`。
+Production Gateway 正在运行时会默认拒绝，除非显式传入
+`--stop-production`。状态查询、停止、清理、override 与完整安全边界请阅读
+[用户手册](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)。
+
+Package 只安装一个按账号命名的 `cosh-gateway@.service`。Core 始终可配置；Codex ACP
+以及用于 Runtime 启动前 baseline 和 effect 前 barrier 的 checkpoint provider，都是同一
+daemon、socket 和 SQLite database 的可选输入。不要再并行启动已经退役的
+`cosh-gateway-acp@` unit。
+
+Service 要求 root 管理的 environment file 提供准确 canonical workspace。Task workspace
+与 private StateDirectory 分离，避免 Runtime 的访问范围扩大到 Gateway database 与 audit
+state。要绑定当前项目，请创建该文件并启动 service。
+
+```bash
+sudo install -d -m 0755 /etc/cosh
+printf 'COSH_GATEWAY_WORKSPACE=%s\n' "$(pwd -P)" | \
+  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+sudo chmod 0600 "/etc/cosh/gateway-$USER.env"
+sudo systemctl enable --now "cosh-gateway@$USER.service"
+```
+
+Unit 把 Core `HOME` 固定为 `/var/lib/cosh-gateway-$USER/core-home`。User-level
+provider config 放在
+`/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`，也可以使用
+`/etc/copilot-shell/config.toml` system configuration。
+
+如需选择 Codex，请安装 pinned Adapter，并增加一个完整的可选参数。必需的 environment file
+属于可信 operator configuration，应保持 root-owned。路径包含空格时，要把整个参数写成一个
+systemd word。
 
 ```bash
 adapter_root="$HOME/.local/lib/cosh/acp-adapters"
 install -d -m 0700 "$(dirname "$adapter_root")"
 ./scripts/install-acp-adapters.sh --prefix "$adapter_root"
 node_bin="$(dirname "$(command -v node)")"
-sudo install -d -m 0755 /etc/cosh
-printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
-  "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
-  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
-sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+sudo tee -a "/etc/cosh/gateway-$USER.env" >/dev/null <<EOF
+COSH_GATEWAY_ACP_ARG='--acp-adapter=$adapter_root/node_modules/.bin/codex-acp'
+PATH=$node_bin:/usr/bin:/bin
+EOF
+sudo systemctl restart "cosh-gateway@$USER.service"
 ```
 
-安装脚本与 Gateway compatibility profile 将
-`@agentclientprotocol/codex-acp` 精确 pin 到 `1.6.2`；Adapter 上报其他 package
-identity 或版本时会被拒绝。在这个 profile 下，typed terminal failure 或 prompt 完成前的
-transport EOF 会使 Task 失败，不会把 partial output 当成成功。这些 failure path 已有自动化
-deterministic coverage，但修正后尚未重跑真实 Codex provider 与 ECS 流程。
+如需显示 checkpoint 选项，请配置绝对 `ws-ckpt` socket。Security audit path 可选，并且
+只能和 checkpoint socket 一起配置。Unit 不依赖 `ws-ckpt`，所以没有这些可选配置时，
+Core-only 启动不会被阻塞。
 
-日常入口始终是交互式 Shell。目标可以包含空格和引号，Shell 会自动生成 idempotency key，
-并选择 `acp`/`codex`。
+```bash
+sudo tee -a "/etc/cosh/gateway-$USER.env" >/dev/null <<EOF
+COSH_GATEWAY_CHECKPOINT_ARG=--checkpoint-socket=/run/ws-ckpt/ws-ckpt.sock
+COSH_GATEWAY_SECURITY_AUDIT_ARG=--security-audit=/var/lib/cosh-gateway-$USER/security-audit.jsonl
+EOF
+sudo systemctl restart "cosh-gateway@$USER.service"
+```
+
+在 `cosh` 中，`/task` 会打开表单，依次选择 goal、Runtime（`Core (cosh-core)` 或
+`Codex (ACP)`）与 checkpoint policy（`Auto`、`On` 或 `Off`）。`/task <目标>` 打开
+同一表单并预填 goal。确认页会显示 canonical workspace 与持久默认审批策略
+`allow_all`。不可用的 Runtime 不能选择；checkpoint provider 不可用时也不会提供 `On`。
 
 ```text
 /task 升级依赖、修改代码并运行测试
 /task
+/task list
 /task show
 /task show <tsk_UUID>
 ```
 
-提交后会立即返回持久 Task ID。Gateway 与 Codex Adapter 由 system service 持有，不依赖
-SSH session 或 Shell process，因此断开后 Task 仍会继续。重新连接后，`/task` 列出最近
-Task，`/task show` 从持久 event page 重建最近 Task 的结果。
+提交后立即返回持久 Task ID。Gateway 与 Runtime 由 system service 持有，因此退出 Shell
+或断开 SSH 不会取消 Task。重新登录后，用 `/task list` 或 `/task show [task-id]` 查看
+持久进度与结果。Gateway restart 仍不能恢复 ACP session。对应 Run 会进入 suspended 或
+lost，必须显式 retry，Gateway 不会静默重放 prompt。
 
-选择 `delegated-acp-v1` 表示把整个 Task 显式授权给 pinned Codex ACP Adapter。
-相关 provider callback 只会收到 `allow_once`，COSH 不创建 `allow_always` rule。Adapter
-拥有本地用户真实的 OS authority，并不受 workspace sandbox 限制。Gateway 会持久化生命周期
-和 Adapter 上报的输出，但不会为 ACP native tool 声明精确 side-effect receipt。Checkpoint
-是可选能力，不属于首个 delegated profile。
+Checkpoint policy 同时作用于 Runtime 启动前和获批的 Runtime-native effect 之前。
+只有 provider 明确报告 unavailable 或 known-no-effect 时，`Auto` 才记录持久 downgrade；
+error 或 uncertain result 不能授权 effect。`On` 只有在存在准确 checkpoint evidence 时才
+放行，否则 fail closed；`Off` 既不创建 baseline，也不建立逐 effect barrier。
 
-Package Gateway 提供一个受 containment 保护的本地 Task Plane。它只在 package 安装的
-systemd service 中调度 Task；即使 Gateway hard crash，该 service 仍负责完整 Runtime
-cgroup。`gateway-brokered-v1` Core profile 有意保持为 task-only：Runtime inventory
-只有无副作用的 `ask_user_question` capability。该 profile 不提供 checkpoint、write、Shell、
-slash command 或 remote capability，也没有需要 approval 的 side effect。单独的 loopback-only
-Web beta 可以展示同一套 authorized Task API，但它不是 Runtime capability。
+托管 Core 使用封闭的 `workspace-write-v1` profile，只提供 `ask_user_question` 与
+`write_file`。每次写入都是 Runtime-native permission decision；只有 Gateway approval
+以及所需 checkpoint barrier 完成后，Core 才会执行。现有 pinned workspace filesystem
+会拒绝 parent traversal、workspace 外绝对路径与 symlink escape。该 profile 不准入 Shell、
+edit、read、MCP、Skills 或 Hooks。
 
-配置 workspace 并启动按 account 命名的 Gateway instance。
+与 active Task 准确关联的 Codex permission callback 会收到 `allow_once`，COSH 不会创建
+provider `allow_always` rule。Codex 原生 effect 不经过 Gateway broker，在 package systemd
+containment 内使用 service user authority，并没有 workspace filesystem sandbox。Effect
+前 barrier 只覆盖 ACP 确实上报 permission callback 的 effect；没有 callback 的 Codex 原生
+effect 不在覆盖范围内。Unit 会把 system path 设为只读，使用 private `/tmp` 并隐藏
+`/run/user`，因此这不表示不受限制的 host authority。Gateway 只持久化有界 Runtime
+event，不会为 ACP 原生工具声称准确 side-effect receipt。
 
-Core unit 默认把 `HOME` 设为 private systemd `StateDirectory` 下的
-`/var/lib/cosh-gateway-%i/core-home`。Core provider config 可以放在
-`/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`，也可以使用
-`/etc/copilot-shell/config.toml` system config。不要在
-`/etc/cosh/gateway-$USER.env` 中把 `HOME` 覆盖到该 `StateDirectory` 之外；environment
-file 的优先级高于安全默认值，而 admitted workspace 与其他 host path 在这个 unit 中是只读的。
+Task 运行时即可通过 Task-owned surface 列出、预览或比较其 proven-created snapshot。
+切换只在 Task terminal 后可用，并会重新校验 preview 与 Task revision，先创建 pinned recovery
+snapshot，再让 `ws-ckpt` 应用完整 ID。daemon 会在 workspace write lock 内、紧邻 rollback
+前重新计算 live diff；generation 或 diff 变化会在 backend 执行前被拒绝。Task active、snapshot
+不属于该 Task、preview 已过期或 workspace 被占用时都会 fail closed。
 
 ```bash
-sudo install -d -m 0755 /etc/cosh
-sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"
-printf '%s\n' \
-  "COSH_GATEWAY_WORKSPACE=$PWD" | \
-  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
-sudo systemctl start "cosh-gateway@$USER.service"
+/task snapshots <task-id>
+/task snapshot preview <task-id> <snapshot-id>
+/task snapshot diff <task-id> <snapshot-id>
+/task snapshot switch <task-id> <snapshot-id>
+```
+
+Automation 可以使用等价的 submission contract。
+
+```bash
 gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
 printf '%s\n' 'inspect the failed service' | \
   cosh agent task --socket "$gateway_socket" submit \
-    --runtime core --runtime-profile gateway-brokered-v1 \
+    --runtime core --checkpoint auto --approval-policy allow-all \
     --idempotency-key '<stable-submit-key>'
+cosh agent task --socket "$gateway_socket" list --limit 20
 cosh agent task --socket "$gateway_socket" get '<tsk_UUID>'
 cosh agent task --socket "$gateway_socket" events '<tsk_UUID>' --after 0 --limit 64
-printf '%s\n' 'answer to the question' | \
-  cosh agent task --socket "$gateway_socket" append '<tsk_UUID>' \
-    --input-request-id '<inp_UUID>' --idempotency-key '<stable-input-key>'
-cosh agent task --socket "$gateway_socket" cancel '<tsk_UUID>' --run-id '<run_UUID>' \
-  --idempotency-key '<stable-cancel-key>'
-cosh agent task --socket "$gateway_socket" retry '<tsk_UUID>' \
-  --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
 ```
 
-Daemon 首次启动时会生成并持久化 installation ID，也可以通过 `--installation-id` 显式 provision。
-请把示例中的 typed identifier 替换成 Task API 返回的值。Task API 支持 `submit`、`list`、`get`、
-`events`、`append`、`cancel`、`retry` 和 `resolve-approval`；`append` 用来回答 profile
-产生的 durable user question，而这个 profile 不会产生 approval request。
-Direct `serve` 没有 package unit 的 live `--systemd-unit` proof 时会 fail closed；Gateway 会在
-创建 socket 或 database 前完成校验。Daemon 会把 Unix peer 认证为 local OS actor，将 target
-固定为 `workspace/cosh/task-only-v1`，只接受 `core`/`gateway-brokered-v1` selector 与配置的
-canonical workspace，持久化 Runtime binding，并由 scheduler 投递 durable Outbox work。
-`doctor` 与 `run` 仍是非托管的一次性 ACP interoperability command。Production `serve`
-只通过精确的 `delegated-acp-v1` profile 和 pinned configured Adapter 接纳 ACP。
-Task Plane 不依赖 checkpoint 或 ws-ckpt。现有的 `cosh-cli checkpoint` 命令仍是独立的
-system-operations 路径，不会为这个 Gateway profile 增加 checkpoint capability。
+Task API 还支持 `append`、`cancel`、`retry` 与 `resolve-approval`。`doctor` 和 `run`
+仍是独立且无 containment 的一次性 ACP interoperability command。本增量尚未重跑真实
+Codex provider、SSH 断开流程与 systemd service，当前验收依据是 deterministic local
+coverage。
 
 如果想在 Browser 中继续本机 Task，请在 admitted workspace 之外创建 private token file，
 并在另一个 Terminal 启动 presentation adapter。

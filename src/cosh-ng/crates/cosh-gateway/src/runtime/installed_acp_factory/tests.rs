@@ -86,6 +86,25 @@ fn workspace_resolution_is_canonical_and_target_exact() {
 }
 
 #[test]
+fn workspace_resolution_accepts_only_the_closed_target_set() {
+    let root = TempDir::new().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let primary = target("primary");
+    let recovery = target("recovery");
+    let resolver =
+        TrustedWorkspaceResolver::new_for_targets([primary.clone(), recovery.clone()], &workspace)
+            .unwrap();
+
+    assert_eq!(
+        resolver.resolve(&primary).unwrap().reference(),
+        resolver.resolve(&recovery).unwrap().reference()
+    );
+    assert!(resolver.resolve(&target("substituted")).is_err());
+    assert!(TrustedWorkspaceResolver::new_for_targets([], &workspace).is_err());
+}
+
+#[test]
 fn workspace_reference_changes_when_the_path_is_replaced() {
     let root = TempDir::new().unwrap();
     let workspace = root.path().join("workspace");
@@ -236,9 +255,16 @@ fn factory_rejects_untrusted_run_fields_before_launch() {
         },
         intent: BoundedText::new("read status").unwrap(),
         target: expected_target,
-        workspace: workspace_ref,
+        workspace: workspace_ref.clone(),
         capability_profile:
             cosh_gateway_contracts::profile::GatewayCapabilityProfile::task_only_v1().identity(),
+        launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+            BoundedText::new("read status").unwrap(),
+            cosh_gateway_contracts::task::TaskRuntime::Codex,
+            workspace_ref,
+            cosh_gateway_contracts::task::CheckpointPolicy::Off,
+            cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+        ),
         lease_generation: 1,
     };
     let error = match factory.create(&run) {
@@ -276,9 +302,16 @@ fn factory_launches_a_valid_explicit_adapter_without_opening_a_session() {
         },
         intent: BoundedText::new("read status").unwrap(),
         target: expected_target,
-        workspace: workspace_ref,
+        workspace: workspace_ref.clone(),
         capability_profile:
             cosh_gateway_contracts::profile::GatewayCapabilityProfile::task_only_v1().identity(),
+        launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+            BoundedText::new("read status").unwrap(),
+            cosh_gateway_contracts::task::TaskRuntime::Codex,
+            workspace_ref,
+            cosh_gateway_contracts::task::CheckpointPolicy::Off,
+            cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+        ),
         lease_generation: 7,
     };
 
@@ -321,9 +354,16 @@ fn factory_pins_a_symlink_target_at_admission() {
         },
         intent: BoundedText::new("read status").unwrap(),
         target: expected_target,
-        workspace: workspace_ref,
+        workspace: workspace_ref.clone(),
         capability_profile:
             cosh_gateway_contracts::profile::GatewayCapabilityProfile::task_only_v1().identity(),
+        launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+            BoundedText::new("read status").unwrap(),
+            cosh_gateway_contracts::task::TaskRuntime::Codex,
+            workspace_ref,
+            cosh_gateway_contracts::task::CheckpointPolicy::Off,
+            cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+        ),
         lease_generation: 7,
     };
 

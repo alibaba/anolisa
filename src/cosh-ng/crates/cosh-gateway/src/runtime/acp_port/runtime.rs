@@ -146,6 +146,11 @@ impl AcpAgentRuntime {
             .ok_or(AgentRuntimePortError::IdentityMismatch)?;
         let selected = match decision {
             RuntimePermissionDecision::ProviderNativeAllowOnce => pending.allow_once,
+            RuntimePermissionDecision::RuntimeNativeAllowOnce => {
+                return Err(AgentRuntimePortError::Unsupported {
+                    operation: "runtime-native permission decision",
+                });
+            }
             RuntimePermissionDecision::Deny { .. } => pending.reject_once,
         };
         let missing_one_shot = selected.is_none();
@@ -312,12 +317,11 @@ impl AcpAgentRuntime {
                 }
                 self.tools.release_turn(&session_id, &turn_id);
                 self.state = PortState::SessionOpen;
-                let abandoned_event = self.event(
-                    AgentRuntimeEvent::ExecutionPermissionsAbandoned {
+                let abandoned_event =
+                    self.event(AgentRuntimeEvent::ExecutionPermissionsAbandoned {
                         turn_id: turn_id.clone(),
                         request_ids: abandoned,
-                    },
-                );
+                    });
                 let cancelled = self.event(AgentRuntimeEvent::Completed {
                     turn_id,
                     outcome: TurnOutcome::Cancelled,

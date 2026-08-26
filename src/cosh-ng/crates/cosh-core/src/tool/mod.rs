@@ -336,6 +336,13 @@ impl ToolRegistry {
         registry
     }
 
+    /// Returns the closed approval-gated workspace-write inventory for v5.
+    pub(crate) fn gateway_brokered_workspace_write_v1() -> Self {
+        let mut registry = Self::gateway_brokered_v1();
+        registry.register(Box::new(write_file::WriteFileTool));
+        registry
+    }
+
     pub fn with_shell_evidence(mut self) -> Self {
         self.register(Box::new(
             read_file::ReadFileTool::with_shell_evidence_tool_guidance(),
@@ -549,6 +556,26 @@ mod tests {
         );
         for forbidden_local_effect in ["shell", "write_file", "edit", "save_memory"] {
             assert!(!registry.contains(forbidden_local_effect));
+        }
+    }
+
+    #[test]
+    fn workspace_write_inventory_is_explicit_and_local() {
+        let registry = ToolRegistry::gateway_brokered_workspace_write_v1();
+
+        assert_eq!(registry.names(), vec!["ask_user_question", "write_file"]);
+        assert_eq!(
+            registry.get("write_file").map(Tool::kind),
+            Some(ToolKind::FileEdit)
+        );
+        for forbidden_tool in [
+            "shell",
+            "edit",
+            "read_file",
+            "save_memory",
+            "workspace_checkpoint_create",
+        ] {
+            assert!(!registry.contains(forbidden_tool));
         }
     }
 

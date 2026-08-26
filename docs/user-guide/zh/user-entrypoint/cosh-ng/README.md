@@ -41,14 +41,110 @@ cosh-ng 是一个 AI 原生 Linux 终端，默认使用 Enhanced Assisted，也�
 | 使用现有的 `cosh-cli` 工作区快照命令 | [工作区快照](cli/checkpoint.md) |
 | 查看策略决策和审计事件 | [安全审计](cli/audit.md) |
 
-工作区快照页面描述现有的 `cosh-cli` system-operations 路径。它与 task-only
-Gateway profile 独立；package Gateway 不依赖 `ws-ckpt`，也不暴露 checkpoint operation。
+工作区快照页面描述 direct `cosh-cli` system-operations 路径。托管 Task 可以从已配置的
+`ws-ckpt` provider 请求 Runtime 启动前 workspace baseline，以及每个获批 Runtime
+permission effect 前的持久 barrier。`/task` 只列出持久归属于该 Task 的 checkpoint，
+运行时即可 read-only preview、diff；recovery-protected switch 要求 Task terminal。
 
 ## 集成与自动化
 
 `cosh agent` launcher 由 ANOLISA 与 RPM package 安装。源码构建与 unified build 只安装
 Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` 或
 `cosh-gateway task`，其余参数保持不变。
+
+### 从源码构建快速启动托管 Task
+
+在使用 systemd 的 Linux 上，贡献者和测试者可以从 cosh-ng 源码根目录准备独立的
+development Gateway，再进入已连接该 Gateway 的 Shell。
+
+```bash
+./scripts/managed-task-dev.sh setup
+./scripts/managed-task-dev.sh shell
+```
+
+命令接口如下。
+
+```text
+managed-task-dev.sh setup [--no-build] [--workspace ABSOLUTE_DIR] [--codex auto|off|required] [--environment inherit|off] [--checkpoint-socket PATH] [--stop-production] [--dry-run]
+managed-task-dev.sh shell [--dry-run]
+managed-task-dev.sh status [--dry-run]
+managed-task-dev.sh down [--dry-run]
+managed-task-dev.sh uninstall [--purge-state] [--dry-run]
+```
+
+默认情况下，`setup` 使用 debug profile 构建必需的源码 binary，并只接纳
+`$PWD` 的 canonical form 作为 workspace。使用 `--no-build` 可复用现有 debug
+artifact，使用 `--workspace ABSOLUTE_DIR` 可选择其他绝对 workspace。Setup 成功后
+只会执行 Gateway capabilities smoke check，不会提交 Task。
+
+Core 始终会被配置。默认的 `--codex auto` 只会在找到已安装的 pinned
+`codex-acp` Adapter 时加入 Codex。Setup 绝不会调用 `npx`、下载 Adapter 或修改
+已安装的 bundle。它复用调用用户的有效 `CODEX_HOME`。使用 `--codex off`
+可只启用 Core，使用 `--codex required` 可在 pinned Adapter 未就绪时让 setup 失败。
+复用 `CODEX_HOME` 也意味着复用其中的登录状态与配置。
+
+默认的 `--environment inherit` 只复制 allowlist 中当前已设置的 variable，并保留
+每个 variable 的当前值。Core-only setup 只复制 8 种大小写 proxy form：`HTTP_PROXY`、
+`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`、`http_proxy`、`https_proxy`、
+`all_proxy` 与 `no_proxy`。
+
+启用 Codex Adapter 后，setup 还会复制以下当前已设置的 Codex 文档变量及
+pinned Adapter 支持的变量：
+`CODEX_SQLITE_HOME`、`CODEX_API_KEY`、`CODEX_ACCESS_TOKEN`、`OPENAI_API_KEY`、
+`OPENAI_FEDERATION_RULE_ID`、`OPENAI_IDENTITY_TOKEN_FILE`、
+`OPENAI_WORKLOAD_IDENTITY_CONTEXT`、`CODEX_CA_CERTIFICATE`、`SSL_CERT_FILE` 与
+`RUST_LOG`。它会读取 `CODEX_HOME/config.toml`，并复制每个
+`model_providers.*.env_key` 和 `model_providers.*.env_http_headers` 值指定且当前已设置的
+variable。
+
+Setup 不会复制整个用户 environment，不会通配继承所有 `CODEX_*` variable，也不会
+自动继承 installer control、`LD_*`、`DYLD_*` 或 SSH variable。大小写 proxy form
+会分别保留自己的当前值，含 userinfo 的 proxy URL 也会保留。Setup 和 status
+只显示继承的 variable name，绝不显示值。复制含 userinfo 的 proxy、API/access token、
+workload identity value 或 provider 声明的 variable 时，setup 会警告凭据已被快照到
+root-owned mode `0600` Gateway/Adapter environment，并可能被同 UID process 读取。使用
+`--environment off` 可以完全关闭快照。应当把生成的 environment 作为 private
+configuration 保护。Proxy 或凭据值改变后请重新运行 `setup`，正在运行的 service
+不会继承后续的 Shell 变化。
+
+默认不配置 Checkpoint support。只在需要公开现有 `ws-ckpt` provider 时，才通过
+`--checkpoint-socket PATH` 传入绝对路径且已存在的 Unix socket；否则 development
+catalog 中没有 checkpoint provider。`Auto` 只针对这个已知 unavailable 状态记录明确的
+持久 downgrade 并继续，`Off` 会跳过两个 checkpoint stage。没有 provider 时 Shell form
+不提供 `On`；API 中请求 `On` 会 fail closed。Checkpoint error 与 uncertain outcome
+绝不能授权 launch 或 effect。
+
+该 development profile 使用持久 `allow_all` policy 进行本地源码测试。托管 Core 只提供
+`ask_user_question` 与需要 approval 的 `write_file`；pinned workspace 会拒绝 traversal、
+workspace 外 absolute path 与 symlink escape。关联的 Codex permission callback 会得到
+单次允许，但 Codex 使用 service user authority，不受 workspace filesystem sandbox 限制。
+提交前请检查 goal 与 canonical workspace，不要对不可信的 repository 或 prompt 使用该
+profile。
+
+该 helper 不会覆盖已安装的 package。它使用 `/run/systemd/system` 下的 transient
+`cosh-gateway-dev@.service` template、`/run/cosh-gateway-dev-$USER.env` environment file、
+`/run/cosh-gateway-dev-$USER/gateway.sock` socket、
+`/usr/local/libexec/cosh-ng-dev/$USER` 下的 staged binary，以及
+`/var/lib/cosh-gateway-dev-$USER` 下的持久 Task state。Unit 与 environment 不会跨开机保留，
+所以 host 重启后请重新运行 `setup`。如果 package 安装的 production 或 legacy Gateway
+正在为同一账号运行，setup 会拒绝且不会修改它。
+只有在确实想停止 production 并把该账号切换到 development instance 时，才使用
+`--stop-production`。`--dry-run` 可预览对应的 setup、Shell、status、shutdown 或
+uninstall operation。
+
+使用以下命令管理生命周期。
+
+```bash
+./scripts/managed-task-dev.sh status
+./scripts/managed-task-dev.sh down
+./scripts/managed-task-dev.sh uninstall
+./scripts/managed-task-dev.sh uninstall --purge-state
+```
+
+`down` 会停止 transient instance，但保留它的 integration 与数据。`uninstall` 会移除
+development integration，但保留持久 Task state，供后续 setup 复用。增加
+`--purge-state` 还会删除该 development state。两种形式都不会卸载 cosh-ng，
+也不会删除 production Gateway state。
 
 - 运行 `cosh agent doctor --profile codex --workspace "$PWD"` 检查单独安装的
   `codex-acp`，也可以选择 `claude-code` profile 检查 `claude-agent-acp`。把有界 UTF-8
@@ -64,85 +160,120 @@ Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` �
   prompt、tool argument、option label、session identifier 或 workspace path。Evidence
   持久化失败时，callback 会被取消且本轮运行失败。这两个 direct ACP command 不受 durable
   Gateway Task Plane 治理，适合本地 interoperability。
-- 如果要把一个持久 Task 完整委托给本机 Codex，先安装 pinned `codex-acp` bundle，并为一个
-  canonical workspace 启用 package 提供的 `cosh-gateway-acp@.service`。它的 environment
-  file 需要 `COSH_GATEWAY_WORKSPACE`、绝对路径 `COSH_GATEWAY_ACP_ADAPTER`，以及能够找到
-  Node 的 `PATH`。先完成一次配置。
+- 对持久托管 Task，启动 package 唯一提供的 system-scope
+  `cosh-gateway@.service`。必需的 root 管理 environment file 选择准确 canonical
+  workspace。请将 workspace 保持在 service private StateDirectory
+  `/var/lib/cosh-gateway-$USER` 之外，避免 Runtime 访问范围扩大到 Gateway database 与
+  audit state。
+
+  ```bash
+  sudo install -d -m 0755 /etc/cosh
+  printf 'COSH_GATEWAY_WORKSPACE=%s\n' "$(pwd -P)" | \
+    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+  sudo chmod 0600 "/etc/cosh/gateway-$USER.env"
+  sudo systemctl enable --now "cosh-gateway@$USER.service"
+  gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
+  ```
+
+  Unit 把 Core `HOME` 固定为 `/var/lib/cosh-gateway-$USER/core-home`。User-level
+  provider config 放在
+  `/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`，也可以使用
+  `/etc/copilot-shell/config.toml` system configuration。
+
+  Service 始终传入 package Core executable。独立的可选 argument variable 可以把 Codex
+  与 checkpoint 加入同一 daemon、socket、database 与 canonical workspace。空 variable
+  会展开为零个 argument，所以省略可选参数不会阻塞 Core-only 启动。不要启动已经退役的
+  `cosh-gateway-acp@` unit；unified unit 会与其冲突，避免两个 daemon 争用同一 state。
+- 如需选择 Codex，请安装 pinned Adapter，并追加绝对 executable argument 与 Node path。
 
   ```bash
   adapter_root="$HOME/.local/lib/cosh/acp-adapters"
   install -d -m 0700 "$(dirname "$adapter_root")"
   ./src/cosh-ng/scripts/install-acp-adapters.sh --prefix "$adapter_root"
   node_bin="$(dirname "$(command -v node)")"
-  sudo install -d -m 0755 /etc/cosh
-  printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
-    "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
-    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
-  sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+  sudo tee -a "/etc/cosh/gateway-$USER.env" >/dev/null <<EOF
+  COSH_GATEWAY_ACP_ARG='--acp-adapter=$adapter_root/node_modules/.bin/codex-acp'
+  PATH=$node_bin:/usr/bin:/bin
+  EOF
+  sudo systemctl restart "cosh-gateway@$USER.service"
   ```
 
-  Bundle 与 Gateway compatibility profile 将
-  `@agentclientprotocol/codex-acp` 精确 pin 到 `1.6.2`；Gateway 会拒绝 Adapter
-  上报的其他 package identity 或版本。在这个 profile 下，协商后的 typed terminal
-  failure 或 prompt 完成前的 transport EOF 会把 Run 与 Task 收敛为失败。Partial text
-  仍作为 progress 可见，但不能成为成功 terminal result。这些修正已有 deterministic
-  自动化 test coverage；修正后尚未重跑真实 Codex provider 与 ECS 路径。
+  Bundle 将 `@agentclientprotocol/codex-acp` 精确 pin 到 `1.6.2`，Gateway 会拒绝
+  Adapter 上报的其他 identity 或版本。路径包含空格时，必须在可信 environment file 中把
+  整个参数引为一个 systemd word。
+- 如需启用 Runtime 启动前 baseline 与 permission-effect barrier，请追加绝对 `ws-ckpt`
+  socket。Security audit argument
+  可选，但不能脱离 socket 单独配置。
 
-  然后进入 `cosh` 使用短入口。
+  ```bash
+  sudo tee -a "/etc/cosh/gateway-$USER.env" >/dev/null <<EOF
+  COSH_GATEWAY_CHECKPOINT_ARG=--checkpoint-socket=/run/ws-ckpt/ws-ckpt.sock
+  COSH_GATEWAY_SECURITY_AUDIT_ARG=--security-audit=/var/lib/cosh-gateway-$USER/security-audit.jsonl
+  EOF
+  sudo systemctl restart "cosh-gateway@$USER.service"
+  ```
+
+  Gateway unit 不依赖 `ws-ckpt` service。它通过已配置的 admission 报告 checkpoint readiness，
+  不会阻塞 Core-only 启动。
+- 在 `cosh` 中，`/task` 与 `/task <目标>` 都打开 managed Task form，后者会预填 goal。
+  Form 从 Gateway 获取 sealed launch catalog，只提供 ready Runtime，再选择 checkpoint
+  policy。确认页会显示 goal、Runtime、canonical workspace、checkpoint 与持久默认审批策略
+  `allow_all`。
 
   ```text
   /task 升级依赖、修改代码并运行测试
   /task
+  /task list
   /task show
   /task show <tsk_UUID>
   ```
 
-  `/task <目标>` 会生成 idempotency key 并选择 `acp`/`codex`。提交立即返回，Gateway 与
-  ACP child 由 system service 持有，因此关闭 Shell 或 SSH 不会停止 Task。单独输入 `/task`
-  会列出当前用户最近的 Task。`/task show` 默认选择最新 Task，遍历有界的持久 event page，
-  显示 Adapter 上报的进度与 terminal state；传入 Task ID 可以查看其他 Task。
+  提交会立即返回持久 Task ID。Service 持有 Gateway 与 Runtime child，所以关闭 Shell 或
+  SSH 不会取消 Task。重新连接后使用 `/task list` 或 `/task show [task-id]` 查看持久进度
+  与结果。Gateway restart 仍不能恢复 ACP session，对应 Run 会 suspended 或 lost，必须显式
+  retry，不能重放 prompt。
 
-  精确的 `delegated-acp-v1` profile 表示完整 Task 授权。相关 ACP provider callback 会先
-  被记录，再以 `allow_once` 回答；COSH 永远不会选择 `allow_always`。这是 local-user
-  authority，不是 workspace containment。Gateway 会监督进程并持久化 Adapter 上报的 event，
-  但不能把 ACP native side effect 归因为 governed execution。这个 profile 不要求也不创建
-  checkpoint。
-- 对于 durable local Task，使用 package 安装的 system-scope
-  `cosh-gateway@.service` unit。它选择 contained `core` runtime 和
-  `gateway-brokered-v1` profile，并接纳配置的 canonical workspace：
+  Policy 作用于 Runtime 启动前，以及每个获批 Runtime permission effect 前。只有 provider
+  明确报告 unavailable 或 known-no-effect 时，`Auto` 才记录持久 downgrade；error 与
+  uncertain outcome 会 fail closed。`On` 要求准确 checkpoint evidence，`Off` 既不创建
+  baseline，也不建立逐 effect barrier。Workspace checkpoint 不保护 host、credential、
+  network、cloud 或其他 external effect。
 
-  Unit 默认把 Core `HOME` 设为 private systemd `StateDirectory` 下的
-  `/var/lib/cosh-gateway-%i/core-home`。Provider config 可以放在
-  `/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`，也可以使用
-  `/etc/copilot-shell/config.toml` system config。不要在
-  `/etc/cosh/gateway-$USER.env` 中把 `HOME` 设到该 `StateDirectory` 之外。
-  `EnvironmentFile` 中的值会覆盖 unit 的安全默认值，而 admitted workspace 与其他 host
-  path 对这个 contained Core profile 保持只读。
+  托管 Core 使用封闭的 `workspace-write-v1` profile，只提供 `ask_user_question` 与
+  `write_file`。每次写入都必须先经过 Runtime-native permission decision、适用的持久
+  checkpoint barrier 与 Gateway approval，之后 Core 才执行。Pinned workspace 会拒绝
+  traversal、workspace 外 absolute path 与 symlink escape。Shell、edit、read、MCP、Skills
+  和 Hooks 都不准入。
+
+  持久 `allow_all` policy 不会创建 provider `allow_always` rule。准确关联的 Codex callback
+  收到 `allow_once`。逐 effect checkpoint barrier 只覆盖 ACP 确实上报的 permission effect；
+  没有 callback 的 native effect 不在覆盖范围内。ACP native effect 在 systemd containment
+  内使用 service user authority，
+  不受 workspace filesystem sandbox 限制。Unit 仍会把 system path 设为只读，使用 private
+  `/tmp` 并隐藏 `/run/user`，所以“local-user authority”不表示 unrestricted host authority。
+  Gateway 持久化有界 reported event，但不声称 ACP native effect 的准确 receipt。
+
+  Task 运行时可以检查 Task-owned snapshot；切换要求 Task terminal。
 
   ```bash
-  sudo install -d -m 0755 /etc/cosh
-  sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"
-  printf '%s\n' \
-    "COSH_GATEWAY_WORKSPACE=$PWD" | \
-    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
-  sudo systemctl start "cosh-gateway@$USER.service"
-  gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
+  /task snapshots <task-id>
+  /task snapshot preview <task-id> <snapshot-id>
+  /task snapshot diff <task-id> <snapshot-id>
+  /task snapshot switch <task-id> <snapshot-id>
   ```
 
-  Unit 会传入 `--systemd-unit`；Gateway 在 bind socket 前校验 live cgroup membership、
-  control-group kill、最终 `SIGKILL`、main-process exit tracking 与 disabled delegation。
-  Direct `serve` 没有该 proof 时会 fail closed。Service 还会向 Runtime descendant 隐藏
-  per-user service-manager socket。启动过程会 canonicalize workspace，把 admitted target 固定为
-  `workspace/cosh/task-only-v1`，把 Runtime selector 固定为 `core`/`gateway-brokered-v1`。
-  Daemon 会把每个 Unix peer 认证为 local OS actor；如果 submission 的 target 或 selector 不同，
-  会在 Task 创建前被拒绝。
-- 在另一个 Terminal 把 `gateway_socket` 设为相同绝对路径，再把 intent 传给 Task API：
+  Switch confirmation 默认选中取消。Task active、foreign 或 abbreviated ID、stale preview
+  和 occupied workspace 都会被 Gateway 拒绝。切换前先把 cosh 与其他 shell process 移到
+  workspace 外。daemon 会在 workspace write lock 内、紧邻 rollback 前重新计算 live diff，
+  generation 或 diff 漂移会在 backend 产生 effect 前被拒绝。
+- Automation 可以把 intent 传给同一 Task API。
 
   ```bash
   printf '%s\n' 'inspect the failed service' | \
     cosh agent task --socket "$gateway_socket" submit \
-      --runtime core --runtime-profile gateway-brokered-v1 \
+      --runtime core --checkpoint auto --approval-policy allow-all \
       --idempotency-key '<stable-submit-key>'
+  cosh agent task --socket "$gateway_socket" list --limit 20
   cosh agent task --socket "$gateway_socket" get '<tsk_UUID>'
   cosh agent task --socket "$gateway_socket" events '<tsk_UUID>' --after 0 --limit 64
   printf '%s\n' 'answer to the question' | \
@@ -154,16 +285,10 @@ Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` �
     --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
   ```
 
-  Task API 支持 `submit`、`list`、`get`、`events`、`append`、`cancel`、`retry` 和
-  `resolve-approval`。`append` 用来回答 profile 的 durable `ask_user_question` request。
-  `resolve-approval` 仍属于通用 API，但这个 profile 没有需要 approval 的 side effect，因此
-  不会产生 approval flow。Idempotency key 让客户端在 I/O 不确定后可以安全重试；durable Task、
-  Runtime 和 Outbox state 支持查看、取消和显式 retry，不会重放未知的 side effect。
-- Task-only profile 有意不暴露 checkpoint、write、Shell、slash command、channel 或
-  remote capability。交互式 slash command 仍由 `cosh-shell` 负责，不是 Gateway Task command。
-  `SIGINT` 与 `SIGTERM` 会触发有界的 scheduler 与 Runtime shutdown，Gateway 只监听本地 Unix
-  socket。仓库自动执行 Fake Adapter conformance；真实 Codex/Claude Adapter 检查与人工 Terminal
-  验收仍是独立的、与具体安装相关的 gate。
+  API 支持 `capabilities`、`submit`、`list`、`get`、`events`、`append`、`cancel`、
+  `retry` 与 `resolve-approval`。Idempotency key 让 I/O 不确定后的重试保持安全。当前
+  deterministic test 覆盖 launch selection 与 baseline policy；真实 Codex、SSH 断开和 package
+  systemd execution 仍是与安装相关且尚未验收的 gate。
 - 本机单用户 Web continuation beta 通过 loopback-only HTTP listener 展示同一套 Task API。
   它不会直接读取 SQLite、Outbox、ACP 或 execution target。Gateway service 运行后，在
   admitted workspace 之外创建 private Bearer token 并启动 Web。

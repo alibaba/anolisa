@@ -13,11 +13,16 @@ pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 pub const BROKERED_CONTROL_PROTOCOL_VERSION: u32 = 3;
 /// Exact private protocol version for the Gateway-owned checkpoint profile.
 pub const BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION: u32 = 4;
+/// Exact private protocol version for the approval-gated workspace-write profile.
+pub const BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION: u32 = 5;
 /// Exact private launch name for the task-only brokered profile.
 pub(crate) const GATEWAY_BROKERED_V1_EXECUTION_PROFILE: &str = "gateway_brokered_v1";
 /// Exact private launch name for the checkpoint-enabled brokered profile.
 pub(crate) const GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE: &str =
     "gateway_brokered_checkpoint_v1";
+/// Exact private launch name for the workspace-write brokered profile.
+pub(crate) const GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE: &str =
+    "gateway_brokered_workspace_write_v1";
 
 // =====================================================================
 // Auth types (used by CoreControlRequest::AuthRequired)
@@ -1426,6 +1431,47 @@ mod tests {
     }
 
     #[test]
+    fn serialize_workspace_write_initialize_ack_is_v5_and_profile_bound() {
+        let capability_profile = BrokeredCapabilityProfileIdentity::workspace_write_v1();
+        let msg = OutputMessage::initialize_success_for_profile(
+            "init-workspace-write",
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION,
+            Some(GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE),
+            Some(capability_profile.clone()),
+            Some(vec![
+                "ask_user_question".to_string(),
+                "write_file".to_string(),
+            ]),
+            false,
+        );
+        let value = serde_json::to_value(msg).unwrap();
+        let response = &value["response"]["response"];
+        assert_eq!(
+            response["protocol_version"],
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            response["execution_profile"],
+            GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE
+        );
+        assert_eq!(
+            response["capability_profile"],
+            serde_json::json!(capability_profile)
+        );
+        assert_eq!(
+            response["runtime_tools"],
+            serde_json::json!(["ask_user_question", "write_file"])
+        );
+        assert!(response["capabilities"]
+            .get("can_handle_hosted_checkpoint_create")
+            .is_none());
+        assert_eq!(
+            response["capabilities"]["can_handle_brokered_ask_user"],
+            true
+        );
+    }
+
+    #[test]
     fn private_wire_dual_version_corpus_matches_core_types() {
         let corpus: Value = serde_json::from_str(include_str!(
             "../tests/fixtures/cosh-private-wire-dual-version.json"
@@ -1472,6 +1518,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(checkpoint_ack).unwrap(),
             corpus["gateway_brokered_checkpoint_v4"]["initialize_ack"]
+        );
+
+        let workspace_write_ack = OutputMessage::initialize_success_for_profile(
+            "gateway-init-v5",
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION,
+            Some(GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE),
+            Some(BrokeredCapabilityProfileIdentity::workspace_write_v1()),
+            Some(vec![
+                "ask_user_question".to_string(),
+                "write_file".to_string(),
+            ]),
+            false,
+        );
+        assert_eq!(
+            serde_json::to_value(workspace_write_ack).unwrap(),
+            corpus["gateway_brokered_workspace_write_v5"]["initialize_ack"]
         );
 
         let checkpoint_created: InputMessage = serde_json::from_value(

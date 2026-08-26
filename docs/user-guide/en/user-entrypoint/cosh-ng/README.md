@@ -42,9 +42,12 @@ Use read-only commands first. Add `--dry-run` to a supported package or service 
 | Use the existing `cosh-cli` workspace checkpoint commands | [Workspace checkpoints](cli/checkpoint.md) |
 | Check policy decisions and audit events | [Security audit](cli/audit.md) |
 
-The workspace checkpoint page describes the existing `cosh-cli` system-operations
-path. It is separate from the task-only Gateway profile; the packaged Gateway
-does not depend on `ws-ckpt` or expose checkpoint operations.
+The workspace checkpoint page describes the direct `cosh-cli`
+system-operations path. Managed Tasks can request both a pre-Runtime workspace
+baseline and a durable barrier before each approved Runtime permission effect
+from a configured `ws-ckpt` provider. `/task` lists only checkpoints durably
+owned by that Task and provides read-only preview and diff while it runs;
+recovery-protected switching requires a terminal Task.
 
 ## Integrate and automate
 
@@ -52,6 +55,110 @@ The `cosh agent` launcher is installed by ANOLISA and RPM packages. Source and
 unified builds install the bare Gateway binary instead; substitute
 `cosh-gateway doctor`, `cosh-gateway run`, or `cosh-gateway task` and keep the
 remaining arguments unchanged.
+
+### Start managed Tasks from a source build
+
+On Linux with systemd, contributors and testers can prepare an isolated
+development Gateway from the cosh-ng source root and enter its connected Shell:
+
+```bash
+./scripts/managed-task-dev.sh setup
+./scripts/managed-task-dev.sh shell
+```
+
+The command surface is:
+
+```text
+managed-task-dev.sh setup [--no-build] [--workspace ABSOLUTE_DIR] [--codex auto|off|required] [--environment inherit|off] [--checkpoint-socket PATH] [--stop-production] [--dry-run]
+managed-task-dev.sh shell [--dry-run]
+managed-task-dev.sh status [--dry-run]
+managed-task-dev.sh down [--dry-run]
+managed-task-dev.sh uninstall [--purge-state] [--dry-run]
+```
+
+By default, `setup` builds the required source binaries in the debug
+profile and admits the canonical form of `$PWD` as the only workspace. Use
+`--no-build` to reuse existing debug artifacts or `--workspace ABSOLUTE_DIR`
+to select a different absolute workspace. A successful setup ends with a
+Gateway capabilities smoke check; it does not submit a Task.
+
+Core is always configured. The default `--codex auto` adds Codex only when it
+finds the already installed pinned `codex-acp` Adapter. Setup never invokes
+`npx`, downloads an Adapter, or modifies the installed bundle. It reuses the
+effective `CODEX_HOME` from the invoking user. Use `--codex off` for Core only,
+or `--codex required` to fail setup unless the pinned Adapter is ready. Reusing
+`CODEX_HOME` also reuses the login state and configuration stored there.
+
+The default `--environment inherit` copies only allowlisted variables that are
+currently set, preserving each current value. Core-only setup copies the eight
+uppercase and lowercase proxy forms: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+`NO_PROXY`, `http_proxy`, `https_proxy`, `all_proxy`, and `no_proxy`.
+
+When the Codex Adapter is enabled, setup also copies these documented Codex
+variables and variables supported by the pinned Adapter when set:
+`CODEX_SQLITE_HOME`, `CODEX_API_KEY`,
+`CODEX_ACCESS_TOKEN`, `OPENAI_API_KEY`, `OPENAI_FEDERATION_RULE_ID`,
+`OPENAI_IDENTITY_TOKEN_FILE`, `OPENAI_WORKLOAD_IDENTITY_CONTEXT`,
+`CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE`, and `RUST_LOG`. It reads
+`CODEX_HOME/config.toml` and also copies currently set variables named by each
+`model_providers.*.env_key` and `model_providers.*.env_http_headers` value.
+
+Setup does not copy the whole user environment, wildcard all `CODEX_*`
+variables, or automatically inherit installer controls, `LD_*`, `DYLD_*`, or
+SSH variables. Uppercase and lowercase proxy forms keep their separate current
+values, and proxy URLs containing userinfo are preserved. Setup and status show
+only inherited variable names, never values. When userinfo proxies, API/access
+tokens, workload identity values, or provider-declared variables are copied,
+setup warns that credentials were snapshotted into the root-owned mode `0600`
+Gateway/Adapter environment and may be readable by same-UID processes. Use
+`--environment off` to disable the snapshot completely. Treat the generated
+environment as private configuration, and rerun `setup` after changing proxy
+or credential values because the service does not inherit later Shell changes.
+
+Checkpoint support is off by default. Pass `--checkpoint-socket PATH` with an
+absolute existing Unix socket only when an existing `ws-ckpt` provider should
+be exposed; otherwise the development
+catalog has no checkpoint provider. `Auto` then records an explicit durable
+downgrade and continues only for that known unavailability, while `Off` skips
+both checkpoint stages. The Shell form does not offer `On` without a provider;
+an API request for `On` fails closed. Checkpoint errors and uncertain outcomes
+never authorize launch or an effect.
+
+This development profile uses the durable `allow_all` policy for local source
+testing. Managed Core exposes only `ask_user_question` and approval-gated
+`write_file`; its pinned workspace rejects traversal, outside absolute paths,
+and symlink escapes. Correlated Codex permission callbacks receive a one-time
+allow decision, but Codex executes with the service user's authority and is not
+confined by a workspace filesystem sandbox. Review the goal and canonical
+workspace before submission, and do not use this profile for untrusted
+repositories or prompts.
+
+The helper does not overwrite the installed package. It uses the transient
+`cosh-gateway-dev@.service` template under `/run/systemd/system`, an environment
+file at `/run/cosh-gateway-dev-$USER.env`, a socket at
+`/run/cosh-gateway-dev-$USER/gateway.sock`, staged binaries below
+`/usr/local/libexec/cosh-ng-dev/$USER`, and durable Task state under
+`/var/lib/cosh-gateway-dev-$USER`. The unit and environment do not survive a
+boot, so rerun `setup` after restarting the host. If the packaged production or
+legacy Gateway is active for the same account, setup refuses without changing
+it. Use `--stop-production` only when you intentionally want setup to stop
+production and switch that account to the development instance. `--dry-run`
+previews the corresponding setup, Shell, status, shutdown, or uninstall
+operation.
+
+Use the lifecycle commands as follows:
+
+```bash
+./scripts/managed-task-dev.sh status
+./scripts/managed-task-dev.sh down
+./scripts/managed-task-dev.sh uninstall
+./scripts/managed-task-dev.sh uninstall --purge-state
+```
+
+`down` stops the transient instance but retains its integration and data.
+`uninstall` removes the development integration while retaining durable Task
+state for a later setup. Add `--purge-state` to delete that development state
+as well. Neither form uninstalls cosh-ng nor deletes production Gateway state.
 
 - Run `cosh agent doctor --profile codex --workspace "$PWD"` to verify a
   separately installed `codex-acp`, or select `claude-code` for
@@ -69,96 +176,130 @@ remaining arguments unchanged.
   identifiers, or workspace paths. Evidence persistence failure cancels the
   callback and fails the run. These direct ACP commands are ungoverned by the
   durable Gateway Task Plane and are intended for local interoperability.
-- To hand one persistent Task to local Codex, install the pinned `codex-acp`
-  bundle and enable the packaged `cosh-gateway-acp@.service` for one canonical
-  workspace. Its environment file requires `COSH_GATEWAY_WORKSPACE`, the
-  absolute `COSH_GATEWAY_ACP_ADAPTER`, and a `PATH` that can resolve Node.
-  Configure it once:
+- For persistent managed Tasks, start the one packaged system-scope
+  `cosh-gateway@.service`. A required root-managed environment file selects the
+  exact canonical workspace. Keep it outside the service's private
+  `/var/lib/cosh-gateway-$USER` StateDirectory so Runtime access does not widen
+  to Gateway databases and audit state:
+
+  ```bash
+  sudo install -d -m 0755 /etc/cosh
+  printf 'COSH_GATEWAY_WORKSPACE=%s\n' "$(pwd -P)" | \
+    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+  sudo chmod 0600 "/etc/cosh/gateway-$USER.env"
+  sudo systemctl enable --now "cosh-gateway@$USER.service"
+  gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
+  ```
+
+  The unit fixes Core `HOME` at
+  `/var/lib/cosh-gateway-$USER/core-home`. Store its user-level provider config
+  at `/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`, or use
+  `/etc/copilot-shell/config.toml` for system configuration.
+
+  The service always passes the packaged Core executable. Optional standalone
+  argument variables add Codex and checkpoint support to the same daemon,
+  socket, database, and canonical workspace. Empty variables expand to no
+  argument, so omitted optional arguments do not block Core-only start.
+  Do not start the retired `cosh-gateway-acp@` unit; the unified unit conflicts
+  with it to prevent two daemons from contending for the same state.
+- To make Codex selectable, install the pinned Adapter and append its absolute
+  executable argument and Node path:
 
   ```bash
   adapter_root="$HOME/.local/lib/cosh/acp-adapters"
   install -d -m 0700 "$(dirname "$adapter_root")"
   ./src/cosh-ng/scripts/install-acp-adapters.sh --prefix "$adapter_root"
   node_bin="$(dirname "$(command -v node)")"
-  sudo install -d -m 0755 /etc/cosh
-  printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
-    "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
-    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
-  sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+  sudo tee -a "/etc/cosh/gateway-$USER.env" >/dev/null <<EOF
+  COSH_GATEWAY_ACP_ARG='--acp-adapter=$adapter_root/node_modules/.bin/codex-acp'
+  PATH=$node_bin:/usr/bin:/bin
+  EOF
+  sudo systemctl restart "cosh-gateway@$USER.service"
   ```
 
-  The bundle and Gateway compatibility profile pin
-  `@agentclientprotocol/codex-acp` exactly to `1.6.2`; Gateway rejects a
-  different reported package identity or version. For this profile, a
-  negotiated typed terminal failure or a transport EOF before prompt
-  completion settles the Run and Task as failed. Partial text remains visible
-  as progress but cannot become a successful terminal result. Deterministic
-  automated tests cover these corrections; the real Codex provider and ECS
-  path have not been rerun after them.
+  The bundle pins `@agentclientprotocol/codex-acp` exactly to `1.6.2` and
+  Gateway rejects a different reported identity or version. Paths with spaces
+  must be quoted as one systemd word in the trusted environment file.
+- To enable pre-Runtime baselines and permission-effect barriers, append the
+  absolute `ws-ckpt` socket. The
+  security audit argument is optional but cannot be used without the socket:
 
-  Inside `cosh`, use the short surface:
+  ```bash
+  sudo tee -a "/etc/cosh/gateway-$USER.env" >/dev/null <<EOF
+  COSH_GATEWAY_CHECKPOINT_ARG=--checkpoint-socket=/run/ws-ckpt/ws-ckpt.sock
+  COSH_GATEWAY_SECURITY_AUDIT_ARG=--security-audit=/var/lib/cosh-gateway-$USER/security-audit.jsonl
+  EOF
+  sudo systemctl restart "cosh-gateway@$USER.service"
+  ```
+
+  The Gateway unit has no `ws-ckpt` service dependency. It reports checkpoint
+  readiness from configured admission instead of blocking Core-only startup.
+- Inside `cosh`, both `/task` and `/task <goal>` open the managed Task form;
+  the latter prefills the goal. The form obtains the sealed launch catalog
+  from Gateway, offers only ready Runtimes, and selects a checkpoint policy.
+  Its confirmation page shows goal, Runtime, canonical workspace, checkpoint,
+  and the durable default approval policy `allow_all`:
 
   ```text
   /task upgrade the dependencies, update the code, and run the tests
   /task
+  /task list
   /task show
   /task show <tsk_UUID>
   ```
 
-  `/task <goal>` generates an idempotency key and selects `acp`/`codex`.
-  Submission returns immediately; the system service owns Gateway and the ACP
-  child, so closing Shell or SSH does not stop the Task. Bare `/task` lists the
-  current user's recent Tasks. `/task show` selects the newest Task, follows all
-  bounded durable event pages, and displays reported progress and terminal
-  state; passing a Task ID selects another Task.
+  Submission returns a durable Task ID immediately. The service owns Gateway
+  and its Runtime children, so closing Shell or SSH does not cancel the Task.
+  Reconnect and use `/task list` or `/task show [task-id]` for durable progress
+  and results. A Gateway restart still cannot resume an ACP session; the Run is
+  suspended or lost and requires explicit retry rather than prompt replay.
 
-  The exact `delegated-acp-v1` profile is a full-Task grant. A correlated ACP
-  provider callback is recorded and answered with `allow_once`; `allow_always`
-  is never selected. This is local-user authority, not workspace containment.
-  Gateway supervises the process and persists reported events, but cannot
-  attribute ACP-native side effects as governed executions. This profile does
-  not require or create a checkpoint.
-- For durable local Tasks, use the packaged system-scope
-  `cosh-gateway@.service`. It selects the contained `core` runtime with the
-  `gateway-brokered-v1` profile and admits the configured canonical workspace:
+  The policy applies before Runtime launch and before each approved Runtime
+  permission effect. `Auto` records a durable downgrade only when the provider
+  explicitly reports unavailable or known-no-effect; errors and uncertain
+  outcomes fail closed. `On` requires exact checkpoint evidence, and `Off`
+  creates neither the baseline nor per-effect barriers. Workspace checkpoints
+  do not protect host, credential, network, cloud, or other external effects.
 
-  The unit defaults Core `HOME` to
-  `/var/lib/cosh-gateway-%i/core-home`, below its private systemd
-  `StateDirectory`. Store the provider configuration at
-  `/var/lib/cosh-gateway-$USER/core-home/.copilot-shell/config.toml`, or use
-  `/etc/copilot-shell/config.toml` as a system configuration. Do not set
-  `HOME` to a path outside that `StateDirectory` in
-  `/etc/cosh/gateway-$USER.env`. `EnvironmentFile` values override the unit's
-  safe default, while the admitted workspace and other host paths are
-  read-only for this contained Core profile.
+  Managed Core uses the closed `workspace-write-v1` profile. It exposes only
+  `ask_user_question` and `write_file`; every write requires a Runtime-native
+  permission decision, the applicable durable checkpoint barrier, and Gateway
+  approval before Core executes it. Its pinned workspace rejects traversal,
+  outside absolute paths, and symlink escapes. Shell, edit, read, MCP, Skills,
+  and Hooks are not admitted.
+
+  The durable `allow_all` policy does not create provider `allow_always` rules.
+  Correlated Codex callbacks receive `allow_once`. A per-effect checkpoint
+  barrier covers only permission effects that ACP actually reports; native
+  effects without a callback are not covered. ACP-native effects run with
+  the service user's authority inside systemd containment and are not confined
+  by a workspace filesystem sandbox. The unit still makes system paths
+  read-only, uses private `/tmp`, and hides `/run/user`; “local-user authority”
+  does not mean unrestricted host authority. Gateway persists bounded reported
+  events without claiming exact receipts for ACP-native effects.
+
+  Inspect Task-owned snapshots while the Task runs; switch only after it is terminal:
 
   ```bash
-  sudo install -d -m 0755 /etc/cosh
-  sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"
-  printf '%s\n' \
-    "COSH_GATEWAY_WORKSPACE=$PWD" | \
-    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
-  sudo systemctl start "cosh-gateway@$USER.service"
-  gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
+  /task snapshots <task-id>
+  /task snapshot preview <task-id> <snapshot-id>
+  /task snapshot diff <task-id> <snapshot-id>
+  /task snapshot switch <task-id> <snapshot-id>
   ```
 
-  The unit passes `--systemd-unit`; Gateway verifies live cgroup membership,
-  control-group kill, final `SIGKILL`, main-process exit tracking, and disabled
-  delegation before it binds a socket. Direct `serve` fails closed without that
-  proof. The service also hides the per-user service-manager socket from Runtime
-  descendants. Startup canonicalizes the workspace and fixes the admitted target
-  to `workspace/cosh/task-only-v1` and the Runtime selector to
-  `core`/`gateway-brokered-v1`. The daemon authenticates each Unix peer as a
-  local OS actor; a submission with a different target or selector is rejected
-  before Task creation.
-- From another Terminal, set `gateway_socket` to the same absolute path and pipe
-  the intent into the Task API:
+  Switch confirmation defaults to cancel. Gateway rejects active Tasks,
+  foreign or abbreviated IDs, stale previews, and occupied workspaces. Move
+  cosh and other shell processes outside the workspace before switching. The
+  daemon recomputes the live diff under the workspace write lock immediately
+  before rollback and rejects generation or diff drift before backend effects.
+- For automation, pipe intent into the same Task API:
 
   ```bash
   printf '%s\n' 'inspect the failed service' | \
     cosh agent task --socket "$gateway_socket" submit \
-      --runtime core --runtime-profile gateway-brokered-v1 \
+      --runtime core --checkpoint auto --approval-policy allow-all \
       --idempotency-key '<stable-submit-key>'
+  cosh agent task --socket "$gateway_socket" list --limit 20
   cosh agent task --socket "$gateway_socket" get '<tsk_UUID>'
   cosh agent task --socket "$gateway_socket" events '<tsk_UUID>' --after 0 --limit 64
   printf '%s\n' 'answer to the question' | \
@@ -170,20 +311,11 @@ remaining arguments unchanged.
     --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
   ```
 
-  The Task API supports `submit`, `list`, `get`, `events`, `append`, `cancel`, `retry`,
-  and `resolve-approval`. `append` answers the profile's durable
-  `ask_user_question` request. `resolve-approval` remains part of the generic
-  API, but this profile has no approvable side effect and therefore produces no
-  approval flow. Idempotency keys make retries safe after uncertain client I/O;
-  durable Task, Runtime, and Outbox state supports inspection, cancellation, and
-  explicit retry without replaying an unknown side effect.
-- The task-only profile intentionally exposes no checkpoint, write, Shell,
-  slash-command, channel, or remote capability. Interactive slash commands
-  remain owned by `cosh-shell`; they are not Gateway Task commands. `SIGINT` and
-  `SIGTERM` initiate bounded scheduler and Runtime shutdown, and the Gateway
-  listens only on its local Unix socket. Repository Fake-Adapter coverage is
-  automated; real Codex/Claude Adapter checks and manual Terminal acceptance
-  remain separate installation-specific gates.
+  The API supports `capabilities`, `submit`, `list`, `get`, `events`, `append`,
+  `cancel`, `retry`, and `resolve-approval`. Idempotency keys make retries safe
+  after uncertain client I/O. Current deterministic tests cover launch
+  selection and baseline policy; real Codex, SSH-disconnect, and packaged
+  systemd execution remain installation-specific unaccepted gates.
 - A local single-user Web continuation beta presents the same Task API through
   a loopback-only HTTP listener. It never reads SQLite, Outbox, ACP, or an
   execution target directly. Create a private Bearer token outside the admitted

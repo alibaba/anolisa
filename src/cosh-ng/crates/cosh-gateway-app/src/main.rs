@@ -15,7 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cosh_gateway::daemon::{
     AppendTaskInput, CancelTask, GatewayDaemon, GatewayDaemonConfig, GatewayResult,
-    LocalGatewayClient, ResolveApproval, RetryTask, SubmitTask,
+    InspectTaskSnapshot, LaunchReadiness, LocalGatewayClient, ResolveApproval, RetryTask,
+    SubmitLaunch, SwitchTaskSnapshot, TaskLaunchCatalog,
 };
 use cosh_gateway::permission::{
     CancelPermissionPresenter, FilePermissionEvidenceSink, OncePermissionProxy,
@@ -28,22 +29,25 @@ use cosh_gateway::runtime::{
     AcpV1RequestId, AcpV1StopReason, InstalledAcpRuntimePortFactory,
     InstalledBrokeredCoreRuntimePortFactory, LinuxSystemdContainmentVerifier, LocalOsActorResolver,
     ScheduledAgentRuntimeFactory, TrustedWorkspaceResolver, GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
-    GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
+    GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE, GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE,
 };
 use cosh_gateway::storage::{inspect_task_store, SqliteTaskStore, StoreInspectionOutcome};
 use cosh_gateway_contracts::{
     capability::ApprovalDecision,
-    common::{BoundedName, BoundedOpaque, BoundedText, IdempotencyKey, RuntimeSelector, TargetRef},
+    common::{BoundedName, BoundedOpaque, BoundedText, Digest, IdempotencyKey, RuntimeSelector},
     ids::{
-        ApprovalId, InputRequestId, InstallationId, RequestId, RunId, RuntimeInstanceId, TaskId,
+        ApprovalId, CheckpointId, InputRequestId, InstallationId, RequestId, RunId,
+        RuntimeInstanceId, TaskId,
     },
-    profile::{GatewayCapabilityProfile, GatewayCapabilityProfileId},
+    profile::GatewayCapabilityProfile,
     runtime::{RuntimeInputResponse, RuntimeInputSelections},
+    task::{ApprovalPolicy, CheckpointPolicy, TaskLaunchSpecV1, TaskRuntime},
 };
 use serde_json::{json, Value};
 use thiserror::Error;
 
 mod checkpoint;
+mod path;
 mod web;
 
 #[path = "cosh_gateway/acp_command.rs"]
@@ -58,10 +62,9 @@ mod serve;
 #[cfg(test)]
 use acp_command::with_observation_sequence;
 use acp_command::{doctor, install_interrupt_handler, run};
-#[cfg(test)]
-use control::task_only_target;
 use control::{admin, task};
 use input::{read_intent, read_prompt, terminal_safe};
+use path::{daemon_database_path, daemon_socket_path, require_absolute};
 use serve::{serve, ServeArgs};
 use web::{web, WebArgs};
 
@@ -129,7 +132,7 @@ struct AdminInspectArgs {
 
 #[derive(Debug, Clone, Args)]
 struct TaskArgs {
-    /// Absolute Unix socket path; defaults below the user runtime directory.
+    /// Absolute Unix socket path; defaults from COSH_GATEWAY_SOCKET or the user runtime directory.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Presentation format for bounded daemon responses.
@@ -141,6 +144,8 @@ struct TaskArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 enum TaskCommand {
+    /// Report the sealed Runtime, checkpoint, and workspace launch catalog.
+    Capabilities,
     /// Create one durable Task from stdin or a regular file.
     Submit(TaskSubmitArgs),
     /// List recent durable Tasks owned by the current local user.
@@ -157,6 +162,55 @@ enum TaskCommand {
     Append(TaskAppendArgs),
     /// Queue a replacement for one exact suspended Run.
     Retry(TaskRetryArgs),
+    /// Inspect or switch checkpoints owned by a managed Task.
+    Snapshot(TaskSnapshotArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct TaskSnapshotArgs {
+    #[command(subcommand)]
+    command: TaskSnapshotCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum TaskSnapshotCommand {
+    /// List proven-created checkpoints owned by one Task.
+    List(TaskIdArgs),
+    /// Preview changes required to switch to one exact checkpoint.
+    Preview(TaskSnapshotInspectArgs),
+    /// Show the same bounded change set used for switch confirmation.
+    Diff(TaskSnapshotInspectArgs),
+    /// Create a recovery point and switch to one confirmed checkpoint.
+    Switch(TaskSnapshotSwitchArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct TaskSnapshotInspectArgs {
+    /// Canonical COSH Task ID.
+    #[arg(value_name = "TASK_ID")]
+    task_id: String,
+    /// Complete COSH checkpoint ID; prefixes are not accepted.
+    #[arg(value_name = "SNAPSHOT_ID")]
+    snapshot_id: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct TaskSnapshotSwitchArgs {
+    /// Canonical COSH Task ID.
+    #[arg(value_name = "TASK_ID")]
+    task_id: String,
+    /// Complete COSH checkpoint ID; prefixes are not accepted.
+    #[arg(value_name = "SNAPSHOT_ID")]
+    snapshot_id: String,
+    /// Digest returned by the immediately preceding preview.
+    #[arg(long, value_name = "SHA256")]
+    preview_digest: String,
+    /// Exact terminal Task revision displayed during preview.
+    #[arg(long)]
+    expected_revision: u64,
+    /// Caller-stable replay key; never replace it after uncertain I/O.
+    #[arg(long, value_name = "KEY")]
+    idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -174,14 +228,72 @@ struct TaskSubmitArgs {
     /// Caller-stable replay key; generate once and reuse after uncertain I/O.
     #[arg(long, value_name = "KEY")]
     idempotency_key: String,
-    /// Runtime kind requested for the first Run. It must match the daemon's
-    /// closed capability profile, such as `core` or delegated `acp`.
-    #[arg(long, default_value = "core")]
-    runtime: String,
-    /// Exact Runtime profile requested for the first Run. The daemon rejects
-    /// profiles outside its configured closed capability profile.
-    #[arg(long, default_value = GATEWAY_BROKERED_CORE_RUNTIME_PROFILE)]
-    runtime_profile: String,
+    /// Provider-neutral Runtime family selected for the durable Task.
+    #[arg(long, value_enum, default_value_t = TaskRuntimeArg::Core)]
+    runtime: TaskRuntimeArg,
+    /// Pre-Runtime workspace baseline behavior.
+    #[arg(long, value_enum, default_value_t = CheckpointArg::Auto)]
+    checkpoint: CheckpointArg,
+    /// Durable permission policy; supported operations remain audited.
+    #[arg(long, value_enum, default_value_t = ApprovalPolicyArg::AllowAll)]
+    approval_policy: ApprovalPolicyArg,
+    /// Fail if the daemon's canonical workspace changed after confirmation.
+    #[arg(long, value_name = "SHA256", value_parser = parse_workspace_digest)]
+    expected_workspace_digest: Option<String>,
+}
+
+fn parse_workspace_digest(value: &str) -> Result<String, String> {
+    cosh_gateway_contracts::common::Digest::parse(value)
+        .map(|digest| digest.as_str().to_owned())
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum TaskRuntimeArg {
+    #[default]
+    Core,
+    Codex,
+}
+
+impl From<TaskRuntimeArg> for TaskRuntime {
+    fn from(value: TaskRuntimeArg) -> Self {
+        match value {
+            TaskRuntimeArg::Core => Self::Core,
+            TaskRuntimeArg::Codex => Self::Codex,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CheckpointArg {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl From<CheckpointArg> for CheckpointPolicy {
+    fn from(value: CheckpointArg) -> Self {
+        match value {
+            CheckpointArg::Auto => Self::Auto,
+            CheckpointArg::On => Self::On,
+            CheckpointArg::Off => Self::Off,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum ApprovalPolicyArg {
+    #[default]
+    AllowAll,
+}
+
+impl From<ApprovalPolicyArg> for ApprovalPolicy {
+    fn from(value: ApprovalPolicyArg) -> Self {
+        match value {
+            ApprovalPolicyArg::AllowAll => Self::AllowAll,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -492,6 +604,10 @@ impl Reporter {
             "task" => println!("{}", human_json(fields)),
             "tasks" => println!("{}", human_json(fields)),
             "task_events" => println!("{}", human_json(fields)),
+            "task_capabilities" => println!("{}", human_json(fields)),
+            "task_snapshots" | "task_snapshot_preview" | "task_snapshot_switched" => {
+                println!("{}", human_json(fields));
+            }
             "task_cancelled" => print_task_id(fields),
             "store_inspection" => println!("{}", human_json(fields)),
             _ => {}
@@ -544,42 +660,6 @@ fn main() -> ExitCode {
             reporter.error(&error);
             ExitCode::from(error.exit_code())
         }
-    }
-}
-
-fn daemon_socket_path(explicit: Option<&PathBuf>) -> Result<PathBuf, CliError> {
-    if let Some(path) = explicit {
-        return require_absolute(path, "daemon socket");
-    }
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return require_absolute(&PathBuf::from(runtime), "XDG_RUNTIME_DIR")
-            .map(|path| path.join("cosh/gateway.sock"));
-    }
-    Ok(PathBuf::from(format!(
-        "/run/user/{}/cosh/gateway.sock",
-        nix::unistd::Uid::effective().as_raw()
-    )))
-}
-
-fn daemon_database_path(explicit: Option<&PathBuf>) -> Result<PathBuf, CliError> {
-    if let Some(path) = explicit {
-        return require_absolute(path, "daemon database");
-    }
-    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
-        return require_absolute(&PathBuf::from(state), "XDG_STATE_HOME")
-            .map(|path| path.join("cosh/gateway/state.db"));
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError::Daemon("absolute HOME is required".to_owned()))?;
-    require_absolute(&home, "HOME").map(|path| path.join(".local/state/cosh/gateway/state.db"))
-}
-
-fn require_absolute(path: &Path, label: &str) -> Result<PathBuf, CliError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Err(CliError::Daemon(format!("{label} path must be absolute")))
     }
 }
 

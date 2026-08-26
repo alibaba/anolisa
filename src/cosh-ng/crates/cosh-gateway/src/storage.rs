@@ -37,6 +37,7 @@ pub(crate) use ledger::{
     RuntimeInputRequestState,
 };
 pub use sqlite::SqliteTaskStore;
+pub(crate) use task_store::TaskSnapshotSwitchRecord;
 pub use task_store::{CommitOutcome, CommitReceipt, OutboxClaim};
 #[cfg(debug_assertions)]
 #[doc(hidden)]

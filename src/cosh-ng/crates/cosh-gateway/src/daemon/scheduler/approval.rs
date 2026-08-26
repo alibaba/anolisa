@@ -16,7 +16,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         self.resolve_approval(actor_id, idempotency_key, approval_id, decision, now_ms)
     }
 
-    /// Resolves the only provider-native approval currently held by this worker.
+    /// Resolves the only Runtime Permission approval currently held by this worker.
     pub fn resolve_approval(
         &mut self,
         actor_id: &ActorId,
@@ -44,9 +44,22 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         let expected_revision = approval_resolution_revision(&approval, decision)?;
         let permission = approval.permission.clone().ok_or_else(|| {
             GatewayDaemonError::Protocol(
-                "approval is not bound to a provider-native callback".to_owned(),
+                "approval is not bound to a Runtime Permission callback".to_owned(),
             )
         })?;
+        let allow_decision = match (
+            permission.callback.is_some(),
+            permission.core_callback.is_some(),
+        ) {
+            (true, false) => RuntimePermissionDecision::ProviderNativeAllowOnce,
+            (false, true) => RuntimePermissionDecision::RuntimeNativeAllowOnce,
+            _ => {
+                return Err(GatewayDaemonError::Protocol(
+                    "live Runtime Permission must have exactly one callback binding".to_owned(),
+                ))
+            }
+        };
+        let expects_provider_denial = permission.callback.is_some();
         let resolution_command = LedgerCommand {
             actor_id: actor_id.clone(),
             idempotency_key,
@@ -165,6 +178,9 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 "approval is no longer resolvable".to_owned(),
             ));
         }
+        if decision == ApprovalDecision::Approve {
+            self.ensure_approval_checkpoint_barrier(&approval, now_ms)?;
+        }
         let prepared = self.coordinator.store.resolve_provider_permission(
             &resolution_command,
             approval_id,
@@ -238,10 +254,10 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             }
         };
         let runtime_decision = match decision {
-            ApprovalDecision::Approve => RuntimePermissionDecision::ProviderNativeAllowOnce,
+            ApprovalDecision::Approve => allow_decision,
             ApprovalDecision::Deny => RuntimePermissionDecision::Deny {
                 code: DenialCode::ApprovalDenied,
-                safe_message: BoundedText::new("The provider-native operation was denied")
+                safe_message: BoundedText::new("The Runtime operation was denied")
                     .unwrap_or_else(|_| unreachable!()),
             },
         };
@@ -279,12 +295,13 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         }
         let active = self.active.as_mut().ok_or_else(no_active_run)?;
         active.pending_permission = None;
-        active.expected_provider_terminal = match decision {
-            ApprovalDecision::Deny => Some(ExpectedProviderTerminal::Denied {
+        active.expected_provider_terminal = match (decision, expects_provider_denial) {
+            (ApprovalDecision::Deny, true) => Some(ExpectedProviderTerminal::Denied {
                 approval_id: approval_id.clone(),
                 permission,
             }),
-            ApprovalDecision::Approve => None,
+            (ApprovalDecision::Deny | ApprovalDecision::Approve, false)
+            | (ApprovalDecision::Approve, true) => None,
         };
         Ok(SchedulerTick::Progressed(view))
     }

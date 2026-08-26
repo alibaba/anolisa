@@ -297,11 +297,14 @@ impl CoshCore {
         };
 
         if self.execution_profile.is_brokered() {
-            return if self.execution_profile.hosts_checkpoint()
+            let workspace_write = self.execution_profile.writes_workspace()
+                && tool.kind() == ToolKind::FileEdit
+                && tool_name == "write_file";
+            let hosted_checkpoint = self.execution_profile.hosts_checkpoint()
                 && tool.kind() == ToolKind::HostedSideEffect
                 && tool_name == "workspace_checkpoint_create"
-                && params.as_object().is_some_and(serde_json::Map::is_empty)
-            {
+                && params.as_object().is_some_and(serde_json::Map::is_empty);
+            return if workspace_write || hosted_checkpoint {
                 Outcome::RequireApproval
             } else {
                 Outcome::Deny
@@ -1824,7 +1827,10 @@ impl CoshCore {
         params: serde_json::Value,
         ctx: &ToolContext,
     ) -> ToolResult {
-        if self.execution_profile.is_brokered() {
+        let is_workspace_write = self.execution_profile.writes_workspace()
+            && name == "write_file"
+            && self.tools.get(name).map(|tool| tool.kind()) == Some(ToolKind::FileEdit);
+        if self.execution_profile.is_brokered() && !is_workspace_write {
             return ToolResult::error(format!(
                 "tool {name} cannot execute inside cosh-core under the gateway brokered profile"
             ));

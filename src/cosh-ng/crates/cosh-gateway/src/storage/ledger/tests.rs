@@ -1179,6 +1179,7 @@ fn provider_permission(
                 normalized_operation_digest: approval.operation_digest.clone(),
             },
         ),
+        core_callback: None,
     }
 }
 

@@ -106,7 +106,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/task",
-            usage: "/task [list|show [task-id]|<goal>]",
+            usage: "/task [list|show [task-id]|snapshots [task-id]|snapshot <preview|diff|switch> <task-id> <snapshot-id>|<goal>]",
             summary_id: MessageId::HelpSummaryTask,
             group: Some("Tasks"),
             scope: "task",

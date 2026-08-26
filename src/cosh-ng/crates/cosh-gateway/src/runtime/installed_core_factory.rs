@@ -28,7 +28,11 @@ const MAX_CORE_FRAME_BYTES: usize = 1024 * 1024;
 pub const GATEWAY_BROKERED_CORE_RUNTIME_PROFILE: &str = "gateway-brokered-v1";
 /// Exact Runtime selector profile for the installed checkpoint Core boundary.
 pub const GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE: &str = "gateway-checkpoint-v1";
+/// Exact Runtime selector profile for the installed workspace-write Core boundary.
+pub const GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE: &str = "gateway-workspace-write-v1";
 const GATEWAY_BROKERED_CHECKPOINT_CORE_LAUNCH_PROFILE: &str = "gateway-brokered-checkpoint-v1";
+const GATEWAY_BROKERED_WORKSPACE_WRITE_CORE_LAUNCH_PROFILE: &str =
+    "gateway-brokered-workspace-write-v1";
 const ALLOWED_ENVIRONMENT: &[&str] = &[
     "HOME",
     "PATH",
@@ -72,7 +76,8 @@ impl fmt::Debug for ResolvedBrokeredCoreRuntimeProfile {
 /// Production factory for closed Gateway-brokered Core profiles.
 ///
 /// Trusted daemon admission selects either the task-only v3 profile or the
-/// checkpoint v4 profile before this factory creates a child process.
+/// checkpoint v4 profile, or workspace-write v5 profile before this factory
+/// creates a child process.
 pub struct InstalledBrokeredCoreRuntimePortFactory {
     installation_id: InstallationId,
     actors: LocalOsActorResolver,
@@ -192,10 +197,14 @@ impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
         if let Some(script) = &self.test_script {
             launch.arguments.push(script.as_os_str().to_owned());
         }
-        let launch_profile = if execution_profile == GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE {
-            GATEWAY_BROKERED_CHECKPOINT_CORE_LAUNCH_PROFILE
-        } else {
-            GATEWAY_BROKERED_CORE_RUNTIME_PROFILE
+        let launch_profile = match execution_profile {
+            GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE => {
+                GATEWAY_BROKERED_CHECKPOINT_CORE_LAUNCH_PROFILE
+            }
+            GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE => {
+                GATEWAY_BROKERED_WORKSPACE_WRITE_CORE_LAUNCH_PROFILE
+            }
+            _ => GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
         };
         launch.arguments.extend(
             ["--headless", "--execution-profile", launch_profile]
@@ -226,10 +235,12 @@ impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
             target: run.target.clone(),
         };
         let config = CoshCoreBridgeConfig::new(launch, workspace.reference().clone(), identity);
-        let config = if execution_profile == GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE {
-            config.gateway_brokered_checkpoint(context)
-        } else {
-            config.gateway_brokered(context)
+        let config = match execution_profile {
+            GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE => config.gateway_brokered_checkpoint(context),
+            GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE => {
+                config.gateway_brokered_workspace_write(context)
+            }
+            _ => config.gateway_brokered(context),
         };
         let port = CoshCoreBridge::launch(config).map_err(|_| {
             contract_error(
@@ -264,6 +275,15 @@ fn admitted_execution_profile(run: &ScheduledRun) -> Result<&'static str, Contra
         && requested == Some(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE)
     {
         return Ok(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE);
+    }
+    let workspace_write = GatewayCapabilityProfile::workspace_write_v1();
+    if workspace_write
+        .verify_identity(&run.capability_profile)
+        .is_ok()
+        && run.target == workspace_write.governed_target()
+        && requested == Some(GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE)
+    {
+        return Ok(GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE);
     }
     Err(profile_error())
 }

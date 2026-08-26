@@ -1,4 +1,3 @@
-
 /// Event emitted by a provider, Core, or ACP Runtime bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
@@ -52,6 +51,22 @@ pub enum AgentRuntimeEvent {
         request: CapabilityRequest,
         /// Complete digested fence for the live provider callback.
         callback: ProviderPermissionCallbackV2,
+    },
+    /// Private cosh-core requested permission for a Runtime-owned local effect.
+    ///
+    /// This event does not claim that Core emitted an ACP callback. The
+    /// dedicated callback fence binds the private control request instead.
+    CoreExecutionPermissionRequested {
+        /// Turn owning the tool invocation.
+        turn_id: TurnId,
+        /// Stable tool identity established by a prior update.
+        tool_use_id: ToolUseId,
+        /// Agent-provided, bounded presentation that carries no authority.
+        summary: ToolSummary,
+        /// Neutral capability request evaluated by the broker.
+        request: CapabilityRequest,
+        /// Complete digested fence for the live private Core callback.
+        callback: CorePermissionCallbackV1,
     },
     /// A cancelled provider turn abandoned callbacks without decisions.
     ///

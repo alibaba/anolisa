@@ -19,8 +19,6 @@ install -p -m 0644 "$ROOT/LICENSE" "$SOURCE/LICENSE"
 install -p -m 0644 "$ROOT/README.md" "$SOURCE/README.md"
 install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
     "$SOURCE/packaging/systemd/cosh-gateway@.service.in"
-install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway-acp@.service.in" \
-    "$SOURCE/packaging/systemd/cosh-gateway-acp@.service.in"
 
 test_rpm_systemd_unit_render() {
     local rpm_libexec rpm_libexec_cosh rpm_libexec_cosh_macro rendered_unit
@@ -55,7 +53,7 @@ test_rpm_systemd_unit_render() {
         "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
         > "$rendered_unit"
     grep -Fqx \
-        "ExecStart=\"$rpm_libexec_cosh/cosh-gateway\" serve --systemd-unit=cosh-gateway@%i.service --socket=/run/cosh-gateway-%i/gateway.sock --database=/var/lib/cosh-gateway-%i/gateway.sqlite --core-executable=\"$rpm_libexec_cosh/cosh-core\" --workspace=\${COSH_GATEWAY_WORKSPACE}" \
+        "ExecStart=\"$rpm_libexec_cosh/cosh-gateway\" serve --systemd-unit=cosh-gateway@%i.service --socket=/run/cosh-gateway-%i/gateway.sock --database=/var/lib/cosh-gateway-%i/gateway.sqlite --core-executable=\"$rpm_libexec_cosh/cosh-core\" --workspace=\${COSH_GATEWAY_WORKSPACE} \$COSH_GATEWAY_ACP_ARG \$COSH_GATEWAY_CHECKPOINT_ARG \$COSH_GATEWAY_SECURITY_AUDIT_ARG" \
         "$rendered_unit" || {
         echo "ERROR: rendered RPM Gateway unit paths do not match libexec installation" >&2
         exit 1
@@ -212,8 +210,6 @@ test_native_without_metadata() {
     install -p -m 0644 "$ROOT/README.md" "$native_source/README.md"
     install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
         "$native_source/packaging/systemd/cosh-gateway@.service.in"
-    install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway-acp@.service.in" \
-        "$native_source/packaging/systemd/cosh-gateway-acp@.service.in"
     for binary in cosh-cli cosh-core cosh-gateway cosh-shell; do
         install -p -m 0755 "$python_bin" "$native_bins/$binary"
     done
@@ -300,8 +296,16 @@ cmp "$LINUX_X64/cosh-gateway" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway"
 cmp "$LINUX_X64/cosh-shell" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell"
 cmp "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
     "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
-cmp "$ROOT/packaging/systemd/cosh-gateway-acp@.service.in" \
-    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in"
+test ! -e "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in"
+grep -Fqx 'EnvironmentFile=/etc/cosh/gateway-%i.env' \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
+if grep -Fq 'Environment=COSH_GATEWAY_WORKSPACE=' \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"; then
+    echo "ERROR: packaged Gateway unit must require an explicit workspace" >&2
+    exit 1
+fi
+grep -Fqx 'Conflicts=cosh-gateway-acp@%i.service' \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 if grep -Fq 'ws-ckpt.service' \
     "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"; then
     echo "ERROR: packaged Gateway unit depends on ws-ckpt" >&2
@@ -317,6 +321,13 @@ if grep -Fq -- '--security-audit=' \
     echo "ERROR: packaged Gateway unit configures checkpoint audit" >&2
     exit 1
 fi
+if grep -Fq 'packaging/systemd/cosh-gateway-acp@.service.in' \
+    "$ROOT/cosh-ng.spec.in" || \
+    grep -Fxq '%{_unitdir}/cosh-gateway-acp@.service' \
+        "$ROOT/cosh-ng.spec.in"; then
+    echo "ERROR: RPM spec still ships the retired split ACP Gateway unit" >&2
+    exit 1
+fi
 cmp "$ROOT/LICENSE" "$EXTRACTED/share/doc/cosh-ng/LICENSE"
 cmp "$ROOT/README.md" "$EXTRACTED/share/doc/cosh-ng/README.md"
 test -z "$(find "$EXTRACTED" -type l -print -quit)"
@@ -327,7 +338,6 @@ test "$(file_mode "$EXTRACTED/bin/cosh")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell")" = 755
 test "$(file_mode "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in")" = 644
-test "$(file_mode "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in")" = 644
 test "$(file_mode "$EXTRACTED/share/doc/cosh-ng/README.md")" = 644
 test ! -e "$EXTRACTED/share/anolisa/hooks"
 cmp "$STAGED/bin/cosh" "$EXTRACTED/bin/cosh"
@@ -410,25 +420,11 @@ gateway_service_file = {
     "mode": "0644",
     "render": "anolisa-paths-v1",
 }
-gateway_acp_service_file = {
-    "source": "share/anolisa/cosh-ng/cosh-gateway-acp@.service.in",
-    "target": "{unitdir}/cosh-gateway-acp@.service",
-    "mode": "0644",
-    "render": "anolisa-paths-v1",
-}
 assert gateway_service_file in linux_common["layout"]["files"]
 assert gateway_service_file not in macos_common["layout"]["files"]
-assert gateway_acp_service_file in linux_common["layout"]["files"]
-assert gateway_acp_service_file not in macos_common["layout"]["files"]
 assert linux_common.pop("services") == [
     {
         "unit": "cosh-gateway@.service",
-        "scope": "system",
-        "enable": False,
-        "start": False,
-    },
-    {
-        "unit": "cosh-gateway-acp@.service",
         "scope": "system",
         "enable": False,
         "start": False,
@@ -439,7 +435,7 @@ linux_common["layout"] = dict(linux_common["layout"])
 linux_common["layout"]["files"] = [
     entry
     for entry in linux_common["layout"]["files"]
-    if entry not in (gateway_service_file, gateway_acp_service_file)
+    if entry != gateway_service_file
 ]
 assert linux_common == macos_common
 assert linux.get("backends") == macos.get("backends")

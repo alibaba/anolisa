@@ -5,7 +5,7 @@ use cosh_gateway_contracts::common::{
     BoundedOpaque, BoundedText, ContractHeader, ContractSchema, Correlation, RuntimeSelector,
     TargetRef,
 };
-use cosh_gateway_contracts::ids::{InstallationId, RunId};
+use cosh_gateway_contracts::ids::{InstallationId, RequestId, RunId};
 use cosh_gateway_contracts::task::{RuntimeUpdate, SuspensionCode, TaskEvent};
 
 use super::*;
@@ -86,6 +86,104 @@ fn table_count(store: &SqliteTaskStore, table: &str) -> i64 {
         .connection()
         .query_row(&query, [], |row| row.get(0))
         .unwrap()
+}
+
+#[test]
+fn task_snapshot_inventory_and_switch_state_are_task_scoped() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let actor_id = ActorId::new();
+    let task_id = TaskId::new();
+    let submitted = submitted(&task_id, &actor_id);
+    store
+        .commit_task(&task_commit(
+            &task_id,
+            &actor_id,
+            "snapshot-inventory-task",
+            'a',
+            vec![submitted],
+            vec![],
+        ))
+        .unwrap();
+    let run_id = RunId::new();
+    let baseline_id = CheckpointId::new();
+    let approval_id = cosh_gateway_contracts::ids::ApprovalId::new();
+    let approval_checkpoint_id = CheckpointId::new();
+    store.connection_mut().execute(
+        "INSERT INTO pre_runtime_baselines(task_id,run_id,baseline_id,policy,state,evidence_json,created_at_ms,updated_at_ms)
+         VALUES (?1,?2,?3,'on','created','{}',1,1)",
+        params![task_id.as_str(), run_id.as_str(), baseline_id.as_str()],
+    ).unwrap();
+    store
+        .connection_mut()
+        .execute(
+            "INSERT INTO approvals(approval_id,request_id,actor_id,task_id,run_id,target_json,
+                               operation_digest,input_digest,state,revision,expires_at_ms,
+                               created_at_ms,updated_at_ms)
+         VALUES (?1,?2,?3,?4,?5,'{}',?6,?7,'pending',1,100,1,1)",
+            params![
+                approval_id.as_str(),
+                RequestId::new().as_str(),
+                actor_id.as_str(),
+                task_id.as_str(),
+                run_id.as_str(),
+                "d".repeat(64),
+                "e".repeat(64)
+            ],
+        )
+        .unwrap();
+    store.connection_mut().execute(
+        "INSERT INTO approval_checkpoint_barriers(approval_id,task_id,run_id,checkpoint_id,policy,runtime_fence_json,state,evidence_json,created_at_ms,updated_at_ms)
+         VALUES (?1,?2,?3,?4,'on','{}','created','{}',2,2)",
+        params![approval_id.as_str(), task_id.as_str(), run_id.as_str(), approval_checkpoint_id.as_str()],
+    ).unwrap();
+
+    let inventory = store.load_task_snapshots(&task_id).unwrap();
+    assert_eq!(inventory.len(), 2);
+    assert_eq!(inventory[0].snapshot_id, baseline_id);
+    assert_eq!(inventory[1].snapshot_id, approval_checkpoint_id);
+
+    let key = IdempotencyKey::new("snapshot-switch-test").unwrap();
+    let digest = Digest::parse("b".repeat(64)).unwrap();
+    let preview = Digest::parse("c".repeat(64)).unwrap();
+    let recovery = CheckpointId::new();
+    store
+        .record_task_snapshot_switch_intent(
+            &actor_id,
+            &key,
+            &digest,
+            &task_id,
+            &baseline_id,
+            &preview,
+            1,
+            &recovery,
+            3,
+        )
+        .unwrap();
+    let record = store
+        .load_task_snapshot_switch(&actor_id, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.state, "intent");
+    assert_eq!(record.recovery_snapshot_id, recovery);
+    store
+        .transition_task_snapshot_switch(
+            &actor_id,
+            &key,
+            "intent",
+            "recovery_created",
+            None,
+            None,
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .load_task_snapshot_switch(&actor_id, &key)
+            .unwrap()
+            .unwrap()
+            .state,
+        "recovery_created"
+    );
 }
 
 fn assert_task_commit_tables_empty(store: &SqliteTaskStore) {
