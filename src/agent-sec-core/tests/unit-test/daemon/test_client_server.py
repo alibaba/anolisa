@@ -977,15 +977,6 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
     registry = create_default_registry()
 
     assert snapshot["status"] == "ok"
-    # Locks the legacy PromptScanRuntimeState shape of the compat stub.
-    assert snapshot["prompt_scan"] == {
-        "status": "ready",
-        "model": "native",
-        "loaded": True,
-        "last_error": None,
-        "last_started_at": None,
-        "last_finished_at": None,
-    }
     assert registry.methods() == (
         "daemon.health",
         "obs.runs.list",
@@ -998,6 +989,33 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
         "skill_ledger.skillfs_notify_change",
     )
     assert _matching_modules(heavy_prefixes) == before
+
+
+def test_health_prompt_scan_is_reported_as_untracked(tmp_path: Path):
+    """Health must not claim scanner readiness it cannot observe."""
+    snapshot = build_health_snapshot(
+        DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    )
+
+    prompt_scan = snapshot["prompt_scan"]
+
+    assert prompt_scan["tracked"] is False
+    assert prompt_scan["status"] == "unknown"
+    assert prompt_scan["loaded"] is None
+    assert prompt_scan["model"] is None
+    assert prompt_scan["detail"]
+    # Legacy PromptScanRuntimeState keys stay present so monitors reading
+    # `.prompt_scan.*` keep parsing, but none may imply availability.
+    assert set(prompt_scan) == {
+        "status",
+        "model",
+        "loaded",
+        "last_error",
+        "last_started_at",
+        "last_finished_at",
+        "tracked",
+        "detail",
+    }
 
 
 def test_completion_log_is_emitted_when_inflight_request_is_cancelled(
