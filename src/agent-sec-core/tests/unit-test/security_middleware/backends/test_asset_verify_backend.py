@@ -24,6 +24,8 @@ class TestAssetVerifyBackend(unittest.TestCase):
     @patch(_PATCH_TARGET)
     def test_single_skill_pass(self, mock_run):
         mock_run.return_value = {
+            "outcome": "verified",
+            "checked": 1,
             "passed": ["my-skill"],
             "failed": [],
         }
@@ -33,11 +35,16 @@ class TestAssetVerifyBackend(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.data["passed"], 1)
         self.assertEqual(result.data["failed"], 0)
+        self.assertEqual(result.data["outcome"], "verified")
+        self.assertEqual(result.data["checked"], 1)
+        self.assertEqual(result.exit_code, 0)
         self.assertIn("[OK]", result.stdout)
 
     @patch(_PATCH_TARGET)
     def test_single_skill_fail(self, mock_run):
         mock_run.return_value = {
+            "outcome": "failed",
+            "checked": 1,
             "passed": [],
             "failed": [{"name": "bad-skill", "error": "signature mismatch"}],
         }
@@ -45,12 +52,16 @@ class TestAssetVerifyBackend(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.data["failed"], 1)
+        self.assertEqual(result.data["outcome"], "failed")
+        self.assertEqual(result.exit_code, 1)
         self.assertIn("[ERROR]", result.stdout)
         self.assertEqual(result.error_type, "")
 
     @patch(_PATCH_TARGET)
     def test_full_scan(self, mock_run):
         mock_run.return_value = {
+            "outcome": "failed",
+            "checked": 3,
             "passed": ["skill-a", "skill-b"],
             "failed": [{"name": "skill-c", "error": "bad sig"}],
         }
@@ -62,11 +73,34 @@ class TestAssetVerifyBackend(unittest.TestCase):
         self.assertEqual(result.data["failed"], 1)
 
     @patch(_PATCH_TARGET)
+    def test_no_candidates_is_successful_skip(self, mock_run):
+        mock_run.return_value = {
+            "outcome": "no_candidates",
+            "checked": 0,
+            "passed": [],
+            "failed": [],
+        }
+
+        result = self.backend.execute(self.ctx)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(
+            result.data,
+            {"outcome": "no_candidates", "checked": 0, "passed": 0, "failed": 0},
+        )
+        self.assertIn("VERIFICATION SKIPPED", result.stdout)
+        self.assertNotIn("VERIFICATION PASSED", result.stdout)
+        self.assertNotIn("[WARN]", result.stdout)
+
+    @patch(_PATCH_TARGET)
     def test_verification_exception(self, mock_run):
         mock_run.side_effect = RuntimeError("no module")
         result = self.backend.execute(self.ctx)
 
         self.assertFalse(result.success)
+        self.assertEqual(result.data, {})
+        self.assertEqual(result.exit_code, 1)
         self.assertIn("Verification error", result.error)
         self.assertEqual(result.error_type, "RuntimeError")
 

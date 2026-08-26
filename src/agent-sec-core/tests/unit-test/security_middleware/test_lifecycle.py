@@ -109,6 +109,27 @@ class TestPostAction(unittest.TestCase):
         self.assertEqual(event.details["result"]["passed"], 20)
 
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
+    def test_post_action_preserves_no_candidates_outcome(self, mock_log):
+        ctx = RequestContext(action="verify", trace_id="t-no-candidates")
+        result = ActionResult(
+            success=True,
+            data={
+                "outcome": "no_candidates",
+                "checked": 0,
+                "passed": 0,
+                "failed": 0,
+            },
+            exit_code=0,
+        )
+
+        post_action(ctx, result, {"skill": None}, DummyBackend())
+
+        event = mock_log.call_args[0][0]
+        self.assertEqual(event.result, "succeeded")
+        self.assertEqual(event.details["result"]["outcome"], "no_candidates")
+        self.assertEqual(event.details["result"]["checked"], 0)
+
+    @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_post_action_copies_request_tracing_to_security_event(self, mock_log):
         ctx = RequestContext(
             action="code_scan",
