@@ -622,8 +622,8 @@ impl SkillFs {
             return;
         }
 
-        let src_physical = self.source_base().join(&src_skill).join(&src_rel);
-        let dst_physical = self.source_base().join(&dst_skill).join(&dst_rel);
+        let src_physical = self.skill_physical_dir(&src_skill).join(&src_rel);
+        let dst_physical = self.skill_physical_dir(&dst_skill).join(&dst_rel);
 
         // T2 hardlink scope: same-skill **ordinary regular files only**.
         // `symlink_metadata` deliberately does NOT follow symlinks, so a

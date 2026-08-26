@@ -671,6 +671,7 @@ impl SkillFs {
                 }
                 self.send_sync(SyncEvent::Reparse {
                     skill_name: skill_name.clone(),
+                    source_path: physical.clone(),
                 });
                 self.observe_mutation(
                     skill_name,

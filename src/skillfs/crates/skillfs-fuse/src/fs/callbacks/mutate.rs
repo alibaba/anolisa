@@ -12,7 +12,9 @@ use super::super::SkillFs;
 use crate::path::PathType;
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
-use crate::sys::{errno, mkdirat_leaf, rename_noreplace, renameat2_leaf, unlinkat_leaf};
+use crate::sys::{
+    errno, mkdirat_leaf, open_dir_path, rename_noreplace, renameat2_leaf, unlinkat_leaf,
+};
 
 impl SkillFs {
     pub(in crate::fs) fn mkdir_impl(
@@ -905,7 +907,7 @@ impl SkillFs {
                 return;
             }
         };
-        let new_physical = match self.resolve_physical_path(&new_path) {
+        let resolved_new_physical = match self.resolve_physical_path(&new_path) {
             Some(p) => p,
             None => {
                 self.ro_warn("rename", &new_path);
@@ -921,6 +923,25 @@ impl SkillFs {
                 reply.error(libc::EROFS);
                 return;
             }
+        };
+        let new_physical = match (&old_path_type, &new_path_type) {
+            (
+                PathType::SkillDir { .. },
+                PathType::SkillDir {
+                    skill_name: new_name,
+                },
+            ) if self.skill_source_path(new_name).is_none()
+                && matches!(
+                    std::fs::symlink_metadata(&resolved_new_physical),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ) =>
+            {
+                old_physical
+                    .parent()
+                    .map(|parent| parent.join(new_name))
+                    .unwrap_or(resolved_new_physical)
+            }
+            _ => resolved_new_physical,
         };
 
         debug!(
@@ -941,10 +962,16 @@ impl SkillFs {
                 // Long-path fallback: rename via two parent dir fds + leafs.
                 // Both sides may exceed PATH_MAX on the absolute physical
                 // path even when each parent dir individually fits.
-                let old_parent = self.open_parent_dir_for(&old_path);
-                let new_parent = self.open_parent_dir_for(&new_path);
+                let old_parent = old_physical
+                    .parent()
+                    .and_then(|parent| open_dir_path(parent).ok())
+                    .zip(old_physical.file_name().map(|leaf| leaf.to_os_string()));
+                let new_parent = new_physical
+                    .parent()
+                    .and_then(|parent| open_dir_path(parent).ok())
+                    .zip(new_physical.file_name().map(|leaf| leaf.to_os_string()));
                 match (old_parent, new_parent) {
-                    (Ok((old_fd, old_leaf)), Ok((new_fd, new_leaf))) => {
+                    (Some((old_fd, old_leaf)), Some((new_fd, new_leaf))) => {
                         let flags: u32 = if no_replace {
                             SUPPORTED_RENAME_FLAGS
                         } else {
@@ -980,7 +1007,7 @@ impl SkillFs {
                         // We must use the *directory* name as the store key regardless
                         // of what SKILL.md frontmatter says (the user may not have
                         // updated the `name:` field yet).
-                        let md_path = self.source_base().join(new_name).join("SKILL.md");
+                        let md_path = new_physical.join("SKILL.md");
                         let new_entry = match parser::parse_skill_file(&md_path) {
                             Ok(mut entry) => {
                                 // Ensure the store key matches the directory name.
@@ -1019,6 +1046,7 @@ impl SkillFs {
                         if let PathType::SkillMd { skill_name } = &new_type {
                             self.send_sync(SyncEvent::Reparse {
                                 skill_name: skill_name.clone(),
+                                source_path: new_physical.clone(),
                             });
                         }
                         if let PathType::SkillMd { skill_name } = &old_type {

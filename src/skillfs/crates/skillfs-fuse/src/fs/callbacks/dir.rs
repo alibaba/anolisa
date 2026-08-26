@@ -1391,60 +1391,14 @@ impl SkillFs {
             PathType::Root | PathType::SkillsDir | PathType::InboxDir => {
                 reply.ok();
             }
-            PathType::SkillDir { ref skill_name } | PathType::InboxSkillDir { ref skill_name } => {
-                if is_skill_discover_path(skill_name) {
-                    reply.ok();
-                } else {
-                    let dir_path = self.source_base().join(skill_name);
-                    match std::fs::metadata(&dir_path) {
-                        Ok(m) if m.is_dir() => match std::fs::File::open(&dir_path) {
-                            Ok(dir_file) => {
-                                let result = if datasync {
-                                    dir_file.sync_data()
-                                } else {
-                                    dir_file.sync_all()
-                                };
-                                match result {
-                                    Ok(()) => reply.ok(),
-                                    Err(e) => reply.error(errno(&e)),
-                                }
-                            }
-                            Err(e) => reply.error(errno(&e)),
-                        },
-                        Ok(_) => reply.error(libc::ENOTDIR),
-                        Err(e) => reply.error(errno(&e)),
-                    }
-                }
+            PathType::SkillDir { ref skill_name } if is_skill_discover_path(skill_name) => {
+                reply.ok();
             }
-            PathType::Passthrough {
-                ref skill_name,
-                ref relative_path,
-            }
-            | PathType::InboxPassthrough {
-                ref skill_name,
-                ref relative_path,
-            } => {
-                let dir_path = self.source_base().join(skill_name).join(relative_path);
-                match std::fs::metadata(&dir_path) {
-                    Ok(m) if m.is_dir() => match std::fs::File::open(&dir_path) {
-                        Ok(dir_file) => {
-                            let result = if datasync {
-                                dir_file.sync_data()
-                            } else {
-                                dir_file.sync_all()
-                            };
-                            match result {
-                                Ok(()) => reply.ok(),
-                                Err(e) => reply.error(errno(&e)),
-                            }
-                        }
-                        Err(e) => reply.error(errno(&e)),
-                    },
-                    Ok(_) => reply.error(libc::ENOTDIR),
-                    Err(e) => reply.error(errno(&e)),
-                }
-            }
-            PathType::HermesMeta { .. }
+            PathType::SkillDir { .. }
+            | PathType::InboxSkillDir { .. }
+            | PathType::Passthrough { .. }
+            | PathType::InboxPassthrough { .. }
+            | PathType::HermesMeta { .. }
             | PathType::HermesMetaChild { .. }
             | PathType::CategoryPassthrough { .. }
             | PathType::CategoryDir { .. }
