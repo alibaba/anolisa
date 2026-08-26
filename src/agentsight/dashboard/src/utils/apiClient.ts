@@ -1631,7 +1631,7 @@ export async function fetchAuditSessions(
 }
 
 export async function fetchSecurityCases(
-  params?: { limit?: number; offset?: number; agent_id?: string },
+  params?: { limit?: number; offset?: number; agent_id?: string; status?: string; blocked?: boolean },
 ): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
   return auditFetch<SecurityPaginated<SecurityRiskCase>>(
     `${API_BASE}/api/audit/cases${buildQuery(params)}`,

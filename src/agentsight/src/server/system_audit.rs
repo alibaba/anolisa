@@ -24,6 +24,8 @@ pub(super) struct AuditQuery {
     agent_id: Option<String>,
     session_id: Option<String>,
     binding_id: Option<Uuid>,
+    status: Option<String>,
+    blocked: Option<bool>,
     limit: Option<usize>,
     offset: Option<i64>,
 }
@@ -156,11 +158,13 @@ pub(super) async fn cases(
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = query.offset.unwrap_or(0).max(0);
     let agent_id = query.agent_id.as_deref();
-    let total = match data.audit_service.case_count(agent_id) {
+    let status = query.status.as_deref();
+    let blocked = query.blocked;
+    let total = match data.audit_service.case_count(agent_id, status, blocked) {
         Ok(total) => total,
         Err(error) => return store_error(error),
     };
-    match data.audit_service.cases(limit, offset, agent_id) {
+    match data.audit_service.cases(limit, offset, agent_id, status, blocked) {
         Ok(items) => response(
             StatusCode::OK,
             if items.is_empty() { "empty" } else { "ok" },

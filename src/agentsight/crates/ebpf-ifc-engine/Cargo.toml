@@ -16,12 +16,3 @@ path = "src/lib.rs"
 aya = "0.13"
 libc = "0.2"
 libbpf-sys = "1.7"
-
-# Vendored third-party crate kept byte-identical to the attested ActPlane upstream
-# (verified by scripts/build-enforcer.sh). Suppress first-party lints so
-# `cargo clippy -D warnings` does not flag upstream code we must not modify.
-[lints.rust]
-warnings = "allow"
-
-[lints.clippy]
-all = "allow"

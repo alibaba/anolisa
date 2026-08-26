@@ -556,28 +556,42 @@ impl AuditStore {
         limit: usize,
         offset: i64,
         agent_id: Option<&str>,
+        status: Option<&str>,
+        blocked: Option<bool>,
     ) -> Result<Vec<RiskCase>, AuditError> {
         let conn = self.connection()?;
-        let (sql, use_agent_filter) = match agent_id {
-            Some(_) => (
-                "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
-                        severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
-                 FROM risk_cases
-                 WHERE agent_id = ?3
-                 ORDER BY updated_at_ns DESC, case_id ASC
-                 LIMIT ?1 OFFSET ?2",
-                true,
-            ),
-            None => (
-                "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
-                        severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
-                 FROM risk_cases
-                 ORDER BY updated_at_ns DESC, case_id ASC
-                 LIMIT ?1 OFFSET ?2",
-                false,
-            ),
+        let mut conditions = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(id) = agent_id {
+            conditions.push("agent_id = ?".to_string());
+            params_vec.push(Box::new(id.to_string()));
+        }
+        if let Some(s) = status {
+            conditions.push("status = ?".to_string());
+            params_vec.push(Box::new(s.to_string()));
+        }
+        if let Some(b) = blocked {
+            conditions.push("blocked = ?".to_string());
+            params_vec.push(Box::new(b as i64));
+        }
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
         };
-        let mut statement = conn.prepare(sql)?;
+        let sql = format!(
+            "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
+                    severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
+             FROM risk_cases
+             {where_clause}
+             ORDER BY updated_at_ns DESC, case_id ASC
+             LIMIT ? OFFSET ?"
+        );
+        params_vec.push(Box::new(limit.clamp(1, 1_000) as i64));
+        params_vec.push(Box::new(offset.max(0)));
+        let mut statement = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let row_mapper = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -595,21 +609,7 @@ impl AuditStore {
                 row.get::<_, String>(12)?,
             ))
         };
-        let rows = if use_agent_filter {
-            statement.query_map(
-                params![
-                    limit.clamp(1, 1_000) as i64,
-                    offset.max(0),
-                    agent_id.unwrap()
-                ],
-                row_mapper,
-            )?
-        } else {
-            statement.query_map(
-                params![limit.clamp(1, 1_000) as i64, offset.max(0)],
-                row_mapper,
-            )?
-        };
+        let rows = statement.query_map(param_refs.as_slice(), row_mapper)?;
         rows.map(|row| row.map_err(Into::into).and_then(risk_case_from_row))
             .collect()
     }
@@ -619,16 +619,31 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
-    pub fn case_count(&self, agent_id: Option<&str>) -> Result<u64, AuditError> {
+    pub fn case_count(&self, agent_id: Option<&str>, status: Option<&str>, blocked: Option<bool>) -> Result<u64, AuditError> {
         let conn = self.connection()?;
-        let count: i64 = match agent_id {
-            Some(id) => conn.query_row(
-                "SELECT COUNT(*) FROM risk_cases WHERE agent_id = ?1",
-                params![id],
-                |row| row.get(0),
-            )?,
-            None => conn.query_row("SELECT COUNT(*) FROM risk_cases", [], |row| row.get(0))?,
+        let mut conditions = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(id) = agent_id {
+            conditions.push("agent_id = ?".to_string());
+            params_vec.push(Box::new(id.to_string()));
+        }
+        if let Some(s) = status {
+            conditions.push("status = ?".to_string());
+            params_vec.push(Box::new(s.to_string()));
+        }
+        if let Some(b) = blocked {
+            conditions.push("blocked = ?".to_string());
+            params_vec.push(Box::new(b as i64));
+        }
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
         };
+        let sql = format!("SELECT COUNT(*) FROM risk_cases {where_clause}");
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let count: i64 = conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))?;
         unsigned(count, "case_total")
     }
 

@@ -52,16 +52,16 @@ fn service_case_queries_delegate_to_store_with_agent_filter() {
         .expect("beta case should persist");
     let service = AuditService::new(Arc::clone(&store));
 
-    assert_eq!(service.case_count(None).expect("total should load"), 2);
+    assert_eq!(service.case_count(None, None, None).expect("total should load"), 2);
     assert_eq!(
         service
-            .case_count(Some("agent-alpha"))
+            .case_count(Some("agent-alpha"), None, None)
             .expect("alpha total should load"),
         1
     );
 
     let alpha_cases = service
-        .cases(10, 0, Some("agent-alpha"))
+        .cases(10, 0, Some("agent-alpha"), None, None)
         .expect("alpha page should load");
     assert_eq!(alpha_cases.len(), 1);
     assert_eq!(alpha_cases[0].agent_id, "agent-alpha");
