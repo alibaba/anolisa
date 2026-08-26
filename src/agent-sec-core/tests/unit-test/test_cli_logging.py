@@ -373,9 +373,7 @@ def test_handler_stringifies_non_json_data_values(tmp_path: Path) -> None:
     }
 
 
-def test_handler_does_not_chmod_log_file_on_emit(tmp_path: Path) -> None:
-    # Access control relies on the parent directory's 0o700 mode; the handler
-    # must not chmod the log file itself on each write.
+def test_handler_tightens_existing_log_file_on_emit(tmp_path: Path) -> None:
     init_invocation_context()
     path = tmp_path / "cli.jsonl"
     path.write_text("", encoding="utf-8")
@@ -384,9 +382,7 @@ def test_handler_does_not_chmod_log_file_on_emit(tmp_path: Path) -> None:
 
     handler.emit(_make_record())
 
-    # File mode is untouched by the handler — whatever umask/explicit chmod
-    # set it to, that's what remains.
-    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_setup_cli_logging_is_idempotent(
