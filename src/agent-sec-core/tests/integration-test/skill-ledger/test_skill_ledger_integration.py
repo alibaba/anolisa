@@ -148,6 +148,17 @@ def write_findings_file(parent: Path, name: str, findings: list | dict) -> Path:
     return path
 
 
+def snapshot_file_tree(root: Path) -> dict[str, bytes]:
+    """Return relative paths and contents for every file below *root*."""
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def read_latest_manifest(skill_dir: Path) -> dict:
     """Read ``.skill-meta/latest.json`` for assertions."""
     latest = skill_dir / ".skill-meta" / "latest.json"
@@ -3734,25 +3745,46 @@ def test_status_drifted_shows_details(ws):
     ), f"Expected health 'attention' after drift: {out['skills']}"
 
 
-# ── Group 8: stubs & edge cases ───────────────────────────────────────────
+# ── Group 8: reserved commands & edge cases ───────────────────────────────
 
 
-def test_set_policy_stub(ws):
-    """set-policy → exit 0, 'coming soon' in output."""
-    skill = make_skill(ws.skills_dir, "stub-policy", {"x.txt": "x"})
+def test_set_policy_removed(ws: Workspace) -> None:
+    """The removed set-policy placeholder fails without creating ledger state."""
+    skill = make_skill(ws.skills_dir, "removed-policy", {"x.txt": "x"})
+    metadata_dir = skill / ".skill-meta"
+    assert not metadata_dir.exists()
+
     r = run_skill_ledger(
         ["set-policy", str(skill), "--policy", "allow"],
         env_extra=ws.env(),
     )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 2, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    error = strip_ansi(r.stderr).lower()
+    assert "no such command" in error
+    assert "set-policy" in error
+    assert not metadata_dir.exists()
 
 
-def test_rotate_keys_stub(ws):
-    """rotate-keys → exit 0, 'coming soon' in output."""
+def test_rotate_keys_not_implemented(ws: Workspace) -> None:
+    """rotate-keys fails explicitly without changing the isolated key store."""
+    key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
+    before = snapshot_file_tree(key_dir)
+    keyring_existed = (key_dir / "keyring").is_dir()
+    assert {"key.enc", "key.pub"}.issubset(before)
+
     r = run_skill_ledger(["rotate-keys"], env_extra=ws.env())
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 1, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    assert r.stderr == (
+        "Error: rotate-keys is not implemented; no keys were changed.\n"
+    )
+    assert snapshot_file_tree(key_dir) == before
+    assert (key_dir / "keyring").is_dir() is keyring_existed
+
+    help_result = run_skill_ledger(["rotate-keys", "--help"], env_extra=ws.env())
+    assert help_result.returncode == 0, help_result.stderr
+    assert "not implemented" in strip_ansi(help_result.stdout).lower()
 
 
 def test_list_scanners(ws):

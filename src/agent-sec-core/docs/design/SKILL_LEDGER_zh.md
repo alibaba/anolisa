@@ -341,7 +341,10 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 兼容入口 `init-keys` 仍保留，但作为低层命令隐藏，不在普通 help 与用户主流程中展示。
 
-**`skill-ledger rotate-keys`** — 密钥轮换（预留接口，本版本不实现）
+**`skill-ledger rotate-keys`** — 密钥轮换（隐藏的预留接口，本版本不实现）
+
+当前直接执行该命令会在 stderr 报告 `not implemented`，以退出码 1 结束，且不会修改
+`key.enc`、`key.pub` 或 `keyring/`；`rotate-keys --help` 仍作为只读帮助以退出码 0 结束。
 
 设计思路：生成新密钥对 → 用新密钥重签 `latest.json` → 旧公钥移入 `keyring/` 供历史验证。
 
@@ -436,6 +439,10 @@ agent-sec-cli skill-ledger decide <skill_dir> --clear
 ```
 
 `--clear` 将 latest manifest 的 `userDecision` 置空，恢复全局 activation 行为。`rollback` 未指定 `--version` 时，默认选择当前用户决策或 `pass_warn_only` 策略下的真实 active version；若当前只有 pending stub 或 hidden，没有真实 active version，则报错。
+
+`decide` 是用户决策的唯一 CLI 入口；不保留早期的 `set-policy` 占位命令，因为其
+`allow | block | warning` 执行策略语义与按版本记录的用户决策并不等价。旧调用由 Typer
+按 unknown command 处理并返回退出码 2，不创建或修改 `.skill-meta`。
 
 **`skill-ledger show <skill_dir>`** — 展示统一暴露摘要和诊断信息
 
