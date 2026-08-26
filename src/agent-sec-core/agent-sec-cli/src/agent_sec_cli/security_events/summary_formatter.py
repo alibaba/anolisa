@@ -124,6 +124,25 @@ def _is_full_verify(event: SecurityEvent) -> bool:
     return request.get("skill") is None
 
 
+def _asset_verify_outcome(event: SecurityEvent) -> str:
+    """Return the semantic verification outcome, including for legacy events."""
+    result = _get_result(event)
+    outcome = result.get("outcome")
+    if outcome in {"verified", "failed", "no_candidates"}:
+        return str(outcome)
+
+    if event.result == "failed":
+        return "failed"
+
+    passed = result.get("passed", 0)
+    failed = result.get("failed", 0)
+    if isinstance(failed, int) and failed > 0:
+        return "failed"
+    if passed == 0 and failed == 0:
+        return "no_candidates"
+    return "verified"
+
+
 def _get_mode(event: SecurityEvent) -> str:
     """Extract hardening mode from details.result, fallback to parsing request.args.
 
@@ -267,32 +286,34 @@ def _summarize_asset_verify(events: list[SecurityEvent]) -> str:
     """Summarize asset_verify category events."""
     lines = ["--- Asset Verification ---"]
 
-    ok_count = 0
-    latest: SecurityEvent | None = None
-    for e in events:
-        if e.result == "succeeded":
-            ok_count += 1
-            if latest is None:
-                latest = e
-    fail_count = len(events) - ok_count
+    outcomes = [_asset_verify_outcome(event) for event in events]
+    verified_count = outcomes.count("verified")
+    skipped_count = outcomes.count("no_candidates")
+    failed_count = outcomes.count("failed")
     lines.append(
         f"  Verifications performed: {len(events)} "
-        f"(succeeded: {ok_count}, failed: {fail_count})"
+        f"(verified: {verified_count}, skipped: {skipped_count}, failed: {failed_count})"
     )
 
-    # Latest successful result
-    if latest:
-        result = _get_result(latest)
-        passed = result.get("passed", 0)
-        failed = result.get("failed", 0)
-        lines.append("")
-        lines.append("  Latest result:")
-        lines.append(f"    {passed} passed, {failed} failed")
-        if failed == 0:
-            lines.append("    Integrity status: ALL CLEAR")
-        else:
-            lines.append("    Integrity status: FAILURES DETECTED")
-            lines.append("    Check details using `agent-sec-cli verify`")
+    latest = events[0]
+    result = _get_result(latest)
+    passed = result.get("passed", 0)
+    failed = result.get("failed", 0)
+    checked = result.get("checked", passed + failed)
+    outcome = _asset_verify_outcome(latest)
+    lines.append("")
+    lines.append("  Latest result:")
+    lines.append(f"    {checked} checked, {passed} passed, {failed} failed")
+    if outcome == "verified":
+        lines.append("    Integrity status: ALL CLEAR")
+    elif outcome == "no_candidates":
+        lines.append("    Integrity status: NOT ASSESSED (no candidate skills)")
+    else:
+        lines.append("    Integrity status: FAILURES DETECTED")
+        error_msg = _safe_details(latest).get("error")
+        if error_msg:
+            lines.append(f"    Latest error: {error_msg}")
+        lines.append("    Check details using `agent-sec-cli verify`")
 
     return "\n".join(lines)
 
@@ -562,21 +583,20 @@ def _compute_posture(
             if failures:
                 needs_attention = True
 
-    # --- Asset Verification (latest FULL verify event) ---
+    # --- Asset Verification (latest conclusive FULL verify event) ---
     # Only consider full-skill verifications (skill=None) for posture calculation
-    # Single-skill verifications should not affect overall system status
-    if verify_events:
-        # Find the latest full verify event
-        latest_full_verify = next(
-            (e for e in verify_events if _is_full_verify(e)), None
-        )
-        if latest_full_verify:
-            if latest_full_verify.result == "failed":
-                needs_attention = True
-            elif latest_full_verify.result == "succeeded":
-                result = _get_result(latest_full_verify)
-                if result.get("failed", 0) > 0:
-                    needs_attention = True
+    # Single-skill and no-candidate runs must not change the prior system status.
+    latest_full_verify = next(
+        (
+            event
+            for event in verify_events
+            if _is_full_verify(event)
+            and _asset_verify_outcome(event) != "no_candidates"
+        ),
+        None,
+    )
+    if latest_full_verify and _asset_verify_outcome(latest_full_verify) == "failed":
+        needs_attention = True
 
     # --- Prompt Scan (any DENY verdict) ---
     for e in prompt_scan_events:

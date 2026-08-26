@@ -284,7 +284,7 @@ def verify(
     """Skill integrity verification."""
     result = invoke("verify", skill=skill)
     if result.stdout:
-        typer.echo(result.stdout)
+        typer.echo(result.stdout, nl=False)
     if result.error:
         typer.echo(result.error, err=True)
     raise typer.Exit(code=result.exit_code)
