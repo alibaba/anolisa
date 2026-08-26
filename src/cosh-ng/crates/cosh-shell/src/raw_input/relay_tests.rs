@@ -218,7 +218,7 @@ fn shift_tab_toggles_enhanced_routing_only_at_an_empty_prompt() {
 }
 
 #[test]
-fn shift_tab_reenables_assistance_while_shell_only_insight_is_visible() {
+fn visible_shell_only_insight_owns_shift_tab() {
     let (path, mut master) = output_file("assistance-toggle-shell-only-insight");
     let state_file = path.with_extension("enabled");
     fs::write(&state_file, b"enabled\n").expect("initial state file");
@@ -250,27 +250,25 @@ fn shift_tab_reenables_assistance_while_shell_only_insight_is_visible() {
         &input_mode,
         &mut state,
     )
-    .expect("reenable assistance over shell-only insight");
+    .expect("Shift+Tab over shell-only insight");
 
-    assert!(control.is_enabled());
-    assert!(state_file.is_file());
+    assert!(!control.is_enabled());
+    assert!(!state_file.exists());
     assert_eq!(
         *input_mode.lock().expect("input mode"),
-        RawInputMode::Passthrough
+        RawInputMode::PromptGhost {
+            text: "analyze failed input".to_string(),
+            route: PromptGhostRoute::AgentIntercept {
+                suggestion_id: Some("insight-1".to_string()),
+            },
+        }
     );
-    assert_eq!(
-        rx.try_iter().collect::<Vec<_>>(),
-        vec![
-            RawInputEvent::PromptGhostClear,
-            RawInputEvent::PromptGhostDismissed,
-            RawInputEvent::AssistanceToggled,
-        ]
-    );
+    assert!(rx.try_iter().next().is_none());
     assert!(fs::read(&path).expect("toggle output").is_empty());
 }
 
 #[test]
-fn shift_tab_disables_assistance_while_failure_insight_is_visible() {
+fn visible_failure_insight_owns_split_shift_tab() {
     let (path, mut master) = output_file("assistance-disable-over-insight");
     let state_file = path.with_extension("enabled");
     fs::write(&state_file, b"enabled\n").expect("initial state file");
@@ -292,31 +290,31 @@ fn shift_tab_disables_assistance_while_failure_insight_is_visible() {
         false,
     );
 
-    relay_input_bytes(
-        b"\x1b[Z",
-        Instant::now(),
-        &mut master,
-        &tx,
-        &classifier,
-        &input_mode,
-        &mut state,
-    )
-    .expect("disable assistance over failure insight");
+    for bytes in [b"\x1b".as_slice(), b"[".as_slice(), b"Z".as_slice()] {
+        relay_input_bytes(
+            bytes,
+            Instant::now(),
+            &mut master,
+            &tx,
+            &classifier,
+            &input_mode,
+            &mut state,
+        )
+        .expect("split Shift+Tab over failure insight");
+    }
 
-    assert!(!control.is_enabled());
-    assert!(!state_file.exists());
+    assert!(control.is_enabled());
+    assert!(state_file.is_file());
     assert_eq!(
         *input_mode.lock().expect("input mode"),
-        RawInputMode::Passthrough
+        RawInputMode::PromptGhost {
+            text: "analyze failed input".to_string(),
+            route: PromptGhostRoute::AgentIntercept {
+                suggestion_id: Some("insight-1".to_string()),
+            },
+        }
     );
-    assert_eq!(
-        rx.try_iter().collect::<Vec<_>>(),
-        vec![
-            RawInputEvent::PromptGhostClear,
-            RawInputEvent::PromptGhostDismissed,
-            RawInputEvent::AssistanceToggled,
-        ]
-    );
+    assert!(rx.try_iter().next().is_none());
     assert!(fs::read(&path).expect("toggle output").is_empty());
 }
 

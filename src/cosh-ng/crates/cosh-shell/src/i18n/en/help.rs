@@ -58,6 +58,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeAnalysis => {
             "choose suggested mode, automatic analysis, or no proactive assistance; controls passive suggestions and failure insights after failed commands"
         }
+        MessageId::HelpSummaryModeRouting => {
+            "choose whether unknown natural-language input may route to Agent"
+        }
         MessageId::HelpSummaryAgent => "compose a one-shot Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",
         MessageId::HelpSummaryCancel => "cancel active Agent work",

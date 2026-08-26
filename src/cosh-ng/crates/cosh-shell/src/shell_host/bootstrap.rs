@@ -20,7 +20,7 @@ const OUTPUT_REF_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const ISOLATED_INPUTRC: &str = "set input-meta on\nset convert-meta off\nset output-meta on\n";
 const ASSISTANCE_STATE_FILENAME: &str = "assistance-enabled";
 
-pub(super) fn assistance_state_file(config: &ShellHostConfig) -> PathBuf {
+pub(crate) fn assistance_state_file(config: &ShellHostConfig) -> PathBuf {
     config.work_dir.join(ASSISTANCE_STATE_FILENAME)
 }
 

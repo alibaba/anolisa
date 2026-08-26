@@ -58,6 +58,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeAnalysis => {
             "选择建议模式、自动分析或关闭主动介入；控制被动建议与失败命令 Insight"
         }
+        MessageId::HelpSummaryModeRouting => "选择未知自然语言输入是否可以路由给 Agent",
         MessageId::HelpSummaryAgent => "组稿一次性 Agent 请求",
         MessageId::HelpSummaryExplain => "分析上一个失败命令",
         MessageId::HelpSummaryCancel => "取消正在运行的 Agent 工作",

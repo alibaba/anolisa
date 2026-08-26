@@ -139,8 +139,16 @@ pub(crate) fn run_raw(
         .input_classifier
         .with_ai_enabled(cosh_config.ai_enabled);
 
+    let assistance_control = enhanced_integration.then(|| {
+        crate::input::AssistanceControl::enabled(crate::shell_host::assistance_state_file(&config))
+    });
+    if let Some(control) = assistance_control.clone() {
+        config.set_assistance_control(control);
+    }
+
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    inline_state.assistance_control = assistance_control;
     inline_state.shell_session_id = Some(config.session_id.clone());
     // #2161: share the relay-side input-wait clock and productized timeout.
     inline_state.input_wait_status = config.input_wait_status.clone();

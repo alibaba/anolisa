@@ -115,6 +115,7 @@ pub(crate) struct InlineState {
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
     pub(crate) analysis_mode: AnalysisMode,
+    pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(crate) debug: bool,
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,

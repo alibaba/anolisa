@@ -64,3 +64,23 @@ macro_rules! mode_ids {
         );
     };
 }
+
+// Appended as a trailing segment so existing MessageId discriminants stay stable.
+macro_rules! enhanced_routing_mode_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryModeRouting,
+            ModeRoutingLine,
+            RoutingModeTitle,
+            RoutingModeCurrentBody,
+            RoutingModeSetBody,
+            RoutingModeUnavailableBody,
+            RoutingModeUnknownBody,
+            RoutingModeUsageFooter,
+            RoutingModeAssistedFooter,
+            RoutingModeShellOnlyFooter,
+        );
+    };
+}

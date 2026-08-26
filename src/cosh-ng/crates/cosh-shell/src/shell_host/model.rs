@@ -175,6 +175,7 @@ pub struct ShellHostConfig {
     /// #2161: mirrors `shell.input_wait_timeout_secs` so the hint card can
     /// forecast the auto-interrupt (0 = disabled, no forecast line).
     pub(crate) input_wait_timeout_secs: u64,
+    pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
     pub(super) transcript_retention: TranscriptRetention,
@@ -201,6 +202,7 @@ impl ShellHostConfig {
             hint_language: crate::config::Language::default(),
             hint_card_renderer: None,
             input_wait_timeout_secs: 120,
+            assistance_control: None,
             shell_environment_observer: None,
             shell_history_file_observer: None,
             transcript_retention: TranscriptRetention::Full,
@@ -221,6 +223,10 @@ impl ShellHostConfig {
     pub fn with_integration(mut self, integration: ShellIntegration) -> Self {
         self.integration = integration;
         self
+    }
+
+    pub(crate) fn set_assistance_control(&mut self, control: crate::input::AssistanceControl) {
+        self.assistance_control = Some(control);
     }
 
     /// Installs the input-wait hint card frame renderer (#2196 review):

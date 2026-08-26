@@ -320,6 +320,11 @@ mod tests {
             Ok(Some(SlashCommand::Mode(Some("approval"), Some("trust"), Some("confirm")))) => {}
             _ => panic!("unquoted trust confirmation did not parse"),
         }
+
+        match SlashCommand::parse("/mode routing shell-only") {
+            Ok(Some(SlashCommand::Mode(Some("routing"), Some("shell-only"), None))) => {}
+            _ => panic!("routing mode did not parse"),
+        }
     }
 
     #[test]

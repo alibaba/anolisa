@@ -330,7 +330,6 @@ fn relay_input_bytes_with_read_ahead(
         &mode,
         input_events,
         input_classifier,
-        input_mode,
         state,
     )?
     else {

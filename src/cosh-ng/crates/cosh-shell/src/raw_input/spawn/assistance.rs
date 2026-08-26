@@ -26,7 +26,6 @@ pub(super) fn resolve_assistance_shortcut<'a>(
     mode: &RawInputMode,
     input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
-    input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
 ) -> io::Result<Option<Cow<'a, [u8]>>> {
     let combined = state
@@ -55,27 +54,8 @@ pub(super) fn resolve_assistance_shortcut<'a>(
     let Some(control) = input_classifier.assistance_control() else {
         return Ok(Some(bytes));
     };
-    let dismiss_prompt_ghost = matches!(mode, RawInputMode::PromptGhost { .. });
-    let mut active_mode = if dismiss_prompt_ghost {
-        match input_mode.lock() {
-            Ok(mode) => Some(mode),
-            Err(_) => return Ok(Some(bytes)),
-        }
-    } else {
-        None
-    };
     if control.toggle().is_err() {
         return Ok(Some(bytes));
-    }
-    if let Some(active_mode) = active_mode.as_mut() {
-        if matches!(**active_mode, RawInputMode::PromptGhost { .. }) {
-            **active_mode = RawInputMode::Passthrough;
-        }
-    }
-    if dismiss_prompt_ghost {
-        drop(active_mode.take());
-        let _ = input_events.send(RawInputEvent::PromptGhostClear);
-        let _ = input_events.send(RawInputEvent::PromptGhostDismissed);
     }
     let _ = input_events.send(RawInputEvent::AssistanceToggled);
     if remainder.is_empty() {
@@ -101,18 +81,7 @@ fn assistance_toggle_available(
 ) -> bool {
     input_classifier
         .assistance_control()
-        .is_some_and(|control| {
-            control.is_at_prompt()
-                && matches!(
-                    mode,
-                    RawInputMode::Passthrough
-                        | RawInputMode::PromptGhost {
-                            route: crate::raw_input::PromptGhostRoute::NativeShell
-                                | crate::raw_input::PromptGhostRoute::AgentIntercept { .. },
-                            ..
-                        }
-                )
-        })
+        .is_some_and(|control| control.is_at_prompt() && matches!(mode, RawInputMode::Passthrough))
         && state.native_line_state.is_empty()
         && !state.line_buffer.is_active()
 }

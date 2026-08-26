@@ -8,8 +8,25 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModesTitle => "Modes",
         MessageId::ModeApprovalLine => "approval: {mode}",
         MessageId::ModeAnalysisLine => "analysis: {mode}",
+        MessageId::ModeRoutingLine => "routing: {mode}",
         MessageId::ModeSummaryFooter => {
-            "Use /mode approval [recommend|auto|trust] or /mode analysis [smart|auto|manual]."
+            "Use /mode approval, /mode analysis, or /mode routing for details."
+        }
+        MessageId::RoutingModeTitle => "Input routing",
+        MessageId::RoutingModeCurrentBody => "Current: {mode}",
+        MessageId::RoutingModeSetBody => "Routing mode set to {mode}.",
+        MessageId::RoutingModeUnavailableBody => {
+            "Routing mode is unavailable in Native sessions; choose Enhanced at startup."
+        }
+        MessageId::RoutingModeUnknownBody => "Unknown routing mode: {mode}",
+        MessageId::RoutingModeUsageFooter => {
+            "Use /mode routing assisted|shell-only."
+        }
+        MessageId::RoutingModeAssistedFooter => {
+            "Unknown natural-language input may route to Agent; post-command insights remain available."
+        }
+        MessageId::RoutingModeShellOnlyFooter => {
+            "Input stays with Shell; post-command insights remain available."
         }
         MessageId::ModeRemovedTitle => "Mode command removed",
         MessageId::ModeRemovedBody => "/mode {mode} is not supported.",
@@ -18,7 +35,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeLanguageFooter => "Use /config language [auto|en-US|zh-CN].",
         MessageId::ModeUnknownBody => "Unknown mode: {mode}",
         MessageId::ModeUnknownFooter => {
-            "Use /mode approval recommend|auto|trust or /mode analysis smart|auto|manual."
+            "Use /mode approval, /mode analysis, or /mode routing."
         }
         MessageId::ApprovalModeTitle => "Approval mode",
         MessageId::ApprovalModeSetBody => "Mode set to {mode}.",

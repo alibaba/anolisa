@@ -22,6 +22,8 @@ pub(crate) mod invocation;
 pub(crate) mod logging;
 pub(crate) mod mode;
 #[cfg(test)]
+mod mode_tests;
+#[cfg(test)]
 mod mvp_loop_tests;
 pub(crate) mod prelude;
 pub(crate) mod prompt_draft;

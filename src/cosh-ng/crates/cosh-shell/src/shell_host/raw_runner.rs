@@ -368,10 +368,12 @@ where
         UnixStream,
     ) -> JoinHandle<io::Result<()>>,
 {
-    let assistance_control = config
-        .integration
-        .uses_markers()
-        .then(|| AssistanceControl::enabled(assistance_state_file(config)));
+    let assistance_control = config.integration.uses_markers().then(|| {
+        config
+            .assistance_control
+            .clone()
+            .unwrap_or_else(|| AssistanceControl::enabled(assistance_state_file(config)))
+    });
     let input_classifier = match assistance_control.as_ref() {
         Some(control) => input_classifier.with_assistance_control(control.clone()),
         None => input_classifier,

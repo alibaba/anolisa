@@ -145,6 +145,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/mode",
+            usage: "/mode routing [assisted|shell-only]",
+            summary_id: MessageId::HelpSummaryModeRouting,
+            group: Some("Modes"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/agent",
             usage: "/agent",
             summary_id: MessageId::HelpSummaryAgent,
@@ -387,6 +395,7 @@ mod tests {
             .any(|usage| usage.starts_with("/session [new|status|list [--all]|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
+        assert!(visible.contains(&"/mode routing [assisted|shell-only]"));
         assert!(visible.contains(&"/hooks"));
         assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
         assert!(visible.contains(&"/agent"));

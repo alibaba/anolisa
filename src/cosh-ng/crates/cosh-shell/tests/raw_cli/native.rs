@@ -56,6 +56,48 @@ fn raw_cli_default_enhanced_assisted_decorates_bash_prompt_without_mutating_ps1(
 }
 
 #[test]
+fn raw_cli_mode_routing_switches_the_live_enhanced_session() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (
+                b"/mode routing shell-only\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"hello there\n".to_vec(), Duration::from_millis(300)),
+            (
+                b"/mode routing assisted\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"hello there\n".to_vec(), Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+    let visible = strip_ansi_escape(&output);
+
+    assert!(
+        visible.contains("Routing mode set to shell-only."),
+        "{output}"
+    );
+    assert!(
+        visible.contains("Routing mode set to assisted."),
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&visible, "hello: command not found"),
+        1,
+        "{output}"
+    );
+    assert!(visible.contains("◌ "), "{output}");
+    assert!(visible.contains("◇ "), "{output}");
+}
+
+#[test]
 fn raw_cli_enhanced_decorates_zsh_prompt_without_mutating_prompt() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

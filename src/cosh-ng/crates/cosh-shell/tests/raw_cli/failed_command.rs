@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn raw_cli_shift_tab_reenables_assistance_over_shell_only_failure_insight() {
+fn raw_cli_failure_insight_keeps_shell_only_ownership_of_shift_tab() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -30,11 +30,12 @@ fn raw_cli_shift_tab_reenables_assistance_over_shell_only_failure_insight() {
         visible.contains("The previous input did not run successfully"),
         "{output}"
     );
-    assert!(count_occurrences(&visible, "◇ ") >= 2, "{output}");
+    assert!(count_occurrences(&visible, "◌ ") >= 2, "{output}");
+    assert_eq!(count_occurrences(&visible, "◇ "), 1, "{output}");
 }
 
 #[test]
-fn raw_cli_shift_tab_disables_assistance_over_assisted_failure_insight() {
+fn raw_cli_failure_insight_keeps_assisted_ownership_of_shift_tab() {
     let home = temp_shell_home("assistance-disable-over-insight");
     fs::write(home.join(".bashrc"), "PS1='insight-owner$ '\n").unwrap();
     let home_str = home.to_string_lossy().into_owned();
@@ -73,11 +74,11 @@ fn raw_cli_shift_tab_disables_assistance_over_assisted_failure_insight() {
         "{output}"
     );
     assert!(
-        visible.contains("◌ insight-owner$ printf '__SHELL_ONLY__\\n'"),
+        visible.contains("◇ insight-owner$ printf '__SHELL_ONLY__\\n'"),
         "{output}"
     );
     assert!(
-        !visible.contains("◇ insight-owner$ printf '__SHELL_ONLY__\\n'"),
+        !visible.contains("◌ insight-owner$ printf '__SHELL_ONLY__\\n'"),
         "{output}"
     );
 }
