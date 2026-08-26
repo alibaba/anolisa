@@ -784,6 +784,174 @@ mod tests {
     use super::*;
 
     #[test]
+    fn common_source_directory_finds_shared_parent() {
+        let paths = vec![
+            "/home/agent/.ssh/id_rsa".to_string(),
+            "/home/agent/.ssh/id_ed25519".to_string(),
+        ];
+        assert_eq!(
+            common_source_directory(&paths),
+            Some(PathBuf::from("/home/agent/.ssh"))
+        );
+    }
+
+    #[test]
+    fn common_source_directory_falls_back_to_root_when_divergent() {
+        let paths = vec![
+            "/home/agent/.env".to_string(),
+            "/etc/credentials.txt".to_string(),
+        ];
+        assert_eq!(common_source_directory(&paths), Some(PathBuf::from("/")));
+    }
+
+    #[test]
+    fn common_source_directory_is_none_for_empty_input() {
+        assert_eq!(common_source_directory(&[]), None);
+    }
+
+    #[test]
+    fn discover_sensitive_files_selects_secrets_and_respects_limits() {
+        let root = std::env::temp_dir().join(format!("agentsight-scan-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("node_modules")).expect("fixture dir should exist");
+        fs::create_dir_all(root.join("nested")).expect("nested dir should exist");
+        fs::write(root.join(".env"), b"SECRET=1").expect("env fixture");
+        fs::write(root.join("id_rsa"), b"key").expect("key fixture");
+        fs::write(root.join("README.md"), b"docs").expect("plain fixture");
+        fs::write(root.join("node_modules/.env"), b"ignored").expect("ignored fixture");
+        fs::write(root.join("nested/credentials.json"), b"c").expect("nested secret");
+
+        let found = discover_sensitive_files(&root, 3, 64);
+        assert!(found.iter().any(|p| p.ends_with(".env")));
+        assert!(found.iter().any(|p| p.ends_with("id_rsa")));
+        assert!(found.iter().any(|p| p.ends_with("credentials.json")));
+        assert!(!found.iter().any(|p| p.ends_with("README.md")));
+        // node_modules must be skipped entirely.
+        assert!(!found.iter().any(|p| p.contains("node_modules")));
+
+        // max_depth=0 must not descend into nested directories.
+        let shallow = discover_sensitive_files(&root, 0, 64);
+        assert!(!shallow.iter().any(|p| p.contains("nested")));
+
+        // limit caps the number of returned entries.
+        let limited = discover_sensitive_files(&root, 3, 1);
+        assert_eq!(limited.len(), 1);
+
+        // A non-existent root exercises the read_dir error branch.
+        let missing = discover_sensitive_files(&root.join("does-not-exist"), 3, 64);
+        assert!(missing.is_empty());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[actix_web::test]
+    async fn preview_agent_protection_scans_workspace_and_reports_secrets() {
+        use actix_web::http::StatusCode;
+        use actix_web::{App, test as awtest, web};
+        use std::sync::RwLock;
+        use std::time::Instant;
+
+        use super::super::{SecurityObservabilityConfig, configure_routes};
+        use crate::config::ServerAuthConfig;
+        use crate::grader::EvaluationStore;
+        use crate::health::store::AgentRole;
+        use crate::health::{AgentHealthState, AgentHealthStatus, HealthStore};
+        use crate::server::auth::DashboardAuth;
+
+        // A real workspace directory with a secret so discovery returns a hit.
+        let workspace = std::env::temp_dir().join(format!("agentsight-preview-{}", Uuid::new_v4()));
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join(".env"), b"SECRET=1").expect("secret fixture");
+        let canonical = workspace
+            .canonicalize()
+            .expect("workspace should canonicalize");
+
+        let pid = std::process::id();
+        let agents_health = Arc::new(RwLock::new(HealthStore::new()));
+        agents_health.write().unwrap().update(
+            pid,
+            AgentHealthStatus {
+                pid,
+                agent_name: "Scanner".into(),
+                category: "test".into(),
+                exe_path: "/usr/bin/sleep".into(),
+                workspace_path: Some(canonical.to_string_lossy().into_owned()),
+                ports: Vec::new(),
+                status: AgentHealthState::Healthy,
+                last_check_time: 1,
+                latency_ms: None,
+                error_message: None,
+                restart_cmd: None,
+                offline_since: None,
+                role: AgentRole::Client,
+                parent_pid: None,
+                has_crash: false,
+            },
+        );
+
+        let auth_dir =
+            std::env::temp_dir().join(format!("agentsight-preview-auth-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&auth_dir).expect("auth dir should exist");
+        let state = web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::clone(&agents_health),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(Path::new(":memory:"))
+                    .expect("evaluation fixture should open"),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(Arc::new(
+                agentsight_audit::AuditStore::open_in_memory().expect("audit store should open"),
+            ))),
+            security_observability: SecurityObservabilityConfig::default(),
+            auth: Arc::new(DashboardAuth::init(
+                &ServerAuthConfig { enabled: false },
+                &auth_dir,
+            )),
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        });
+
+        let app =
+            awtest::init_service(App::new().app_data(state).configure(configure_routes)).await;
+
+        // Unknown pid resolves to a 404 agent_not_found.
+        let missing = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/enforcement/agent-protection/4294967295")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        // Known pid scans its workspace and reports the discovered secret.
+        let ok = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/api/enforcement/agent-protection/{pid}"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(ok).await;
+        assert_eq!(body["root_pid"], pid);
+        assert_eq!(body["mode"], "audit");
+        assert!(
+            body["source_paths"]
+                .as_array()
+                .expect("source_paths should be an array")
+                .iter()
+                .any(|p| p.as_str().is_some_and(|s| s.ends_with(".env")))
+        );
+
+        fs::remove_dir_all(&workspace).ok();
+        fs::remove_dir_all(&auth_dir).ok();
+    }
+
+    #[test]
     fn builds_file_binding_from_product_fields() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
