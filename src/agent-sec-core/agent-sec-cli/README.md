@@ -263,14 +263,30 @@ uv run maturin build --release
 
 ### Asset Verification
 
-Edit `asset_verify/config.conf`:
+The packaged `asset_verify/config.conf` contains both supported system discovery roots:
 
 ```ini
 skills_dir = [
     /usr/share/anolisa/skills
-    /opt/custom-skills
+    /usr/local/share/anolisa/skills
 ]
 ```
+
+The first path is used by RPM installations; the second is used by standard ANOLISA raw
+installations. Both are optional. Missing or empty roots are skipped, and roots that resolve to the
+same canonical path are scanned once. The defaults are not derived from a custom installation
+prefix; use `agent-sec-cli verify --skill /path/to/skill` for a relocated Skill.
+
+Normal runs report `verified` when at least one candidate passes and none fail, `failed` when any
+candidate fails, or `no_candidates` when discovery completes without finding a candidate.
+`no_candidates` exits `0` but does not claim that an asset was verified. Configuration, trusted-key,
+canonicalization, and root-enumeration errors exit `1` as operation failures and may omit the
+outcome; the CLI writes those operation errors to standard error. Completed runs print
+`CHECKED`/`PASSED`/`FAILED` counts and finish with `VERIFICATION PASSED`, `VERIFICATION FAILED`, or
+`VERIFICATION SKIPPED: NO CANDIDATE SKILLS`.
+
+Full behavior and topology reference:
+[Asset Verification User Guide](../../../docs/user-guide/en/agent-security/agent-sec-core/asset-verification.md).
 
 ### Security Events
 
@@ -309,6 +325,9 @@ sign-skill.sh /path/to/skill
 
 # Sign all skills in batch
 sign-skill.sh --batch /usr/share/anolisa/skills --force
+
+# Standard ANOLISA raw installation root
+sign-skill.sh --batch /usr/local/share/anolisa/skills --force
 ```
 
 ### Verifying Skills
@@ -317,9 +336,17 @@ sign-skill.sh --batch /usr/share/anolisa/skills --force
 # Verify all configured skills
 agent-sec-cli verify
 
-# Verify with detailed output
-python -m agent_sec_cli.asset_verify.verifier --skill /path/to/skill
+# Verify one Skill without default-root discovery
+agent-sec-cli verify --skill /path/to/skill
 ```
+
+Batch discovery treats each immediate, non-hidden child directory as a candidate. Candidate
+manifest, signature, hash, unexpected-file, and access failures produce the `failed` outcome and
+exit `1`. An existing discovery root that is not a directory or cannot be enumerated is an operation
+error instead. An explicit `--skill` always represents one candidate, so a nonexistent, non-directory,
+unreadable, or invalid path is `failed` with exit `1`, never `no_candidates`. Completed runs expose
+`seccore.asset_outcome = verified|failed|no_candidates` to the sanitized telemetry projection;
+paths are not uploaded.
 
 ---
 

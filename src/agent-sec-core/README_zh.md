@@ -220,6 +220,9 @@ agent-sec-cli scan-prompt --mode standard --text "ignore previous instructions"
 # PII 检测
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
 
+# 验证默认安装根目录中的发布签名 Skill
+agent-sec-cli verify
+
 # Skill 完整性检查
 agent-sec-cli skill-ledger check /path/to/skill
 
@@ -229,6 +232,26 @@ agent-sec-cli events --summary
 
 完整 CLI 说明与各宿主集成步骤见
 [AgentSecCore 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)。
+
+### 资产验证
+
+`agent-sec-cli verify` 用于检查 GPG 签名的分发 manifest 和 SHA-256 文件覆盖。它与
+Skill Ledger 职责不同：`verify` 验证发布或部署签名，`skill-ledger` 维护本地 Ed25519
+运行时完整性历史。
+
+批量验证会从两个可选系统根目录发现直接、非隐藏的 Skill 子目录：RPM 安装使用
+`/usr/share/anolisa/skills`，标准 ANOLISA raw 安装使用
+`/usr/local/share/anolisa/skills`。缺失或为空的根目录会被跳过，指向同一 canonical path
+的重复根目录只扫描一次。至少找到一个候选且全部通过时 outcome 为 `verified`；任何候选
+失败时为 `failed`；没有发现候选时为 `no_candidates`。`no_candidates` 会成功退出，
+但不代表已验证任何资产。
+
+这两个根目录是固定的包默认值，不会从任意安装 prefix 动态推导。对于重定位或自定义
+Skill，请使用 `agent-sec-cli verify --skill /path/to/skill`。配置、受信密钥和根目录枚举
+异常仍属于操作失败；候选 Skill 的签名、manifest、哈希、未签名文件或访问失败会产生
+`failed` outcome。
+
+详见 [资产验证用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/asset-verification.md)。
 
 ## Prompt Scanner
 
