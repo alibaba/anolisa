@@ -293,8 +293,3 @@ def test_register_default_jobs_includes_skill_ledger():
     manager = JobManager()
     register_default_jobs(manager)
     assert [job["name"] for job in manager.status()] == ["skill-ledger-activation"]
-
-
-# TODO: prompt-model-preload job was removed when the Python prompt scanner was
-# replaced by the Rust native scanner. Add tests here for any replacement
-# warmup/background work once the new architecture is stable.
