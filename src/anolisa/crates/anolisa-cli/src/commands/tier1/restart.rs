@@ -36,25 +36,16 @@
 //! forget/repair previews, so a non-root system preview can render a plan
 //! on a root-owned install.
 
+mod application;
+
 use clap::Parser;
 
-use anolisa_core::domain::{Installation, ProviderBinding};
-use anolisa_core::facts::{JournalEvidence, pending_journal_for};
-use anolisa_core::lock::InstallLock;
-use anolisa_core::{
-    ObjectKind, ServiceManager, ServiceScope, ServiceState,
-    service_for_install_mode as service_factory,
-    user_service_for_install_mode as user_service_factory,
-};
-use anolisa_env::EnvService;
-use anolisa_platform::command::CommandRunner;
-use anolisa_platform::pkg_query::PackageQueryError;
-use anolisa_platform::rpm_query::RpmPackageQuery;
+use anolisa_core::execution::ExecutionIntent;
 
+use self::application::{
+    RestartApplicationOutcome, RestartRequest, RestartSummary, RestartUnitOutcome,
+};
 use crate::color::Palette;
-use crate::commands::common;
-use crate::commands::tier1::recovery::{LockedJournalGate, pending_operation_error};
-use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -71,148 +62,143 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
     render_restart(&payload, ctx)
 }
 
-/// Resolve units and either preview or dispatch the restart.
-///
-/// `--dry-run` must not `daemon-reload` or `restart_service`. Those are live
-/// systemd mutations; a preview that still dispatched would bounce units
-/// while the operator asked only for the plan. Unsupported scopes stay
-/// `not_supported` so the preview names the same units execute would skip.
 fn compute_restart(input: &str, ctx: &CliContext) -> Result<RestartPayload, CliError> {
-    compute_restart_with(input, ctx, None)
+    application::run(
+        RestartRequest {
+            component: input,
+            intent: execution_intent(ctx.dry_run),
+        },
+        ctx,
+    )
+    .map(project_restart_outcome)
 }
 
-/// Resolve units and either preview or dispatch using the given managers.
-///
-/// Tests inject recording managers so a supported backend cannot hide a
-/// dry-run dispatch behind the host's `not_supported` skip.
+fn execution_intent(dry_run: bool) -> ExecutionIntent {
+    if dry_run {
+        ExecutionIntent::Plan
+    } else {
+        ExecutionIntent::Apply
+    }
+}
+
+#[cfg(test)]
 fn compute_restart_with(
     input: &str,
     ctx: &CliContext,
-    managers: Option<(&dyn ServiceManager, &dyn ServiceManager)>,
+    managers: Option<(
+        &dyn anolisa_core::ServiceManager,
+        &dyn anolisa_core::ServiceManager,
+    )>,
 ) -> Result<RestartPayload, CliError> {
-    let command = format!("restart {input}");
+    application::run_with_managers(
+        RestartRequest {
+            component: input,
+            intent: execution_intent(ctx.dry_run),
+        },
+        ctx,
+        managers,
+    )
+    .map(project_restart_outcome)
+}
 
-    let install_mode = ctx.install_mode.as_str();
-    let layout = common::resolve_layout(ctx);
-    // Preview only reads recorded units and journals. Creating or exclusively
-    // locking `/var/lib/anolisa/lock` would fail on a root-owned install
-    // before a non-root `--dry-run` could print the plan.
-    let exclusive_lock = if ctx.dry_run {
-        None
-    } else {
-        Some(
-            InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-                command: command.clone(),
-                reason: format!("failed to acquire install lock: {err}"),
-            })?,
-        )
-    };
-    let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
-    let journal_dir = rpm_install::journal_dir(&layout);
-    let evidence = JournalEvidence::new(&journal_dir, &view.writable.state.operations);
-    if let Some(ref lock) = exclusive_lock {
-        let journal_gate = LockedJournalGate::load(lock, evidence, &command)?;
-        journal_gate.ensure_clear(&resolved, &command)?;
-    } else if let Some(path) =
-        pending_journal_for(evidence, &resolved).map_err(|err| CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to inspect operation journals: {err}"),
-        })?
-    {
-        return Err(pending_operation_error(&command, &resolved, &path));
-    }
-    let comp = view
-        .writable
-        .state
-        .find(ObjectKind::Component, &resolved)
-        .ok_or_else(|| CliError::NotInstalled {
-            command: command.clone(),
-            reason: format!(
-                "component '{resolved}' is not installed — nothing to restart (run `anolisa status` to see what is installed)"
-            ),
-        })?;
-
-    // Units come from the component's recorded ServiceRefs (raw installs, where
-    // ANOLISA drove activation) or from live `rpm -ql` discovery (RPM installs,
-    // which record no services). Discovery may also return notes — e.g. a
-    // template unit it cannot expand in this tier — which seed `warnings`.
-    let (units, mut warnings) = collect_restart_units(comp, &resolved)?;
-
-    if units.is_empty() {
-        if warnings.is_empty() {
-            // Ships no service units at all → nothing to restart, a usage error.
-            return Err(CliError::InvalidArgument {
-                command,
-                reason: format!("component '{resolved}' has no restartable systemd service units"),
-            });
-        }
-        // Ships only template units whose instances are per-user runtime state
-        // restart cannot choose. Not an error: the package is fine,
-        // so exit 0 and surface the per-user guidance already collected.
-        return Ok(guidance_only_payload(
-            &resolved,
-            install_mode,
+fn project_restart_outcome(outcome: RestartApplicationOutcome) -> RestartPayload {
+    match outcome {
+        RestartApplicationOutcome::Guidance {
+            summary,
+            intent,
             warnings,
-            ctx.dry_run,
-        ));
+        } => project_restart_payload(
+            summary,
+            matches!(intent, ExecutionIntent::Plan),
+            vec![],
+            warnings,
+        ),
+        RestartApplicationOutcome::Preview {
+            summary,
+            units,
+            warnings,
+        } => project_restart_payload(summary, true, units, warnings),
+        RestartApplicationOutcome::Applied {
+            summary,
+            units,
+            warnings,
+        } => project_restart_payload(summary, false, units, warnings),
     }
+}
 
-    // Restart routes each unit through the manager for its own scope — the
-    // same per-scope partitioning uninstall uses. System units drive
-    // `systemctl`, user units drive `systemctl --user`, so a mixed-scope
-    // component never mis-drives a user unit through the system manager (or
-    // vice versa): a unit whose scope has no driver here is a per-unit
-    // `not_supported` skip rather than a wrong-namespace call.
-    let detected_sys;
-    let detected_user;
-    let (sys_manager, user_manager) = match managers {
-        Some(pair) => pair,
-        None => {
-            let env = EnvService::detect();
-            detected_sys = service_factory(install_mode, &env);
-            detected_user = user_service_factory(install_mode, &env);
-            (detected_sys.as_ref(), detected_user.as_ref())
-        }
-    };
-
-    // Summary fields describe the set of scopes actually present. The op is
-    // "supported" if at least one unit's manager can drive it, and the label
-    // combines the distinct namespaces in play (just one for the common
-    // single-scope component).
-    let used_sys = units.iter().any(|u| u.scope == ServiceScope::System);
-    let used_user = units.iter().any(|u| u.scope == ServiceScope::User);
-    let supported =
-        (used_sys && sys_manager.supported()) || (used_user && user_manager.supported());
-    let manager_label = match (used_sys, used_user) {
-        (true, true) => format!("{}+{}", sys_manager.manager(), user_manager.manager()),
-        (true, false) => sys_manager.manager().to_string(),
-        (false, true) => user_manager.manager().to_string(),
-        // `units` is non-empty (checked above), so at least one scope is used.
-        (false, false) => unreachable!("restartable units present but no scope flagged"),
-    };
-
-    let results = if ctx.dry_run {
-        preview_restart_results(&units, sys_manager, user_manager)
-    } else {
-        execute_restart_units(
-            &units,
-            sys_manager,
-            user_manager,
-            used_sys,
-            used_user,
-            &mut warnings,
-        )
-    };
-
-    Ok(RestartPayload {
-        component: resolved,
-        install_mode: install_mode.to_string(),
-        manager: manager_label,
-        supported,
-        dry_run: ctx.dry_run,
-        units: results,
+fn project_restart_payload(
+    summary: RestartSummary,
+    dry_run: bool,
+    units: Vec<RestartUnitOutcome>,
+    warnings: Vec<String>,
+) -> RestartPayload {
+    RestartPayload {
+        component: summary.component,
+        install_mode: summary.install_mode,
+        manager: summary.manager,
+        supported: summary.supported,
+        dry_run,
+        units: units.into_iter().map(project_restart_unit).collect(),
         warnings,
-    })
+    }
+}
+
+fn project_restart_unit(outcome: RestartUnitOutcome) -> RestartResult {
+    match outcome {
+        RestartUnitOutcome::Planned {
+            component,
+            unit,
+            manager,
+        } => RestartResult {
+            component,
+            message: format!("dry-run: would restart {unit}"),
+            unit,
+            state: PLANNED_STATE.to_string(),
+            changed: false,
+            manager,
+        },
+        RestartUnitOutcome::Dispatched {
+            component,
+            unit,
+            state,
+            changed,
+            manager,
+            message,
+        } => RestartResult {
+            component,
+            unit,
+            state: state.as_str().to_string(),
+            changed,
+            manager,
+            message,
+        },
+        RestartUnitOutcome::Unsupported {
+            component,
+            unit,
+            manager,
+            message,
+        } => RestartResult {
+            component,
+            unit,
+            state: "not_supported".to_string(),
+            changed: false,
+            manager,
+            message,
+        },
+        RestartUnitOutcome::Failed {
+            component,
+            unit,
+            manager,
+            message,
+        } => RestartResult {
+            component,
+            unit,
+            state: "unknown".to_string(),
+            changed: false,
+            manager,
+            message,
+        },
+    }
 }
 
 fn render_restart(payload: &RestartPayload, ctx: &CliContext) -> Result<(), CliError> {
@@ -239,336 +225,63 @@ fn render_restart(payload: &RestartPayload, ctx: &CliContext) -> Result<(), CliE
     Ok(())
 }
 
-/// Describe units execute would touch without contacting systemd.
+#[cfg(test)]
+type RestartUnit = application::RestartUnit;
+
+#[cfg(test)]
 fn preview_restart_results(
     units: &[RestartUnit],
-    sys_manager: &dyn ServiceManager,
-    user_manager: &dyn ServiceManager,
+    system_manager: &dyn anolisa_core::ServiceManager,
+    user_manager: &dyn anolisa_core::ServiceManager,
 ) -> Vec<RestartResult> {
-    units
-        .iter()
-        .map(|unit| {
-            let manager = manager_for_scope(unit.scope, sys_manager, user_manager);
-            if !manager.supported() {
-                unsupported_restart_result(unit, manager)
-            } else {
-                RestartResult {
-                    component: unit.component.clone(),
-                    unit: unit.unit.clone(),
-                    state: PLANNED_STATE.to_string(),
-                    changed: false,
-                    manager: manager.manager().to_string(),
-                    message: format!("dry-run: would restart {}", unit.unit),
-                }
-            }
-        })
+    application::preview_restart_units(units, system_manager, user_manager)
+        .into_iter()
+        .map(project_restart_unit)
         .collect()
 }
 
-fn execute_restart_units(
-    units: &[RestartUnit],
-    sys_manager: &dyn ServiceManager,
-    user_manager: &dyn ServiceManager,
-    used_sys: bool,
-    used_user: bool,
-    warnings: &mut Vec<String>,
-) -> Vec<RestartResult> {
-    // Freshly-placed units (a place-only install, or an RPM whose %post did not
-    // reload the manager) aren't loadable until the manager reloads its unit
-    // database, so restart would otherwise fail "unit not found". Reload once
-    // per in-play scope, best-effort — a reload failure only adds a warning.
-    if used_sys
-        && sys_manager.supported()
-        && let Err(err) = sys_manager.daemon_reload()
-    {
-        warnings.push(format!("daemon-reload (system scope) failed: {err}"));
-    }
-    if used_user
-        && user_manager.supported()
-        && let Err(err) = user_manager.daemon_reload()
-    {
-        warnings.push(format!("daemon-reload (user scope) failed: {err}"));
-    }
-
-    let mut results: Vec<RestartResult> = Vec::with_capacity(units.len());
-    for unit in units {
-        let manager = manager_for_scope(unit.scope, sys_manager, user_manager);
-        if !manager.supported() {
-            // Quiet skip: this unit's scope has no driver here (a user unit
-            // in a system-mode restart, container, non-Linux). Reported
-            // `not_supported` per unit so the boundary is explicit and the
-            // unit is never mis-driven through another namespace.
-            results.push(unsupported_restart_result(unit, manager));
-            continue;
-        }
-        match manager.restart_service(&unit.unit) {
-            Ok(outcome) => {
-                results.push(RestartResult {
-                    component: unit.component.clone(),
-                    unit: unit.unit.clone(),
-                    state: outcome.state.as_str().to_string(),
-                    changed: outcome.changed,
-                    manager: outcome.manager,
-                    message: outcome.message,
-                });
-                if matches!(outcome.state, ServiceState::Failed | ServiceState::Unknown) {
-                    warnings.push(format!(
-                        "{}/{} reports state '{}' after restart",
-                        unit.component,
-                        unit.unit,
-                        outcome.state.as_str()
-                    ));
-                }
-            }
-            Err(err) => {
-                let msg = format!("{err}");
-                warnings.push(format!(
-                    "service restart skipped for {}/{}: {msg}",
-                    unit.component, unit.unit
-                ));
-                results.push(RestartResult {
-                    component: unit.component.clone(),
-                    unit: unit.unit.clone(),
-                    state: "unknown".to_string(),
-                    changed: false,
-                    manager: manager.manager().to_string(),
-                    message: msg,
-                });
-            }
-        }
-    }
-    results
-}
-
-fn manager_for_scope<'a>(
-    scope: ServiceScope,
-    sys_manager: &'a dyn ServiceManager,
-    user_manager: &'a dyn ServiceManager,
-) -> &'a dyn ServiceManager {
-    match scope {
-        ServiceScope::System => sys_manager,
-        ServiceScope::User => user_manager,
-    }
-}
-
-fn unsupported_restart_result(unit: &RestartUnit, manager: &dyn ServiceManager) -> RestartResult {
-    RestartResult {
-        component: unit.component.clone(),
-        unit: unit.unit.clone(),
-        state: "not_supported".to_string(),
-        changed: false,
-        manager: manager.manager().to_string(),
-        message: manager
-            .unsupported_reason()
-            .unwrap_or("service manager not supported in this environment")
-            .to_string(),
-    }
-}
-
-/// Absolute directories systemd searches for **system** unit files. A `.service`
-/// placed directly in one of these is a system-scope unit.
-const SYSTEM_UNIT_DIRS: &[&str] = &[
-    "/usr/lib/systemd/system",
-    "/usr/local/lib/systemd/system",
-    "/etc/systemd/system",
-    "/run/systemd/system",
-];
-
-/// Absolute directories systemd searches for **user** unit files (driven via
-/// `systemctl --user`).
-const USER_UNIT_DIRS: &[&str] = &[
-    "/usr/lib/systemd/user",
-    "/usr/local/lib/systemd/user",
-    "/etc/systemd/user",
-];
-
-/// Collect a component's restartable units plus any discovery notes.
-///
-/// The unit source is the component's backend: raw installs read the recorded
-/// `ServiceRef`s (ANOLISA owns activation); RPM installs discover live from
-/// `rpm -ql` (the package owns the unit files and state records no services).
-/// Returned notes (e.g. for un-expandable templates) are surfaced to the user.
-fn collect_restart_units(
-    comp: &Installation,
-    component: &str,
-) -> Result<(Vec<RestartUnit>, Vec<String>), CliError> {
-    match &comp.binding {
-        ProviderBinding::Delegated { package, .. } => discover_rpm_units(
-            package.resolved_name(),
-            component,
-            &RpmPackageQuery::system(),
-        ),
-        // Owned: the recorded ServiceRefs (restartable is hardcoded true
-        // today; the filter keeps the door open for an explicit opt-out
-        // later).
-        ProviderBinding::Owned { artifact } => {
-            let units = artifact
-                .services
-                .iter()
-                .filter(|svc| svc.restartable)
-                .map(|svc| RestartUnit {
-                    component: component.to_string(),
-                    unit: svc.name.clone(),
-                    scope: svc.scope,
-                })
-                .collect();
-            Ok((units, Vec::new()))
-        }
-    }
-}
-
-/// Discover an RPM component's `.service` units from its file manifest.
-///
-/// `rpm -ql <pkg>` lists every owned path; [`classify_unit_files`] keeps the
-/// `.service` files sitting directly in a systemd unit directory and infers
-/// scope from that directory. Plain units become [`RestartUnit`]s; template
-/// (`foo@.service`) units cannot be expanded here (their instances are runtime
-/// state, not package files), so each yields a per-user guidance note instead.
-///
-/// Generic over the [`RpmPackageQuery`] runner so tests can inject a fake
-/// `rpm -ql` listing; production passes [`RpmPackageQuery::system`].
-///
-/// # Errors
-/// `Runtime` when the component records no RPM package name (refresh with
-/// `repair`), or when `rpm -ql` fails (e.g. the recorded package vanished).
-fn discover_rpm_units<R: CommandRunner>(
+#[cfg(test)]
+fn discover_rpm_units<R: anolisa_platform::command::CommandRunner>(
     package: Option<&str>,
     component: &str,
-    query: &RpmPackageQuery<R>,
+    query: &anolisa_platform::rpm_query::RpmPackageQuery<R>,
 ) -> Result<(Vec<RestartUnit>, Vec<String>), CliError> {
-    let command = format!("restart {component}");
-    let package = package.ok_or_else(|| CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "component '{component}' is RPM-backed but its state records no package name; run `anolisa repair {component}` to refresh rpm metadata"
-            ),
-        })?;
-
-    let paths = match query.list_files(package) {
-        Ok(paths) => paths,
-        // Tooling gone: match the rpm/dnf-missing handling repair/update/uninstall
-        // use, so an RPM-backed restart fails with the same actionable message
-        // rather than a generic "command not found".
-        Err(PackageQueryError::CommandMissing { .. }) => {
-            return Err(rpm_tooling_missing_error(&command));
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command,
-                reason: format!("could not list files for RPM package '{package}': {err}"),
-            });
-        }
-    };
-
-    let mut units = Vec::new();
-    let mut notes = Vec::new();
-    for (unit, scope) in classify_unit_files(&paths) {
-        if is_template_unit(&unit) {
-            notes.push(template_guidance(&unit, scope));
-            continue;
-        }
-        units.push(RestartUnit {
-            component: component.to_string(),
-            unit,
-            scope,
-        });
-    }
-    Ok((units, notes))
+    application::discover_rpm_units(package, component, query)
 }
 
-/// Warn-and-exit error when `rpm`/`dnf` is absent: an RPM-backed component
-/// cannot be restarted without the package manager to enumerate its units.
-/// Mirrors the sibling helpers in `repair`/`update`/`uninstall` so the
-/// tooling-missing message is uniform across tier-1 commands.
+#[cfg(test)]
 fn rpm_tooling_missing_error(command: &str) -> CliError {
-    CliError::Runtime {
-        command: command.to_string(),
-        reason: "rpm/dnf not found: cannot restart an RPM-backed component without the package manager. Install rpm/dnf and retry".to_string(),
-    }
+    application::rpm_tooling_missing_error(command)
 }
 
-/// Stable `manager` label for a guidance-only result. No manager is engaged
-/// (the component ships only templates), so the wire field carries a sentinel
-/// rather than an empty string — `""` would be ambiguous between "no manager"
-/// and a missing field, whereas `none` reads clearly alongside the normal
-/// `systemd` / `systemd-user` / `not-supported` labels.
-const GUIDANCE_MANAGER: &str = "none";
-
-/// Build the payload for a guidance-only outcome: no units, the
-/// per-user guidance as warnings, the [`GUIDANCE_MANAGER`] sentinel, and
-/// `supported = true` (the command completed; the package is healthy).
+#[cfg(test)]
 fn guidance_only_payload(
     component: &str,
     install_mode: &str,
     warnings: Vec<String>,
     dry_run: bool,
 ) -> RestartPayload {
-    RestartPayload {
-        component: component.to_string(),
-        install_mode: install_mode.to_string(),
-        manager: GUIDANCE_MANAGER.to_string(),
-        supported: true,
-        dry_run,
-        units: Vec::new(),
+    project_restart_outcome(application::guidance_only_outcome(
+        component,
+        install_mode,
         warnings,
-    }
+        execution_intent(dry_run),
+    ))
 }
 
-/// Keep the `.service` files that sit **directly** in a known systemd unit
-/// directory, pairing each with the scope its directory implies.
-///
-/// Requiring a direct parent match rejects `*.target.wants/foo.service` enable
-/// symlinks and `foo.service.d/` drop-ins, leaving only canonical unit files.
-fn classify_unit_files(paths: &[String]) -> Vec<(String, ServiceScope)> {
-    let mut out = Vec::new();
-    for path in paths {
-        let path = path.trim();
-        if !path.ends_with(".service") {
-            continue;
-        }
-        let Some((dir, file)) = path.rsplit_once('/') else {
-            continue;
-        };
-        let scope = if SYSTEM_UNIT_DIRS.contains(&dir) {
-            ServiceScope::System
-        } else if USER_UNIT_DIRS.contains(&dir) {
-            ServiceScope::User
-        } else {
-            continue;
-        };
-        out.push((file.to_string(), scope));
-    }
-    out
+#[cfg(test)]
+fn classify_unit_files(paths: &[String]) -> Vec<(String, anolisa_core::ServiceScope)> {
+    application::classify_unit_files(paths)
 }
 
-/// A systemd template unit names its instance after `@` and has no instance
-/// before `.service` (e.g. `anolisa-memory@.service`).
+#[cfg(test)]
 fn is_template_unit(unit: &str) -> bool {
-    unit.ends_with("@.service")
+    application::is_template_unit(unit)
 }
 
-/// Per-user guidance for a template unit restart cannot expand.
-///
-/// A bare template is not restartable (`systemctl restart foo@.service` fails);
-/// the operator must pick an instance. For user-scope templates that also means
-/// running as the target user, plus linger to survive logout.
-fn template_guidance(unit: &str, scope: ServiceScope) -> String {
-    let base = unit.trim_end_matches("@.service");
-    match scope {
-        ServiceScope::User => format!(
-            "{unit} is a per-user template; restart cannot expand its instances — enable one as the target user: `systemctl --user enable --now {base}@<user>.service` (and `loginctl enable-linger <user>` to keep it running after logout)"
-        ),
-        ServiceScope::System => format!(
-            "{unit} is a systemd template; restart cannot pick an instance — start a concrete one with `systemctl start {base}@<instance>.service`"
-        ),
-    }
-}
-
-#[derive(Debug)]
-struct RestartUnit {
-    component: String,
-    unit: String,
-    scope: ServiceScope,
+#[cfg(test)]
+fn template_guidance(unit: &str, scope: anolisa_core::ServiceScope) -> String {
+    application::template_guidance(unit, scope)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -652,15 +365,20 @@ mod tests {
     use crate::commands::tier1::rpm_install;
     use crate::context::InstallMode;
     use anolisa_core::domain::{
-        InstallationScope, LifecycleStatus, OwnedArtifact, ProviderBinding,
+        Installation, InstallationScope, LifecycleStatus, OwnedArtifact, ProviderBinding,
     };
     use anolisa_core::state::ServiceRef;
     use anolisa_core::state_store::StateStore;
     use anolisa_core::transaction::Transaction;
-    use anolisa_core::{FakeServiceManager, ServiceOp};
-    use anolisa_platform::command::CommandOutput;
+    use anolisa_core::{
+        FakeServiceManager, ObjectKind, ServiceError, ServiceManager, ServiceOp, ServiceOutcome,
+        ServiceScope, ServiceState,
+    };
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
     use anolisa_platform::fs_layout::FsLayout;
+    use anolisa_platform::rpm_query::RpmPackageQuery;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use tempfile::tempdir;
 
     fn ctx_with_prefix(install_mode: InstallMode, prefix: Option<PathBuf>) -> CliContext {
@@ -725,6 +443,10 @@ mod tests {
     }
 
     fn plant_owned_restartable(layout: &FsLayout, name: &str, unit: &str, scope: ServiceScope) {
+        plant_owned_restartables(layout, name, &[(unit, scope)]);
+    }
+
+    fn plant_owned_restartables(layout: &FsLayout, name: &str, services: &[(&str, ServiceScope)]) {
         let state_path = layout.state_dir.join("installed.toml");
         let mut store = StateStore::empty_for_layout(layout);
         store.upsert(Installation {
@@ -738,13 +460,16 @@ mod tests {
                     raw_package: None,
                     manifest_digest: None,
                     files: Vec::new(),
-                    services: vec![ServiceRef {
-                        name: unit.to_string(),
-                        manager: "systemd".to_string(),
-                        restartable: true,
-                        enabled: true,
-                        scope,
-                    }],
+                    services: services
+                        .iter()
+                        .map(|(unit, scope)| ServiceRef {
+                            name: (*unit).to_string(),
+                            manager: "systemd".to_string(),
+                            restartable: true,
+                            enabled: true,
+                            scope: *scope,
+                        })
+                        .collect(),
                     external_modified_files: Vec::new(),
                     provisioned_packages: Vec::new(),
                 },
@@ -786,6 +511,74 @@ mod tests {
             code: Some(0),
             spawn_err: None,
         })
+    }
+
+    struct FixedStateManager {
+        state: ServiceState,
+        calls: Mutex<Vec<(ServiceOp, String)>>,
+    }
+
+    impl FixedStateManager {
+        fn new(state: ServiceState) -> Self {
+            Self {
+                state,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn outcome(&self, op: ServiceOp, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push((op, unit.to_string()));
+            Ok(ServiceOutcome {
+                manager: "fixed-state".to_string(),
+                unit: unit.to_string(),
+                op,
+                state: self.state,
+                supported: true,
+                changed: false,
+                message: format!("fixed {} {}", op.as_str(), unit),
+            })
+        }
+    }
+
+    impl ServiceManager for FixedStateManager {
+        fn manager(&self) -> &str {
+            "fixed-state"
+        }
+
+        fn supported(&self) -> bool {
+            true
+        }
+
+        fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::DaemonReload, "")
+        }
+
+        fn probe_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::Probe, unit)
+        }
+
+        fn start_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::Start, unit)
+        }
+
+        fn stop_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::Stop, unit)
+        }
+
+        fn restart_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::Restart, unit)
+        }
+
+        fn enable_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::Enable, unit)
+        }
+
+        fn disable_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
+            self.outcome(ServiceOp::Disable, unit)
+        }
     }
 
     #[test]
@@ -1091,6 +884,146 @@ mod tests {
             user.calls().is_empty(),
             "system-only execute must not drive the user manager: {:?}",
             user.calls()
+        );
+    }
+
+    #[test]
+    fn execution_intent_selects_the_typed_preview_branch() {
+        let (tmp, ctx) = planted_restart_ctx(false);
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let system = FakeServiceManager::new();
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+
+        let outcome = application::run_with_managers(
+            RestartRequest {
+                component: "agentsight",
+                intent: ExecutionIntent::Plan,
+            },
+            &ctx,
+            Some((&system, &user)),
+        )
+        .expect("typed preview");
+
+        assert!(matches!(outcome, RestartApplicationOutcome::Preview { .. }));
+        assert!(system.calls().is_empty());
+        assert!(user.calls().is_empty());
+        assert!(!layout.lock_file.exists());
+    }
+
+    #[test]
+    fn apply_routes_mixed_scopes_and_reloads_each_once() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        let layout = FsLayout::system(Some(prefix.clone()));
+        plant_owned_restartables(
+            &layout,
+            "agentsight",
+            &[
+                ("agentsight.service", ServiceScope::System),
+                ("agentsight-user.service", ServiceScope::User),
+            ],
+        );
+        let ctx = ctx_with_options(
+            InstallMode::System,
+            Some(prefix),
+            crate::test_support::TestContextOptions {
+                quiet: true,
+                no_color: true,
+                ..Default::default()
+            },
+        );
+        let system = FakeServiceManager::new();
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+
+        let payload = compute_restart_with("agentsight", &ctx, Some((&system, &user)))
+            .expect("mixed-scope restart");
+
+        assert_eq!(payload.manager, "fake+fake");
+        assert_eq!(payload.units.len(), 2);
+        assert_eq!(
+            system.calls(),
+            vec![
+                (ServiceOp::DaemonReload, String::new()),
+                (ServiceOp::Restart, "agentsight.service".to_string()),
+            ]
+        );
+        assert_eq!(
+            user.calls(),
+            vec![
+                (ServiceOp::DaemonReload, String::new()),
+                (ServiceOp::Restart, "agentsight-user.service".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_keeps_reload_failure_as_a_warning_and_restarts_units() {
+        let (_tmp, ctx) = planted_restart_ctx(false);
+        let system = FakeServiceManager::new();
+        system.fail(ServiceOp::DaemonReload, "");
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+
+        let payload = compute_restart_with("agentsight", &ctx, Some((&system, &user)))
+            .expect("reload failure stays non-fatal");
+
+        assert!(
+            payload
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("daemon-reload (system scope) failed")),
+            "{:?}",
+            payload.warnings
+        );
+        assert_eq!(
+            system.calls(),
+            vec![
+                (ServiceOp::DaemonReload, String::new()),
+                (ServiceOp::Restart, PROBE_UNIT.to_string()),
+            ]
+        );
+        assert_ne!(payload.units[0].state, "unknown");
+    }
+
+    #[test]
+    fn apply_projects_restart_failure_to_unknown_with_warning() {
+        let (_tmp, ctx) = planted_restart_ctx(false);
+        let system = FakeServiceManager::new();
+        system.fail(ServiceOp::Restart, PROBE_UNIT);
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+
+        let payload = compute_restart_with("agentsight", &ctx, Some((&system, &user)))
+            .expect("restart failure stays non-fatal");
+
+        assert_eq!(payload.units[0].state, "unknown");
+        assert!(!payload.units[0].changed);
+        assert!(payload.units[0].message.contains("fake forced failure"));
+        assert!(
+            payload
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("service restart skipped")),
+            "{:?}",
+            payload.warnings
+        );
+    }
+
+    #[test]
+    fn apply_preserves_abnormal_service_state_and_warning() {
+        let (_tmp, ctx) = planted_restart_ctx(false);
+        let system = FixedStateManager::new(ServiceState::Failed);
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+
+        let payload = compute_restart_with("agentsight", &ctx, Some((&system, &user)))
+            .expect("abnormal state remains a successful command result");
+
+        assert_eq!(payload.units[0].state, "failed");
+        assert!(
+            payload
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("reports state 'failed' after restart")),
+            "{:?}",
+            payload.warnings
         );
     }
 
