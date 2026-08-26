@@ -136,7 +136,7 @@ fn audit_chain_creates_one_open_unblocked_case_with_ordered_evidence() {
     let (store, _) = ingest_mock_chain(PolicyMode::Audit);
 
     let cases = store
-        .list_cases(100, 0, None)
+        .list_cases(100, 0, None, None, None)
         .expect("case list should load");
     assert_eq!(cases.len(), 1);
     let detail = store
@@ -175,7 +175,7 @@ fn repeated_decision_does_not_duplicate_the_case() {
 
     assert_eq!(
         store
-            .list_cases(100, 0, None)
+            .list_cases(100, 0, None, None, None)
             .expect("case list should load")
             .len(),
         1
@@ -210,7 +210,7 @@ fn dns_destination_retries_share_one_case_and_append_evidence() {
     }
 
     let cases = store
-        .list_cases(100, 0, None)
+        .list_cases(100, 0, None, None, None)
         .expect("case list should load");
     assert_eq!(cases.len(), 1, "DNS fallback must remain one risk case");
     let detail = store
@@ -237,7 +237,7 @@ fn product_observe_chain_persists_events_without_opening_a_case() {
     );
     assert!(
         store
-            .list_cases(100, 0, None)
+            .list_cases(100, 0, None, None, None)
             .expect("case list should load")
             .is_empty()
     );
@@ -248,7 +248,7 @@ fn enforce_chain_creates_a_critical_blocked_case() {
     let (store, _) = ingest_mock_chain(PolicyMode::Enforce);
 
     let case = store
-        .list_cases(10, 0, None)
+        .list_cases(10, 0, None, None, None)
         .expect("case list should load")
         .remove(0);
     assert_eq!(case.severity, RiskSeverity::Critical);
@@ -259,7 +259,7 @@ fn enforce_chain_creates_a_critical_blocked_case() {
 fn allowed_containment_decision_appends_without_claiming_a_block() {
     let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
     let case_id = store
-        .list_cases(10, 0, None)
+        .list_cases(10, 0, None, None, None)
         .expect("case list should load")[0]
         .case_id;
     let binding_id = Uuid::new_v4();
@@ -295,7 +295,7 @@ fn allowed_containment_decision_appends_without_claiming_a_block() {
     assert_eq!(detail.evidence.len(), 5);
     assert_eq!(
         store
-            .list_cases(10, 0, None)
+            .list_cases(10, 0, None, None, None)
             .expect("cases should load")
             .len(),
         1
@@ -306,7 +306,7 @@ fn allowed_containment_decision_appends_without_claiming_a_block() {
 fn containment_correlation_rolls_back_when_the_binding_is_missing() {
     let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
     let case_id = store
-        .list_cases(10, 0, None)
+        .list_cases(10, 0, None, None, None)
         .expect("case list should load")[0]
         .case_id;
     let binding_id = Uuid::new_v4();
@@ -338,7 +338,7 @@ fn containment_correlation_rolls_back_when_the_binding_is_missing() {
 fn reordered_duplicate_block_decisions_mark_original_case_at_earliest_time() {
     let (store, event_ids) = ingest_mock_chain(PolicyMode::Audit);
     let case_id = store
-        .list_cases(10, 0, None)
+        .list_cases(10, 0, None, None, None)
         .expect("case list should load")[0]
         .case_id;
     let binding_id = Uuid::new_v4();
@@ -392,7 +392,7 @@ fn reordered_duplicate_block_decisions_mark_original_case_at_earliest_time() {
     assert_eq!(detail.evidence.len(), 6);
     assert_eq!(
         store
-            .list_cases(10, 0, None)
+            .list_cases(10, 0, None, None, None)
             .expect("cases should load")
             .len(),
         1
@@ -481,7 +481,7 @@ fn coordinator_worker_ingests_the_uds_stream() {
 
     let deadline = Instant::now() + Duration::from_secs(2);
     while store
-        .list_cases(10, 0, None)
+        .list_cases(10, 0, None, None, None)
         .expect("case list should load")
         .is_empty()
     {

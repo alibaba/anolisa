@@ -111,7 +111,12 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence error when the count fails.
-    pub fn case_count(&self, agent_id: Option<&str>, status: Option<&str>, blocked: Option<bool>) -> Result<u64, AuditError> {
+    pub fn case_count(
+        &self,
+        agent_id: Option<&str>,
+        status: Option<&str>,
+        blocked: Option<bool>,
+    ) -> Result<u64, AuditError> {
         self.store.case_count(agent_id, status, blocked)
     }
 
@@ -137,7 +142,8 @@ impl AuditService {
         status: Option<&str>,
         blocked: Option<bool>,
     ) -> Result<Vec<RiskCase>, AuditError> {
-        self.store.list_cases(limit, offset, agent_id, status, blocked)
+        self.store
+            .list_cases(limit, offset, agent_id, status, blocked)
     }
 
     /// Returns a mapping from (agent_id, policy_id) to the most recent case_id.
