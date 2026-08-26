@@ -505,9 +505,10 @@ fn build_https_data(record: &HttpRecord, agent_name: Option<&str>) -> HttpsDataH
 
     let c_data = AgentsightHttpsData {
         pid: record.pid as i32,
-        // Process name = the *process* comm (/proc/<pid>/comm), not the SSL
-        // event's per-event thread comm (which may be a worker-thread name such
-        // as "HTTP client"). Falls back to the event comm when /proc is gone.
+        // Process name = the *process* comm (`<procfs root>/<pid>/comm`), not
+        // the SSL event's per-event thread comm (which may be a worker-thread
+        // name such as "HTTP client"). Falls back to the event comm when the
+        // entry is gone.
         process_name: copy_process_name(
             &crate::discovery::scanner::read_comm(record.pid)
                 .unwrap_or_else(|| record.comm.clone()),

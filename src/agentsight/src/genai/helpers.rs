@@ -678,8 +678,8 @@ impl GenAIBuilder {
             exe_path,
         };
         // Config rule match, else fall back to the *process* comm
-        // (/proc/{pid}/comm) — never the caller's per-event thread comm, which
-        // may be a library thread name such as "HTTP client".
+        // (`<procfs root>/{pid}/comm`) — never the caller's per-event thread
+        // comm, which may be a library thread name such as "HTTP client".
         Self::match_agent_by_ctx(&ctx).or_else(|| crate::discovery::scanner::read_comm(pid))
     }
 }

@@ -99,8 +99,9 @@ impl AgentScanner {
 
     /// Scan the system for running AI agent processes
     ///
-    /// This method iterates over /proc/[pid]/ directories and attempts to match
-    /// each process against the known agent list based on process name.
+    /// This method iterates over the `<procfs root>/[pid]/` directories and
+    /// attempts to match each process against the known agent list based on
+    /// process name.
     /// Discovered agents are automatically added to `tracked_agents`.
     ///
     /// # Returns
@@ -149,7 +150,7 @@ impl AgentScanner {
     /// `Some(DiscoveredAgent)` if the process is a known agent, `None` otherwise.
     pub fn on_process_create(&mut self, pid: u32, bpf_comm: &str) -> Option<&DiscoveredAgent> {
         // Use BPF comm as primary source (already updated at sys_exit_execve time).
-        // Fallback to /proc/[pid]/comm only if BPF comm is empty or too short.
+        // Fallback to `<procfs root>/[pid]/comm` only if BPF comm is empty or too short.
         let comm = if bpf_comm.len() >= 3 {
             bpf_comm.to_string()
         } else {

@@ -1,9 +1,10 @@
-//! TCP port detection for a given PID via /proc filesystem
+//! TCP port detection for a given PID via procfs
 //!
 //! Discovers which TCP ports a process is listening on by:
-//! 1. Enumerating socket inodes from `/proc/[pid]/fd/`
+//! 1. Enumerating socket inodes from `<procfs root>/[pid]/fd/`
 //! 2. Matching them against `/proc/net/tcp` and `/proc/net/tcp6` entries
-//!    that are in the LISTEN state.
+//!    that are in the LISTEN state (netns-scoped, deliberately the observer's
+//!    own procfs -- see `utils::procfs`).
 
 use std::collections::HashSet;
 use std::fs;

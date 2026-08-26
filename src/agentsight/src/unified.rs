@@ -903,8 +903,8 @@ impl AgentSight {
             );
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
-            // to the *process* comm (/proc/<pid>/comm) and only then the event's
-            // per-event thread comm (which may be e.g. "HTTP client").
+            // to the *process* comm (`<procfs root>/<pid>/comm`) and only then
+            // the event's per-event thread comm (which may be e.g. "HTTP client").
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {

@@ -8,7 +8,7 @@ use glob::Pattern;
 
 /// Process context passed to agent matchers for identification
 pub struct ProcessContext {
-    /// Process name (from /proc/[pid]/comm or BPF event)
+    /// Process name (from `<procfs root>/[pid]/comm` or BPF event)
     pub comm: String,
     /// Parsed command line arguments (argv vector)
     pub cmdline_args: Vec<String>,

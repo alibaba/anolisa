@@ -179,6 +179,10 @@ mod tests {
         );
     }
 
+    // The final assertion deliberately feeds join() an absolute right-hand side to
+    // *demonstrate* the footgun that rooted() exists to avoid -- the lint exists to
+    // stop accidental uses, which is precisely not what this line is.
+    #[allow(clippy::join_absolute_paths)]
     #[test]
     fn rooted_keeps_the_pid_prefix_for_absolute_paths() {
         // The regression this guards: `Path::join` with an absolute path drops

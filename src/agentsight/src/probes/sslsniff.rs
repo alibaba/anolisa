@@ -909,11 +909,19 @@ fn parse_maps_line(line: &str) -> Option<(u64, &str)> {
     let mut inode = None;
     for field in 0..5 {
         rest = rest.trim_start();
-        let end = rest.find(char::is_whitespace)?;
-        if field == 4 {
-            inode = rest[..end].parse::<u64>().ok();
+        match rest.find(char::is_whitespace) {
+            Some(end) => {
+                if field == 4 {
+                    inode = rest[..end].parse::<u64>().ok();
+                }
+                rest = &rest[end..];
+            }
+            // Anonymous mappings end at the inode with neither a pathname nor
+            // trailing whitespace; surface them with an empty path instead of
+            // dropping the line.
+            None if field == 4 => return Some((rest.parse::<u64>().ok()?, "")),
+            None => return None,
         }
-        rest = &rest[end..];
     }
     Some((inode?, rest.trim_start()))
 }
@@ -1499,5 +1507,78 @@ mod tests {
         with_static_ssl_fixture("write-far", &img, |path| {
             assert!(find_static_ssl_offsets(path).is_none());
         });
+    }
+
+    // ── parse_maps_line ─────────────────────────────────────────────────────
+    //
+    // Replaces the procfs crate's maps parsing, so it carries the coverage the
+    // crate used to provide. Fixtures match the kernel's show_map_vma output:
+    // five whitespace-separated fields (addr, perms, offset, dev, inode), then
+    // an optional pathname that is the *entire remainder* of the line and may
+    // itself contain spaces.
+
+    #[test]
+    fn maps_line_file_backed_mapping() {
+        let line = "7f2f0a000000-7f2f0a028000 r--p 00000000 fd:01 2621443 \
+                    /usr/lib64/libssl.so.1.1.1k";
+        assert_eq!(
+            parse_maps_line(line),
+            Some((2621443, "/usr/lib64/libssl.so.1.1.1k"))
+        );
+    }
+
+    #[test]
+    fn maps_line_anonymous_mapping_ends_at_inode() {
+        // Anonymous vmas print neither a pathname nor trailing whitespace.
+        let line = "7f2f09e00000-7f2f09e21000 rw-p 00000000 00:00 0";
+        assert_eq!(parse_maps_line(line), Some((0, "")));
+        // Trailing whitespace without a pathname behaves the same.
+        let padded = "7f2f09e00000-7f2f09e21000 rw-p 00000000 00:00 0   ";
+        assert_eq!(parse_maps_line(padded), Some((0, "")));
+    }
+
+    #[test]
+    fn maps_line_deleted_suffix_is_part_of_the_path() {
+        // The suffix belongs to the pathname verbatim; the caller strips it
+        // when choosing the attach target.
+        let line = "7f2f09c00000-7f2f09c28000 r-xp 00028000 fd:01 2621443 \
+                    /usr/lib64/libssl.so.1.1.1k (deleted)";
+        assert_eq!(
+            parse_maps_line(line),
+            Some((2621443, "/usr/lib64/libssl.so.1.1.1k (deleted)"))
+        );
+    }
+
+    #[test]
+    fn maps_line_pseudo_path_survives_untouched() {
+        // [stack]/[heap]-style entries parse with a non-slash path; the caller
+        // filters them out, the parser must not mangle them.
+        let line = "7fffb6c40000-7fffb6c61000 rw-p 00000000 00:00 0   [stack]";
+        assert_eq!(parse_maps_line(line), Some((0, "[stack]")));
+    }
+
+    #[test]
+    fn maps_line_path_with_spaces_kept_whole() {
+        let line = "7f2f09a00000-7f2f09a10000 r--p 00000000 fd:01 1048577 \
+                    /opt/my app (copy)/libssl.so";
+        assert_eq!(
+            parse_maps_line(line),
+            Some((1048577, "/opt/my app (copy)/libssl.so"))
+        );
+    }
+
+    #[test]
+    fn maps_line_malformed_input_yields_none() {
+        // Fewer than five fields.
+        assert_eq!(
+            parse_maps_line("7f2f0a000000-7f2f0a028000 r--p 00000000"),
+            None
+        );
+        // Garbage in the inode field.
+        let bad_inode = "7f2f0a000000-7f2f0a028000 r--p 00000000 fd:01 xx /usr/lib/libssl.so";
+        assert_eq!(parse_maps_line(bad_inode), None);
+        // Not a maps line at all.
+        assert_eq!(parse_maps_line("rubbish"), None);
+        assert_eq!(parse_maps_line(""), None);
     }
 }
