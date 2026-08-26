@@ -169,7 +169,7 @@ L1 字段。
 | `code_scan` | `seccore.verdict`、`seccore.elapsed_ms`、可选错误字段 |
 | `prompt_scan` | `seccore.verdict`、`seccore.elapsed_ms`、可选错误字段 |
 | `pii_scan` | `seccore.verdict`、`seccore.elapsed_ms`、可选错误字段 |
-| `verify` | `seccore.asset_passed_count`、`seccore.asset_failed_count`、可选错误字段 |
+| `verify` | `seccore.asset_outcome`、`seccore.asset_passed_count`、`seccore.asset_failed_count`、可选错误字段 |
 | `harden` | baseline result/timestamp/counts、可选错误字段 |
 | 其他或新增 action | 无额外字段，仅公共 L1 envelope 和可选错误字段 |
 
@@ -182,6 +182,21 @@ pass / warn / deny / error
 ```
 
 耗时必须是非负有限数值。计数必须是非负整数；布尔值不能作为整数接受。
+
+`seccore.asset_outcome` 仅接受：
+
+```text
+verified / failed / no_candidates
+```
+
+- `verified`：至少检查了一个候选 Skill，且所有候选均通过。
+- `failed`：至少一个候选 Skill 验证失败。
+- `no_candidates`：可选发现根目录的扫描正常完成，但没有找到候选 Skill。缺失或为空的
+  `/usr/share/anolisa/skills` 与 `/usr/local/share/anolisa/skills` 不属于产品失败。
+
+配置、受信密钥、canonicalization 或根目录枚举异常属于操作错误；此时 backend 没有稳定
+的资产结果，允许省略 `seccore.asset_outcome` 和资产计数。Telemetry 不投影配置根目录、
+候选 Skill 路径或其他文件系统路径。
 
 ### 5.3 示例
 
@@ -198,6 +213,23 @@ Code Scanner 成功记录：
   "seccore.timestamp": "2026-07-16T08:00:00+00:00",
   "seccore.verdict": "pass",
   "seccore.elapsed_ms": 3
+}
+```
+
+Asset Verification 未发现候选的成功记录：
+
+```json
+{
+  "component.name": "agent-sec-core",
+  "component.version": "<package-version>",
+  "component.agent_name": "codex",
+  "seccore.event_type": "verify",
+  "seccore.category": "asset_verify",
+  "seccore.result": "succeeded",
+  "seccore.timestamp": "2026-07-16T08:00:30+00:00",
+  "seccore.asset_outcome": "no_candidates",
+  "seccore.asset_passed_count": 0,
+  "seccore.asset_failed_count": 0
 }
 ```
 
@@ -259,7 +291,7 @@ def build_telemetry_security_event(
 
 Telemetry 直接消费 middleware 已写入的 `event_type` 和 `category`，只用 `_SCAN_ACTIONS`、
 `_BASELINE_ACTION` 和 `_ASSET_VERIFY_ACTION` 表达特殊字段投影。公共 envelope、扫描指标、
-资产计数、baseline 计数和错误字段分别复用小型 scalar projector。
+资产 outcome 与计数、baseline 计数和错误字段分别复用小型 scalar projector。
 
 Telemetry sanitizer 不提供通用递归 JSON 转换，不调用未知对象的 `model_dump()` 或
 `str()`，也不自动展开 dict/list。新增字段必须修改显式映射和精确字段测试，不能仅由 backend
@@ -275,6 +307,7 @@ Telemetry sanitizer 不提供通用递归 JSON 转换，不调用未知对象的
 - 新增 action 无需修改 Telemetry 即可输出公共 L1 envelope，且不会获得特殊字段。
 - `AgentName` 枚举中的 6 个产品名可输出，未知值和客户标识统一降为空字符串。
 - PII request/summary 完全缺席。
+- Asset Verification 三种 outcome、对应计数组合及操作错误省略 outcome 的契约。
 - 原始 Prompt、代码、命令、路径、错误消息和所有 ID 的 canary 无法进入 JSON。
 - 未知对象不会被字符串化。
 - error type 格式、失败状态和 exit code 的组合约束。

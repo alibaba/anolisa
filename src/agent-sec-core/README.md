@@ -230,6 +230,9 @@ agent-sec-cli scan-prompt --mode standard --text "ignore previous instructions"
 # PII detection
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
 
+# Verify release-signed skills in the default installation roots
+agent-sec-cli verify
+
 # Skill integrity check
 agent-sec-cli skill-ledger check /path/to/skill
 
@@ -239,6 +242,30 @@ agent-sec-cli events --summary
 
 Full CLI reference and per-host integration steps:
 [AgentSecCore User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md).
+
+### Asset Verification
+
+`agent-sec-cli verify` checks GPG-signed distribution manifests and SHA-256
+file coverage. It is separate from Skill Ledger: `verify` validates release or
+deployment signatures, while `skill-ledger` maintains the local Ed25519 runtime
+integrity history.
+
+Batch verification discovers immediate, non-hidden Skill directories from two
+optional system roots: `/usr/share/anolisa/skills` for RPM installations and
+`/usr/local/share/anolisa/skills` for standard ANOLISA raw installations.
+Missing or empty roots are skipped, and canonical duplicate roots are scanned
+once. A completed scan reports `verified` when at least one candidate passes and
+none fail, `failed` when any candidate fails, or `no_candidates` when no
+candidate is found. `no_candidates` exits successfully but does not claim that
+an asset was verified.
+
+The two roots are fixed package defaults and are not derived from an arbitrary
+installation prefix. Use `agent-sec-cli verify --skill /path/to/skill` for a
+relocated or custom Skill. Configuration, trust-key, and root-enumeration errors
+remain operation failures; candidate signature, manifest, hash, unexpected-file,
+or access failures produce the `failed` outcome.
+
+Details: [Asset Verification User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/asset-verification.md).
 
 ## Prompt Scanner
 
