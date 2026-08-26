@@ -714,22 +714,14 @@ pub fn compile_credential_exfiltration_policy(
             "the pinned ActPlane ABI supports one trusted endpoint exception per rule".into(),
         ));
     }
-    // Design decision: enforce mode is now permitted under strict constraints.
-    // Previously rejected because a kernel-level LSM denial is irrecoverable.
-    // Conditions that make it safe:
-    // 1. At least one trusted_endpoint is required (fail-closed check below) —
-    //    the wildcard block always has an escape hatch for legitimate traffic.
-    // 2. TTL expires clause bounds the denial window — stale taints do not
-    //    persist indefinitely, limiting blast radius to `taint_ttl_secs`.
-    // 3. The Dashboard workflow enforces "audit first, escalate later" — users
-    //    must confirm zero false-positives in audit mode before enabling enforce.
-    // The public_ipv4 destination_scope check remains in the userspace
-    // violation-conversion path; it cannot undo a kernel denial, but the
-    // trusted_endpoint exception covers the intended use case (block all
-    // untrusted targets while allowing the one verified-safe endpoint).
-    if policy.mode == PolicyMode::Enforce && trusted.is_empty() {
+    // Enforce mode is rejected: the kernel LSM block rule uses `endpoint "*"`
+    // which denies ALL outbound (including private/loopback), and the public/private
+    // classification happens only after the kernel has already dropped the connection.
+    // Until the BPF engine can express public-only scope, enforce remains unsafe.
+    // TODO(roadmap): re-enable when ActPlane supports `scope public` or CIDR exclusions.
+    if policy.mode == PolicyMode::Enforce {
         return Err(BackendError::CompileFailure(
-            "enforce mode requires at least one trusted_endpoint to avoid blocking all outbound connections".into(),
+            "enforce mode is not yet supported: kernel cannot distinguish public vs private destinations".into(),
         ));
     }
 
@@ -741,21 +733,12 @@ pub fn compile_credential_exfiltration_policy(
         ));
     }
     dsl.push_str("rule agentsight-credential-exfiltration:\n  ");
-    let effect_keyword = match policy.mode {
-        PolicyMode::Enforce => "block",
-        _ => "notify",
-    };
-    dsl.push_str(effect_keyword);
-    dsl.push_str(" connect endpoint \"*\" if ");
+    dsl.push_str("notify connect endpoint \"*\" if ");
     dsl.push_str(&policy.taint_label);
     if let Some(endpoint) = trusted.first() {
         dsl.push_str(" unless target \"");
         dsl.push_str(endpoint);
         dsl.push('"');
-    }
-    // Add TTL expires clause for enforce mode using the existing taint TTL field.
-    if policy.mode == PolicyMode::Enforce {
-        dsl.push_str(&format!(" expires {}s", policy.taint_ttl_secs));
     }
     dsl.push_str("\n  because \"credential-derived data reached an untrusted network target\"\n");
 
