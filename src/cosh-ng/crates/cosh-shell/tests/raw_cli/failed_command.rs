@@ -188,7 +188,13 @@ fn raw_cli_build_failure_respects_analysis_mode_matrix() {
             bin_dir.to_string_lossy(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let output = run_raw_cli_with_args_env_and_delayed_input(
+        let analysis_marker = match mode {
+            "smart" => "Insight: The build or test command failed",
+            "auto" => "The command make all failed with exit code 2.",
+            "manual" => "make: *** [all] Error 2",
+            _ => unreachable!(),
+        };
+        let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
             "fake",
             &[],
             &[
@@ -196,12 +202,11 @@ fn raw_cli_build_failure_respects_analysis_mode_matrix() {
                 ("COSH_SHELL_ANALYSIS_MODE", mode),
                 ("PATH", path.as_str()),
             ],
-            vec![
-                (b"make all\n".to_vec(), Duration::ZERO),
-                (
-                    b"echo after-build\nexit\n".to_vec(),
-                    Duration::from_millis(800),
-                ),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            &[
+                ("cosh-osc$ ", b"make all\n"),
+                (analysis_marker, b""),
+                ("cosh-osc$ ", b"echo after-build\nexit\n"),
             ],
         );
         let _ = fs::remove_dir_all(&fixture);
