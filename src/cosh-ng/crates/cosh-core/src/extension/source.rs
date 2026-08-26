@@ -215,7 +215,7 @@ pub struct StoreLock {
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
