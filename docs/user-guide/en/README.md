@@ -60,6 +60,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | [Asset Verification](agent-security/agent-sec-core/asset-verification.md) | agent-sec-core | GPG-signed skill distribution verification and discovery outcomes |
 | [Skill Ledger User Guide](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | Skill integrity chain and signing workflow |
 | [OpenClaw Deployment & Upgrade](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw plugin deployment and upgrade guide |
+| [Internal Commands](agent-security/agent-sec-core/internal-commands.md) | agent-sec-core | Contract and inventory of the hidden, hook-invoked commands |
 
 ### Token Saving (`token-saving/`)
 
