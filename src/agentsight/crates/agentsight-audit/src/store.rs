@@ -686,6 +686,47 @@ impl AuditStore {
         Ok(index)
     }
 
+    /// Returns a mapping from `event_id` to the `case_id` that contains it,
+    /// using the precise `risk_evidence_links` table. Only events that are
+    /// actually linked to a case appear in the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, stored-data, or lock error.
+    pub fn case_ids_for_events(
+        &self,
+        event_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Uuid>, AuditError> {
+        if event_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.connection()?;
+        // SQLite limit on host parameters is 999 by default; batch if needed.
+        let mut result = HashMap::with_capacity(event_ids.len());
+        for chunk in event_ids.chunks(500) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT event_id, case_id FROM risk_evidence_links WHERE event_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<String> = chunk.iter().map(|id| id.to_string()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (eid_str, cid_str) = row?;
+                let eid = Uuid::parse_str(&eid_str)
+                    .map_err(|_| AuditError::InvalidData(format!("bad event_id: {eid_str}")))?;
+                let cid = Uuid::parse_str(&cid_str)
+                    .map_err(|_| AuditError::InvalidData(format!("bad case_id: {cid_str}")))?;
+                result.insert(eid, cid);
+            }
+        }
+        Ok(result)
+    }
+
     /// Loads one risk case with immutable evidence in correlation order.
     ///
     /// # Errors

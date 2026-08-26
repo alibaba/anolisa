@@ -149,6 +149,15 @@ impl AuditService {
         self.store.case_index_by_agent_policy()
     }
 
+    /// Returns a mapping from event_id to case_id using the precise
+    /// risk_evidence_links table.
+    pub fn case_ids_for_events(
+        &self,
+        event_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Uuid>, AuditError> {
+        self.store.case_ids_for_events(event_ids)
+    }
+
     /// Returns one risk case and its ordered immutable evidence.
     ///
     /// # Errors

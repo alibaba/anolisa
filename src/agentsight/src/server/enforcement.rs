@@ -488,18 +488,22 @@ pub(super) async fn list_violations(
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
     match web::block(move || coordinator.violations(limit)).await {
         Ok(Ok(violations)) => {
-            let case_index = audit_service
-                .case_index_by_agent_policy()
+            // Use the precise risk_evidence_links table to map each violation's
+            // event_id to the exact case that generated it, instead of the coarse
+            // (agent, policy, revision) index which picks the latest case and
+            // mis-links violations from earlier bursts.
+            let event_ids: Vec<uuid::Uuid> = violations
+                .iter()
+                .map(|v| v.event_id)
+                .collect();
+            let case_map = audit_service
+                .case_ids_for_events(&event_ids)
                 .unwrap_or_default();
             let enriched: Vec<serde_json::Value> = violations
                 .iter()
                 .map(|v| {
                     let mut obj = serde_json::to_value(v).unwrap_or_default();
-                    if let Some(case_id) = case_index.get(&(
-                        v.agent_id.clone(),
-                        v.policy_id.clone(),
-                        v.policy_revision.clone(),
-                    )) {
+                    if let Some(case_id) = case_map.get(&v.event_id) {
                         obj["case_id"] = serde_json::json!(case_id.to_string());
                     }
                     obj
