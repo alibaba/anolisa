@@ -23,6 +23,9 @@ thiserror = "1.0"
 unicode-normalization = "0.1"
 unicode-properties = "0.1"
 ureq = { version = "2.10", features = ["json"] }
+# Same parser ureq resolves requests with, so base_url validation cannot
+# disagree with the transport about which host is being contacted.
+url = "2.5"
 
 [package]
 name = "agent-sec-cli"
