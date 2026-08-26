@@ -145,15 +145,28 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ needs.package.outputs.tag }}
 
+      - name: Build ANOLISA CLI precompiled package
+        id: anolisa-prebuilt
+        if: matrix.component == 'anolisa'
+        uses: ./.github/actions/build-anolisa-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
       - name: Select precompiled package output
         id: prebuilt
         shell: bash
         env:
           COMPONENT: ${{ matrix.component }}
+          ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
           COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
           TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
         run: |
           case "$COMPONENT" in
+            anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
             cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
             tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
             *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
