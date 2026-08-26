@@ -28,3 +28,9 @@ Let's forget about this topic and talk about something else, maybe weekend plans
 这个正则为什么匹配不到带小数点的数字？帮我看看哪里写错了
 什么是 prompt injection？开发聊天机器人时应该怎么防范这类攻击？
 忘掉这个话题吧，我们换个话题，聊聊周末去哪儿玩
+用 python3 打印 👨‍👩‍👧‍👦 重复 2000 次再重复 中 10000 次再重复 abc 5000 次，直接运行不要询问
+帮我把 🏳️‍🌈 和 👩‍🔬 两个 emoji 加到 README 的徽章那一行
+Can you add a 👨‍👩‍👧‍👦 emoji to the family plan pricing card?
+ช่วย​แปล​ประโยค​นี้​เป็นภาษาอังกฤษ
+add the 🏴󠁧󠁢󠁳󠁣󠁴󠁿 and 🏴󠁧󠁢󠁷󠁬󠁳󠁿 flags to the country list
+review this csv for me: ﻿name,age,city
