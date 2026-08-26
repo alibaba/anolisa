@@ -600,8 +600,8 @@ print('CLASSIFY_OK')
 
     # ==========================================
     # 6.26h Behavioral dispatch: Read skips, Bash proceeds to compression
-    # Read must produce empty output (skip); Bash must attempt compression
-    # (produces non-empty hook output even if compression saves nothing).
+    # Use a replacement-capable host so this test isolates tool classification
+    # from the unified entry's fail-open behavior for unknown/additive hosts.
     # ==========================================
     log_info "Test 6.26h: Read skips entirely, Bash enters compression pipeline"
     local large_body
@@ -613,7 +613,7 @@ print('CLASSIFY_OK')
     local read_input
     read_input=$(jq -n --arg r "$dispatch_resp" '{"tool_name":"Read","tool_response":$r}')
     local read_out
-    read_out=$(echo "$read_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    read_out=$(echo "$read_input" | python3 "$COMPRESS_SCRIPT" --agent-id qoder-cli 2>&1)
     local read_trimmed
     read_trimmed=$(echo "$read_out" | tr -d '[:space:]')
     [ "$read_trimmed" = "{}" ] && log_pass "Read (layer 1) skips entirely" || log_fail "Read should skip with {}, got: $read_out"
@@ -622,7 +622,7 @@ print('CLASSIFY_OK')
     local bash_input
     bash_input=$(jq -n --arg r "$dispatch_resp" '{"tool_name":"Bash","tool_response":$r}')
     local bash_out
-    bash_out=$(echo "$bash_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    bash_out=$(echo "$bash_input" | python3 "$COMPRESS_SCRIPT" --agent-id qoder-cli 2>&1)
     local bash_trimmed
     bash_trimmed=$(echo "$bash_out" | tr -d '[:space:]')
     [ -n "$bash_trimmed" ] && [ "$bash_trimmed" != "{}" ] && log_pass "Bash (layer 2) enters compression pipeline" || log_fail "Bash should attempt compression, got: $bash_out"
