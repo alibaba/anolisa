@@ -455,24 +455,44 @@ fn extract_string_list(value: &toml::Value) -> Vec<String> {
 /// `("component", "tokenless")` to expand `{component}`).
 ///
 /// Any `{...}` token that is neither a layout field nor an extra variable
-/// produces an [`AdapterError::UnknownPlaceholder`].
+/// produces an [`AdapterError::UnknownPlaceholder`]. Destination paths are
+/// written by anolisa itself, with no shell or service manager in the loop,
+/// so a `${VAR}` reference in a path template is a manifest bug and is
+/// rejected the same way — see [`expand_layout_placeholders_content`] for the
+/// one context where such references are meaningful.
 pub fn expand_layout_placeholders(
     template: &str,
     layout: &FsLayout,
     extra_vars: &[(&str, &str)],
 ) -> Result<PathBuf, AdapterError> {
-    expand_layout_placeholders_str(template, layout, extra_vars).map(PathBuf::from)
+    expand(template, layout, extra_vars, false).map(PathBuf::from)
 }
 
-/// String-level core of [`expand_layout_placeholders`].
+/// Expand layout placeholders inside *file content* for layout entries that
+/// declare `render = "anolisa-paths-v1"`.
 ///
-/// Shared by path expansion (which wraps the result in a [`PathBuf`]) and
-/// file *content* rendering (`render = "anolisa-paths-v1"` layout entries),
-/// so both consume the identical placeholder vocabulary and cannot drift.
-pub fn expand_layout_placeholders_str(
+/// Uses the identical placeholder vocabulary as [`expand_layout_placeholders`]
+/// so the two cannot drift on what `{bindir}` and friends mean. The single
+/// deliberate difference: a `{` immediately preceded by `$` is a shell or
+/// systemd environment-variable reference (`${VAR}`) that the *consumer*
+/// resolves at runtime — e.g. an `EnvironmentFile=`-fed unit — so it is kept
+/// verbatim instead of being rejected as an unknown placeholder. Content that
+/// wants anolisa expansion must therefore use `{bindir}`, never `${bindir}`.
+pub fn expand_layout_placeholders_content(
     template: &str,
     layout: &FsLayout,
     extra_vars: &[(&str, &str)],
+) -> Result<String, AdapterError> {
+    expand(template, layout, extra_vars, true)
+}
+
+/// Shared expansion core. `preserve_env_refs` keeps `${VAR}` tokens verbatim
+/// instead of failing closed on them.
+fn expand(
+    template: &str,
+    layout: &FsLayout,
+    extra_vars: &[(&str, &str)],
+    preserve_env_refs: bool,
 ) -> Result<String, AdapterError> {
     let mut replacements: BTreeMap<&str, &Path> = BTreeMap::new();
 
@@ -507,6 +527,16 @@ pub fn expand_layout_placeholders_str(
             Some(pos) => open + pos,
             None => break,
         };
+
+        // `${...}` is a shell/systemd environment reference resolved by the
+        // consumer at runtime, so the token stays verbatim. Resume scanning
+        // just past the opener rather than past `close`: a parameter
+        // expansion can carry a layout placeholder as its default
+        // (`${ROOT:-{datadir}}`), and `close` points at that inner `}`.
+        if preserve_env_refs && result[..open].ends_with('$') {
+            search_from = open + 1;
+            continue;
+        }
 
         let key = &result[open + 1..close];
 
@@ -813,6 +843,66 @@ mod tests {
         assert!(
             err.to_string().contains("unknown_thing"),
             "error should name the placeholder: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_content_preserves_dollar_braced_env_reference() {
+        let layout = test_layout();
+        let unit = "ExecStart=\"{libexecdir}/cosh-ng/cosh-gateway\" serve \
+--workspace=${COSH_GATEWAY_WORKSPACE}";
+        let rendered = expand_layout_placeholders_content(unit, &layout, &[]).unwrap();
+        assert_eq!(
+            rendered,
+            "ExecStart=\"/usr/local/libexec/anolisa/cosh-ng/cosh-gateway\" serve \
+--workspace=${COSH_GATEWAY_WORKSPACE}"
+        );
+
+        // The exemption is lexical, not name-aware: `${bindir}` is an
+        // environment reference, not a layout placeholder. COMPONENT_CONTRACT.md
+        // documents `{bindir}` as the only spelling that expands.
+        let rendered = expand_layout_placeholders_content("${bindir}", &layout, &[]).unwrap();
+        assert_eq!(rendered, "${bindir}");
+    }
+
+    #[test]
+    fn expand_content_renders_layout_placeholder_nested_in_env_default() {
+        let layout = test_layout();
+        let rendered =
+            expand_layout_placeholders_content("${ROOT:-{datadir}}/skills", &layout, &[]).unwrap();
+        assert_eq!(rendered, "${ROOT:-/usr/local/share/anolisa}/skills");
+    }
+
+    #[test]
+    fn expand_content_rejects_unknown_placeholder_nested_in_env_default() {
+        let layout = test_layout();
+        let err = expand_layout_placeholders_content("${ROOT:-{unknown_thing}}", &layout, &[])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown_thing"),
+            "nested placeholders must stay fail-closed: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_content_still_rejects_unknown_bare_placeholder() {
+        let layout = test_layout();
+        let err =
+            expand_layout_placeholders_content("{unknown_thing}/${VAR}", &layout, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown_thing"),
+            "bare placeholders must stay fail-closed: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_path_rejects_dollar_braced_env_reference() {
+        let layout = test_layout();
+        let err = expand_layout_placeholders("{etcdir}/${COSH_GATEWAY_WORKSPACE}/x", &layout, &[])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("COSH_GATEWAY_WORKSPACE"),
+            "paths have no runtime expander and must fail closed: {err}"
         );
     }
 

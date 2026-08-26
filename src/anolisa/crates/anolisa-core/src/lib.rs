@@ -58,7 +58,7 @@ pub use adapter::manager::{
 pub use adapter::registry::DriverRegistry;
 pub use adapter::{
     AdapterError, DetectResult, detect_framework, expand_layout_placeholders,
-    expand_layout_placeholders_str,
+    expand_layout_placeholders_content,
 };
 pub use backup::{BackupEntry, BackupSet};
 pub use capability::{

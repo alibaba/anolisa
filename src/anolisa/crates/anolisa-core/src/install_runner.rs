@@ -719,7 +719,10 @@ impl<'a> InstallRunner<'a> {
     ///
     /// For [`RenderMode::AnolisaPathsV1`] the bytes must be UTF-8 text; layout
     /// placeholders are substituted via the same expansion vocabulary used
-    /// for destination paths, so path and content semantics cannot drift.
+    /// for destination paths, so path and content semantics cannot drift on
+    /// what a placeholder means. Content additionally keeps `${VAR}`
+    /// environment-variable references verbatim for the runtime consumer to
+    /// resolve (see [`crate::adapter::expand_layout_placeholders_content`]).
     fn render_bytes(
         &self,
         file: &ResolvedInstallFile,
@@ -733,7 +736,7 @@ impl<'a> InstallRunner<'a> {
                     reason: "content is not valid UTF-8 — anolisa-paths-v1 renders text files only"
                         .to_string(),
                 })?;
-                let rendered = crate::adapter::expand_layout_placeholders_str(
+                let rendered = crate::adapter::expand_layout_placeholders_content(
                     text,
                     self.layout,
                     &[("component", spec.component.as_str())],
@@ -2628,6 +2631,63 @@ mod tests {
             fs::read_to_string(&dest).unwrap(),
             format!("root={}/adapters/sec-core\n", layout.datadir.display())
         );
+    }
+
+    #[test]
+    fn render_preserves_env_refs_and_expands_nested_placeholders() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        // Shape taken from cosh-gateway@.service.in: a layout placeholder and
+        // an EnvironmentFile-backed reference on one line, plus a parameter
+        // expansion whose default is itself a layout placeholder.
+        let template = concat!(
+            "ExecStart=\"{libexecdir}/cosh-gateway\" --workspace=${COSH_GATEWAY_WORKSPACE}\n",
+            "Environment=SKILLS=${SKILL_ROOT:-{datadir}/skills}\n"
+        );
+        let gz = build_tar_gz(&[("unit.in", template.as_bytes())]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("cosh-gateway@.service");
+        runner
+            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .expect("install ok");
+
+        assert_eq!(
+            fs::read_to_string(&dest).unwrap(),
+            format!(
+                "ExecStart=\"{}/cosh-gateway\" --workspace=${{COSH_GATEWAY_WORKSPACE}}\n\
+                 Environment=SKILLS=${{SKILL_ROOT:-{}/skills}}\n",
+                layout.libexec_dir.display(),
+                layout.datadir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn render_unknown_placeholder_nested_in_env_default_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("unit.in", b"Environment=X=${ROOT:-{no_such_dir}}\n")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("unit");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .expect_err("must reject unknown placeholder inside an env default");
+        match err {
+            InstallError::Render { reason, .. } => assert!(
+                reason.contains("no_such_dir"),
+                "reason must name the placeholder: {reason}"
+            ),
+            other => panic!("expected Render, got {other:?}"),
+        }
+        assert!(!dest.exists(), "nothing may land on a failed render");
     }
 
     #[test]
