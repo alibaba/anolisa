@@ -22,7 +22,7 @@ pub struct ExtensionManager {
     catalog_diagnostics: Vec<ExtensionDiagnostic>,
     workspace_dir: PathBuf,
     user_dir_override: Option<PathBuf>,
-    system_dir_override: Option<PathBuf>,
+    system_dirs_override: Option<Vec<PathBuf>>,
     state_dir_override: Option<PathBuf>,
 }
 
@@ -34,7 +34,7 @@ impl ExtensionManager {
             catalog_diagnostics: Vec::new(),
             workspace_dir,
             user_dir_override: None,
-            system_dir_override: None,
+            system_dirs_override: None,
             state_dir_override: None,
         }
     }
@@ -56,7 +56,7 @@ impl ExtensionManager {
             catalog_diagnostics: Vec::new(),
             workspace_dir,
             user_dir_override: user_dir,
-            system_dir_override: system_dir,
+            system_dirs_override: system_dir.map(|directory| vec![directory]),
             state_dir_override,
         }
     }
@@ -74,7 +74,25 @@ impl ExtensionManager {
             catalog_diagnostics: Vec::new(),
             workspace_dir,
             user_dir_override: user_dir,
-            system_dir_override: system_dir,
+            system_dirs_override: system_dir.map(|directory| vec![directory]),
+            state_dir_override: Some(state_dir),
+        }
+    }
+
+    /// Creates an isolated manager with explicit system roots and state directory.
+    #[cfg(test)]
+    fn new_isolated_with_system_dirs(
+        workspace_dir: PathBuf,
+        user_dir: Option<PathBuf>,
+        system_dirs: Vec<PathBuf>,
+        state_dir: PathBuf,
+    ) -> Self {
+        Self {
+            extensions: Vec::new(),
+            catalog_diagnostics: Vec::new(),
+            workspace_dir,
+            user_dir_override: user_dir,
+            system_dirs_override: Some(system_dirs),
             state_dir_override: Some(state_dir),
         }
     }
@@ -83,11 +101,13 @@ impl ExtensionManager {
     pub fn refresh(&mut self) {
         self.catalog_diagnostics.clear();
         let mut candidates: BTreeMap<String, Vec<Extension>> = BTreeMap::new();
-        let system_dir = self
-            .system_dir_override
+        let system_dirs = self
+            .system_dirs_override
             .clone()
-            .unwrap_or_else(super::system_extensions_dir);
-        self.scan_directory(&system_dir, ExtensionSourceKind::System, &mut candidates);
+            .unwrap_or_else(super::system_extensions_dirs);
+        for system_dir in canonical_unique_roots(system_dirs) {
+            self.scan_directory(&system_dir, ExtensionSourceKind::System, &mut candidates);
+        }
         if let Some(user_dir) = self
             .user_dir_override
             .clone()
@@ -157,47 +177,86 @@ impl ExtensionManager {
 
         let mut resolved = Vec::new();
         for (name, mut group) in candidates {
-            group.sort_by_key(|extension| match extension.source {
-                ExtensionSourceKind::PathCopy
-                | ExtensionSourceKind::Link
-                | ExtensionSourceKind::GitHttps
-                | ExtensionSourceKind::Legacy => 0,
-                ExtensionSourceKind::System => 1,
-                ExtensionSourceKind::Conflict => 2,
-            });
-            let available_sources = group
-                .iter()
-                .map(|extension| extension.source)
-                .collect::<Vec<_>>();
-            let available_source_identities = group
-                .iter()
-                .map(|extension| {
-                    let key = match extension.source {
+            group.sort_by_key(|extension| {
+                (
+                    match extension.source {
                         ExtensionSourceKind::PathCopy
                         | ExtensionSourceKind::Link
                         | ExtensionSourceKind::GitHttps
-                        | ExtensionSourceKind::Legacy => "user",
-                        ExtensionSourceKind::System => "system",
-                        ExtensionSourceKind::Conflict => "conflict",
-                    };
-                    (key.to_string(), extension.source_identity.clone())
-                })
-                .collect::<BTreeMap<_, _>>();
+                        | ExtensionSourceKind::Legacy => 0,
+                        ExtensionSourceKind::System => 1,
+                        ExtensionSourceKind::Conflict => 2,
+                    },
+                    extension.source_identity.clone(),
+                )
+            });
+            let mut available_sources = Vec::new();
+            let mut available_source_identities = BTreeMap::new();
+            let system_source_identities = group
+                .iter()
+                .filter(|extension| extension.source == ExtensionSourceKind::System)
+                .map(|extension| extension.source_identity.clone())
+                .collect::<Vec<_>>();
+            let system_source_conflict = system_source_identities.len() > 1;
+            for extension in &group {
+                if !available_sources.contains(&extension.source) {
+                    available_sources.push(extension.source);
+                }
+                if system_source_conflict && extension.source == ExtensionSourceKind::System {
+                    continue;
+                }
+                let key = match extension.source {
+                    ExtensionSourceKind::PathCopy
+                    | ExtensionSourceKind::Link
+                    | ExtensionSourceKind::GitHttps
+                    | ExtensionSourceKind::Legacy => "user",
+                    ExtensionSourceKind::System => "system",
+                    ExtensionSourceKind::Conflict => "conflict",
+                };
+                available_source_identities
+                    .insert(key.to_string(), extension.source_identity.clone());
+            }
             let selection = persisted_state.source_selections.get(&name);
-            let selected_index = match selection {
-                Some(selection) => group.iter().position(|extension| {
+            let exact_selection = selection.and_then(|selection| {
+                group.iter().position(|extension| {
                     let source_matches = match selection.source {
                         SourceSelection::User => is_user_source(extension.source),
                         SourceSelection::System => extension.source == ExtensionSourceKind::System,
                     };
                     source_matches && extension.source_identity == selection.source_identity
-                }),
-                None if group.len() == 1 => Some(0),
+                })
+            });
+            if let (Some(index), Some(selection)) = (exact_selection, selection) {
+                let source_key = match selection.source {
+                    SourceSelection::User => "user",
+                    SourceSelection::System => "system",
+                };
+                available_source_identities
+                    .insert(source_key.to_string(), group[index].source_identity.clone());
+            }
+            let selected_index = match exact_selection {
+                Some(index) => Some(index),
+                None if system_source_conflict => None,
+                None if selection.is_none() && group.len() == 1 => Some(0),
                 None => None,
             };
 
             let mut extension = match selected_index {
                 Some(index) => group.remove(index),
+                None if system_source_conflict => {
+                    let mut conflict = group.remove(0);
+                    conflict.source = ExtensionSourceKind::Conflict;
+                    conflict.source_identity = format!("conflict:{name}");
+                    conflict.health = ExtensionHealth::Conflict;
+                    conflict.diagnostics.push(ExtensionDiagnostic::new(
+                        "extension_system_source_conflict",
+                        format!(
+                            "extension {name} has multiple system installations: {}; uninstall all but one system installation before enabling it",
+                            system_source_identities.join(", ")
+                        ),
+                    ));
+                    conflict
+                }
                 None => {
                     let mut conflict = group.remove(0);
                     conflict.source = ExtensionSourceKind::Conflict;
@@ -451,10 +510,7 @@ impl ExtensionManager {
                 continue;
             }
             match self.load_extension(&resolved_path, source) {
-                Ok(extension) => candidates
-                    .entry(extension.name.clone())
-                    .or_default()
-                    .push(extension),
+                Ok(extension) => insert_candidate(candidates, extension),
                 Err(diagnostic) => self.catalog_diagnostics.push(diagnostic),
             }
         }
@@ -482,18 +538,12 @@ impl ExtensionManager {
                 continue;
             }
             match self.load_managed_extension(&installation) {
-                Ok(extension) => candidates
-                    .entry(extension.name.clone())
-                    .or_default()
-                    .push(extension),
+                Ok(extension) => insert_candidate(candidates, extension),
                 Err(diagnostic) => {
                     if let Some(extension) =
                         self.broken_link_extension(&installation, diagnostic.clone())
                     {
-                        candidates
-                            .entry(extension.name.clone())
-                            .or_default()
-                            .push(extension);
+                        insert_candidate(candidates, extension);
                     }
                     self.catalog_diagnostics.push(diagnostic);
                 }
@@ -728,6 +778,30 @@ impl ExtensionManager {
     }
 }
 
+fn canonical_unique_roots(directories: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    directories
+        .into_iter()
+        .filter(|directory| {
+            let identity = directory
+                .canonicalize()
+                .unwrap_or_else(|_| directory.clone());
+            seen.insert(identity)
+        })
+        .collect()
+}
+
+fn insert_candidate(candidates: &mut BTreeMap<String, Vec<Extension>>, extension: Extension) {
+    let group = candidates.entry(extension.name.clone()).or_default();
+    if group.iter().any(|candidate| {
+        candidate.source == extension.source
+            && candidate.source_identity == extension.source_identity
+    }) {
+        return;
+    }
+    group.push(extension);
+}
+
 fn has_source(group: &[Extension], source: ExtensionSourceKind) -> bool {
     group.iter().any(|extension| extension.source == source)
 }
@@ -805,6 +879,311 @@ mod tests {
         assert_eq!(manager.list()[0].name, "my-ext");
         assert!(manager.list()[0].is_active);
         assert_eq!(manager.list()[0].health, ExtensionHealth::Degraded);
+    }
+
+    #[test]
+    fn discovers_distinct_extensions_from_all_system_roots() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_system = temporary.path().join("system-a");
+        let second_system = temporary.path().join("system-b");
+        let user = temporary.path().join("user");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&first_system).unwrap();
+        fs::create_dir_all(&second_system).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        state::save(&state::ExtensionState::default(), Some(&states)).unwrap();
+        create_extension(
+            &first_system,
+            "zeta",
+            r#"{"name":"zeta","version":"1.0.0","skills":[]}"#,
+        );
+        create_extension(
+            &second_system,
+            "alpha",
+            r#"{
+                "schemaVersion": 1,
+                "name": "alpha",
+                "version": "2.0.0",
+                "compatibility": {"cosh": ">=0.12.0"},
+                "hooks": {
+                    "BeforeModel": [{
+                        "hooks": [{
+                            "type": "command",
+                            "name": "raw-guard",
+                            "command": "/usr/bin/true"
+                        }]
+                    }]
+                }
+            }"#,
+        );
+
+        let mut manager = ExtensionManager::new_isolated_with_system_dirs(
+            PathBuf::from("/workspace"),
+            Some(user),
+            vec![first_system, second_system],
+            states,
+        );
+        manager.refresh();
+
+        assert_eq!(
+            manager
+                .list()
+                .iter()
+                .map(|extension| extension.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
+        assert!(manager.list().iter().all(|extension| {
+            extension.source == ExtensionSourceKind::System && extension.is_active
+        }));
+        assert!(
+            flatten_hook_groups(&manager.hook_definitions().before_model)
+                .iter()
+                .any(|hook| hook.name.as_deref() == Some("raw-guard"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_system_root_alias_is_scanned_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let system = temporary.path().join("system");
+        let system_alias = temporary.path().join("system-alias");
+        let user = temporary.path().join("user");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        std::os::unix::fs::symlink(&system, &system_alias).unwrap();
+        state::save(&state::ExtensionState::default(), Some(&states)).unwrap();
+        create_extension(
+            &system,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
+        );
+
+        let mut manager = ExtensionManager::new_isolated_with_system_dirs(
+            PathBuf::from("/workspace"),
+            Some(user),
+            vec![system_alias, system],
+            states,
+        );
+        manager.refresh();
+
+        assert_eq!(manager.list().len(), 1);
+        assert_eq!(manager.list()[0].source, ExtensionSourceKind::System);
+        assert!(manager.list()[0].is_active);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_system_installation_alias_is_discovered_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_system = temporary.path().join("system-a");
+        let second_system = temporary.path().join("system-b");
+        let payloads = temporary.path().join("payloads");
+        let user = temporary.path().join("user");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&first_system).unwrap();
+        fs::create_dir_all(&second_system).unwrap();
+        fs::create_dir_all(&payloads).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        state::save(&state::ExtensionState::default(), Some(&states)).unwrap();
+        let shared = create_extension(
+            &payloads,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
+        );
+        std::os::unix::fs::symlink(&shared, first_system.join("shared")).unwrap();
+        std::os::unix::fs::symlink(&shared, second_system.join("shared")).unwrap();
+
+        let mut manager = ExtensionManager::new_isolated_with_system_dirs(
+            PathBuf::from("/workspace"),
+            Some(user),
+            vec![first_system, second_system],
+            states,
+        );
+        manager.refresh();
+
+        assert_eq!(manager.list().len(), 1);
+        assert_eq!(manager.list()[0].source, ExtensionSourceKind::System);
+        assert!(manager.list()[0].is_active);
+    }
+
+    #[test]
+    fn duplicate_system_identity_fails_closed_without_exact_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_system = temporary.path().join("system-a");
+        let second_system = temporary.path().join("system-b");
+        let user = temporary.path().join("user");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&first_system).unwrap();
+        fs::create_dir_all(&second_system).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        state::save(&state::ExtensionState::default(), Some(&states)).unwrap();
+        let first_installation = create_extension(
+            &first_system,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
+        )
+        .canonicalize()
+        .unwrap();
+        let second_installation = create_extension(
+            &second_system,
+            "shared",
+            r#"{"name":"shared","version":"2.0.0","skills":[]}"#,
+        )
+        .canonicalize()
+        .unwrap();
+
+        let mut manager = ExtensionManager::new_isolated_with_system_dirs(
+            PathBuf::from("/workspace"),
+            Some(user),
+            vec![first_system, second_system],
+            states,
+        );
+        manager.refresh();
+
+        let extension = &manager.list()[0];
+        assert_eq!(extension.source, ExtensionSourceKind::Conflict);
+        assert_eq!(extension.health, ExtensionHealth::Conflict);
+        assert_eq!(extension.effective_state, EffectiveState::Disabled);
+        assert!(!extension.is_active);
+        assert_eq!(
+            extension.available_sources,
+            vec![ExtensionSourceKind::System]
+        );
+        assert!(!extension.available_source_identities.contains_key("system"));
+        let diagnostic = extension
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "extension_system_source_conflict")
+            .unwrap();
+        assert!(diagnostic
+            .message
+            .contains(&first_installation.to_string_lossy().into_owned()));
+        assert!(diagnostic
+            .message
+            .contains(&second_installation.to_string_lossy().into_owned()));
+        assert!(diagnostic.message.contains("uninstall all but one"));
+        assert!(manager
+            .select_source("shared", SourceSelection::System)
+            .unwrap_err()
+            .contains("extension source not found"));
+    }
+
+    #[test]
+    fn duplicate_system_identity_honors_exact_persisted_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_system = temporary.path().join("system-a");
+        let second_system = temporary.path().join("system-b");
+        let user = temporary.path().join("user");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&first_system).unwrap();
+        fs::create_dir_all(&second_system).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        create_extension(
+            &first_system,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
+        );
+        let selected_identity = create_extension(
+            &second_system,
+            "shared",
+            r#"{"name":"shared","version":"2.0.0","skills":[]}"#,
+        )
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        let mut extension_state = state::ExtensionState::default();
+        extension_state.source_selections.insert(
+            "shared".to_string(),
+            SourceSelectionRecord {
+                source: SourceSelection::System,
+                source_identity: selected_identity,
+            },
+        );
+        state::save(&extension_state, Some(&states)).unwrap();
+
+        let mut manager = ExtensionManager::new_isolated_with_system_dirs(
+            PathBuf::from("/workspace"),
+            Some(user),
+            vec![first_system, second_system],
+            states,
+        );
+        manager.refresh();
+
+        let extension = &manager.list()[0];
+        assert_eq!(extension.version, "2.0.0");
+        assert_eq!(extension.source, ExtensionSourceKind::System);
+        assert!(extension.is_active);
+        assert_eq!(
+            extension.available_source_identities.get("system"),
+            Some(&extension.path.to_string_lossy().into_owned())
+        );
+        assert!(!extension
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "extension_system_source_conflict"));
+    }
+
+    #[test]
+    fn duplicate_system_identity_preserves_exact_user_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_system = temporary.path().join("system-a");
+        let second_system = temporary.path().join("system-b");
+        let user = temporary.path().join("user");
+        let states = temporary.path().join("states");
+        fs::create_dir_all(&first_system).unwrap();
+        fs::create_dir_all(&second_system).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        create_extension(
+            &first_system,
+            "shared",
+            r#"{"name":"shared","version":"1.0.0","skills":[]}"#,
+        );
+        create_extension(
+            &second_system,
+            "shared",
+            r#"{"name":"shared","version":"2.0.0","skills":[]}"#,
+        );
+        let selected_identity = create_extension(
+            &user,
+            "shared",
+            r#"{"name":"shared","version":"3.0.0","skills":[]}"#,
+        )
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        let mut extension_state = state::ExtensionState::default();
+        extension_state.source_selections.insert(
+            "shared".to_string(),
+            SourceSelectionRecord {
+                source: SourceSelection::User,
+                source_identity: selected_identity,
+            },
+        );
+        state::save(&extension_state, Some(&states)).unwrap();
+
+        let mut manager = ExtensionManager::new_isolated_with_system_dirs(
+            PathBuf::from("/workspace"),
+            Some(user),
+            vec![first_system, second_system],
+            states,
+        );
+        manager.refresh();
+
+        let extension = &manager.list()[0];
+        assert_eq!(extension.version, "3.0.0");
+        assert_eq!(extension.source, ExtensionSourceKind::Legacy);
+        assert!(extension.is_active);
+        assert!(!extension.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_str(),
+                "extension_system_source_conflict" | "extension_source_selection_stale"
+            )
+        }));
     }
 
     #[test]
