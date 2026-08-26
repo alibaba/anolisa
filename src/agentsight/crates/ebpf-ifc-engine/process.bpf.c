@@ -96,6 +96,9 @@ const volatile unsigned int policy_features = 0;
 #ifndef VM_SHARED
 #define VM_SHARED 0x00000008UL
 #endif
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1U << 1)
+#endif
 
 #define TE_USER_MSGHDR_CONTROL_OFF    32
 #define TE_USER_MSGHDR_CONTROLLEN_OFF 40
@@ -178,6 +181,17 @@ static __always_inline int te_pid_protected(pid_t pid)
 	return v && *v;
 }
 
+static __always_inline int te_pid_can_control_bpf(pid_t pid)
+{
+	if (te_pid_protected(pid))
+		return 1;
+	__u32 domain_id = cap_domain_for_pid(pid);
+	if (!domain_id)
+		return 0;
+	struct cap_state *state = bpf_map_lookup_elem(&cap_state, &domain_id);
+	return state && state->authority_mask;
+}
+
 /* Pending open(at) args, stashed at sys_enter and consumed at sys_exit. The
  * sys_enter tracepoint fires before the kernel's copy_from_user faults the path
  * page in, so a non-faulting read of the path there can EFAULT and silently drop
@@ -194,6 +208,25 @@ struct {
 	__type(key, __u64);
 	__type(value, struct open_pend);
 } ts_openpend SEC(".maps");
+
+struct rename_pend {
+	__u64 old_path_ptr;
+	__u64 new_path_ptr;
+	__u32 flags;
+	__u32 have_old;
+	__u32 have_new;
+	__u32 _pad;
+	char old_path[MAX_FILENAME_LEN];
+	char new_path[MAX_FILENAME_LEN];
+	struct file_id old_fid;
+	struct file_id new_fid;
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u64);
+	__type(value, struct rename_pend);
+} ts_renamepend SEC(".maps");
 
 struct fd_key {
 	pid_t pid;
@@ -440,24 +473,6 @@ struct {
 	__type(key, __u32);
 	__type(value, struct exec_pipe_state);
 } ts_exec_pipe SEC(".maps");
-
-struct argv_cache_entry {
-	char blob[TAINT_ARGV_CAP];
-	__u32 len;
-	__u32 _pad;
-};
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, struct argv_cache_entry);
-} ts_argv_scratch SEC(".maps");
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 256);
-	__type(key, __u64);
-	__type(value, struct argv_cache_entry);
-} ts_argv_cache SEC(".maps");
 
 struct file_scratch {
 	char path[MAX_FILENAME_LEN];
@@ -1273,22 +1288,16 @@ static __always_inline __u32 te_effect_mode(__u32 backend_mode, __u32 effect)
 		return TE_MODE_NOTIFY;
 	if (effect == TEFFECT_KILL)
 		return TE_MODE_KILL;
-	if (effect == TEFFECT_BLOCK) {
-		if (backend_mode == TE_MODE_BLOCK)
-			return TE_MODE_BLOCK;
-		return TE_MODE_KILL;
-	}
+	if (effect == TEFFECT_BLOCK && backend_mode == TE_MODE_BLOCK)
+		return TE_MODE_BLOCK;
 	return TE_MODE_UNSUPPORTED;
 }
 
 static __always_inline __u32 te_supported_effects(__u32 backend_mode)
 {
 	if (backend_mode == TE_MODE_BLOCK)
-		return (1U << TEFFECT_NOTIFY) |
-		       (1U << TEFFECT_BLOCK) |
-		       (1U << TEFFECT_KILL) |
-		       (1U << TEFFECT_ALLOW);
-	return (1U << TEFFECT_NOTIFY) | (1U << TEFFECT_BLOCK) | (1U << TEFFECT_KILL) | (1U << TEFFECT_ALLOW);
+		return (1U << TEFFECT_BLOCK);
+	return (1U << TEFFECT_NOTIFY) | (1U << TEFFECT_KILL);
 }
 
 static __always_inline int exec_pipe_init(pid_t pid, __u32 mode)
@@ -1365,18 +1374,6 @@ static __always_inline void exec_pipe_apply_updates(void)
 		ns.labels = (ns.labels | s->add[i]) & ~s->del[i];
 		ns.lin_gates |= s->gates[i];
 		te_store_proc_domain(s->pid, domain_id, &ns);
-		/* Propagate declassify (del mask) to session root */
-		if (s->del[i]) {
-			pid_t declass_root = te_root(s->pid);
-			if (declass_root != s->pid) {
-				struct proc_state *rp = te_get_domain(declass_root, domain_id);
-				if (rp) {
-					struct proc_state rns = *rp;
-					rns.labels &= ~s->del[i];
-					te_store_proc_domain(declass_root, domain_id, &rns);
-				}
-			}
-		}
 		if (s->add[i])
 			te_record_proc_prov_mask(s->pid, domain_id, s->add[i],
 						 TOP_EXEC, scratch->match, 0);
@@ -1431,7 +1428,7 @@ static __always_inline void exec_pipe_scan_rules(__u32 complex)
 
 	if (!s || !scratch || !es)
 		return;
-	if (s->best_effect == TEFFECT_KILL || s->best_effect == TEFFECT_ALLOW)
+	if (s->best_effect == TEFFECT_KILL)
 		return;
 	__u32 current_domain_id = cap_domain_for_pid(s->pid);
 	__builtin_memset(es, 0, sizeof(*es));
@@ -1439,18 +1436,6 @@ static __always_inline void exec_pipe_scan_rules(__u32 complex)
 	eval->pid = s->pid;
 	eval->global_labels = te_labels_for_domain(s->pid, 0);
 	eval->current_labels = te_labels_for_domain(s->pid, current_domain_id);
-	/* Session-level declassify: mask labels with session root's labels. */
-	{
-		pid_t root = te_root(s->pid);
-		if (root != s->pid) {
-			struct proc_state *root_g = te_get_domain(root, 0);
-			if (root_g)
-				eval->global_labels &= root_g->labels;
-			struct proc_state *root_c = te_get_domain(root, current_domain_id);
-			if (root_c)
-				eval->current_labels &= root_c->labels;
-		}
-	}
 	eval->op = TOP_EXEC;
 	te_copy_target(eval->target, scratch->match);
 	eval->current_domain_id = current_domain_id;
@@ -1468,8 +1453,6 @@ static __always_inline void exec_pipe_finish(void)
 
 	if (!s || !scratch || s->best_rule < 0)
 		return;
-	if (s->best_effect == TEFFECT_ALLOW)
-		return;
 	__u32 action = te_effect_mode(s->mode, s->best_effect);
 	if (action != TE_MODE_UNSUPPORTED)
 		emit_violation(s->pid, s->best_rule, scratch->display, 0,
@@ -1480,7 +1463,6 @@ static __always_inline void exec_pipe_finish(void)
 			       action == TE_MODE_KILL, s->best_effect);
 	if (action == TE_MODE_KILL)
 		bpf_send_signal(SIGKILL);
-
 }
 
 static __always_inline int te_better_match(int candidate_rule, __u32 candidate_effect,
@@ -1653,12 +1635,6 @@ static __always_inline int te_resolve_socket_peer_ipv4(struct socket *sock, __u3
  * the connect/exec programs (obj_kind is a compile-time constant per caller). */
 static __always_inline int te_handle_event(struct te_event *ev, struct file_id *fid)
 {
-	/* AGENT ISOLATION: only evaluate rules for processes in a registered agent tree.
-	 * Non-agent processes must never be blocked by policy rules. */
-	pid_t root = te_root(ev->pid);
-	if (!te_is_agent_root(root))
-		return 0;
-
 	if (!te_pid_active(ev->pid))
 		return 0;
 	struct eval_scratch *scratch = eval_scratch_buf();
@@ -1699,18 +1675,6 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 							 current_domain_id) |
 			te_update_add_recv_domain(ev->ip, ev->pid,
 						  current_domain_id);
-	}
-
-	/* Session-level declassify: mask labels with session root's labels.
-	 * If root has been declassified (label cleared), child processes
-	 * should not be intercepted for that label either. */
-	if (root != ev->pid) {
-		struct proc_state *root_g = te_get_domain(root, 0);
-		if (root_g)
-			global_labels &= root_g->labels;
-		struct proc_state *root_c = te_get_domain(root, current_domain_id);
-		if (root_c)
-			current_labels &= root_c->labels;
 	}
 
 	if (ev->obj_kind == TE_OBJ_EXEC) {
@@ -1782,8 +1746,6 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 	}
 
 	if (rid >= 0) {
-		if (effect == TEFFECT_ALLOW)
-			goto taint_propagate;
 		action = te_effect_mode(ev->mode, effect);
 		if (action != TE_MODE_UNSUPPORTED)
 			emit_violation(ev->pid, rid, display,
@@ -1803,17 +1765,12 @@ static __always_inline int te_handle_event(struct te_event *ev, struct file_id *
 		}
 	}
 
-taint_propagate:
 	if (ev->obj_kind == TE_OBJ_FILE && (policy_features & TE_POLICY_FILE_FLOW)) {
 		if (ev->access & TE_ACCESS_READ)
 			te_read(ev->pid, fid, ev->target);
 		if (ev->access & TE_ACCESS_WRITE)
 			te_write_flow(ev->pid, fid, ev->target);
 	} else if (ev->obj_kind == TE_OBJ_ENDPOINT) {
-		/* AGENT ISOLATION: only apply endpoint taint for registered agent processes. */
-		pid_t ep_root = te_root(ev->pid);
-		if (!te_is_agent_root(ep_root))
-			return 0;
 		if (ev->access & TE_ACCESS_CONNECT)
 			te_connect_flow(ev->ip, ev->pid);
 		if (ev->access & TE_ACCESS_RECV)
@@ -1827,12 +1784,6 @@ static __always_inline int te_handle_file_event(pid_t pid, const char *target,
 						struct file_id *fid, __u32 access,
 						__u32 mode)
 {
-	/* AGENT ISOLATION: only evaluate rules for processes in a registered agent tree.
-	 * Non-agent processes must never be blocked by policy rules. */
-	pid_t root = te_root(pid);
-	if (!te_is_agent_root(root))
-		return 0;
-
 	struct eval_scratch *scratch = eval_scratch_buf();
 	struct te_rule_eval *eval;
 
@@ -1854,8 +1805,8 @@ static __always_inline int te_handle_file_event(pid_t pid, const char *target,
 	int candidate = -1;
 
 	if ((policy_features & TE_POLICY_FILE_FLOW) && (access & TE_ACCESS_READ)) {
-		global_labels |= te_file_stored_labels_domain(fid, pid, 0);
-		current_labels |= te_file_stored_labels_domain(fid, pid, current_domain_id);
+		global_labels |= te_file_labels_domain(fid, target, pid, 0);
+		current_labels |= te_file_labels_domain(fid, target, pid, current_domain_id);
 	}
 
 	eval->pid = pid;
@@ -1895,8 +1846,6 @@ static __always_inline int te_handle_file_event(pid_t pid, const char *target,
 	}
 
 	if (rid >= 0) {
-		if (effect == TEFFECT_ALLOW)
-			goto file_taint_propagate;
 		action = te_effect_mode(mode, effect);
 		if (action != TE_MODE_UNSUPPORTED)
 			emit_violation(pid, rid, target, 0, TE_OBJ_FILE, fid,
@@ -1913,7 +1862,6 @@ static __always_inline int te_handle_file_event(pid_t pid, const char *target,
 		}
 	}
 
-file_taint_propagate:
 	if ((policy_features & TE_POLICY_FILE_FLOW) && (access & TE_ACCESS_READ))
 		te_read(pid, fid, target);
 	if ((policy_features & TE_POLICY_FILE_FLOW) && (access & TE_ACCESS_WRITE))
@@ -1986,6 +1934,113 @@ static __always_inline int te_handle_file(__u32 ref_kind, const void *a,
 	if (!te_is_regular_or_dir(a, b, ref_kind))
 		return 0;
 	return te_handle_file_event(pid, scratch->path, &scratch->fid, access, mode);
+}
+
+static __always_inline int te_stash_rename_user_paths(const void *old_path,
+						      const void *new_path,
+						      __u32 flags,
+						      __u32 mode)
+{
+	__u64 tid = bpf_get_current_pid_tgid();
+	struct file_scratch *scratch = file_scratch_buf();
+	struct rename_pend p = {
+		.old_path_ptr = (__u64)old_path,
+		.new_path_ptr = (__u64)new_path,
+		.flags = flags,
+	};
+	pid_t pid;
+
+	if (mode == TE_MODE_BLOCK && !enforce_mode)
+		return 0;
+	pid = tid >> 32;
+	if (!te_pid_active(pid))
+		return 0;
+	if (scratch) {
+		__builtin_memset(scratch, 0, sizeof(*scratch));
+		if (te_resolve_file_ref(TE_REF_USER_PATH, old_path, 0,
+					scratch->path, sizeof(scratch->path)) == 0) {
+			te_copy_target(p.old_path, scratch->path);
+			te_resolve_file_id(TE_REF_USER_PATH, old_path, 0,
+					   scratch->path, &p.old_fid);
+			p.have_old = 1;
+		}
+		__builtin_memset(scratch, 0, sizeof(*scratch));
+		if (te_resolve_file_ref(TE_REF_USER_PATH, new_path, 0,
+					scratch->path, sizeof(scratch->path)) == 0) {
+			te_copy_target(p.new_path, scratch->path);
+			te_resolve_file_id(TE_REF_USER_PATH, new_path, 0,
+					   scratch->path, &p.new_fid);
+			p.have_new = 1;
+		}
+	}
+	bpf_map_update_elem(&ts_renamepend, &tid, &p, BPF_ANY);
+	return 0;
+}
+
+static __noinline int te_handle_rename_exit(long ret, __u32 mode)
+{
+	__u64 tid = bpf_get_current_pid_tgid();
+	pid_t pid = tid >> 32;
+	struct rename_pend *p = bpf_map_lookup_elem(&ts_renamepend, &tid);
+	struct file_scratch *scratch = file_scratch_buf();
+	int rc = 0;
+	int rc2 = 0;
+	__u32 exchange = 0;
+
+	if (!p)
+		return 0;
+	if (ret == 0 && scratch && te_pid_active(pid)) {
+		__builtin_memset(scratch, 0, sizeof(*scratch));
+		if (!p->have_old && p->old_path_ptr &&
+		    te_resolve_file_ref(TE_REF_USER_PATH,
+					(const void *)p->old_path_ptr, 0,
+					scratch->path, sizeof(scratch->path)) == 0) {
+			te_copy_target(p->old_path, scratch->path);
+			te_resolve_file_id(TE_REF_USER_PATH,
+					   (const void *)p->old_path_ptr, 0,
+					   scratch->path, &p->old_fid);
+			p->have_old = 1;
+		}
+		__builtin_memset(scratch, 0, sizeof(*scratch));
+		if (!p->have_new && p->new_path_ptr &&
+		    te_resolve_file_ref(TE_REF_USER_PATH,
+					(const void *)p->new_path_ptr, 0,
+					scratch->path, sizeof(scratch->path)) == 0) {
+			te_copy_target(p->new_path, scratch->path);
+			te_resolve_file_id(TE_REF_USER_PATH,
+					   (const void *)p->new_path_ptr, 0,
+					   scratch->path, &p->new_fid);
+			p->have_new = 1;
+		}
+		exchange = p->flags & RENAME_EXCHANGE;
+		if (p->have_old) {
+			if (policy_features & TE_POLICY_FILE_FLOW)
+				te_materialize_file_source(pid, &p->old_fid,
+							   p->old_path);
+			rc = te_handle_file_event(pid, p->old_path, &p->old_fid,
+						  TE_ACCESS_WRITE, mode);
+		}
+		if (p->have_new) {
+			if (exchange && (policy_features & TE_POLICY_FILE_FLOW))
+				te_materialize_file_source(pid, &p->new_fid,
+							   p->new_path);
+			rc2 = te_handle_file_event(pid, p->new_path, &p->new_fid,
+						   TE_ACCESS_WRITE, mode);
+			if (!rc)
+				rc = rc2;
+		}
+		if (p->have_old && p->have_new &&
+		    !te_file_id_equal(&p->old_fid, &p->new_fid)) {
+			if (exchange)
+				te_swap_file_state(pid, &p->old_fid,
+						   &p->new_fid);
+			else
+				te_copy_file_state(pid, &p->old_fid,
+						   &p->new_fid, 1);
+		}
+	}
+	bpf_map_delete_elem(&ts_renamepend, &tid);
+	return rc;
 }
 
 static __always_inline int te_handle_file_permission(struct file *file,
@@ -2138,19 +2193,6 @@ static __always_inline int te_handle_exec_event(pid_t pid, const char *target,
 	global_labels = te_labels_for_domain(pid, 0);
 	current_labels = te_labels_for_domain(pid, current_domain_id);
 
-	/* Session-level declassify: mask labels with session root's labels. */
-	{
-		pid_t root = te_root(pid);
-		if (root != pid) {
-			struct proc_state *root_g = te_get_domain(root, 0);
-			if (root_g)
-				global_labels &= root_g->labels;
-			struct proc_state *root_c = te_get_domain(root, current_domain_id);
-			if (root_c)
-				current_labels &= root_c->labels;
-		}
-	}
-
 	eval->pid = pid;
 	eval->global_labels = global_labels;
 	eval->current_labels = current_labels;
@@ -2216,19 +2258,6 @@ static __always_inline int te_handle_exec_event_with_args(pid_t pid,
 	global_labels = te_labels_for_domain(pid, 0);
 	current_labels = te_labels_for_domain(pid, current_domain_id);
 
-	/* Session-level declassify: mask labels with session root's labels. */
-	{
-		pid_t root = te_root(pid);
-		if (root != pid) {
-			struct proc_state *root_g = te_get_domain(root, 0);
-			if (root_g)
-				global_labels &= root_g->labels;
-			struct proc_state *root_c = te_get_domain(root, current_domain_id);
-			if (root_c)
-				current_labels &= root_c->labels;
-		}
-	}
-
 	eval->pid = pid;
 	eval->global_labels = global_labels;
 	eval->current_labels = current_labels;
@@ -2269,7 +2298,6 @@ static __always_inline int te_handle_exec(__u32 ref_kind, const void *a,
 	const char *target;
 	const char *shown;
 	pid_t pid;
-	int has_cached_args = 0;
 
 	if (mode == TE_MODE_BLOCK && !enforce_mode)
 		return 0;
@@ -2290,19 +2318,9 @@ static __always_inline int te_handle_exec(__u32 ref_kind, const void *a,
 					 sizeof(scratch->match));
 		if (mode == TE_MODE_BLOCK) {
 			struct te_argslots *as = te_argslots_buf();
-			__u64 pid_tgid = bpf_get_current_pid_tgid();
-			struct argv_cache_entry *cached;
 
-			cached = bpf_map_lookup_elem(&ts_argv_cache, &pid_tgid);
-			if (as && cached && cached->len > 0) {
-				__builtin_memcpy(as->blob, cached->blob, TAINT_ARGV_CAP);
-				__builtin_memset(as->slots, 0, sizeof(as->slots));
-				te_tokenize_args_eng(cached->len);
-				has_cached_args = 1;
-			} else if (as) {
+			if (as)
 				__builtin_memset(as, 0, sizeof(*as));
-			}
-			bpf_map_delete_elem(&ts_argv_cache, &pid_tgid);
 		}
 		target = scratch->match;
 		shown = scratch->display;
@@ -2315,8 +2333,6 @@ static __always_inline int te_handle_exec(__u32 ref_kind, const void *a,
 		return 0;
 	}
 
-	if (has_cached_args)
-		return te_handle_exec_event_with_args(pid, target, shown, mode);
 	return te_handle_exec_event(pid, target, shown, mode);
 }
 
@@ -2474,16 +2490,19 @@ int BPF_PROG(enforce_bpf_syscall, int cmd, union bpf_attr *attr,
 	(void)privileged;
 	if (!te_pid_active(caller))
 		return 0;
-	/* Runtime policy deltas and domain binding operate on already-held
-	 * ActPlane map fds. Keep the required map operations available while
-	 * still denying object creation, program load, attach, pin/get, and link
-	 * commands from managed processes. */
+
+	/* Runtime clients may need to open pinned maps while already managed.
+	 * Map mutation is limited to protected pids or domains that already carry
+	 * runtime authority. */
 	switch (cmd) {
 	case BPF_MAP_LOOKUP_ELEM:
-	case BPF_MAP_UPDATE_ELEM:
-	case BPF_MAP_DELETE_ELEM:
+	case BPF_MAP_GET_NEXT_KEY:
+	case BPF_OBJ_GET:
 	case BPF_OBJ_GET_INFO_BY_FD:
 		return 0;
+	case BPF_MAP_UPDATE_ELEM:
+	case BPF_MAP_DELETE_ELEM:
+		return te_pid_can_control_bpf(caller) ? 0 : -EPERM;
 	default:
 		return -EPERM;
 	}
@@ -2528,23 +2547,8 @@ int handle_exec(struct trace_event_raw_sched_process_exec *ctx)
 		if (mm)
 			a0 = BPF_CORE_READ(mm, arg_start);
 		if (a0 && bpf_probe_read_user_str(as->blob, TAINT_PAT_LEN,
-						  (void *)a0) > 0) {
-			/* Strip path prefix: find last '/' to get basename */
-			int base_off = 0;
-			#pragma clang loop unroll(disable)
-			for (int i = 0; i < TAINT_PAT_LEN - 1; i++) {
-				if (as->blob[i] == '\0')
-					break;
-				if (as->blob[i] == '/')
-					base_off = i + 1;
-			}
-			if (base_off > 0) {
-				__builtin_memset(as->blob, 0, TAINT_PAT_LEN);
-				bpf_probe_read_user_str(as->blob, TAINT_PAT_LEN,
-							(void *)(a0 + base_off));
-			}
+						  (void *)a0) > 0)
 			target = as->blob;
-		}
 	}
 	te_exec_update_no_args(pid, target);
 	te_handle_exec(TE_REF_STRINGS, target, scratch->display, te_tracepoint_mode());
@@ -2560,11 +2564,11 @@ int handle_exec_args(struct trace_event_raw_sched_process_exec *ctx)
 	unsigned fname_off;
 	int alen = 0;
 
-	if (!te_pid_active(pid))
-		return 0;
 	if (!scratch)
 		return 0;
 	__builtin_memset(scratch, 0, sizeof(*scratch));
+	if (!te_pid_active(pid))
+		return 0;
 
 	bpf_get_current_comm(&scratch->match, TASK_COMM_LEN);
 	__builtin_memcpy(scratch->display, scratch->match, TASK_COMM_LEN);
@@ -2586,27 +2590,6 @@ int handle_exec_args(struct trace_event_raw_sched_process_exec *ctx)
 				alen = (int)len;
 		}
 		te_tokenize_args_eng(alen);
-		if (a0)
-			bpf_probe_read_user_str(scratch->match, sizeof(scratch->match),
-						(void *)a0);
-		/* Strip path prefix: extract basename for pattern matching.
-		 * lower_exec() in the DSL compiler strips paths to basename,
-		 * so we must do the same here for taint_streq to match. */
-		if (a0) {
-			int base_off = 0;
-			#pragma clang loop unroll(disable)
-			for (int i = 0; i < TAINT_TEXT_BUF - 1; i++) {
-				if (scratch->match[i] == '\0')
-					break;
-				if (scratch->match[i] == '/')
-					base_off = i + 1;
-			}
-			if (base_off > 0) {
-				__builtin_memset(scratch->match, 0, sizeof(scratch->match));
-				bpf_probe_read_user_str(scratch->match, sizeof(scratch->match),
-							(void *)(a0 + base_off));
-			}
-		}
 	}
 
 	fname_off = ctx->__data_loc_filename & 0xFFFF;
@@ -2663,6 +2646,7 @@ int handle_exit(struct trace_event_raw_sched_process_template *ctx)
 		return 0;
 	te_exit(pid, exit_code);
 	te_delete_mmaps(pid);
+	bpf_map_delete_elem(&te_protected_pids, &pid);
 	return 0;
 }
 
@@ -2696,6 +2680,7 @@ static __noinline int handle_open_exit(long ret)
 	__u64 path_ptr;
 	__u32 flags;
 	__u32 remember_fd;
+	__u32 access;
 	int rc = 0;
 
 	if (!p)
@@ -2707,28 +2692,50 @@ static __noinline int handle_open_exit(long ret)
 	/* On success the kernel has copied the path in, so the user page is now
 	 * resident and the read in te_handle_file is reliable. */
 	if (ret >= 0 && scratch && te_pid_active(pid)) {
+		struct file *opened_file = NULL;
+		struct file_id path_fid = {};
+
 		__builtin_memset(scratch, 0, sizeof(*scratch));
 		if (te_resolve_file_ref(TE_REF_USER_PATH, (const void *)path_ptr,
-					0, scratch->path, sizeof(scratch->path)) == 0) {
-			struct file *opened_file = NULL;
-
-			te_resolve_file_id(TE_REF_USER_PATH,
-					   (const void *)path_ptr, 0,
-					   scratch->path, &scratch->fid);
-			if (remember_fd) {
-				opened_file = te_current_file_from_fd((int)ret);
-				if (opened_file)
-					te_resolve_file_id_from_file(opened_file,
-								     &scratch->fid);
-			}
-			rc = te_handle_file_event(pid, scratch->path, &scratch->fid,
-						  te_access_from_open_flags(flags),
-						  te_tracepoint_mode());
-			if (remember_fd)
-				te_store_fd_with_current_file(pid, (int)ret,
-							      scratch->path,
-							      &scratch->fid);
+					0, scratch->path, sizeof(scratch->path)) != 0)
+			return 0;
+		te_resolve_file_id(TE_REF_USER_PATH, (const void *)path_ptr, 0,
+				   scratch->path, &scratch->fid);
+		access = te_access_from_open_flags(flags);
+		path_fid = scratch->fid;
+		if (remember_fd) {
+			opened_file = te_current_file_from_fd((int)ret);
+			/* Promote labels captured by path-only tracepoints, such as
+			 * rename, onto the inode id used after a successful open. */
+			if (opened_file &&
+			    te_resolve_file_id_from_file(opened_file,
+							 &scratch->fid) == 0 &&
+			    (policy_features & TE_POLICY_FILE_FLOW) &&
+			    !te_file_id_equal(&path_fid, &scratch->fid))
+				te_copy_file_state(pid, &path_fid, &scratch->fid, 0);
 		}
+		if (policy_features & TE_POLICY_FILE_FLOW)
+			te_materialize_file_source(pid, &scratch->fid, scratch->path);
+		if (remember_fd)
+			te_store_fd_with_current_file(pid, (int)ret, scratch->path,
+						      &scratch->fid);
+		/* Keep pure object-label propagation out of the full rule matcher so
+		 * trace_openat_exit stays verifier-small for common file-flow policies. */
+		if (!((access & TE_ACCESS_READ) &&
+		      (policy_features & TE_POLICY_OPEN_RULES)) &&
+		    !((access & TE_ACCESS_WRITE) &&
+		      (policy_features & TE_POLICY_WRITE_RULES))) {
+			if (policy_features & TE_POLICY_FILE_FLOW) {
+				if (access & TE_ACCESS_READ)
+					te_read(pid, &scratch->fid, scratch->path);
+				if (access & TE_ACCESS_WRITE)
+					te_write_flow(pid, &scratch->fid,
+						      scratch->path);
+			}
+			return 0;
+		}
+		rc = te_handle_file_event(pid, scratch->path, &scratch->fid,
+					  access, te_tracepoint_mode());
 	}
 	return rc;
 }
@@ -3021,20 +3028,41 @@ int trace_unlinkat(struct trace_event_raw_sys_enter *ctx)
 SEC("tp/syscalls/sys_enter_rename")
 int trace_rename(struct trace_event_raw_sys_enter *ctx)
 {
-	return te_handle_file(TE_REF_USER_PATH, (const void *)ctx->args[1], 0,
-			      TE_ACCESS_WRITE, te_tracepoint_mode());
+	return te_stash_rename_user_paths((const void *)ctx->args[0],
+					  (const void *)ctx->args[1],
+					  0,
+					  te_tracepoint_mode());
+}
+SEC("tp/syscalls/sys_exit_rename")
+int trace_rename_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	return te_handle_rename_exit(ctx->ret, te_tracepoint_mode());
 }
 SEC("tp/syscalls/sys_enter_renameat")
 int trace_renameat(struct trace_event_raw_sys_enter *ctx)
 {
-	return te_handle_file(TE_REF_USER_PATH, (const void *)ctx->args[3], 0,
-			      TE_ACCESS_WRITE, te_tracepoint_mode());
+	return te_stash_rename_user_paths((const void *)ctx->args[1],
+					  (const void *)ctx->args[3],
+					  0,
+					  te_tracepoint_mode());
+}
+SEC("tp/syscalls/sys_exit_renameat")
+int trace_renameat_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	return te_handle_rename_exit(ctx->ret, te_tracepoint_mode());
 }
 SEC("tp/syscalls/sys_enter_renameat2")
 int trace_renameat2(struct trace_event_raw_sys_enter *ctx)
 {
-	return te_handle_file(TE_REF_USER_PATH, (const void *)ctx->args[3], 0,
-			      TE_ACCESS_WRITE, te_tracepoint_mode());
+	return te_stash_rename_user_paths((const void *)ctx->args[1],
+					  (const void *)ctx->args[3],
+					  (__u32)ctx->args[4],
+					  te_tracepoint_mode());
+}
+SEC("tp/syscalls/sys_exit_renameat2")
+int trace_renameat2_exit(struct trace_event_raw_sys_exit *ctx)
+{
+	return te_handle_rename_exit(ctx->ret, te_tracepoint_mode());
 }
 
 /* connect: numeric IPv4 matching (compiler lowers host/IP patterns to net+mask;
@@ -3814,109 +3842,5 @@ int cap_drain_tick(struct trace_event_raw_sys_enter *ctx)
 {
 	(void)ctx;
 	cap_drain_current();
-	return 0;
-}
-
-/* --- argv pre-cache for LSM bprm_check_security ---
- * At sys_enter time, current->mm is the ORIGINAL mm so argv pointers
- * are accessible via bpf_probe_read_user. We cache the argv blob in a
- * hash map keyed by pid_tgid; the LSM hook then consumes it. */
-
-static __always_inline struct argv_cache_entry *argv_scratch_buf(void)
-{
-	__u32 key = 0;
-	return bpf_map_lookup_elem(&ts_argv_scratch, &key);
-}
-
-static __always_inline int argv_cache_store(unsigned long argv_uptr)
-{
-	struct argv_cache_entry *ent;
-	__u64 pid_tgid;
-	int pos = 0;
-
-	if (!argv_uptr)
-		return 0;
-
-	pid_tgid = bpf_get_current_pid_tgid();
-	{
-		pid_t pid = pid_tgid >> 32;
-		if (!te_pid_active(pid))
-			return 0;
-	}
-
-	ent = argv_scratch_buf();
-	if (!ent)
-		return 0;
-	__builtin_memset(ent, 0, sizeof(*ent));
-
-	#pragma clang loop unroll(disable)
-	for (int i = 0; i < MAX_ARG_SLOTS; i++) {
-		unsigned long str_ptr = 0;
-		int ret;
-
-		if (pos >= TAINT_ARGV_CAP - 1)
-			break;
-		if (bpf_probe_read_user(&str_ptr, sizeof(str_ptr),
-					(void *)(argv_uptr + (__u64)i * sizeof(unsigned long))) != 0)
-			break;
-		if (!str_ptr)
-			break;
-
-		/* Fixed-size read so verifier can prove offset+size in bounds.
-		 * Each arg is capped to TAINT_ARG_LEN bytes (matches slot width).
-		 * Clamp pos to ensure safe_pos + TAINT_ARG_LEN <= TAINT_ARGV_CAP. */
-		__u32 safe_pos = (__u32)pos & (TAINT_ARGV_CAP - 1);
-		if (safe_pos > TAINT_ARGV_CAP - TAINT_ARG_LEN)
-			break;
-		ret = bpf_probe_read_user_str(ent->blob + safe_pos,
-					      TAINT_ARG_LEN, (void *)str_ptr);
-		if (ret <= 0)
-			break;
-		pos += ret; /* ret includes the NUL byte */
-	}
-
-	ent->len = (__u32)pos;
-	if (pos > 0)
-		bpf_map_update_elem(&ts_argv_cache, &pid_tgid, ent, BPF_ANY);
-	return 0;
-}
-
-SEC("tp/syscalls/sys_enter_execve")
-int argv_cache_execve(struct trace_event_raw_sys_enter *ctx)
-{
-	unsigned long argv_uptr = (unsigned long)ctx->args[1];
-	return argv_cache_store(argv_uptr);
-}
-
-SEC("tp/syscalls/sys_enter_execveat")
-int argv_cache_execveat(struct trace_event_raw_sys_enter *ctx)
-{
-	unsigned long argv_uptr = (unsigned long)ctx->args[2];
-	return argv_cache_store(argv_uptr);
-}
-
-/* Cleanup: if execve fails (bprm_check_security never ran, or file-not-found),
- * the cache entry leaks. Clean up on sys_exit. */
-SEC("tp/syscalls/sys_exit_execve")
-int argv_cache_cleanup_execve(struct trace_event_raw_sys_exit *ctx)
-{
-	__u64 pid_tgid;
-
-	if (ctx->ret >= 0)
-		return 0; /* success: entry already consumed by LSM hook */
-	pid_tgid = bpf_get_current_pid_tgid();
-	bpf_map_delete_elem(&ts_argv_cache, &pid_tgid);
-	return 0;
-}
-
-SEC("tp/syscalls/sys_exit_execveat")
-int argv_cache_cleanup_execveat(struct trace_event_raw_sys_exit *ctx)
-{
-	__u64 pid_tgid;
-
-	if (ctx->ret >= 0)
-		return 0;
-	pid_tgid = bpf_get_current_pid_tgid();
-	bpf_map_delete_elem(&ts_argv_cache, &pid_tgid);
 	return 0;
 }

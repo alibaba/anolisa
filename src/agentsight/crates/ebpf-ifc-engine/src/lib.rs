@@ -6,18 +6,19 @@
 //! Loads the prebuilt CO-RE object `process.bpf.o` (compiled from the untouched
 //! kernel C in this directory), installs the compiled policy into writable BPF
 //! array maps, attaches the enforcer, and surfaces `TAINT_VIOLATION` events.
-//! Supports hot-reload of policy rules via `ReloadHandle` (user ring buffer).
+//! Supports runtime policy deltas via `ReloadHandle` (user ring buffer).
 //!
 //! The config blob is exactly the `struct taint_config` the collector's DSL
 //! compiler already produces (the same bytes the C loader read from `--config`).
 
-use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 use std::io::{self, Read};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use aya::maps::{Array, HashMap, Map, MapData, MapError, ProgramArray, RingBuf};
+use aya::programs::links::FdLink;
 use aya::programs::{Lsm, ProgramFd, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
 
@@ -30,6 +31,8 @@ use capability::{
 const BPF_ANY: u64 = 0;
 const BPF_NOEXIST: u64 = 1;
 pub const GLOBAL_ACTIVE_DOMAIN_ID: u32 = u32::MAX;
+pub const DEFAULT_PIN_ROOT: &str = "/sys/fs/bpf/actplane/v1";
+pub const PIN_ROOT_ENV: &str = "ACTPLANE_BPF_PIN_ROOT";
 
 // ---- prebuilt eBPF object, 8-byte aligned for aya's ELF parser ----
 #[repr(align(8))]
@@ -66,6 +69,45 @@ const FEAT_FILE_FLOW: u32 = 1 << 6;
 const FEAT_BLOCK_EXEC: u32 = 1 << 7;
 const FEAT_BLOCK_FILE: u32 = 1 << 8;
 const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
+const PINNED_FILE_PROFILE_MARKER: &str =
+    "agentsight_profile_file_v1_a62e5d9d96f91101cda019519053e950d532380a";
+const PINNED_CREDENTIAL_PROFILE_MARKER: &str =
+    "agentsight_profile_credential_exfiltration_v2_a62e5d9d96f91101cda019519053e950d532380a";
+const PINNED_FULL_PROFILE_MARKER: &str =
+    "agentsight_profile_full_v1_a62e5d9d96f91101cda019519053e950d532380a";
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PinnedEnginePaths {
+    root: PathBuf,
+}
+
+impl PinnedEnginePaths {
+    fn from_env() -> Self {
+        Self::new(
+            std::env::var_os(PIN_ROOT_ENV)
+                .map_or_else(|| PathBuf::from(DEFAULT_PIN_ROOT), PathBuf::from),
+        )
+    }
+
+    fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn maps_dir(&self) -> PathBuf {
+        self.root.join("maps")
+    }
+
+    fn links_dir(&self) -> PathBuf {
+        self.root.join("links")
+    }
+
+    fn map(&self, name: &str) -> PathBuf {
+        self.maps_dir().join(name)
+    }
+
+    fn link(&self, name: &str) -> PathBuf {
+        self.links_dir().join(name)
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -106,7 +148,6 @@ struct CRule {
     gate_idx: u32,
     domain_id: u32,
     since_mask: u64,
-    ttl_ns: u64,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -117,7 +158,8 @@ struct CConfig {
     rules: [CRule; MAX_RULES],
 }
 
-/// Expected policy config blob size — ABI contract with actplane-ifc-compiler.
+/// AgentSight ABI guard: the compiled config blob must match this engine's
+/// CConfig size. Cross-checked against actplane-ifc-compiler at compile time.
 pub const EXPECTED_CONFIG_BLOB_SIZE: usize = std::mem::size_of::<CConfig>();
 
 // proc_state seed (bpf/taint_engine.bpf.h: { u64 labels; u64 lin_gates; }).
@@ -305,6 +347,47 @@ fn child_domain_state(parent: &CapState, spec: ChildDomainSpec) -> io::Result<Ca
     })
 }
 
+fn merge_cap_state(mut base: CapState, update: CapState) -> CapState {
+    if base.parent == 0 {
+        base.parent = update.parent;
+    }
+    if base.scope_id == 0 {
+        base.scope_id = update.scope_id;
+    }
+    base.labels |= update.labels;
+    base.authority_mask |= update.authority_mask;
+    base.target_mask |= update.target_mask;
+    base.restrict_mask |= update.restrict_mask;
+    base.gate_mask |= update.gate_mask;
+    base.label_mask |= update.label_mask;
+    base
+}
+
+fn upsert_cap_state<T>(
+    states: &mut HashMap<T, u32, CapState>,
+    target_id: u32,
+    state: CapState,
+) -> io::Result<()>
+where
+    T: std::borrow::Borrow<MapData> + std::borrow::BorrowMut<MapData>,
+{
+    match states.get(&target_id, BPF_ANY) {
+        Ok(existing) => {
+            let merged = merge_cap_state(existing, state);
+            if merged != existing {
+                states
+                    .insert(target_id, merged, BPF_ANY)
+                    .map_err(|e| err(format!("merge cap_state: {e}")))?;
+            }
+        }
+        Err(MapError::KeyNotFound) => states
+            .insert(target_id, state, BPF_NOEXIST)
+            .map_err(|e| err(format!("seed cap_state: {e}")))?,
+        Err(e) => return Err(err(format!("lookup cap_state: {e}"))),
+    }
+    Ok(())
+}
+
 /// Map-fd backed control handle for binding child domains while the loader polls events.
 pub struct DomainHandle {
     cap_task_fd: OwnedFd,
@@ -325,6 +408,7 @@ fn dup_owned_fd(fd: &OwnedFd) -> io::Result<OwnedFd> {
     dup_cloexec_fd(fd.as_raw_fd())
 }
 
+#[allow(dead_code)]
 fn dup_hash_map_fd(bpf: &Ebpf, name: &str) -> io::Result<OwnedFd> {
     let map = bpf
         .map(name)
@@ -336,6 +420,7 @@ fn dup_hash_map_fd(bpf: &Ebpf, name: &str) -> io::Result<OwnedFd> {
     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
 }
 
+#[allow(dead_code)]
 fn dup_array_map_fd(bpf: &Ebpf, name: &str) -> io::Result<OwnedFd> {
     let map = bpf
         .map(name)
@@ -347,9 +432,174 @@ fn dup_array_map_fd(bpf: &Ebpf, name: &str) -> io::Result<OwnedFd> {
     dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
 }
 
+fn ensure_pinned_engine_dirs(paths: &PinnedEnginePaths) -> io::Result<()> {
+    for dir in [paths.maps_dir(), paths.links_dir()] {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+fn pin_loaded_maps(
+    bpf: &Ebpf,
+    paths: &PinnedEnginePaths,
+    created: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for (name, map) in bpf.maps() {
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = paths.map(name);
+        map.pin(&path)
+            .map_err(|e| err(format!("pin map {name} at {}: {e}", path.display())))?;
+        created.push(path);
+    }
+    Ok(())
+}
+
+fn pin_profile_marker(
+    bpf: &Ebpf,
+    paths: &PinnedEnginePaths,
+    reserve: HookReserve,
+    created: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let marker = paths.map(reserve.profile_marker());
+    bpf.map("cap_state")
+        .ok_or_else(|| err("map cap_state missing for profile marker"))?
+        .pin(&marker)
+        .map_err(|e| err(format!("pin profile marker at {}: {e}", marker.display())))?;
+    created.push(marker);
+    Ok(())
+}
+
+fn pin_pending_links(
+    paths: &PinnedEnginePaths,
+    links: Vec<(String, FdLink)>,
+    created: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for (name, link) in links {
+        let path = paths.link(&name);
+        match link.pin(&path) {
+            Ok(_) => {
+                created.push(path);
+            }
+            Err(e) => {
+                return Err(err(format!("pin link {name} at {}: {e}", path.display())));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pinned_map_data(paths: &PinnedEnginePaths, name: &str) -> io::Result<MapData> {
+    let path = paths.map(name);
+    MapData::from_pin(&path)
+        .map_err(|e| err(format!("open pinned map {name} at {}: {e}", path.display())))
+}
+
+fn dup_pinned_map_fd(paths: &PinnedEnginePaths, name: &str) -> io::Result<OwnedFd> {
+    let data = pinned_map_data(paths, name)?;
+    dup_cloexec_fd(data.fd().as_fd().as_raw_fd())
+}
+
+fn open_append_lock() -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(std::env::temp_dir().join("actplane.append.lock"))
+}
+
+fn open_runtime_lock() -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(std::env::temp_dir().join("actplane.runtime.lock"))
+}
+
+fn pinned_hash_map<K: aya::Pod, V: aya::Pod>(
+    paths: &PinnedEnginePaths,
+    name: &str,
+) -> io::Result<HashMap<MapData, K, V>> {
+    let data = pinned_map_data(paths, name)?;
+    HashMap::try_from(Map::HashMap(data)).map_err(|e| err(format!("pinned map {name}: {e}")))
+}
+
+fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io::Result<bool> {
+    for name in [
+        "rb",
+        "cap_req",
+        "cap_task",
+        "cap_state",
+        "cap_policy",
+        "ts_counts",
+        "ts_proc",
+        "ts_proc_domains",
+        "ts_root",
+        "te_protected_pids",
+    ] {
+        if !paths.map(name).try_exists()? {
+            return Ok(false);
+        }
+    }
+    let marker = reserve.profile_marker();
+    if !paths.map(marker).try_exists()? {
+        return Err(err(format!(
+            "ActPlane pinned metadata mismatch at {}: expected {marker}; remove the pin root before changing ActPlane revision, profile, or schema",
+            paths.root.display()
+        )));
+    }
+    let budget = HookBudget::for_pinned_reserve(reserve);
+    for spec in TRACEPOINTS {
+        let exists = paths.link(spec.name).try_exists()?;
+        let expected = tracepoint_needed(spec, budget);
+        if expected && !exists {
+            return Ok(false);
+        }
+        if exists && !expected {
+            return Err(pinned_profile_mismatch(paths, spec.name));
+        }
+    }
+
+    let lsm_active = bpf_lsm_active();
+    for (name, _) in LSM_PROGS {
+        let exists = paths.link(name).try_exists()?;
+        let expected = lsm_link_expected(name, budget, lsm_active);
+        if expected && !exists {
+            return Ok(false);
+        }
+        if exists && !expected {
+            return Err(pinned_profile_mismatch(paths, name));
+        }
+    }
+    Ok(true)
+}
+
+fn pinned_profile_mismatch(paths: &PinnedEnginePaths, link: &str) -> io::Error {
+    err(format!(
+        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}; remove the pin root before changing profiles",
+        paths.root.display()
+    ))
+}
+
 fn hash_map_from_fd<K: aya::Pod, V: aya::Pod>(fd: &OwnedFd) -> io::Result<HashMap<MapData, K, V>> {
     let data = MapData::from_fd(dup_owned_fd(fd)?).map_err(|e| err(format!("map from fd: {e}")))?;
     HashMap::try_from(Map::HashMap(data)).map_err(|e| err(format!("typed hash map: {e}")))
+}
+
+fn clear_hash_map<K: aya::Pod + Copy, V: aya::Pod + Copy>(
+    fd: &OwnedFd,
+    what: &str,
+) -> io::Result<()> {
+    let mut map = hash_map_from_fd::<K, V>(fd)?;
+    let keys: Vec<K> = map
+        .keys()
+        .map(|key| key.map_err(|e| err(format!("list {what}: {e}"))))
+        .collect::<io::Result<_>>()?;
+    for key in keys {
+        ignore_missing_remove(map.remove(&key), &format!("clear {what}"))?;
+    }
+    Ok(())
 }
 
 fn map_get<K: aya::Pod, V: aya::Pod>(
@@ -369,6 +619,18 @@ fn map_get_optional<K: aya::Pod, V: aya::Pod>(
     match map.get(key, BPF_ANY) {
         Ok(v) => Ok(Some(v)),
         Err(MapError::KeyNotFound) => Ok(None),
+        Err(e) => Err(err(format!("{what}: {e}"))),
+    }
+}
+
+fn ignore_missing_remove(result: Result<(), MapError>, what: &str) -> io::Result<()> {
+    match result {
+        Ok(()) | Err(MapError::KeyNotFound | MapError::ElementNotFound) => Ok(()),
+        Err(MapError::SyscallError(error))
+            if error.io_error.raw_os_error() == Some(libc::ENOENT) =>
+        {
+            Ok(())
+        }
         Err(e) => Err(err(format!("{what}: {e}"))),
     }
 }
@@ -622,15 +884,33 @@ const TRACEPOINTS: &[TracepointSpec] = &[
         need: TracepointNeed::FileWritePath,
     },
     TracepointSpec {
+        name: "trace_rename_exit",
+        category: "syscalls",
+        event: "sys_exit_rename",
+        need: TracepointNeed::FileWritePath,
+    },
+    TracepointSpec {
         name: "trace_renameat",
         category: "syscalls",
         event: "sys_enter_renameat",
         need: TracepointNeed::FileWritePath,
     },
     TracepointSpec {
+        name: "trace_renameat_exit",
+        category: "syscalls",
+        event: "sys_exit_renameat",
+        need: TracepointNeed::FileWritePath,
+    },
+    TracepointSpec {
         name: "trace_renameat2",
         category: "syscalls",
         event: "sys_enter_renameat2",
+        need: TracepointNeed::FileWritePath,
+    },
+    TracepointSpec {
+        name: "trace_renameat2_exit",
+        category: "syscalls",
+        event: "sys_exit_renameat2",
         need: TracepointNeed::FileWritePath,
     },
     TracepointSpec {
@@ -861,30 +1141,6 @@ const TRACEPOINTS: &[TracepointSpec] = &[
         event: "sys_enter_getpid",
         need: TracepointNeed::Core,
     },
-    TracepointSpec {
-        name: "argv_cache_execve",
-        category: "syscalls",
-        event: "sys_enter_execve",
-        need: TracepointNeed::ExecArgs,
-    },
-    TracepointSpec {
-        name: "argv_cache_execveat",
-        category: "syscalls",
-        event: "sys_enter_execveat",
-        need: TracepointNeed::ExecArgs,
-    },
-    TracepointSpec {
-        name: "argv_cache_cleanup_execve",
-        category: "syscalls",
-        event: "sys_exit_execve",
-        need: TracepointNeed::ExecArgs,
-    },
-    TracepointSpec {
-        name: "argv_cache_cleanup_execveat",
-        category: "syscalls",
-        event: "sys_exit_execveat",
-        need: TracepointNeed::ExecArgs,
-    },
 ];
 
 const EXEC_TAIL_PROGS: &[(u32, &str)] = &[
@@ -918,6 +1174,10 @@ const ALL_HOOK_FEATURES: u32 = FEAT_CONNECT
     | FEAT_BLOCK_EXEC
     | FEAT_BLOCK_FILE
     | FEAT_BLOCK_CONNECT;
+#[cfg(test)]
+const ALL_POLICY_FEATURES: u32 =
+    FEAT_PATH_CONTAINS | FEAT_PATH_SUFFIX | FEAT_OPEN_RULES | FEAT_WRITE_RULES | ALL_HOOK_FEATURES;
+const PINNED_POLICY_FEATURES: u32 = ALL_HOOK_FEATURES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HookProfile {
@@ -951,9 +1211,37 @@ struct HookBudget {
     features: u32,
     file_write: bool,
     advanced_tracepoints: bool,
+    suppress_dataflow_tracepoints: bool,
+    file_open_only: bool,
 }
 
 impl HookBudget {
+    fn for_pinned_reserve(reserve: HookReserve) -> Self {
+        let mut budget = HookBudget {
+            features: reserve.policy_features,
+            file_write: reserve.file_write_paths,
+            advanced_tracepoints: reserve.advanced_tracepoints,
+            suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
+            file_open_only: reserve.file_open_only,
+        };
+        if reserve.file_flow {
+            budget.features |= FEAT_FILE_FLOW;
+        }
+        if reserve.network {
+            budget.features |= FEAT_CONNECT | FEAT_RECV;
+        }
+        if reserve.block_exec {
+            budget.features |= FEAT_BLOCK_EXEC;
+        }
+        if reserve.block_file {
+            budget.features |= FEAT_BLOCK_FILE;
+        }
+        if reserve.block_connect {
+            budget.features |= FEAT_BLOCK_CONNECT;
+        }
+        budget
+    }
+
     fn from_config(cfg: &CConfig, reserve: HookReserve) -> Self {
         let profile = HookProfile::from_env();
         let mut budget = match profile {
@@ -962,19 +1250,27 @@ impl HookBudget {
                 file_write: config_has_file_write(cfg),
                 advanced_tracepoints: profile.advanced_tracepoints()
                     || reserve.advanced_tracepoints,
+                suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
+                file_open_only: reserve.file_open_only,
             },
             HookProfile::Full => HookBudget {
                 features: config_features(cfg) | ALL_HOOK_FEATURES,
                 file_write: true,
                 advanced_tracepoints: profile.advanced_tracepoints()
                     || reserve.advanced_tracepoints,
+                suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
+                file_open_only: reserve.file_open_only,
             },
         };
+        budget.features |= reserve.policy_features;
         if reserve.file_flow {
             budget.features |= FEAT_FILE_FLOW;
         }
         if std::env::var_os("ACTPLANE_RESERVE_FILE_FLOW").is_some() {
             budget.features |= FEAT_FILE_FLOW;
+        }
+        if std::env::var_os("ACTPLANE_RESERVE_NETWORK").is_some() {
+            budget.features |= FEAT_CONNECT | FEAT_RECV | FEAT_BLOCK_CONNECT;
         }
         if reserve.file_write_paths {
             budget.file_write = true;
@@ -1016,12 +1312,19 @@ impl HookBudget {
 }
 
 fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
+    if budget.suppress_dataflow_tracepoints {
+        return (budget.file_open_only && budget.has_connect() && spec.name == "trace_connect")
+            || matches!(
+                spec.need,
+                TracepointNeed::Core | TracepointNeed::CoreExec | TracepointNeed::ExecArgs
+            );
+    }
     match spec.need {
         TracepointNeed::Core => true,
         TracepointNeed::CoreExec => false,
         TracepointNeed::ExecArgs => true,
         TracepointNeed::FileOpen => budget.has_file_flow() || budget.has_open_rules(),
-        TracepointNeed::FileWritePath => budget.has_file_write(),
+        TracepointNeed::FileWritePath => budget.has_file_write() || budget.has_file_flow(),
         TracepointNeed::FdFlow => {
             budget.has_file_flow() || budget.has_connect() || budget.has_recv()
         }
@@ -1064,6 +1367,40 @@ fn lsm_needed(
         | "enforce_path_rename" => block_file,
         _ => false,
     }
+}
+
+fn lsm_needed_for_budget(
+    name: &str,
+    block_exec: bool,
+    block_file: bool,
+    block_connect: bool,
+    recv_flow: bool,
+    budget: HookBudget,
+) -> bool {
+    if budget.file_open_only {
+        return (block_file && name == "enforce_file_open")
+            || (block_connect && name == "enforce_socket_connect");
+    }
+    lsm_needed(
+        name,
+        block_exec,
+        block_file,
+        block_connect,
+        recv_flow,
+        budget.advanced_tracepoints,
+    )
+}
+
+fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
+    lsm_active
+        && lsm_needed_for_budget(
+            name,
+            budget.features & FEAT_BLOCK_EXEC != 0,
+            budget.features & FEAT_BLOCK_FILE != 0,
+            budget.features & FEAT_BLOCK_CONNECT != 0,
+            budget.has_recv(),
+            budget,
+        )
 }
 
 fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
@@ -1110,7 +1447,7 @@ pub fn bpf_lsm_active() -> bool {
 }
 
 fn err(msg: impl Into<String>) -> io::Error {
-    io::Error::other(msg.into())
+    io::Error::new(io::ErrorKind::Other, msg.into())
 }
 
 fn validate_config(cfg: &CConfig) -> io::Result<()> {
@@ -1170,7 +1507,7 @@ fn config_features(cfg: &CConfig) -> u32 {
     }
     for r in cfg.rules.iter().take((cfg.n_rules as usize).min(MAX_RULES)) {
         if r.effect == EFFECT_BLOCK {
-            if r.op == OP_EXEC {
+            if r.op == OP_EXEC && r.arg[0] == 0 {
                 features |= FEAT_BLOCK_EXEC;
             }
             if r.op == OP_OPEN || r.op == OP_WRITE {
@@ -1257,7 +1594,7 @@ fn feature_gate_error(context: &str, needed: u32, supported: u32, missing: u32) 
     }
     let mut hints = Vec::new();
     hints.push(
-        "runtime reload/delta cannot attach new hooks or enable new matcher classes after load; restart the engine with a profile or policy that enables them",
+        "runtime policy deltas cannot attach new hooks or enable new matcher classes after load; restart the engine with a profile or policy that enables them",
     );
     if missing
         & (FEAT_FILE_FLOW
@@ -1274,7 +1611,7 @@ fn feature_gate_error(context: &str, needed: u32, supported: u32, missing: u32) 
     }
     if missing & (FEAT_OPEN_RULES | FEAT_WRITE_RULES | FEAT_PATH_CONTAINS | FEAT_PATH_SUFFIX) != 0 {
         hints.push(
-            "file sink rule classes and path contains/suffix matcher classes must be enabled by the policy used to load the engine; hook-profile reservation does not enable them by itself",
+            "file sink rule classes and path contains/suffix matcher classes require the engine to be loaded with those policy features; the pinned singleton reserves hooks for future deltas but not expensive file sink matcher classes",
         );
     }
     if missing & (FEAT_BLOCK_EXEC | FEAT_BLOCK_FILE | FEAT_BLOCK_CONNECT) != 0 {
@@ -1292,38 +1629,423 @@ fn feature_gate_error(context: &str, needed: u32, supported: u32, missing: u32) 
     )
 }
 
-pub struct Loader {
+#[allow(dead_code)]
+struct Loader {
     bpf: Ebpf,
     enforce: bool,
     policy_features: u32,
-    /// Snapshot of `op=EXEC` source entries from the compiled config
-    exec_sources: Vec<(String, u64)>,
-    /// Persistent, owned RingBuf created once at load time
-    ringbuf: Option<RingBuf<MapData>>,
-    /// Complete source-to-bit mapping for all op types
-    source_bit_map: StdHashMap<String, u8>,
+}
+
+#[derive(Debug)]
+pub struct PinnedEngine {
+    paths: PinnedEnginePaths,
+    policy_features: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct HookReserve {
-    pub file_flow: bool,
-    pub file_write_paths: bool,
-    pub network: bool,
-    pub block_exec: bool,
-    pub block_file: bool,
-    pub block_connect: bool,
-    pub advanced_tracepoints: bool,
+struct HookReserve {
+    file_flow: bool,
+    file_write_paths: bool,
+    network: bool,
+    block_exec: bool,
+    block_file: bool,
+    block_connect: bool,
+    advanced_tracepoints: bool,
+    suppress_dataflow_tracepoints: bool,
+    file_open_only: bool,
+    policy_features: u32,
 }
 
 impl HookReserve {
-    pub fn runtime_file_delta() -> Self {
+    #[cfg(test)]
+    fn runtime_file_delta() -> Self {
         HookReserve {
             file_flow: true,
             ..HookReserve::default()
         }
     }
+
+    fn full_profile() -> Self {
+        HookReserve {
+            file_flow: true,
+            file_write_paths: true,
+            network: true,
+            block_exec: true,
+            block_file: true,
+            block_connect: true,
+            advanced_tracepoints: true,
+            suppress_dataflow_tracepoints: false,
+            file_open_only: false,
+            policy_features: PINNED_POLICY_FEATURES,
+        }
+    }
+
+    fn file_enforcement() -> Self {
+        HookReserve {
+            block_file: true,
+            suppress_dataflow_tracepoints: true,
+            file_open_only: true,
+            policy_features: FEAT_PATH_CONTAINS
+                | FEAT_PATH_SUFFIX
+                | FEAT_OPEN_RULES
+                | FEAT_BLOCK_FILE,
+            ..HookReserve::default()
+        }
+    }
+
+    fn credential_exfiltration() -> Self {
+        HookReserve {
+            file_flow: true,
+            network: true,
+            block_file: true,
+            block_connect: true,
+            suppress_dataflow_tracepoints: true,
+            file_open_only: true,
+            policy_features: FEAT_FILE_FLOW | FEAT_CONNECT | FEAT_BLOCK_FILE | FEAT_BLOCK_CONNECT,
+            ..HookReserve::default()
+        }
+    }
+
+    fn profile_marker(self) -> &'static str {
+        if self.file_open_only {
+            if self.block_connect {
+                PINNED_CREDENTIAL_PROFILE_MARKER
+            } else {
+                PINNED_FILE_PROFILE_MARKER
+            }
+        } else {
+            PINNED_FULL_PROFILE_MARKER
+        }
+    }
+
+    fn pinned_profile_value(value: Option<&str>) -> io::Result<Self> {
+        match value {
+            None => Ok(HookReserve::full_profile()),
+            Some(value) if value.eq_ignore_ascii_case("full") => Ok(HookReserve::full_profile()),
+            Some(value) if value.eq_ignore_ascii_case("file-enforcement") => {
+                Ok(HookReserve::file_enforcement())
+            }
+            Some(value) if value.eq_ignore_ascii_case("credential-exfiltration") => {
+                Ok(HookReserve::credential_exfiltration())
+            }
+            Some(value) => Err(err(format!(
+                "unsupported ACTPLANE_PINNED_PROFILE value {value:?}"
+            ))),
+        }
+    }
+
+    fn pinned_profile() -> io::Result<Self> {
+        let value = std::env::var("ACTPLANE_PINNED_PROFILE").ok();
+        HookReserve::pinned_profile_value(value.as_deref())
+    }
 }
 
+fn validate_pinned_runtime(reserve: HookReserve, lsm_active: bool) -> io::Result<()> {
+    if reserve.file_open_only && !lsm_active {
+        return Err(err(
+            "the selected ACTPLANE_PINNED_PROFILE requires an active BPF LSM",
+        ));
+    }
+    Ok(())
+}
+
+fn empty_config_blob() -> Vec<u8> {
+    let cfg: CConfig = unsafe { std::mem::zeroed() };
+    unsafe {
+        std::slice::from_raw_parts(
+            &cfg as *const CConfig as *const u8,
+            std::mem::size_of::<CConfig>(),
+        )
+        .to_vec()
+    }
+}
+
+impl PinnedEngine {
+    pub fn open_or_install_singleton() -> io::Result<Self> {
+        let paths = PinnedEnginePaths::from_env();
+        let reserve = HookReserve::pinned_profile()?;
+        validate_pinned_runtime(reserve, bpf_lsm_active())?;
+        let policy_features = reserve.policy_features;
+        if pinned_engine_present(&paths, reserve)? {
+            return Ok(Self {
+                paths,
+                policy_features,
+            });
+        }
+
+        match Loader::load_with_pinned_layout(&empty_config_blob(), reserve, paths.clone()) {
+            Ok(installer) => {
+                drop(installer);
+                if pinned_engine_present(&paths, reserve)? {
+                    Ok(Self {
+                        paths,
+                        policy_features,
+                    })
+                } else {
+                    Err(err(format!(
+                        "pinned ActPlane engine missing after install at {}",
+                        paths.root.display()
+                    )))
+                }
+            }
+            Err(e) => {
+                if pinned_engine_present(&paths, reserve)? {
+                    Ok(Self {
+                        paths,
+                        policy_features,
+                    })
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    pub fn try_lock_runtime(&self) -> io::Result<std::fs::File> {
+        let file = open_runtime_lock()?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Err(err(
+                    "another ActPlane runtime is already draining singleton events",
+                ));
+            }
+            return Err(e);
+        }
+        Ok(file)
+    }
+
+    pub fn protect_pid(&self, pid: i32) -> io::Result<()> {
+        if pid <= 0 {
+            return Err(err("protected pid must be positive"));
+        }
+        let mut protected: HashMap<_, i32, u32> =
+            pinned_hash_map(&self.paths, "te_protected_pids")?;
+        protected
+            .insert(pid, 1, 0)
+            .map_err(|e| err(format!("protect pid {pid}: {e}")))?;
+        Ok(())
+    }
+
+    pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
+        Ok(ReloadHandle {
+            cap_req_fd: dup_pinned_map_fd(&self.paths, "cap_req")?,
+            cap_task_fd: dup_pinned_map_fd(&self.paths, "cap_task")?,
+            cap_state_fd: dup_pinned_map_fd(&self.paths, "cap_state")?,
+            cap_policy_fd: dup_pinned_map_fd(&self.paths, "cap_policy")?,
+            ts_counts_fd: dup_pinned_map_fd(&self.paths, "ts_counts")?,
+            append_lock: Mutex::new(()),
+            append_lock_file: Some(open_append_lock()?),
+            policy_features: self.policy_features,
+        })
+    }
+
+    pub fn domain_handle(&self) -> io::Result<DomainHandle> {
+        Ok(DomainHandle {
+            cap_task_fd: dup_pinned_map_fd(&self.paths, "cap_task")?,
+            cap_state_fd: dup_pinned_map_fd(&self.paths, "cap_state")?,
+            ts_proc_domains_fd: dup_pinned_map_fd(&self.paths, "ts_proc_domains")?,
+            ts_root_fd: dup_pinned_map_fd(&self.paths, "ts_root")?,
+        })
+    }
+
+    fn seed_global_proc_state(&self, pid: i32, label: u64) -> io::Result<()> {
+        if pid <= 0 || label == 0 {
+            return Err(err("pid and label must both be set"));
+        }
+        let mut proc: HashMap<_, i32, ProcState> = pinned_hash_map(&self.paths, "ts_proc")?;
+        proc.insert(
+            pid,
+            ProcState {
+                labels: label,
+                lin_gates: 0,
+            },
+            0,
+        )
+        .map_err(|e| err(format!("seed ts_proc: {e}")))?;
+
+        let mut root: HashMap<_, i32, i32> = pinned_hash_map(&self.paths, "ts_root")?;
+        root.insert(pid, pid, 0)
+            .map_err(|e| err(format!("seed ts_root: {e}")))?;
+        Ok(())
+    }
+
+    pub fn seed_label_in_domain(&self, pid: i32, domain_id: u32, label: u64) -> io::Result<()> {
+        self.seed_global_proc_state(pid, label)?;
+        self.bind_state(
+            pid,
+            domain_id,
+            CapState {
+                scope_id: 1,
+                labels: label,
+                authority_mask: AUTH_BIND_RULE
+                    | AUTH_NARROW_SCOPE
+                    | AUTH_ADD_LABEL
+                    | AUTH_REQUIRE_GATE
+                    | AUTH_DECLASSIFY
+                    | AUTH_DELEGATE,
+                target_mask: TARGET_SELF | TARGET_CHILD,
+                gate_mask: u64::MAX,
+                label_mask: u64::MAX,
+                ..CapState::default()
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn bind_state(&self, pid: i32, target_id: u32, state: CapState) -> io::Result<()> {
+        if pid <= 0 || target_id == 0 {
+            return Err(err("pid and target id must both be set"));
+        }
+        {
+            let mut states: HashMap<_, u32, CapState> = pinned_hash_map(&self.paths, "cap_state")?;
+            upsert_cap_state(&mut states, target_id, state)?;
+        }
+        {
+            let mut proc: HashMap<_, PidDomainKey, ProcState> =
+                pinned_hash_map(&self.paths, "ts_proc_domains")?;
+            proc.insert(
+                PidDomainKey {
+                    pid,
+                    domain_id: target_id,
+                },
+                ProcState {
+                    labels: 0,
+                    lin_gates: 0,
+                },
+                0,
+            )
+            .map_err(|e| err(format!("bind ts_proc_domains: {e}")))?;
+        }
+        {
+            let mut pid_map: HashMap<_, i32, u32> = pinned_hash_map(&self.paths, "cap_task")?;
+            pid_map
+                .insert(pid, target_id, 0)
+                .map_err(|e| err(format!("seed cap_task: {e}")))?;
+        }
+        Ok(())
+    }
+
+    pub fn unbind_pid_from_domain(&self, pid: i32, domain_id: u32) -> io::Result<()> {
+        let mut tasks: HashMap<_, i32, u32> = pinned_hash_map(&self.paths, "cap_task")?;
+        ignore_missing_remove(tasks.remove(&pid), "remove cap_task")?;
+        let mut proc: HashMap<_, PidDomainKey, ProcState> =
+            pinned_hash_map(&self.paths, "ts_proc_domains")?;
+        ignore_missing_remove(
+            proc.remove(&PidDomainKey { pid, domain_id }),
+            "remove ts_proc_domains",
+        )
+    }
+
+    /// Consumes at most the records that could be queued in one ring-buffer snapshot.
+    ///
+    /// The caller must hold the lock from [`Self::try_lock_runtime`] continuously
+    /// through the handoff to the live [`Self::run`] consumer. Concurrent calls to
+    /// [`Self::run`] or this method are forbidden because the ring buffer has one
+    /// shared consumer position.
+    ///
+    /// A concurrent producer cannot extend this drain indefinitely. Records left
+    /// after the snapshot bound are handed to the live [`Self::run`] consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pinned ring-buffer map cannot be opened.
+    pub fn drain_pending_events(&self) -> io::Result<usize> {
+        let data = pinned_map_data(&self.paths, "rb")?;
+        let byte_capacity = data
+            .info()
+            .map_err(|e| err(format!("inspect pinned rb: {e}")))?
+            .max_entries() as usize;
+        let snapshot_bound = pending_event_snapshot_bound(byte_capacity);
+        let mut ring =
+            RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
+        let fd = ring.as_raw_fd();
+        drain_available_up_to(snapshot_bound, || {
+            Ok(consume_one_if_ready(ring_readable(fd, 0)?, || {
+                ring.next().is_some()
+            }))
+        })
+    }
+
+    pub fn run(&self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
+        let data = pinned_map_data(&self.paths, "rb")?;
+        let mut ring =
+            RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
+        let fd = ring.as_raw_fd();
+
+        while !stop.load(Ordering::Relaxed) {
+            // Aya initializes a reopened ring's producer cache at zero, even when
+            // the pinned map's shared consumer offset is already nonzero.
+            if !ring_readable(fd, 100)? {
+                continue;
+            }
+            let Some(item) = ring.next() else {
+                continue;
+            };
+            let bytes: &[u8] = &item;
+            if bytes.len() < std::mem::size_of::<Event>() {
+                continue;
+            }
+            let e: Event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Event) };
+            if e.etype == EVENT_TYPE_TAINT_VIOLATION {
+                on(decode(&e));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn pending_event_snapshot_bound(byte_capacity: usize) -> usize {
+    byte_capacity / std::mem::size_of::<Event>()
+}
+
+fn ring_readable(fd: i32, timeout_ms: i32) -> io::Result<bool> {
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if result == 0 {
+            return Ok(false);
+        }
+        if result > 0 {
+            return ring_revents_readable(pfd.revents);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn ring_revents_readable(revents: i16) -> io::Result<bool> {
+    let terminal = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
+    if revents & terminal != 0 {
+        return Err(io::Error::other(format!(
+            "pinned ring poll failed: revents={revents:#x}"
+        )));
+    }
+    Ok(revents & libc::POLLIN != 0)
+}
+
+fn consume_one_if_ready(ready: bool, next: impl FnOnce() -> bool) -> bool {
+    ready && next()
+}
+
+fn drain_available_up_to(
+    limit: usize,
+    mut next: impl FnMut() -> io::Result<bool>,
+) -> io::Result<usize> {
+    let mut drained = 0;
+    while drained < limit && next()? {
+        drained += 1;
+    }
+    Ok(drained)
+}
+
+#[allow(dead_code)]
 impl Loader {
     /// `config_blob` is the raw `struct taint_config` produced by the collector.
     pub fn load(config_blob: &[u8]) -> io::Result<Self> {
@@ -1336,6 +2058,22 @@ impl Loader {
     pub fn load_with_hook_reserve(
         config_blob: &[u8],
         hook_reserve: HookReserve,
+    ) -> io::Result<Self> {
+        Self::load_inner(config_blob, hook_reserve, None)
+    }
+
+    fn load_with_pinned_layout(
+        config_blob: &[u8],
+        hook_reserve: HookReserve,
+        paths: PinnedEnginePaths,
+    ) -> io::Result<Self> {
+        Self::load_inner(config_blob, hook_reserve, Some(paths))
+    }
+
+    fn load_inner(
+        config_blob: &[u8],
+        hook_reserve: HookReserve,
+        pin_paths: Option<PinnedEnginePaths>,
     ) -> io::Result<Self> {
         if config_blob.len() != std::mem::size_of::<CConfig>() {
             return Err(err(format!(
@@ -1353,6 +2091,15 @@ impl Loader {
         let enforce_mode: u32 = if enforce { 1 } else { 0 };
         let hook_budget = HookBudget::from_config(&cfg, hook_reserve);
         let policy_features = hook_budget.features;
+        if let Some(paths) = pin_paths.as_ref() {
+            ensure_pinned_engine_dirs(paths)?;
+            if pinned_engine_present(paths, hook_reserve)? {
+                return Err(err(format!(
+                    "ActPlane pinned engine already exists at {}; open pinned objects instead of loading another engine",
+                    paths.root.display()
+                )));
+            }
+        }
 
         let mut loader = EbpfLoader::new();
         loader
@@ -1384,13 +2131,13 @@ impl Loader {
                     .map_err(|e| err(format!("ts_counts[{i}]: {e}")))?;
             }
         }
-
         let has_recv = hook_budget.has_recv();
         let has_block_exec = hook_budget.features & FEAT_BLOCK_EXEC != 0;
         let has_block_file = hook_budget.features & FEAT_BLOCK_FILE != 0;
         let has_block_connect = hook_budget.features & FEAT_BLOCK_CONNECT != 0;
 
         load_exec_tail_programs(&mut bpf)?;
+        let mut pending_links: Vec<(String, FdLink)> = Vec::new();
 
         // Attach only the tracepoints required by this loaded hook set, then LSM
         // programs only when BPF LSM is active.
@@ -1405,19 +2152,32 @@ impl Loader {
                 .map_err(|e| err(format!("{} not a tracepoint: {e}", spec.name)))?;
             p.load()
                 .map_err(|e| err(format!("{}.load: {e}", spec.name)))?;
-            p.attach(spec.category, spec.event)
+            let link_id = p
+                .attach(spec.category, spec.event)
                 .map_err(|e| err(format!("{}.attach: {e}", spec.name)))?;
+            if pin_paths.is_some() {
+                let link = p
+                    .take_link(link_id)
+                    .map_err(|e| err(format!("{}.take_link: {e}", spec.name)))?;
+                let fd_link: FdLink = link.try_into().map_err(|e| {
+                    err(format!(
+                        "{} tracepoint link is not pinnable as an fd link: {e}",
+                        spec.name
+                    ))
+                })?;
+                pending_links.push((spec.name.to_string(), fd_link));
+            }
         }
         if enforce {
             let btf = Btf::from_sys_fs().map_err(|e| err(format!("btf: {e}")))?;
             for (name, hook) in LSM_PROGS {
-                if !lsm_needed(
+                if !lsm_needed_for_budget(
                     name,
                     has_block_exec,
                     has_block_file,
                     has_block_connect,
                     has_recv,
-                    hook_budget.advanced_tracepoints,
+                    hook_budget,
                 ) {
                     continue;
                 }
@@ -1428,44 +2188,41 @@ impl Loader {
                     .map_err(|e| err(format!("{name} not an lsm: {e}")))?;
                 p.load(hook, &btf)
                     .map_err(|e| err(format!("{name}.load: {e}")))?;
-                p.attach().map_err(|e| err(format!("{name}.attach: {e}")))?;
+                let link_id = p.attach().map_err(|e| err(format!("{name}.attach: {e}")))?;
+                if pin_paths.is_some() {
+                    let link = p
+                        .take_link(link_id)
+                        .map_err(|e| err(format!("{name}.take_link: {e}")))?;
+                    let fd_link: FdLink = link.into();
+                    pending_links.push((name.to_string(), fd_link));
+                }
             }
         }
 
-        // Snapshot exec-sources for later scope_bit_for_command() lookups.
-        let mut exec_sources: Vec<(String, u64)> = Vec::new();
-        for i in 0..(cfg.n_updates as usize).min(MAX_UPDATES) {
-            let u = &cfg.updates[i];
-            if u.op != OP_EXEC {
-                continue;
-            }
-            let raw: &[u8] = &u.target;
-            let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-            if let Ok(s) = std::str::from_utf8(&raw[..end]) {
-                exec_sources.push((s.to_string(), u.add));
+        if let Some(paths) = pin_paths.as_ref() {
+            let mut created = Vec::new();
+            let pin_result = (|| -> io::Result<()> {
+                pin_loaded_maps(&bpf, paths, &mut created)?;
+                pin_profile_marker(&bpf, paths, hook_reserve, &mut created)?;
+                pin_pending_links(paths, pending_links, &mut created)
+            })();
+            match pin_result {
+                Ok(()) => {}
+                Err(e) => {
+                    for path in created.iter().rev() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Err(e);
+                }
             }
         }
 
-        // Take the "rb" ring-buffer map out of `Ebpf` and create an owned
-        // `RingBuf<MapData>`. Reused across hot-reload cycles to avoid aya 0.13
-        // wrap-state bug (pos_cache=0 + stale consumer_pos).
-        let ringbuf = match bpf.take_map("rb") {
-            Some(rb_map) => {
-                Some(RingBuf::try_from(rb_map).map_err(|e| err(format!("rb ringbuf: {e}")))?)
-            }
-            None => None,
-        };
-
-        let source_bit_map = build_full_bit_map(&cfg);
-
-        Ok(Loader {
+        let loader = Loader {
             bpf,
             enforce,
             policy_features,
-            exec_sources,
-            ringbuf,
-            source_bit_map,
-        })
+        };
+        Ok(loader)
     }
 
     pub fn enforce_mode(&self) -> bool {
@@ -1491,43 +2248,33 @@ impl Loader {
         Ok(())
     }
 
-    /// Create a `ReloadHandle` that can hot-reload policy into this engine.
-    ///
-    /// On kernels that support `BPF_MAP_TYPE_USER_RINGBUF` (6.1+), the handle
-    /// uses the ring buffer for zero-copy hot-reload.  On 5.10-compat builds
-    /// where `cap_req` is compiled as a simple ARRAY mailbox, the handle is
-    /// created in **compat mode** (`is_compat() == true`) — callers should fall
-    /// back to `Loader::reload_policy_direct()` for policy updates.
+    /// Create a `ReloadHandle` that can append runtime policy deltas.
     pub fn reload_handle(&self) -> io::Result<ReloadHandle> {
         let map = self
             .bpf
             .map("cap_req")
             .ok_or_else(|| err("cap_req missing"))?;
-        let cap_req_fd = match map {
-            Map::Unsupported(data) => {
-                let raw = data.fd().as_fd().as_raw_fd();
-                Some(dup_cloexec_fd(raw)?)
-            }
-            Map::Array(_) => {
-                // 5.10 compat: cap_req was compiled as BPF_MAP_TYPE_ARRAY.
-                None
-            }
-            _ => return Err(err("cap_req is neither a user ringbuf nor an array map")),
+        let map_data = match map {
+            Map::Unsupported(data) => data,
+            _ => return Err(err("cap_req is not a user ringbuf map")),
         };
+        let raw = map_data.fd().as_fd().as_raw_fd();
+        let dup = dup_cloexec_fd(raw)?;
         Ok(ReloadHandle {
-            cap_req_fd,
+            cap_req_fd: dup,
             cap_task_fd: dup_hash_map_fd(&self.bpf, "cap_task")?,
             cap_state_fd: dup_hash_map_fd(&self.bpf, "cap_state")?,
             cap_policy_fd: dup_hash_map_fd(&self.bpf, "cap_policy")?,
             ts_counts_fd: dup_array_map_fd(&self.bpf, "ts_counts")?,
             append_lock: Mutex::new(()),
+            append_lock_file: None,
             policy_features: self.policy_features,
         })
     }
 
     /// Create a map-fd backed domain control handle.
     ///
-    /// This handle can be shared with a control plane while `Loader::run` polls
+    /// This handle can be shared with a control plane while the test loader polls
     /// the ring buffer, which is how MCP can bind subagent pids without stopping
     /// enforcement.
     pub fn domain_handle(&self) -> io::Result<DomainHandle> {
@@ -1595,17 +2342,6 @@ impl Loader {
     /// Seed `pid` and its future descendants with an initial label.
     pub fn seed_label(&mut self, pid: i32, label: u64) -> io::Result<()> {
         self.seed_global_proc_state(pid, label)?;
-        {
-            let mut agent_roots: HashMap<_, i32, u8> = HashMap::try_from(
-                self.bpf
-                    .map_mut("ts_agent_roots")
-                    .ok_or_else(|| err("ts_agent_roots missing"))?,
-            )
-            .map_err(|e| err(format!("ts_agent_roots: {e}")))?;
-            agent_roots
-                .insert(pid, 1u8, 0)
-                .map_err(|e| err(format!("register agent root: {e}")))?;
-        }
         self.bind_state(
             pid,
             pid as u32,
@@ -1627,101 +2363,6 @@ impl Loader {
         Ok(())
     }
 
-    /// After `seed_label(root_pid, ..)`, walk the existing descendant process
-    /// tree under `root_pid` and write BPF maps for each live child so that
-    /// processes forked *before* seed are also visible to enforcement.
-    ///
-    /// Writes per descendant:
-    ///   - `cap_task[child]`  = domain_id (root_pid as u32)
-    ///   - `ts_proc[child]`  = ProcState { labels, lin_gates: 0 }
-    ///   - `ts_root[child]`  = root_pid
-    ///
-    /// Races (child exiting mid-scan) are tolerated: errors are logged and
-    /// skipped. Recursion is capped at 32 levels.
-    pub fn seed_descendants(&mut self, root_pid: i32, label: u64) -> io::Result<()> {
-        let descendants = Self::get_descendants(root_pid, 0, 32);
-        if descendants.is_empty() {
-            return Ok(());
-        }
-
-        let domain_id = root_pid as u32;
-
-        // Each map borrow requires exclusive access to self.bpf, so we process
-        // them in separate scopes.
-        {
-            let mut cap_task_map: HashMap<_, i32, u32> = HashMap::try_from(
-                self.bpf
-                    .map_mut("cap_task")
-                    .ok_or_else(|| err("cap_task missing"))?,
-            )
-            .map_err(|e| err(format!("cap_task: {e}")))?;
-            for &cpid in &descendants {
-                let _ = cap_task_map.insert(cpid, domain_id, 0);
-            }
-        }
-        {
-            let mut proc_map: HashMap<_, i32, ProcState> = HashMap::try_from(
-                self.bpf
-                    .map_mut("ts_proc")
-                    .ok_or_else(|| err("ts_proc missing"))?,
-            )
-            .map_err(|e| err(format!("ts_proc: {e}")))?;
-            for &cpid in &descendants {
-                let _ = proc_map.insert(
-                    cpid,
-                    ProcState {
-                        labels: label,
-                        lin_gates: 0,
-                    },
-                    0,
-                );
-            }
-        }
-        {
-            let mut root_map: HashMap<_, i32, i32> = HashMap::try_from(
-                self.bpf
-                    .map_mut("ts_root")
-                    .ok_or_else(|| err("ts_root missing"))?,
-            )
-            .map_err(|e| err(format!("ts_root: {e}")))?;
-            for &cpid in &descendants {
-                let _ = root_map.insert(cpid, root_pid, 0);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Recursively collect descendant PIDs by reading `/proc/{pid}/task/{tid}/children`.
-    /// `depth` tracks current recursion depth; `max_depth` caps it.
-    fn get_descendants(pid: i32, depth: u32, max_depth: u32) -> Vec<i32> {
-        if depth >= max_depth {
-            return Vec::new();
-        }
-        let mut result = Vec::new();
-        let task_dir = format!("/proc/{}/task", pid);
-        let entries = match std::fs::read_dir(&task_dir) {
-            Ok(e) => e,
-            Err(_) => return result,
-        };
-        for entry in entries.flatten() {
-            let children_path = entry.path().join("children");
-            let content = match std::fs::read_to_string(&children_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            for child_str in content.split_whitespace() {
-                if let Ok(child_pid) = child_str.parse::<i32>() {
-                    if child_pid > 0 {
-                        result.push(child_pid);
-                        result.extend(Self::get_descendants(child_pid, depth + 1, max_depth));
-                    }
-                }
-            }
-        }
-        result
-    }
-
     /// Bind a Linux pid to an engine state id.
     ///
     /// Binding is also a runtime domain boundary. Reset the pid's dynamic
@@ -1739,9 +2380,7 @@ impl Loader {
                     .ok_or_else(|| err("cap_state missing"))?,
             )
             .map_err(|e| err(format!("cap_state: {e}")))?;
-            states
-                .insert(target_id, state, 0)
-                .map_err(|e| err(format!("seed cap_state: {e}")))?;
+            upsert_cap_state(&mut states, target_id, state)?;
         }
         {
             let mut proc: HashMap<_, PidDomainKey, ProcState> = HashMap::try_from(
@@ -1819,45 +2458,11 @@ impl Loader {
         Ok(())
     }
 
-    /// Drain all pending events from the persistent ringbuf without blocking.
-    pub fn drain_ringbuf(&mut self, mut on: impl FnMut(Violation)) {
-        let ring = match self.ringbuf.as_mut() {
-            Some(r) => r,
-            None => return,
-        };
-
-        const DRAIN_LIMIT: usize = 65_536;
-        let mut count = 0usize;
-        while let Some(item) = ring.next() {
-            count += 1;
-            if count > DRAIN_LIMIT {
-                break;
-            }
-            let bytes: &[u8] = &item;
-            if bytes.len() < std::mem::size_of::<Event>() {
-                continue;
-            }
-            let e: Event = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Event) };
-            if e.etype != EVENT_TYPE_TAINT_VIOLATION {
-                continue;
-            }
-            on(decode(&e));
-        }
-    }
-
     /// Poll the ring buffer until `stop` is set, delivering each violation.
-    /// Uses the persistent `self.ringbuf` created once at `Loader::load()`.
     pub fn run(&mut self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
-        const MAX_ITEMS_PER_POLL: usize = 4096;
-        const DEDUP_WINDOW: usize = 8192;
-
-        let ring = self
-            .ringbuf
-            .as_mut()
-            .ok_or_else(|| err("rb ringbuf not initialised (take_map failed at load?)"))?;
+        let mut ring = RingBuf::try_from(self.bpf.map_mut("rb").ok_or_else(|| err("rb missing"))?)
+            .map_err(|e| err(format!("rb: {e}")))?;
         let fd = ring.as_raw_fd();
-
-        let mut dedup = EventDedup::new(DEDUP_WINDOW);
 
         while !stop.load(Ordering::Relaxed) {
             let mut pfd = libc::pollfd {
@@ -1873,12 +2478,7 @@ impl Loader {
                 }
                 return Err(e);
             }
-            let mut batch = 0usize;
             while let Some(item) = ring.next() {
-                batch += 1;
-                if batch > MAX_ITEMS_PER_POLL {
-                    break;
-                }
                 let bytes: &[u8] = &item;
                 if bytes.len() < std::mem::size_of::<Event>() {
                     continue;
@@ -1887,267 +2487,9 @@ impl Loader {
                 if e.etype != EVENT_TYPE_TAINT_VIOLATION {
                     continue;
                 }
-                if !dedup.admit((e.pid, e.timestamp_ns, e.effect)) {
-                    continue;
-                }
                 on(decode(&e));
             }
         }
-        Ok(())
-    }
-
-    /// Return the lowest label-bit assigned to an exec-source whose target
-    /// equals `command`.
-    pub fn scope_bit_for_command(&self, command: &str) -> Option<u8> {
-        for (target, add) in &self.exec_sources {
-            if target == command {
-                if *add == 0 {
-                    return None;
-                }
-                return Some(add.trailing_zeros() as u8);
-            }
-        }
-        None
-    }
-
-    /// Snapshot of all `op=EXEC` source entries compiled into the policy.
-    pub fn exec_sources_snapshot(&self) -> Vec<(String, u8)> {
-        self.exec_sources
-            .iter()
-            .filter_map(|(target, add)| {
-                if *add == 0 {
-                    None
-                } else {
-                    Some((target.clone(), add.trailing_zeros() as u8))
-                }
-            })
-            .collect()
-    }
-
-    /// Read the current taint label for `pid` directly from the BPF map.
-    pub fn query_proc_label(&mut self, pid: i32) -> io::Result<u64> {
-        let proc_map: HashMap<_, i32, ProcState> = HashMap::try_from(
-            self.bpf
-                .map_mut("ts_proc")
-                .ok_or_else(|| err("ts_proc missing"))?,
-        )
-        .map_err(|e| err(format!("ts_proc: {e}")))?;
-        match proc_map.get(&pid, 0) {
-            Ok(state) => Ok(state.labels),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("ENOENT")
-                    || msg.contains("No such file")
-                    || msg.contains("not found")
-                {
-                    Ok(0)
-                } else {
-                    Err(err(format!("ts_proc lookup: {e}")))
-                }
-            }
-        }
-    }
-
-    /// Remove a pid from the ts_agent_roots BPF map (called on deactivation).
-    pub fn unseed_agent_root(&mut self, pid: i32) -> io::Result<()> {
-        if pid <= 0 {
-            return Ok(());
-        }
-        let mut agent_roots: HashMap<_, i32, u8> = HashMap::try_from(
-            self.bpf
-                .map_mut("ts_agent_roots")
-                .ok_or_else(|| err("ts_agent_roots missing"))?,
-        )
-        .map_err(|e| err(format!("ts_agent_roots: {e}")))?;
-        let _ = agent_roots.remove(&pid); // ignore ENOENT
-        Ok(())
-    }
-
-    /// Direct-map hot-reload for 5.10-compat mode (no ring buffer).
-    pub fn reload_policy_direct(&mut self, new_blob: &[u8]) -> io::Result<()> {
-        if new_blob.len() != std::mem::size_of::<CConfig>() {
-            return Err(err(format!(
-                "reload_policy_direct config size mismatch: got {}, expected {}",
-                new_blob.len(),
-                std::mem::size_of::<CConfig>()
-            )));
-        }
-        let cfg: Box<CConfig> =
-            Box::new(unsafe { std::ptr::read_unaligned(new_blob.as_ptr() as *const CConfig) });
-        validate_config(&cfg)?;
-
-        // Phase 1: quiesce
-        {
-            let mut counts: Array<_, u32> = Array::try_from(
-                self.bpf
-                    .map_mut("ts_counts")
-                    .ok_or_else(|| err("map ts_counts missing"))?,
-            )
-            .map_err(|e| err(format!("ts_counts: {e}")))?;
-            counts
-                .set(0, 0u32, 0)
-                .map_err(|e| err(format!("quiesce rules: {e}")))?;
-            counts
-                .set(1, 0u32, 0)
-                .map_err(|e| err(format!("quiesce updates: {e}")))?;
-        }
-
-        // Phase 2: write updates
-        populate_update_map(&mut self.bpf, &cfg)?;
-
-        // Phase 3: write rules
-        populate_rule_map(&mut self.bpf, &cfg)?;
-
-        // Phase 4: activate
-        {
-            let mut counts: Array<_, u32> = Array::try_from(
-                self.bpf
-                    .map_mut("ts_counts")
-                    .ok_or_else(|| err("map ts_counts missing"))?,
-            )
-            .map_err(|e| err(format!("ts_counts: {e}")))?;
-            counts
-                .set(0, cfg.n_rules, 0)
-                .map_err(|e| err(format!("activate rules: {e}")))?;
-            counts
-                .set(1, cfg.n_updates, 0)
-                .map_err(|e| err(format!("activate updates: {e}")))?;
-        }
-
-        // Phase 4.5: remap process labels
-        {
-            let old_bit_map = &self.source_bit_map;
-            let new_bit_map = build_full_bit_map(&cfg);
-
-            let mut bit_remap: StdHashMap<u8, Option<u8>> = StdHashMap::new();
-            for (source_key, old_bit) in old_bit_map {
-                match new_bit_map.get(source_key) {
-                    Some(&new_bit) if new_bit != *old_bit => {
-                        bit_remap.insert(*old_bit, Some(new_bit));
-                    }
-                    None => {
-                        bit_remap.insert(*old_bit, None);
-                    }
-                    _ => {}
-                }
-            }
-
-            if !bit_remap.is_empty() {
-                let mut proc_map: HashMap<_, i32, ProcState> = HashMap::try_from(
-                    self.bpf
-                        .map_mut("ts_proc")
-                        .ok_or_else(|| err("ts_proc missing"))?,
-                )
-                .map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
-
-                let mut updates: Vec<(i32, ProcState)> = Vec::new();
-                for (pid, state) in proc_map.iter().flatten() {
-                    let new_labels = remap_labels(state.labels, &bit_remap);
-                    if new_labels != state.labels {
-                        updates.push((
-                            pid,
-                            ProcState {
-                                labels: new_labels,
-                                lin_gates: state.lin_gates,
-                            },
-                        ));
-                    }
-                }
-
-                for (pid, new_state) in updates {
-                    let _ = proc_map.insert(pid, new_state, 0);
-                }
-            }
-        }
-
-        // Phase 5: Update cached exec_sources and source_bit_map
-        let n = (cfg.n_updates as usize).min(MAX_UPDATES);
-        self.exec_sources.clear();
-        for i in 0..n {
-            let u = &cfg.updates[i];
-            if u.op != OP_EXEC {
-                continue;
-            }
-            let raw: &[u8] = &u.target;
-            let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-            if let Ok(s) = std::str::from_utf8(&raw[..end]) {
-                self.exec_sources.push((s.to_string(), u.add));
-            }
-        }
-        self.source_bit_map = build_full_bit_map(&cfg);
-
-        Ok(())
-    }
-
-    /// Remap all process labels in ts_proc based on the difference between
-    /// old and new policy blobs.
-    pub fn remap_proc_labels(&mut self, old_blob: &[u8], new_blob: &[u8]) -> io::Result<()> {
-        if old_blob.len() != std::mem::size_of::<CConfig>() {
-            return Err(err(format!(
-                "remap_proc_labels old config size mismatch: got {}, expected {}",
-                old_blob.len(),
-                std::mem::size_of::<CConfig>()
-            )));
-        }
-        if new_blob.len() != std::mem::size_of::<CConfig>() {
-            return Err(err(format!(
-                "remap_proc_labels new config size mismatch: got {}, expected {}",
-                new_blob.len(),
-                std::mem::size_of::<CConfig>()
-            )));
-        }
-        let old_cfg: Box<CConfig> =
-            Box::new(unsafe { std::ptr::read_unaligned(old_blob.as_ptr() as *const CConfig) });
-        let new_cfg: Box<CConfig> =
-            Box::new(unsafe { std::ptr::read_unaligned(new_blob.as_ptr() as *const CConfig) });
-
-        let old_bit_map = build_full_bit_map(&old_cfg);
-        let new_bit_map = build_full_bit_map(&new_cfg);
-
-        let mut bit_remap: StdHashMap<u8, Option<u8>> = StdHashMap::new();
-        for (source_key, old_bit) in &old_bit_map {
-            match new_bit_map.get(source_key) {
-                Some(&new_bit) if new_bit != *old_bit => {
-                    bit_remap.insert(*old_bit, Some(new_bit));
-                }
-                None => {
-                    bit_remap.insert(*old_bit, None);
-                }
-                _ => {}
-            }
-        }
-
-        if bit_remap.is_empty() {
-            return Ok(());
-        }
-
-        let mut proc_map: HashMap<_, i32, ProcState> = HashMap::try_from(
-            self.bpf
-                .map_mut("ts_proc")
-                .ok_or_else(|| err("ts_proc missing"))?,
-        )
-        .map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
-
-        let mut updates: Vec<(i32, ProcState)> = Vec::new();
-        for (pid, state) in proc_map.iter().flatten() {
-            let new_labels = remap_labels(state.labels, &bit_remap);
-            if new_labels != state.labels {
-                updates.push((
-                    pid,
-                    ProcState {
-                        labels: new_labels,
-                        lin_gates: state.lin_gates,
-                    },
-                ));
-            }
-        }
-
-        for (pid, new_state) in updates {
-            let _ = proc_map.insert(pid, new_state, 0);
-        }
-
-        self.source_bit_map = new_bit_map;
-
         Ok(())
     }
 }
@@ -2216,38 +2558,10 @@ fn populate_policy_mask_map(bpf: &mut Ebpf, cfg: &CConfig) -> io::Result<()> {
     Ok(())
 }
 
-// ── Hot-reload via cap_req ring buffer ─────────────────────────────
+// ── Runtime policy deltas via cap_req ring buffer ──────────────────
 
-const CAP_REQ_RELOAD_UPDATE: i32 = -1;
-const CAP_REQ_RELOAD_RULE: i32 = -2;
-const CAP_REQ_RELOAD_COUNTS: i32 = -3;
 const CAP_REQ_APPEND_UPDATE: i32 = -4;
 const CAP_REQ_APPEND_RULE: i32 = -5;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ReloadUpdate {
-    tag: i32,
-    index: u32,
-    entry: CUpdate,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ReloadRule {
-    tag: i32,
-    index: u32,
-    entry: CRule,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ReloadCounts {
-    tag: i32,
-    n_rules: u32,
-    n_updates: u32,
-    _pad: u32,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -2271,39 +2585,47 @@ struct AppendRule {
     entry: CRule,
 }
 
-/// A handle for hot-reloading policy rules into a running eBPF engine.
+/// A handle for appending runtime policy deltas into a running eBPF engine.
 ///
 /// Holds only the `cap_req` user ring buffer fd (via a dup'd `OwnedFd`).
 /// `Send + Sync` — safe to share across threads and the async MCP server.
 pub struct ReloadHandle {
-    cap_req_fd: Option<std::os::fd::OwnedFd>,
+    cap_req_fd: std::os::fd::OwnedFd,
     cap_task_fd: std::os::fd::OwnedFd,
     cap_state_fd: std::os::fd::OwnedFd,
     cap_policy_fd: std::os::fd::OwnedFd,
     ts_counts_fd: std::os::fd::OwnedFd,
     append_lock: Mutex<()>,
+    append_lock_file: Option<std::fs::File>,
     policy_features: u32,
 }
 
 unsafe impl Send for ReloadHandle {}
 unsafe impl Sync for ReloadHandle {}
 
+struct FileLockGuard(RawFd);
+
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0, libc::LOCK_UN);
+        }
+    }
+}
+
 impl ReloadHandle {
-    /// Returns `true` when the handle was created from a 5.10-compat ARRAY
-    /// `cap_req` map.  Callers should fall back to
-    /// `Loader::reload_policy_direct()`.
-    pub fn is_compat(&self) -> bool {
-        self.cap_req_fd.is_none()
+    fn lock_append_file(&self) -> io::Result<Option<FileLockGuard>> {
+        let Some(file) = &self.append_lock_file else {
+            return Ok(None);
+        };
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(FileLockGuard(file.as_raw_fd())))
     }
 
     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
-        let fd = self
-            .cap_req_fd
-            .as_ref()
-            .ok_or_else(|| {
-                err("hot-reload via cap_req ringbuf not available on this kernel (5.10 compat)")
-            })?
-            .as_raw_fd();
+        let fd = self.cap_req_fd.as_raw_fd();
         unsafe {
             let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
             if rb.is_null() {
@@ -2431,6 +2753,19 @@ impl ReloadHandle {
         Ok(())
     }
 
+    pub fn clear_runtime_state(&self) -> io::Result<()> {
+        let _guard = self
+            .append_lock
+            .lock()
+            .map_err(|e| err(format!("append lock poisoned: {e}")))?;
+        let _file_guard = self.lock_append_file()?;
+        self.set_count_slot(0, 0)?;
+        self.set_count_slot(1, 0)?;
+        clear_hash_map::<i32, u32>(&self.cap_task_fd, "cap_task")?;
+        clear_hash_map::<u32, CapState>(&self.cap_state_fd, "cap_state")?;
+        clear_hash_map::<u32, CapPolicyMask>(&self.cap_policy_fd, "cap_policy")
+    }
+
     fn submit_expect_count<T: Copy>(
         &self,
         val: &T,
@@ -2520,71 +2855,13 @@ impl ReloadHandle {
         Ok(())
     }
 
-    /// Hot-reload a new compiled policy blob without restarting the engine.
-    ///
-    /// Sequence: quiesce (counts→0) → write updates → write rules → activate.
-    /// Accumulated state (process labels, file labels, session gates) is preserved.
-    pub fn reload_policy(&self, new_blob: &[u8]) -> io::Result<()> {
-        if new_blob.len() != std::mem::size_of::<CConfig>() {
-            return Err(err(format!(
-                "reload config size mismatch: got {}, expected {}",
-                new_blob.len(),
-                std::mem::size_of::<CConfig>()
-            )));
-        }
-        let cfg: Box<CConfig> =
-            Box::new(unsafe { std::ptr::read_unaligned(new_blob.as_ptr() as *const CConfig) });
-        validate_config(&cfg)?;
-        validate_supported_features(&cfg, self.policy_features, "reload policy")?;
-        let _guard = self
-            .append_lock
-            .lock()
-            .map_err(|e| err(format!("reload lock poisoned: {e}")))?;
-
-        // Phase 1: quiesce — set counts to 0 so the engine skips all rules.
-        self.submit(&ReloadCounts {
-            tag: CAP_REQ_RELOAD_COUNTS,
-            n_rules: 0,
-            n_updates: 0,
-            _pad: 0,
-        })?;
-
-        // Phase 2: submit all update entries.
-        for i in 0..cfg.n_updates {
-            self.submit(&ReloadUpdate {
-                tag: CAP_REQ_RELOAD_UPDATE,
-                index: i,
-                entry: cfg.updates[i as usize],
-            })?;
-        }
-
-        // Phase 3: submit all rule entries.
-        for i in 0..cfg.n_rules {
-            self.submit(&ReloadRule {
-                tag: CAP_REQ_RELOAD_RULE,
-                index: i,
-                entry: cfg.rules[i as usize],
-            })?;
-        }
-
-        // Phase 4: activate — set real counts.
-        self.submit(&ReloadCounts {
-            tag: CAP_REQ_RELOAD_COUNTS,
-            n_rules: cfg.n_rules,
-            n_updates: cfg.n_updates,
-            _pad: 0,
-        })?;
-
-        Ok(())
-    }
-
     /// Append a precompiled policy delta through the kernel-admitted runtime path.
     ///
-    /// Unlike `reload_policy`, this does not replace existing rules. Each update
-    /// and rule is admitted by the BPF capability checker using the submitting
-    /// pid's bound state. Updates that delete labels require `AUTH_DECLASSIFY`
-    /// and label authority over every deleted bit, so runtime declassification is
-    /// domain-local instead of a way to clear inherited higher-authority labels.
+    /// Each update and rule is admitted by the BPF capability checker using the
+    /// submitting pid's bound state. Updates that delete labels require
+    /// `AUTH_DECLASSIFY` and label authority over every deleted bit, so runtime
+    /// declassification is domain-local instead of a way to clear inherited
+    /// higher-authority labels.
     pub fn append_policy_delta(
         &self,
         caller_pid: i32,
@@ -2622,6 +2899,7 @@ impl ReloadHandle {
             .append_lock
             .lock()
             .map_err(|e| err(format!("append lock poisoned: {e}")))?;
+        let _file_guard = self.lock_append_file()?;
         let updates_before = self.count_slot(1)?;
         let rules_before = self.count_slot(0)?;
         if updates_before as usize + cfg.n_updates as usize > MAX_UPDATES {
@@ -2774,113 +3052,85 @@ fn decode(e: &Event) -> Violation {
     }
 }
 
-/// Extract `(target_basename, bit_index)` pairs for every `op=EXEC` source
-/// entry in a compiled policy blob. Pure function — no Loader, no kernel.
-pub fn exec_sources_from_blob(blob: &[u8]) -> io::Result<Vec<(String, u8)>> {
-    if blob.len() != std::mem::size_of::<CConfig>() {
-        return Err(err(format!(
-            "config size mismatch: got {}, expected {}",
-            blob.len(),
-            std::mem::size_of::<CConfig>()
-        )));
-    }
-    let cfg: Box<CConfig> =
-        Box::new(unsafe { std::ptr::read_unaligned(blob.as_ptr() as *const CConfig) });
-    let n = (cfg.n_updates as usize).min(MAX_UPDATES);
-    let mut out: Vec<(String, u8)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let u = &cfg.updates[i];
-        if u.op != OP_EXEC || u.add == 0 {
-            continue;
-        }
-        let raw: &[u8] = &u.target;
-        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        if let Ok(s) = std::str::from_utf8(&raw[..end]) {
-            out.push((s.to_string(), u.add.trailing_zeros() as u8));
-        }
-    }
-    Ok(out)
-}
-
-/// Sliding-window dedup for ringbuf events.
-struct EventDedup {
-    capacity: usize,
-    set: HashSet<(i32, u64, u32)>,
-    order: VecDeque<(i32, u64, u32)>,
-}
-
-impl EventDedup {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            set: HashSet::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-        }
-    }
-
-    fn admit(&mut self, key: (i32, u64, u32)) -> bool {
-        if !self.set.insert(key) {
-            return false;
-        }
-        self.order.push_back(key);
-        if self.order.len() > self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.set.remove(&old);
-            }
-        }
-        true
-    }
-}
-
-// ── Label remapping helpers ────────────────────────────────────────
-
-/// Remap label bits according to a remapping table.
-fn remap_labels(old_labels: u64, bit_remap: &StdHashMap<u8, Option<u8>>) -> u64 {
-    let mut new_labels: u64 = 0;
-    for old_bit in 0u8..64 {
-        if (old_labels & (1u64 << old_bit)) == 0 {
-            continue;
-        }
-        match bit_remap.get(&old_bit) {
-            Some(Some(new_bit)) => {
-                new_labels |= 1u64 << (*new_bit as u64);
-            }
-            Some(None) => {
-                // deleted
-            }
-            None => {
-                new_labels |= 1u64 << old_bit;
-            }
-        }
-    }
-    new_labels
-}
-
-/// Build a complete target→bit mapping from a CConfig (covering all op types).
-fn build_full_bit_map(cfg: &CConfig) -> StdHashMap<String, u8> {
-    let mut map = StdHashMap::new();
-    let n = (cfg.n_updates as usize).min(MAX_UPDATES);
-    for i in 0..n {
-        let u = &cfg.updates[i];
-        if u.add == 0 {
-            continue;
-        }
-        let raw: &[u8] = &u.target;
-        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-        if let Ok(s) = std::str::from_utf8(&raw[..end]) {
-            let key = format!("{}:{}", u.op, s);
-            map.insert(key, u.add.trailing_zeros() as u8);
-        }
-    }
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const EFFECT_NOTIFY: u8 = 0;
     const EFFECT_KILL: u8 = 2;
+
+    #[test]
+    fn pending_event_snapshot_bound_uses_fixed_event_payload_size() {
+        let event_size = std::mem::size_of::<Event>();
+
+        assert_eq!(pending_event_snapshot_bound(event_size * 3), 3);
+        assert_eq!(pending_event_snapshot_bound(event_size - 1), 0);
+    }
+
+    #[test]
+    fn pending_event_drain_stops_at_snapshot_bound_with_continuous_producer() {
+        let mut attempts = 0;
+        let drained = drain_available_up_to(3, || {
+            attempts += 1;
+            Ok(true)
+        })
+        .expect("drain succeeds");
+
+        assert_eq!(drained, 3);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn pending_event_drain_stops_when_available_records_are_exhausted() {
+        let mut records = [true, true, false].into_iter();
+        let drained = drain_available_up_to(5, || Ok(records.next().unwrap_or(false)))
+            .expect("drain succeeds");
+
+        assert_eq!(drained, 2);
+        assert_eq!(records.next(), None);
+    }
+
+    #[test]
+    fn pinned_event_consumer_does_not_probe_an_unreadable_ring() {
+        let mut probes = 0;
+
+        let consumed = consume_one_if_ready(false, || {
+            probes += 1;
+            true
+        });
+
+        assert!(!consumed);
+        assert_eq!(probes, 0);
+    }
+
+    #[test]
+    fn pinned_event_consumer_reads_only_one_record_per_readiness() {
+        let mut probes = 0;
+
+        let consumed = consume_one_if_ready(true, || {
+            probes += 1;
+            true
+        });
+
+        assert!(consumed);
+        assert_eq!(probes, 1);
+    }
+
+    #[test]
+    fn pinned_ring_poll_rejects_terminal_events() {
+        for revents in [libc::POLLERR, libc::POLLHUP, libc::POLLNVAL] {
+            let error = ring_revents_readable(revents)
+                .expect_err("terminal poll events must fail the consumer");
+            assert!(error.to_string().contains("pinned ring poll failed"));
+        }
+    }
+
+    #[test]
+    fn pinned_ring_poll_accepts_only_readable_events() {
+        assert!(!ring_revents_readable(0).expect("empty poll result should be valid"));
+        assert!(ring_revents_readable(libc::POLLIN).expect("readable poll result should work"));
+        assert!(ring_revents_readable(libc::POLLIN | libc::POLLHUP).is_err());
+    }
 
     // The Rust ABI mirror must match the C struct sizes the object was built
     // with. These are the documented sizes from bpf/taint.h.
@@ -2891,19 +3141,12 @@ mod tests {
         assert_eq!(std::mem::size_of::<DeltaRequest>(), 48);
         // CConfig mirrors bpf/taint.h exactly:
         // 8-byte header + 320 taint_update entries + 128 taint_rule entries.
-        // CRule carries a trailing ttl_ns (u64) for enforce-mode TTL expiry, so
-        // each rule is 232 bytes and the full blob is 8 + 320*144 + 128*232.
         assert_eq!(std::mem::align_of::<CConfig>(), 8);
         assert_eq!(std::mem::size_of::<CUpdate>(), 144);
-        assert_eq!(std::mem::size_of::<CRule>(), 232);
-        assert_eq!(std::mem::size_of::<CConfig>(), 75_784);
+        assert_eq!(std::mem::size_of::<CRule>(), 224);
+        assert_eq!(std::mem::size_of::<CConfig>(), 74_760);
         assert_eq!(std::mem::align_of::<Event>(), 8);
         assert_eq!(std::mem::size_of::<Event>(), 384);
-        assert_eq!(
-            std::mem::size_of::<CConfig>(),
-            actplane_ifc_compiler::COMPILED_CONFIG_BLOB_SIZE,
-            "engine/compiler CConfig size mismatch"
-        );
     }
 
     #[test]
@@ -3000,6 +3243,8 @@ mod tests {
             features: 0,
             file_write: false,
             advanced_tracepoints: false,
+            suppress_dataflow_tracepoints: false,
+            file_open_only: false,
         };
         assert!(tracepoint_needed(spec("handle_fork"), empty));
         assert!(!tracepoint_needed(spec("handle_exec"), empty));
@@ -3014,10 +3259,12 @@ mod tests {
             features: FEAT_FILE_FLOW,
             file_write: false,
             advanced_tracepoints: false,
+            suppress_dataflow_tracepoints: false,
+            file_open_only: false,
         };
         assert!(tracepoint_needed(spec("trace_openat"), file));
         assert!(tracepoint_needed(spec("trace_read_exit"), file));
-        assert!(!tracepoint_needed(spec("trace_unlink"), file));
+        assert!(tracepoint_needed(spec("trace_unlink"), file));
         assert!(!tracepoint_needed(spec("trace_pipe"), file));
         assert!(!tracepoint_needed(spec("trace_mmap"), file));
 
@@ -3028,6 +3275,136 @@ mod tests {
         assert!(tracepoint_needed(spec("trace_pipe"), advanced_file));
         assert!(tracepoint_needed(spec("trace_mmap"), advanced_file));
         assert!(tracepoint_needed(spec("trace_recvmsg"), advanced_file));
+    }
+
+    #[test]
+    fn pinned_file_enforcement_avoids_flow_tracepoints() {
+        fn spec(name: &str) -> &'static TracepointSpec {
+            TRACEPOINTS
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("tracepoint spec")
+        }
+
+        let budget = HookBudget::from_config(
+            &unsafe { std::mem::zeroed() },
+            HookReserve::file_enforcement(),
+        );
+
+        assert!(budget.features & FEAT_BLOCK_FILE != 0);
+        assert!(budget.features & FEAT_OPEN_RULES != 0);
+        assert!(!tracepoint_needed(spec("trace_openat"), budget));
+        assert!(!tracepoint_needed(spec("trace_rename"), budget));
+        assert!(lsm_needed(
+            "enforce_file_open",
+            false,
+            true,
+            false,
+            false,
+            false,
+        ));
+        assert!(lsm_needed_for_budget(
+            "enforce_file_open",
+            false,
+            true,
+            false,
+            false,
+            budget,
+        ));
+        assert!(!lsm_needed_for_budget(
+            "enforce_path_truncate",
+            false,
+            true,
+            false,
+            false,
+            budget,
+        ));
+    }
+
+    #[test]
+    fn pinned_file_enforcement_requires_bpf_lsm() {
+        let error = validate_pinned_runtime(HookReserve::file_enforcement(), false)
+            .expect_err("file enforcement must reject tracepoint-only mode");
+        assert!(error.to_string().contains("requires an active BPF LSM"));
+    }
+
+    #[test]
+    fn pinned_file_enforcement_rejects_full_profile_links() {
+        let budget = HookBudget::for_pinned_reserve(HookReserve::file_enforcement());
+        assert!(lsm_link_expected("enforce_file_open", budget, true));
+        assert!(!lsm_link_expected("enforce_bpf_syscall", budget, true));
+    }
+
+    #[test]
+    fn pinned_profile_marker_captures_revision_profile_and_schema() {
+        let marker = HookReserve::file_enforcement().profile_marker();
+        assert!(marker.contains("file_v1"));
+        assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
+        assert_ne!(marker, HookReserve::full_profile().profile_marker());
+    }
+
+    #[test]
+    fn unknown_pinned_profile_is_rejected() {
+        let error = HookReserve::pinned_profile_value(Some("file-enforcment"))
+            .expect_err("unknown profile must not fall back to full hooks");
+        assert!(error
+            .to_string()
+            .contains("unsupported ACTPLANE_PINNED_PROFILE"));
+    }
+
+    #[test]
+    fn credential_exfiltration_profile_adds_only_notify_connect_tracepoint() {
+        let reserve = HookReserve::pinned_profile_value(Some("credential-exfiltration"))
+            .expect("credential exfiltration profile");
+        let budget = HookBudget::for_pinned_reserve(reserve);
+        let open_exit = TRACEPOINTS
+            .iter()
+            .find(|spec| spec.name == "trace_openat_exit")
+            .expect("openat exit tracepoint");
+        let connect = TRACEPOINTS
+            .iter()
+            .find(|spec| spec.name == "trace_connect")
+            .expect("connect entry tracepoint");
+        let connect_exit = TRACEPOINTS
+            .iter()
+            .find(|spec| spec.name == "trace_connect_exit")
+            .expect("connect exit tracepoint");
+
+        assert!(reserve.suppress_dataflow_tracepoints);
+        assert!(budget.features & FEAT_FILE_FLOW != 0);
+        assert!(budget.features & FEAT_CONNECT != 0);
+        assert!(budget.features & FEAT_BLOCK_CONNECT != 0);
+        assert!(!tracepoint_needed(open_exit, budget));
+        assert!(tracepoint_needed(connect, budget));
+        assert!(!tracepoint_needed(connect_exit, budget));
+        assert!(lsm_link_expected("enforce_file_open", budget, true));
+        assert!(lsm_link_expected("enforce_socket_connect", budget, true));
+        assert!(!lsm_link_expected("enforce_file_permission", budget, true));
+        assert!(!lsm_link_expected("enforce_bpf_syscall", budget, true));
+    }
+
+    #[test]
+    fn credential_exfiltration_profile_has_distinct_marker() {
+        let reserve = HookReserve::pinned_profile_value(Some("credential-exfiltration"))
+            .expect("credential exfiltration profile");
+        let marker = reserve.profile_marker();
+
+        assert!(marker.contains("credential_exfiltration_v2"));
+        assert_ne!(marker, HookReserve::file_enforcement().profile_marker());
+        assert_ne!(marker, HookReserve::full_profile().profile_marker());
+    }
+
+    #[test]
+    fn missing_map_delete_is_idempotent() {
+        assert!(ignore_missing_remove(Err(MapError::ElementNotFound), "fixture").is_ok());
+        assert!(ignore_missing_remove(
+            Err(MapError::SyscallError(aya::sys::SyscallError {
+                call: "bpf_map_delete_elem",
+                io_error: io::Error::from_raw_os_error(libc::ENOENT),
+            })),
+            "fixture",
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3134,7 +3511,7 @@ mod tests {
         );
         assert!(
             err.to_string()
-                .contains("runtime reload/delta cannot attach new hooks"),
+                .contains("runtime policy deltas cannot attach new hooks"),
             "{err}"
         );
         validate_supported_features(&cfg, FEAT_BLOCK_EXEC, "runtime policy delta")
@@ -3153,23 +3530,25 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("path contains matches"), "{text}");
         assert!(
-            text.contains("must be enabled by the policy used to load the engine"),
+            text.contains("not expensive file sink matcher classes"),
             "{text}"
         );
         assert!(text.contains("missing=0x"), "{text}");
+        validate_supported_features(&cfg, ALL_POLICY_FEATURES, "runtime policy delta")
+            .expect("full policy feature budget admits path matcher rule");
     }
 
     #[test]
-    fn argv_sensitive_exec_block_enables_lsm_hook() {
+    fn argv_sensitive_exec_delta_uses_always_on_exec_tracepoint() {
         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
         cfg.n_rules = 1;
         cfg.rules[0].op = OP_EXEC;
         cfg.rules[0].effect = EFFECT_BLOCK;
         set_cstr(&mut cfg.rules[0].arg, "commit");
 
-        assert_ne!(config_features(&cfg) & FEAT_BLOCK_EXEC, 0);
-        validate_supported_features(&cfg, FEAT_BLOCK_EXEC, "runtime policy delta")
-            .expect("argv-sensitive exec block rules now use the LSM hook via argv cache");
+        assert_eq!(config_features(&cfg) & FEAT_BLOCK_EXEC, 0);
+        validate_supported_features(&cfg, 0, "runtime policy delta")
+            .expect("argv-sensitive exec matching is handled by the always-on exec tracepoint");
     }
 
     #[test]
@@ -3268,16 +3647,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_struct_layout() {
-        assert_eq!(
-            std::mem::size_of::<ReloadUpdate>(),
-            8 + std::mem::size_of::<CUpdate>()
-        );
-        assert_eq!(
-            std::mem::size_of::<ReloadRule>(),
-            8 + std::mem::size_of::<CRule>()
-        );
-        assert_eq!(std::mem::size_of::<ReloadCounts>(), 16);
+    fn append_struct_layout() {
         assert_eq!(
             std::mem::size_of::<AppendUpdate>(),
             24 + std::mem::size_of::<CUpdate>()
@@ -3719,29 +4089,6 @@ os.execv({hit:?}, [{hit:?}])
         )
     }
 
-    fn percentile(sorted: &[std::time::Duration], pct: f64) -> std::time::Duration {
-        assert!(!sorted.is_empty());
-        let idx = ((sorted.len() - 1) as f64 * pct).round() as usize;
-        sorted[idx.min(sorted.len() - 1)]
-    }
-
-    fn summarize_durations(name: &str, durs: &[std::time::Duration]) {
-        let mut sorted = durs.to_vec();
-        sorted.sort_unstable();
-        let total_ns: u128 = durs.iter().map(|d| d.as_nanos()).sum();
-        let mean_us = total_ns as f64 / durs.len() as f64 / 1000.0;
-        println!(
-            "{name}: n={} mean={:.2}us p50={:.2}us p90={:.2}us p99={:.2}us min={:.2}us max={:.2}us",
-            durs.len(),
-            mean_us,
-            percentile(&sorted, 0.50).as_secs_f64() * 1_000_000.0,
-            percentile(&sorted, 0.90).as_secs_f64() * 1_000_000.0,
-            percentile(&sorted, 0.99).as_secs_f64() * 1_000_000.0,
-            sorted[0].as_secs_f64() * 1_000_000.0,
-            sorted[sorted.len() - 1].as_secs_f64() * 1_000_000.0,
-        );
-    }
-
     struct LiveBpfTestGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         old_hook_profile: Option<std::ffi::OsString>,
@@ -3770,80 +4117,6 @@ os.execv({hit:?}, [{hit:?}])
             _lock: lock,
             old_hook_profile,
         }
-    }
-
-    #[test]
-    #[ignore = "requires root/CAP_BPF and loads live eBPF programs"]
-    fn reload_policy_latency_smoke() {
-        let empty = empty_config_blob();
-        let policy_a = notify_exec_config_blob("aprl_a");
-        let policy_b = notify_exec_config_blob("aprl_b");
-        let policy_hit = notify_exec_config_blob("aprlhit");
-
-        let mut loader = Loader::load(&empty).expect("load eBPF engine");
-        loader
-            .seed_label(std::process::id() as i32, 1)
-            .expect("seed current test domain");
-        let handle = loader.reload_handle().expect("reload handle");
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (tx, rx) = std::sync::mpsc::channel();
-        let run_stop = std::sync::Arc::clone(&stop);
-        let run_thread = std::thread::spawn(move || {
-            loader.run(&run_stop, |v| {
-                let _ = tx.send((std::time::Instant::now(), v));
-            })
-        });
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        for i in 0..10 {
-            let blob = if i % 2 == 0 { &policy_a } else { &policy_b };
-            handle.reload_policy(blob).expect("warm reload");
-        }
-
-        let mut reload_durs = Vec::new();
-        for i in 0..200 {
-            let blob = if i % 2 == 0 { &policy_a } else { &policy_b };
-            let start = std::time::Instant::now();
-            handle.reload_policy(blob).expect("measured reload");
-            reload_durs.push(start.elapsed());
-        }
-
-        let tmp =
-            std::env::temp_dir().join(format!("actplane-reload-bench-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).expect("create temp dir");
-        let hit_path = tmp.join("aprlhit");
-        std::fs::copy("/bin/true", &hit_path).expect("copy /bin/true");
-
-        let mut effect_durs = Vec::new();
-        let mut reload_only_durs = Vec::new();
-        for _ in 0..50 {
-            let start = std::time::Instant::now();
-            handle
-                .reload_policy(&policy_hit)
-                .expect("reload hit policy");
-            reload_only_durs.push(start.elapsed());
-            let status = std::process::Command::new(&hit_path)
-                .status()
-                .expect("run matching executable");
-            assert!(status.success());
-            let (event_at, v) = rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("violation after reload");
-            assert!(v.target.ends_with("aprlhit"), "target was {}", v.target);
-            effect_durs.push(event_at.duration_since(start));
-        }
-
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        run_thread
-            .join()
-            .expect("join ring thread")
-            .expect("run loop");
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        println!("reload path: 1 rule, 0 updates, counts quiesce + rule + counts activate");
-        summarize_durations("reload_policy_submit_to_drain", &reload_durs);
-        summarize_durations("reload_policy_before_effect_samples", &reload_only_durs);
-        summarize_durations("reload_to_observed_exec_violation", &effect_durs);
     }
 
     #[test]
@@ -6616,8 +6889,11 @@ os.execv({hit:?}, [{hit:?}])
         for _ in 0..200 {
             match std::fs::read_to_string(&port_path) {
                 Ok(s) => {
-                    port = Some(s.trim().parse::<u16>().expect("parse UDP port"));
-                    break;
+                    if let Ok(p) = s.trim().parse::<u16>() {
+                        port = Some(p);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
@@ -6732,8 +7008,11 @@ os.execv({hit:?}, [{hit:?}])
         for _ in 0..200 {
             match std::fs::read_to_string(&port_path) {
                 Ok(s) => {
-                    port = Some(s.trim().parse::<u16>().expect("parse UDP port"));
-                    break;
+                    if let Ok(p) = s.trim().parse::<u16>() {
+                        port = Some(p);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
@@ -7088,7 +7367,7 @@ finally:
         loader
             .bind_state(caller_pid, domain_a, domain_a_state)
             .expect("bind caller to domain A");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         handle
             .append_policy_delta(caller_pid, domain_a, &policy_a_source)
             .expect("append domain A source");
@@ -7184,7 +7463,7 @@ finally:
                 },
             )
             .expect("bind caller to child domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         handle
             .append_policy_delta(caller_pid, child_domain, &policy)
             .expect("append child domain label rule");
@@ -7229,7 +7508,7 @@ finally:
                 },
             )
             .expect("bind caller to child domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         handle
             .append_policy_delta(caller_pid, child_domain, &policy)
             .expect("append child domain label rule");
@@ -7299,7 +7578,7 @@ finally:
         loader
             .bind_state(caller_pid, local_domain, local_state)
             .expect("bind caller to local domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         handle
             .append_policy_delta(caller_pid, local_domain, &local_source)
             .expect("append local source");
@@ -7406,7 +7685,7 @@ finally:
             )
             .expect("bind sibling domain child");
 
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let run_stop = std::sync::Arc::clone(&stop);
@@ -7483,7 +7762,7 @@ finally:
         loader
             .bind_state(caller_pid, parent_domain, parent_state)
             .expect("bind caller to parent domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         handle
             .append_policy_delta(caller_pid, parent_domain, &policy)
             .expect("append parent-domain source and rule");
@@ -7547,7 +7826,7 @@ finally:
         loader
             .seed_label(caller_pid, 1)
             .expect("seed parent agent domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         let domains = loader.domain_handle().expect("domain handle");
 
         let mut in_child = spawn_stopped_exec(&hit_path);
@@ -7641,7 +7920,7 @@ finally:
         loader
             .seed_label(caller_pid, 1)
             .expect("seed parent agent domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         let domains = loader.domain_handle().expect("domain handle");
 
         let mut child = spawn_stopped_shell(&format!("read _ < {src}; exec {hit}"));
@@ -7707,7 +7986,7 @@ finally:
                 },
             )
             .expect("bind caller domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -7800,7 +8079,7 @@ finally:
         loader
             .bind_state(delegated_actor_pid, delegate_target_id, base_state)
             .expect("bind delegated actor domain");
-        let handle = loader.reload_handle().expect("reload handle");
+        let handle = loader.reload_handle().expect("policy delta handle");
         let err = handle
             .append_policy_delta(delegated_actor_pid, delegate_target_id, &declassify)
             .expect_err("declassify delta without AUTH_DECLASSIFY");

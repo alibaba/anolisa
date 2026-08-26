@@ -106,7 +106,6 @@ enum taint_effect {
 	TEFFECT_NOTIFY = 0, /* report only (notify the agent) */
 	TEFFECT_BLOCK  = 1, /* deny at LSM when available */
 	TEFFECT_KILL   = 2, /* send SIGKILL to the current task */
-	TEFFECT_ALLOW  = 3, /* whitelist: first match short-circuits */
 };
 
 struct taint_update {
@@ -149,7 +148,6 @@ struct taint_rule {
 	unsigned int gate_idx;
 	unsigned int domain_id;   /* 0 = inherited/global, else cap_state target id */
 	unsigned long long since_mask;
-	unsigned long long ttl_ns;    /* 0 = never expires; >0 = label must have been applied within this many ns */
 };
 
 /* Compiled policy, the ABI between the Rust DSL compiler and the C loader.

@@ -31,6 +31,7 @@ static void pad2(const char *a, const char *b)
 static int p_streq(const char *a, const char *b) { pad2(a, b); return taint_streq(pa_, pb_); }
 static int p_prefix(const char *t, const char *p) { pad2(t, p); return taint_prefix(pa_, pb_); }
 static int p_match(unsigned int k, const char *t, const char *p) { pad2(t, p); return taint_match(k, pa_, pb_); }
+static int p_exec_match(unsigned int k, const char *t, const char *p) { pad2(t, p); return taint_exec_match(k, pa_, pb_); }
 
 static void test_streq(void)
 {
@@ -64,6 +65,9 @@ static void test_match(void)
 	check(p_match(TAINT_MATCH_CONTAINS, "/server/start", "/server/") == 1, "match: contains at start");
 	check(p_match(TAINT_MATCH_CONTAINS, "/x/server/", "/server/") == 1, "match: contains at end");
 	check(p_match(TAINT_MATCH_CONTAINS, "server", "/server/") == 0, "match: contains no slashes");
+	check(p_exec_match(TAINT_MATCH_EXACT, "git", "git") == 1, "exec match: comm exact hit");
+	check(p_exec_match(TAINT_MATCH_EXACT, "redact", "redact") == 1, "exec match: argv0 exact hit");
+	check(p_exec_match(TAINT_MATCH_EXACT, "/tmp/ape/git", "git") == 0, "exec match: full path is not exact");
 }
 
 static void test_mask(void)

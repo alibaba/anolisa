@@ -74,8 +74,9 @@ pub struct Clause {
     /// Effect declared by the action verb that starts the clause
     /// (`notify`/`block`/`kill`).
     pub effect: Effect,
-    /// Optional TTL: labels older than this are treated as unset in this rule
-    pub expires_ns: Option<u64>,
+    /// Zero-based source clause index within the containing rule. This is
+    /// metadata only, used to connect lowered kernel rules back to source text.
+    pub source_index: usize,
 }
 
 /// Rule result. This is compiled into the kernel rule table and is the source
@@ -90,8 +91,6 @@ pub enum Effect {
     Block = 1,
     /// Send SIGKILL to the current task.
     Kill = 2,
-    /// Allow (whitelist): operation is permitted regardless of other labels.
-    Allow = 3,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,17 +98,6 @@ pub struct Rule {
     pub name: String,
     pub clauses: Vec<Clause>,
     pub reason: String,
-}
-
-impl Rule {
-    /// The strongest effect across all clauses (kill > block > notify).
-    pub fn effect(&self) -> Effect {
-        self.clauses
-            .iter()
-            .map(|cl| cl.effect)
-            .max()
-            .unwrap_or_default()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

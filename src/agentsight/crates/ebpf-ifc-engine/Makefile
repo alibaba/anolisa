@@ -22,14 +22,6 @@ VMLINUX := ../vmlinux/$(ARCH)/vmlinux.h
 # outdated
 INCLUDES := -I$(OUTPUT) -I. -I../libbpf/include/uapi -I$(dir $(VMLINUX))
 CFLAGS := -g -Wall
-
-# Auto-detect if vmlinux.h provides BPF_MAP_TYPE_USER_RINGBUF (kernel 6.1+).
-# On 5.10 builds this enum does not exist; pass -DCOMPAT_NO_USER_RINGBUF so
-# capability.bpf.h falls back to a simple ARRAY mailbox.
-VMLINUX_HAS_USER_RINGBUF := $(shell grep -q BPF_MAP_TYPE_USER_RINGBUF $(VMLINUX) 2>/dev/null && echo yes)
-ifneq ($(VMLINUX_HAS_USER_RINGBUF),yes)
-BPF_EXTRA_CFLAGS += -DCOMPAT_NO_USER_RINGBUF
-endif
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
 
 # AddressSanitizer flags
@@ -146,7 +138,7 @@ $(LIBBLAZESYM_HEADER): $(LIBBLAZESYM_SRC)/target/release/libblazesym.a | $(OUTPU
 # did not trigger a rebuild (stale .bpf.o — a real footgun while tuning the engine).
 $(OUTPUT)/%.bpf.o: %.bpf.c $(LIBBPF_OBJ) $(wildcard *.h) $(VMLINUX) | $(OUTPUT) $(BPFTOOL)
 	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(BPF_EXTRA_CFLAGS)		      \
+	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH)		      \
 		     $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES)		      \
 		     -c $(filter %.c,$^) -o $(patsubst %.bpf.o,%.tmp.bpf.o,$@)
 	$(Q)$(BPFTOOL) gen object $@ $(patsubst %.bpf.o,%.tmp.bpf.o,$@)

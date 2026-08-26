@@ -68,20 +68,10 @@ struct cap_delta_request {
 	__u64 add_gate_mask;
 };
 
-#ifndef COMPAT_NO_USER_RINGBUF
 struct {
 	__uint(type, BPF_MAP_TYPE_USER_RINGBUF);
 	__uint(max_entries, 64 * 1024);
 } cap_req SEC(".maps");
-#else
-/* Compat: simple ARRAY mailbox when USER_RINGBUF is unavailable (kernel <6.1) */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, __u32);
-	__type(value, __u32);
-} cap_req SEC(".maps");
-#endif
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -336,45 +326,11 @@ static __always_inline int cap_apply_request(const struct cap_delta_request *r)
 	return 0;
 }
 
-/* ── Hot-reload protocol ────────────────────────────────────────────
- *
- * Policy reload messages share the cap_req user ring buffer. They are
- * distinguished from capability deltas by a negative value in the first
- * __s32 field (caller_pid is always > 0 for real deltas).  The BPF drain
- * callback peeks the tag, then reads the appropriately-sized payload and
- * applies it to the writable ts_updates / ts_rules / ts_counts maps.
- *
- * Reload sequence (from userspace):
- *   1. RELOAD_COUNTS(n_rules=0, n_updates=0)   — quiesce engine
- *   2. RELOAD_UPDATE(i, entry) × n_updates      — populate updates
- *   3. RELOAD_RULE(i, entry)   × n_rules         — populate rules
- *   4. RELOAD_COUNTS(n_rules, n_updates)          — activate
+/* Runtime policy deltas use negative tags so they cannot be confused with
+ * capability updates, whose first field is always a positive caller pid.
  */
-
-#define CAP_REQ_RELOAD_UPDATE  (-1)
-#define CAP_REQ_RELOAD_RULE    (-2)
-#define CAP_REQ_RELOAD_COUNTS  (-3)
 #define CAP_REQ_APPEND_UPDATE  (-4)
 #define CAP_REQ_APPEND_RULE    (-5)
-
-struct cap_reload_update {
-	__s32 tag;
-	__u32 index;
-	struct taint_update entry;
-};
-
-struct cap_reload_rule {
-	__s32 tag;
-	__u32 index;
-	struct taint_rule entry;
-};
-
-struct cap_reload_counts {
-	__s32 tag;
-	__u32 n_rules;
-	__u32 n_updates;
-	__u32 _pad;
-};
 
 struct cap_append_update {
 	__s32 tag;
@@ -460,7 +416,6 @@ static __always_inline int cap_append_rule_entry(const struct cap_append_rule *r
 	return 0;
 }
 
-#ifndef COMPAT_NO_USER_RINGBUF
 static long cap_request_cb(struct bpf_dynptr *dynptr, void *data)
 {
 	const __s32 *tag = bpf_dynptr_data(dynptr, 0, sizeof(__s32));
@@ -469,58 +424,6 @@ static long cap_request_cb(struct bpf_dynptr *dynptr, void *data)
 		return 0;
 	}
 
-	if (*tag == CAP_REQ_RELOAD_UPDATE) {
-		const struct cap_reload_update *r =
-			bpf_dynptr_data(dynptr, 0, sizeof(*r));
-		if (!r || r->index >= MAX_TAINT_UPDATES) {
-			cap_count(CAP_STAT_DROP);
-			return 0;
-		}
-		if (!cap_update_supported(&r->entry)) {
-			cap_count(CAP_STAT_REJECT);
-			return 0;
-		}
-		__u32 idx = r->index;
-		bpf_map_update_elem(&ts_updates, &idx, &r->entry, BPF_ANY);
-		cap_count(CAP_STAT_ACCEPT);
-		return 0;
-	}
-	if (*tag == CAP_REQ_RELOAD_RULE) {
-		const struct cap_reload_rule *r =
-			bpf_dynptr_data(dynptr, 0, sizeof(*r));
-		if (!r || r->index >= MAX_TAINT_RULES) {
-			cap_count(CAP_STAT_DROP);
-			return 0;
-		}
-		if (!cap_rule_supported(&r->entry)) {
-			cap_count(CAP_STAT_REJECT);
-			return 0;
-		}
-		__u32 idx = r->index;
-		bpf_map_update_elem(&ts_rules, &idx, &r->entry, BPF_ANY);
-		if (cap_policy_bind_rule(r->entry.domain_id, idx) != 0) {
-			cap_count(CAP_STAT_REJECT);
-			return 0;
-		}
-		cap_count(CAP_STAT_ACCEPT);
-		return 0;
-	}
-	if (*tag == CAP_REQ_RELOAD_COUNTS) {
-		const struct cap_reload_counts *r =
-			bpf_dynptr_data(dynptr, 0, sizeof(*r));
-		if (!r) {
-			cap_count(CAP_STAT_DROP);
-			return 0;
-		}
-		__u32 slot0 = 0, slot1 = 1;
-		__u32 nr = r->n_rules, nu = r->n_updates;
-		if (!nr)
-			cap_policy_clear_domain(0);
-		bpf_map_update_elem(&ts_counts, &slot0, &nr, BPF_ANY);
-		bpf_map_update_elem(&ts_counts, &slot1, &nu, BPF_ANY);
-		cap_count(CAP_STAT_ACCEPT);
-		return 0;
-	}
 	if (*tag == CAP_REQ_APPEND_UPDATE) {
 		const struct cap_append_update *r =
 			bpf_dynptr_data(dynptr, 0, sizeof(*r));
@@ -567,16 +470,13 @@ static long cap_request_cb(struct bpf_dynptr *dynptr, void *data)
 	}
 	return 0;
 }
-#endif /* !COMPAT_NO_USER_RINGBUF */
 
 static __always_inline void cap_drain_current(void)
 {
-#ifndef COMPAT_NO_USER_RINGBUF
 	struct cap_drain_ctx ctx = {
 		.current_pid = bpf_get_current_pid_tgid() >> 32,
 	};
 	bpf_user_ringbuf_drain(&cap_req, cap_request_cb, &ctx, 0);
-#endif
 	cap_count(CAP_STAT_DRAIN);
 }
 

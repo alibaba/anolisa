@@ -2,8 +2,11 @@
 name = "ebpf-ifc-engine"
 version = "0.1.9"
 edition = "2021"
-description = "eBPF information-flow control engine with TTL support"
+description = "eBPF information-flow control engine for Linux: kernel-level label propagation and policy rule matching across process, file, network, and stdio boundaries."
 license = "MIT"
+repository = "https://github.com/eunomia-bpf/ActPlane"
+keywords = ["ebpf", "ifc", "policy-engine", "bpf-lsm", "linux"]
+categories = ["os::linux-apis"]
 
 [lib]
 name = "ebpf_ifc_engine"
@@ -14,5 +17,11 @@ aya = "0.13"
 libc = "0.2"
 libbpf-sys = "1.7"
 
-[dev-dependencies]
-actplane-ifc-compiler = { path = "../actplane-ifc-compiler" }
+# Vendored third-party crate kept byte-identical to the attested ActPlane upstream
+# (verified by scripts/build-enforcer.sh). Suppress first-party lints so
+# `cargo clippy -D warnings` does not flag upstream code we must not modify.
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

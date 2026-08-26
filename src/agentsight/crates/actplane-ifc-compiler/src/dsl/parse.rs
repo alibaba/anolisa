@@ -236,18 +236,13 @@ impl P {
             "notify" => Some(Effect::Notify),
             "block" => Some(Effect::Block),
             "kill" => Some(Effect::Kill),
-            "allow" => Some(Effect::Allow),
             _ => None,
         }
     }
     fn clause(&mut self) -> Result<Clause, String> {
         let verb = self.word()?;
-        let effect = P::clause_effect(&verb).ok_or_else(|| {
-            format!(
-                "expected 'notify', 'block', 'kill', or 'allow', got '{}'",
-                verb
-            )
-        })?;
+        let effect = P::clause_effect(&verb)
+            .ok_or_else(|| format!("expected 'notify', 'block', or 'kill', got '{}'", verb))?;
         let op = P::op(&self.word()?)?;
         let target = self.target(op)?;
         let when = if self.is_word("if") {
@@ -262,20 +257,13 @@ impl P {
         } else {
             None
         };
-        let expires_ns = if self.is_word("expires") {
-            self.next();
-            let raw = self.word()?;
-            Some(parse_duration_ns(&raw)?)
-        } else {
-            None
-        };
         Ok(Clause {
             op,
             target,
             when,
             unless,
             effect,
-            expires_ns,
+            source_index: 0,
         })
     }
 }
@@ -331,13 +319,18 @@ pub fn parse(src: &str) -> Result<Policy, String> {
                 let mut reason = String::new();
                 while let Some(Tok::Word(w)) = p.peek() {
                     if P::clause_effect(w).is_some() {
-                        clauses.push(p.clause()?);
+                        let mut clause = p.clause()?;
+                        clause.source_index = clauses.len();
+                        clauses.push(clause);
                     } else if w == "because" {
                         p.next();
                         reason = p.string()?;
                     } else {
                         break;
                     }
+                }
+                if pol.rules.iter().any(|rule| rule.name == name) {
+                    return Err(format!("duplicate rule name `{name}`"));
                 }
                 pol.rules.push(Rule {
                     name,
@@ -349,19 +342,4 @@ pub fn parse(src: &str) -> Result<Policy, String> {
         }
     }
     Ok(pol)
-}
-
-fn parse_duration_ns(s: &str) -> Result<u64, String> {
-    if let Some(n) = s.strip_suffix('s') {
-        let secs: u64 = n.parse().map_err(|_| format!("invalid duration '{}'", s))?;
-        Ok(secs * 1_000_000_000)
-    } else if let Some(n) = s.strip_suffix('m') {
-        let mins: u64 = n.parse().map_err(|_| format!("invalid duration '{}'", s))?;
-        Ok(mins * 60 * 1_000_000_000)
-    } else if let Some(n) = s.strip_suffix('h') {
-        let hrs: u64 = n.parse().map_err(|_| format!("invalid duration '{}'", s))?;
-        Ok(hrs * 3600 * 1_000_000_000)
-    } else {
-        Err(format!("duration '{}' must end with s, m, or h", s))
-    }
 }
