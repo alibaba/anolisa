@@ -130,6 +130,8 @@ pub enum HookFailureKind {
     InvalidJson,
     /// The hook exited successfully without output.
     EmptyOutput,
+    /// The hook's output exceeded the per-pipe size limit.
+    OutputTruncated,
 }
 
 impl HookFailureKind {
@@ -142,6 +144,7 @@ impl HookFailureKind {
             Self::Signaled => "terminated by signal",
             Self::InvalidJson => "returned invalid JSON",
             Self::EmptyOutput => "returned empty output",
+            Self::OutputTruncated => "output exceeded the size limit",
         }
     }
 }
@@ -993,7 +996,7 @@ impl HookSystem {
     ) -> HookExecution {
         use tokio::process::Command;
 
-        use crate::process::{output_with_timeout, OutputError};
+        use crate::process::{output_with_timeout, OutputError, MAX_PIPE_OUTPUT_BYTES};
 
         let safe_command = crate::redaction::redact_text(command);
         let mut cmd = Command::new("sh");
@@ -1026,7 +1029,9 @@ impl HookSystem {
 
         // The deadline covers the stdin write as well: a hook that never
         // reads stdin must not stall the session, and on timeout the whole
-        // process group is killed instead of leaking grandchildren.
+        // process group is killed instead of leaking grandchildren. Output
+        // collection is size-capped per pipe so a runaway hook cannot
+        // exhaust memory (issue #2841).
         let result = output_with_timeout(cmd, Some(input_json.as_bytes().to_vec()), timeout).await;
 
         let output = match result {
@@ -1053,6 +1058,18 @@ impl HookSystem {
                 };
             }
         };
+
+        if output.stdout_truncated || output.stderr_truncated {
+            tracing::warn!(
+                target: "cosh_hook",
+                "Hook '{safe_command}' output exceeded {MAX_PIPE_OUTPUT_BYTES} bytes; \
+                 the process group was killed and the output was cut short"
+            );
+            return HookExecution {
+                output: HookOutput::default(),
+                failure: Some(HookFailureKind::OutputTruncated),
+            };
+        }
 
         let Some(exit_code) = output.status.code() else {
             tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' terminated by signal");
@@ -1692,6 +1709,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_output_truncated_returns_failure() {
+        let mut system = HookSystem::from_config(&HooksConfig::default());
+        // Produce just over 32 MiB on stdout so the per-pipe cap triggers
+        // before the natural deadline.
+        system.register_extension_hooks(&extension_pre_tool_hook("yes | head -c 33554433"));
+        assert!(system.enabled, "extension registration must enable hooks");
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+        assert_eq!(result.hook_failures.len(), 1);
+        assert_eq!(
+            result.hook_failures[0].kind,
+            HookFailureKind::OutputTruncated
+        );
+        assert!(result.notifications[0]
+            .message
+            .contains("output exceeded the size limit"));
+    }
+
+    #[tokio::test]
     async fn explicit_hooks_disable_prevents_extension_auto_enable() {
         let config = HooksConfig {
             enabled: false,
@@ -2040,6 +2080,7 @@ mod tests {
             HookFailureKind::Signaled,
             HookFailureKind::InvalidJson,
             HookFailureKind::EmptyOutput,
+            HookFailureKind::OutputTruncated,
         ] {
             let result = system.aggregate_pre_tool_use(
                 vec![(
