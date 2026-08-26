@@ -12,6 +12,8 @@ use cosh_gateway_contracts::task::UncertaintyCode;
 use super::*;
 use crate::daemon::{actor_id_for_uid, now_ms, SubmitTask};
 
+const LOGICAL_CLOCK_HEADROOM_MS: u64 = 60_000;
+
 #[derive(Default)]
 struct InputProbe {
     request: Option<RuntimeInputRequest>,
@@ -745,7 +747,7 @@ fn expired_run_takeover_converges_every_input_crash_window_without_runtime_io() 
             config,
         )
         .unwrap();
-        let started_at = now_ms().unwrap().saturating_add(1);
+        let started_at = now_ms().unwrap().saturating_add(LOGICAL_CLOCK_HEADROOM_MS);
         first.tick(started_at).unwrap();
         first.tick(started_at + 1).unwrap();
         let request = probe.lock().unwrap().request.clone().unwrap();
@@ -918,7 +920,7 @@ fn expired_run_takeover_honors_waiting_input_cancellation_before_suspension() {
         config,
     )
     .unwrap();
-    let started_at = now_ms().unwrap().saturating_add(1);
+    let started_at = now_ms().unwrap().saturating_add(LOGICAL_CLOCK_HEADROOM_MS);
     first.tick(started_at).unwrap();
     first.tick(started_at + 1).unwrap();
     let request = probe.lock().unwrap().request.clone().unwrap();
@@ -1006,7 +1008,7 @@ fn second_takeover_finishes_cancellation_after_first_recovery_crashes() {
         config,
     )
     .unwrap();
-    let started_at = now_ms().unwrap().saturating_add(1);
+    let started_at = now_ms().unwrap().saturating_add(LOGICAL_CLOCK_HEADROOM_MS);
     first.tick(started_at).unwrap();
     first.tick(started_at + 1).unwrap();
     let request = probe.lock().unwrap().request.clone().unwrap();
@@ -1142,7 +1144,7 @@ fn expired_running_run_takeover_honors_durable_cancellation() {
         config,
     )
     .unwrap();
-    let started_at = now_ms().unwrap().saturating_add(1);
+    let started_at = now_ms().unwrap().saturating_add(LOGICAL_CLOCK_HEADROOM_MS);
     first.tick(started_at).unwrap();
     let running = first.coordinator.store.load_task(&task.task_id).unwrap();
     first

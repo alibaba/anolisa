@@ -1444,7 +1444,9 @@ fn assert_uncertain_result_failure(fail_result: bool, fail_completion: bool) {
         .unwrap();
     let writes = Arc::new(Mutex::new(RuntimeWrites::default()));
     let target_calls = Arc::new(Mutex::new(0));
-    let started_at = now_ms().unwrap().saturating_add(1);
+    // Keep the logical approval timeline ahead of wall-clock timestamps that
+    // storage may create while a loaded parallel test runner stalls this test.
+    let started_at = now_ms().unwrap().saturating_add(LOGICAL_CLOCK_HEADROOM_MS);
     let mut scheduler = TaskScheduler::open(
         &database_path,
         Some(installation),
