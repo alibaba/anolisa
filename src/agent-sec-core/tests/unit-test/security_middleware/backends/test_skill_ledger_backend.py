@@ -326,6 +326,72 @@ def test_batch_event_results_keep_command_and_child_result_contracts():
     }
 
 
+def test_batch_skip_is_not_projected_as_an_integrity_verdict():
+    skipped = {
+        "status": "skipped",
+        "skillName": "system-skill",
+        "canonicalSkillDir": "/usr/share/anolisa/skills/system-skill",
+        "reasonCode": "readonly_system_skill",
+        "persisted": False,
+    }
+
+    all_skipped = _event_result(
+        {
+            "command": "scan",
+            "keyCreated": True,
+            "results": [skipped],
+        }
+    )
+    init_all_skipped = _event_result(
+        {
+            "command": "init",
+            "keyCreated": True,
+            "baseline": True,
+            "results": [skipped],
+        }
+    )
+    mixed = _event_result(
+        {
+            "command": "scan",
+            "keyCreated": False,
+            "results": [
+                skipped,
+                {
+                    "status": "scanned",
+                    "skillName": "user-skill",
+                    "scanStatus": "warn",
+                },
+            ],
+        }
+    )
+    mixed_pass = _event_result(
+        {
+            "command": "scan",
+            "keyCreated": False,
+            "results": [
+                skipped,
+                {
+                    "status": "scanned",
+                    "skillName": "user-skill",
+                    "scanStatus": "pass",
+                },
+            ],
+        }
+    )
+
+    assert "verdict" not in all_skipped
+    assert "verdict" not in init_all_skipped
+    assert all_skipped["results"][0] == {
+        "status": "skipped",
+        "skill_name": "system-skill",
+        "canonical_skill_dir": "/usr/share/anolisa/skills/system-skill",
+        "reason_code": "readonly_system_skill",
+        "persisted": False,
+    }
+    assert mixed["verdict"] == "warn"
+    assert mixed_pass["verdict"] == "pass"
+
+
 def test_batch_check_event_result_uses_declared_severity_order():
     cases = (
         (["pass", "none"], "none"),

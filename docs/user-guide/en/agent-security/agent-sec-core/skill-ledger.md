@@ -21,6 +21,11 @@ Skill Ledger is the security subsystem of agent-sec-core that maintains a versio
 agent-sec-cli skill-ledger init
 ```
 
+The baseline is a batch write operation. Host-backed, read-only packaged system
+Skills follow the skip contract described under
+[Packaged read-only system Skills](#packaged-read-only-system-skills); key
+initialization still completes.
+
 Key locations:
 
 | File | Path | Permissions |
@@ -120,6 +125,39 @@ child.on("close", (code) => {
 future packaging change may extract the shared scanners into a scanner-only
 wheel or RPM subpackage; the scanner rules must remain single-source.
 
+#### Packaged read-only system Skills
+
+`scan` is a stateful certification command: successful work persists scanner
+results, a signed manifest, and a snapshot under `.skill-meta`. It is not a
+read-only alias for `analyze`.
+
+For host-backed packaged Skills that are immediate children of
+`/usr/share/anolisa/skills/` or `/usr/local/share/anolisa/skills/`, batch write
+paths skip an item when its ledger state is not writable. Both `scan --all` and
+the default `init` baseline emit this per-Skill result:
+
+```json
+{
+  "canonicalSkillDir": "/usr/share/anolisa/skills/example",
+  "skillName": "example",
+  "status": "skipped",
+  "reasonCode": "readonly_system_skill",
+  "persisted": false
+}
+```
+
+`skipped` is an operational batch status, not one of the six integrity states.
+It does not mean `pass`, does not attest the Skill, and does not fail the batch
+by itself; the command exits `0` unless another item returns `status=error`.
+No per-Skill scanner result, manifest, snapshot, or `.skill-meta` state is
+written for the skipped item, while global key initialization keeps its normal
+behavior. An explicit `scan <dir>` remains strict: it exits `1` and points the
+caller to `analyze` for read-only findings.
+
+`check` and `status` are unchanged. A skipped Skill with no prior ledger
+artifacts returns `none`, and aggregate health can remain `unscanned`. These
+values do not turn the batch skip into an attestation or a safety verdict.
+
 The default certification path uses the built-in quick scanner and does not depend on an LLM. For a single Skill:
 
 ```bash
@@ -180,6 +218,13 @@ agent-sec-cli skill-ledger status --verbose
 | `skills` | Aggregate health (discovered Skill count, per-status counts, overall health label) |
 
 `health` label meanings: `healthy` (no critical/attention statuses and not all none; may mix pass/none), `unscanned` (all none), `attention` (drifted/warn present), `critical` (deny/tampered/error present), `empty` (no registered Skills).
+
+`none` means that no attested scanner verdict is available; it covers both a
+missing ledger artifact and a verified manifest whose `scanStatus` is `none`.
+`unscanned` means that every discovered Skill currently checks as `none`.
+Neither value may be interpreted as `pass`. A read-only packaged system Skill
+skipped by a batch write remains in those existing states when it has no prior
+ledger artifacts.
 
 With `--verbose`, an additional `results` array contains detailed check results for each Skill.
 
@@ -522,7 +567,7 @@ Non-existent directories are silently ignored. Additionally, running `scan` or `
 
 #### Scheduled Default Quick Scans
 
-To periodically refresh default quick-scan results, put `scan --all` into cron. `scan --all` automatically skips Skills whose files are unchanged and already have complete scan results, re-scanning only new, changed, scan-result-missing, or manifest-anomalous Skills.
+To periodically refresh default quick-scan results, put `scan --all` into cron. `scan --all` automatically skips Skills whose files are unchanged and already have complete scan results, re-scanning only new, changed, scan-result-missing, or manifest-anomalous Skills. It also returns `status=skipped` with `reasonCode=readonly_system_skill` for host-backed, read-only packaged system Skills; inspect the JSON results because this run does not create or refresh an attestation for those items.
 
 Without a key passphrase:
 
@@ -615,13 +660,14 @@ Per-version verification: schema → hash integrity → signature validity → s
 |---------|---------|
 | `agent-sec-cli skill-ledger init` | Initialize keys and build a quick-scan baseline for covered Skills |
 | `agent-sec-cli skill-ledger init --no-baseline` | Initialize keys only, without scanning Skills |
+| `agent-sec-cli skill-ledger analyze <dir> --format json` | Analyze current content without creating ledger state or an attestation |
 | `agent-sec-cli skill-ledger check <dir>` | Check integrity status (JSON output) |
 | `agent-sec-cli skill-ledger show <dir>` | Show latest, active, user decision, activation target, findings, and alerts |
 | `agent-sec-cli skill-ledger export <dir> --version latest --output <path>` | Export a snapshot, manifest, and findings for full review |
 | `agent-sec-cli skill-ledger decide <dir> --action allow|always_allow|block|rollback` | Record a user decision and refresh activation |
 | `agent-sec-cli skill-ledger decide <dir> --clear` | Clear the user decision on the latest manifest |
-| `agent-sec-cli skill-ledger scan <dir>` | Run a quick scan and sign it into the manifest |
-| `agent-sec-cli skill-ledger scan --all` | Gap-filling quick scan across all discovered Skills |
+| `agent-sec-cli skill-ledger scan <dir>` | Run a quick scan and sign it into the manifest; a host-backed, read-only packaged system Skill is an error |
+| `agent-sec-cli skill-ledger scan --all` | Gap-filling quick scan; host-backed, read-only packaged system Skills return operational `skipped` results |
 | `agent-sec-cli skill-ledger certify <dir> --findings <file>` | Sign deep-scan findings into the manifest |
 | `agent-sec-cli skill-ledger status` | Overall security posture (keys, config, Skill health) |
 | `agent-sec-cli skill-ledger status --verbose` | Overall posture including per-Skill detailed results |

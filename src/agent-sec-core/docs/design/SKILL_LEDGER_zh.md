@@ -46,14 +46,14 @@ AI Agent 通过加载 Skill（结构化指令 + 辅助脚本）扩展能力。Sk
 │                                                       │
 │  ~/.local/share/agent-sec/skill-ledger/                     │
 │    key.enc (私钥)     ← scan/certify 签名                   │
-│    check 只读状态；scan/certify 创建签名版本与 snapshot       │
+│ analyze/check 只读；scan/certify 创建签名版本与 snapshot     │
 │    key.pub (公钥)     ← check 验签                     │
 └───────────────────────────────────────────────────────┘
 ```
 
 **组件职责**：
 
-- **skill-ledger CLI**：核心基础设施。提供 `init`（初始化密钥并可为已覆盖 Skill 建立快速扫描 baseline）、`scan`（运行内置快速扫描器并签名入账）、`check`（只读检查 JSON + 验签 + 比哈希 + 输出状态，可供宿主 hook/capability 调用）、`certify`（导入外部 findings 并签名）等子命令。`scan` / `certify` 写入的 manifest 经 Ed25519 数字签名保护，防止篡改；当 `latest.json` 缺失时，`check` 仅在历史版本 artifact 也不存在时将该缺失判为 `none`，历史 artifact 仍存在则返回 `tampered`；latest 验真且与当前文件匹配时，仍按 `scanStatus` 返回状态（包括 `none`）。`check` 不创建版本或 snapshot。确定性逻辑不依赖 LLM，不可被 prompt injection 绕过。
+- **skill-ledger CLI**：核心基础设施。提供 `init`（初始化密钥并可为已覆盖 Skill 建立快速扫描 baseline）、`analyze`（只读内容分析，不创建账本状态）、`scan`（运行内置快速扫描器并签名入账）、`check`（只读检查 JSON + 验签 + 比哈希 + 输出状态，可供宿主 hook/capability 调用）、`certify`（导入外部 findings 并签名）等子命令。`scan` / `certify` 写入的 manifest 经 Ed25519 数字签名保护，防止篡改；当 `latest.json` 缺失时，`check` 仅在历史版本 artifact 也不存在时将该缺失判为 `none`，历史 artifact 仍存在则返回 `tampered`；latest 验真且与当前文件匹配时，仍按 `scanStatus` 返回状态（包括 `none`）。`analyze` / `check` 不创建版本或 snapshot。确定性逻辑不依赖 LLM，不可被 prompt injection 绕过。
 - **Scanner Registry**：可扩展扫描框架。通过配置注册扫描器（`builtin`/`cli`/`skill`/`api` 四种调用类型）和结果解析器（将异构扫描输出归一化为统一 `NormalizedFinding` 格式）。本版本默认注册 `skill-vetter`（`type: "skill"`，由 Agent 深度扫描后通过 `certify --findings` 消费）、`code-scanner` 和 `static-scanner`（均为 `type: "builtin"`，可由 `scan` 自动调用）。当前仅实现 `findings-array` parser；`cli`/`api` adapter 及其它 parser 类型为预留扩展点。旧名称 `skill-code-scanner`、`cisco-static-scanner` 仅作为兼容 alias 读取，不再作为公开名称展示或写入新 manifest。
 - **skill-ledger Skill**：一个 Skill，三个阶段。Phase 1 做环境准备与状态查看；Phase 2 默认执行快速扫描认证（`scan` 调用内置 `code-scanner` 与 `static-scanner`）；Phase 3 在用户显式要求或确认后执行 Agent 驱动深度扫描（`skill-vetter`），再用 `certify --findings ... --delete-findings` 写入版本链。
 - **SkillFS + daemon activation**：推荐运行态入口。SkillFS 捕获 Skill 文件变化后调用 daemon 的 `skill_ledger.skillfs_notify_change` 接口，daemon 根据签名 manifest 和 activation policy 刷新 `.skill-meta/activation.json`，并尽力同步写入 xattr。
@@ -258,7 +258,7 @@ class SigningBackend(Protocol):
 
 **合并策略**：默认目录默认启用，由 `enableDefaultSkillDirs` 控制；`managedSkillDirs` 存放 skill-ledger 动态管理或用户额外配置的目录，不再兼容旧的 `skillDirs` 字段。解析时默认目录在前，`managedSkillDirs` 在后，自动去重。`scanners` 按 `name` 合并，用户配置可覆盖同名扫描器；`activationPolicy` 是全局运行态策略，当前只执行 `pass_warn_only` 行为，历史配置值 `pass_only` / `latest_scanned` 会兼容读取并归一化；`signingBackend` 当前会被读取到配置摘要中，但不会改变实际签名后端。
 
-**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录不在当前有效目录中，会自动追加到 `managedSkillDirs`。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。若父目录下有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。
+**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录不在当前有效目录中，会自动追加到 `managedSkillDirs`。其中 `scan` 只在 manifest 持久化成功或成功返回 `noop` 后记忆；scanner 失败、落盘失败和批量跳过均不触发记忆。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。若父目录下有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。
 
 #### 默认后端：Ed25519 + 加密密钥文件
 
@@ -320,6 +320,7 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 | 子命令 | 用途 | 本版本状态 |
 |--------|------|-----------|
 | `init` | 初始化密钥，并默认为已覆盖 Skill 建立快速扫描 baseline | 已实现 |
+| `analyze` | 只读分析当前内容，不创建账本状态或认证 | 已实现 |
 | `scan` | 运行内置快速扫描器并签名写入 manifest | 已实现 |
 | `check` | 低层完整性与扫描状态检查（只读 JSON） | 已实现 |
 | `certify` | 导入外部 findings 并签名写入 manifest | 已实现 |
@@ -337,7 +338,7 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 若密钥不存在，生成 Ed25519 密钥对并写入 `~/.local/share/agent-sec/skill-ledger/key.enc`（mode 0600）；若密钥已存在则复用，不轮换。默认不加密（明文种子）；只有指定 `--passphrase` 时才启用口令逻辑，此时可交互输入口令，或设置 `SKILL_LEDGER_PASSPHRASE` 环境变量用于非交互场景。
 
-默认行为还会发现已覆盖目录中的 Skill，并执行补齐式快速扫描，建立签名 baseline。`--no-baseline` 只初始化密钥，不扫描 Skill。不访问、不可写或扫描失败的 Skill 会记录为 `error`/`skipped` 结果，不阻断其它 Skill。
+默认行为还会发现已覆盖目录中的 Skill，并执行补齐式快速扫描，建立签名 baseline。`--no-baseline` 只初始化密钥，不扫描 Skill。对于 `/usr/share/anolisa/skills/` 或 `/usr/local/share/anolisa/skills/` 的直接子目录中由 host 提供、账本状态不可写的已打包 Skill，baseline 返回逐项 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`；该项不会阻断其它 Skill，也不会单独使命令返回非零退出码。其它访问、写入或扫描失败仍记录为 `error`，并使命令返回退出码 1。
 
 兼容入口 `init-keys` 仍保留，但作为低层命令隐藏，不在普通 help 与用户主流程中展示。
 
@@ -367,6 +368,8 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 `scan` 是内置快速扫描器的主入口，不是 dry-run。默认 scanner 为 `code-scanner,static-scanner`；执行结束后自动更新 `manifest.scans[]`，聚合 `scanStatus`，重算 `manifestHash`，并写入 Ed25519 签名。
 
+只读内容分析由 `skill-ledger analyze <skill_dir> --format json` 提供。用户显式执行 `scan <skill_dir>` 表示要求持久化签名账本；若目标是上述由 host 提供且账本状态不可写的已打包系统 Skill，命令保持严格语义，返回退出码 1，并提示改用 `analyze`，不会降级为未持久化的扫描结论。
+
 默认采用补齐式扫描：
 
 - 未纳管（`latest.json` 与历史版本 artifact 均不存在）、无扫描结果、缺少部分默认 scanner 结果时，只运行缺失 scanner。
@@ -374,7 +377,7 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 - `tampered`（包括缺少签名）时用户显式执行 `scan` 即表示按当前文件重新建立可信记录；CLI 不原地补签，也不继承损坏 manifest 的 scans、状态或用户决策，而是重新扫描并写入新版本。
 - 已有对应 scanner 结果且文件未变时跳过该 scanner。
 
-`scan --all` 对所有发现的 Skill 执行相同补齐逻辑；若没有任何 scanner 需要执行，不写 manifest，只报告 `noop`。`--force` 会强制重跑请求 scanner 并重签 manifest。
+`scan --all` 对所有发现的 Skill 执行相同补齐逻辑；若没有任何 scanner 需要执行，不写 manifest，只报告 `noop`。对于上述只读已打包系统 Skill，批量路径不运行 scanner，也不写入逐 Skill manifest、snapshot、`.skill-meta` 状态或配置，返回 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`。`skipped` 是运行状态，不是六种完整性状态之一，不表示 `pass`，也不构成认证；它本身不使批量命令失败，只有实际 `status=error` 才使批量命令返回退出码 1。全局密钥初始化行为不变。`--force` 会强制重跑其它请求 scanner 并重签 manifest。
 
 新版本只会链接历史中最近的完整可信 artifact：候选的 schema、`versionId`/文件名、`skillName`、manifestHash、签名与 snapshot 必须全部匹配。版本号从该可信父版本之后选择首个未被版本 JSON 或 snapshot 占用的编号；没有可信父版本时从 `v000001` 起选择首个空槽。这样既不覆盖损坏或部分写入的证据，也不允许无效 latest 或孤立的超大编号控制恢复可用性。无可信父版本时两个 previous 字段均为 `null`；只有可信父版本的 `always_allow` 决策可以继承。
 
@@ -460,6 +463,8 @@ agent-sec-cli skill-ledger decide <skill_dir> --clear
 - `skills`：聚合健康度（已发现 Skill 数量、各状态计数、整体 `health` 标签：`healthy` / `unscanned` / `attention` / `critical` / `empty`）
 
 使用 `--verbose` 时额外输出 `results` 数组，包含每个已注册 Skill 的详细检查结果。与 `check` 的定位区分：`check` 是单个 Skill 的完整性门禁（供 hook/plugin 调用，退出码语义化），`status` 是系统级态势感知（始终退出码 0，纯信息输出）。
+
+`check` / `status` 不把批量写路径的 `skipped` 解释为完整性结论；如果跳过项此前不存在任何账本 artifact，仍分别表现为 `none` 和 `unscanned`。`none` 也可能来自已验真 manifest 中的 `scanStatus=none`；`unscanned` 表示当前所有已发现 Skill 都检查为 `none`。二者都不能解释为 `pass`。
 
 **`skill-ledger list-scanners`** — 查看已注册扫描器
 

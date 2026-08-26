@@ -329,6 +329,14 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 
 六种完整性状态为 `pass` / `none` / `drifted` / `warn` / `deny` / `tampered`。
 
+`scan` 和默认的 `init` baseline 都会写入签名账本；如需只读内容 findings，
+请使用 `analyze`。批量模式下，如果 `/usr/share/anolisa/skills/` 或
+`/usr/local/share/anolisa/skills/` 下由 host 提供的已打包 Skill 无法写入账本状态，
+命令会返回 `status=skipped`、`reasonCode=readonly_system_skill`、
+`persisted=false`。这个运行状态不是 `pass` 结果，也不构成认证；显式执行
+`scan <dir>` 仍会报错。如果跳过项此前没有任何账本 artifact，`check` 和 `status`
+仍会分别报告 `none` / `unscanned`；二者都不表示 `pass`。
+
 ### 核心命令
 
 | 命令 | 说明 |

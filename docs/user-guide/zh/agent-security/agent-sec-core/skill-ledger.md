@@ -21,6 +21,9 @@ Skill Ledger 是 agent-sec-core 的安全子系统，为 AI Agent Skill 提供�
 agent-sec-cli skill-ledger init
 ```
 
+baseline 是批量写操作。由 host 提供的只读已打包系统 Skill 会遵循
+[只读的已打包系统 Skill](#只读的已打包系统-skill) 中的跳过契约；密钥初始化仍会完成。
+
 密钥存放位置：
 
 | 文件 | 路径 | 权限 |
@@ -115,6 +118,35 @@ child.on("close", (code) => {
 `analyze` 当前随完整的 `agent-sec-cli` wheel 和 RPM 交付。后续可将共享 scanner
 提取为 scanner-only wheel 或 RPM 子包，但 scanner 规则必须继续保持单一源码。
 
+#### 只读的已打包系统 Skill
+
+`scan` 是有状态的认证命令：成功时会把 scanner 结果、签名 manifest 和 snapshot
+写入 `.skill-meta`。它不是 `analyze` 的只读别名。
+
+对于 `/usr/share/anolisa/skills/` 或 `/usr/local/share/anolisa/skills/` 的直接
+子目录中由 host 提供的已打包 Skill，如果账本状态不可写，批量写路径会跳过该项。
+`scan --all` 和默认的 `init` baseline 都会返回以下逐 Skill 结果：
+
+```json
+{
+  "canonicalSkillDir": "/usr/share/anolisa/skills/example",
+  "skillName": "example",
+  "status": "skipped",
+  "reasonCode": "readonly_system_skill",
+  "persisted": false
+}
+```
+
+`skipped` 是批量操作状态，不是六种完整性状态之一。它不表示 `pass`，不构成 Skill
+认证，也不会单独使批量命令失败；除非其它项返回 `status=error`，命令退出码为 `0`。
+跳过项不会写入逐 Skill scanner 结果、manifest、snapshot 或 `.skill-meta` 状态，
+全局密钥初始化行为保持不变。显式 `scan <dir>` 仍保持严格语义：退出码为 `1`，并提示
+调用方使用 `analyze` 获取只读 findings。
+
+`check` 和 `status` 的语义不变。若跳过项此前不存在任何账本 artifact，`check`
+返回 `none`，聚合健康度仍可能为 `unscanned`；这些值不会把批量跳过转化为认证或
+安全结论。
+
 默认认证路径使用内置快速扫描器，不依赖 LLM。对单个 Skill 执行：
 
 ```bash
@@ -175,6 +207,11 @@ agent-sec-cli skill-ledger status --verbose
 | `skills` | 聚合健康度（已发现 Skill 数、各状态计数、整体 health 标签） |
 
 `health` 标签含义：`healthy`（没有 critical/attention 状态，且不是全部 none；可能包含 pass/none 混合）、`unscanned`（全部 none）、`attention`（存在 drifted/warn）、`critical`（存在 deny/tampered/error）、`empty`（无已注册 Skill）。
+
+`none` 表示没有可用的已认证 scanner verdict，既可能是账本 artifact 不存在，也可能
+是已验真 manifest 的 `scanStatus` 为 `none`；`unscanned` 表示所有已发现 Skill 当前
+都检查为 `none`。二者都不能解释为 `pass`。批量写操作跳过的只读已打包系统 Skill
+如果没有既有账本 artifact，会继续处于这些已有状态。
 
 使用 `--verbose` 时会额外输出 `results` 数组，包含每个 Skill 的详细检查结果。
 
@@ -495,7 +532,7 @@ agent-sec-cli skill-ledger decide /path/to/skill --clear
 
 #### 定时执行默认快速扫描
 
-如果希望定期刷新默认快速扫描结果，可以把 `scan --all` 放入 cron。`scan --all` 会自动跳过文件未变且已有完整扫描结果的 Skill，只补扫新增、变更、缺少扫描结果或 manifest 异常的 Skill。
+如果希望定期刷新默认快速扫描结果，可以把 `scan --all` 放入 cron。`scan --all` 会自动跳过文件未变且已有完整扫描结果的 Skill，只补扫新增、变更、缺少扫描结果或 manifest 异常的 Skill。对于由 host 提供的只读已打包系统 Skill，它还会返回 `status=skipped` 和 `reasonCode=readonly_system_skill`；本次运行不会为这些项创建或刷新认证，因此应检查 JSON 结果。
 
 无口令密钥场景：
 
@@ -588,13 +625,14 @@ agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 |------|------|
 | `agent-sec-cli skill-ledger init` | 初始化密钥，并为已覆盖 Skill 建立快速扫描 baseline |
 | `agent-sec-cli skill-ledger init --no-baseline` | 只初始化密钥，不扫描 Skill |
+| `agent-sec-cli skill-ledger analyze <dir> --format json` | 只读分析当前内容，不创建账本状态或认证 |
 | `agent-sec-cli skill-ledger check <dir>` | 检查完整性状态（JSON 输出） |
 | `agent-sec-cli skill-ledger show <dir>` | 展示 latest、active、用户决策、activation target、findings 与告警信息 |
 | `agent-sec-cli skill-ledger export <dir> --version latest --output <path>` | 导出指定 snapshot、manifest 和 findings 供完整审查 |
 | `agent-sec-cli skill-ledger decide <dir> --action allow|always_allow|block|rollback` | 写入用户决策并刷新 activation |
 | `agent-sec-cli skill-ledger decide <dir> --clear` | 清除 latest manifest 上的用户决策 |
-| `agent-sec-cli skill-ledger scan <dir>` | 执行快速扫描并签名写入 manifest |
-| `agent-sec-cli skill-ledger scan --all` | 对所有已发现 Skill 执行补齐式快速扫描 |
+| `agent-sec-cli skill-ledger scan <dir>` | 执行快速扫描并签名写入 manifest；由 host 提供的只读已打包系统 Skill 会报错 |
+| `agent-sec-cli skill-ledger scan --all` | 执行补齐式快速扫描；由 host 提供的只读已打包系统 Skill 返回运行状态 `skipped` |
 | `agent-sec-cli skill-ledger certify <dir> --findings <file>` | 将深度扫描 findings 签名写入 manifest |
 | `agent-sec-cli skill-ledger status` | 查看整体安全状况（密钥、配置、Skill 健康度） |
 | `agent-sec-cli skill-ledger status --verbose` | 查看整体安全状况（含每个 Skill 详细结果） |
