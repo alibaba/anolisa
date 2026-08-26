@@ -9,6 +9,22 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-08-26
+
+### Added
+
+- The protocol-v1 `tokenless compress` command and `TokenlessRuntime::compress` now provide one entry point for schema, response, and TOON compression, so adapters make at most one subprocess call, apply one final size decision, and record only the winning operation ([#2844](https://github.com/alibaba/anolisa/pull/2844)).
+- `tokenless stats summary` now excludes dry-run rows from active totals while reporting their count, and adds gross savings, retrieved tokens, net savings, Retrieve hit/miss/error counts, and unrecoverable truncation attribution; JSON output uses schema version 1.1, and the Python `TokenlessStats` API exposes the same typed fields ([#2885](https://github.com/alibaba/anolisa/pull/2885)).
+
+### Changed
+
+- Truncation markers now include a directly runnable `tokenless retrieve` command, retrievals through the CLI, MCP, and embedded Runtime contribute to attribution, and MCP retrieval accepts uppercase hashes like the CLI ([#2885](https://github.com/alibaba/anolisa/pull/2885)).
+
+### Fixed
+
+- The Codex integration no longer appends a second compressed copy after Tool use; it keeps environment diagnostics and RTK source reduction without increasing the Model-visible Prompt ([#2866](https://github.com/alibaba/anolisa/pull/2866)).
+- `tokenless compress-toon` and the Runtime/Python SDK now consistently leave valid payloads shorter than 500 characters unchanged, while `--min-toon-chars 0` can force encoding; malformed JSON still fails, and CLI output preserves the input's exact trailing-newline form ([#2869](https://github.com/alibaba/anolisa/pull/2869)).
+
 ## [0.7.13] - 2026-08-25
 
 ### Added

@@ -9,6 +9,22 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.14] - 2026-08-26
+
+### 新增
+
+- 协议 v1 的 `tokenless compress` 命令与 `TokenlessRuntime::compress` 现在为 Schema、Response 和 TOON 压缩提供统一入口，使 Adapter 最多调用一次子进程、只执行一次最终大小判定，并且只记录胜出的操作（[#2844](https://github.com/alibaba/anolisa/pull/2844)）。
+- `tokenless stats summary` 现在会从活跃汇总中排除 Dry-run Row 并报告排除数量，同时新增总节省、Retrieve Token、净节省、Retrieve 命中/未命中/错误计数和不可恢复截断归因；JSON 输出使用 Schema 版本 1.1，Python `TokenlessStats` API 也开放相同的类型化字段（[#2885](https://github.com/alibaba/anolisa/pull/2885)）。
+
+### 变更
+
+- 截断 Marker 现在包含可直接运行的 `tokenless retrieve` 命令，通过 CLI、MCP 和内嵌 Runtime 执行的 Retrieve 都会计入归因，并且 MCP Retrieve 与 CLI 一样接受大写 Hash（[#2885](https://github.com/alibaba/anolisa/pull/2885)）。
+
+### 修复
+
+- Codex 集成不再在 Tool 使用后追加第二份压缩副本；它会保留环境诊断与 RTK 源头压缩能力，同时避免增加 Model 可见 Prompt（[#2866](https://github.com/alibaba/anolisa/pull/2866)）。
+- `tokenless compress-toon` 与 Runtime/Python SDK 现在会一致地保持少于 500 字符的有效 Payload 不变，同时可用 `--min-toon-chars 0` 强制编码；格式错误的 JSON 仍会失败，CLI 输出也会精确保留输入末尾换行符的原有形式（[#2869](https://github.com/alibaba/anolisa/pull/2869)）。
+
 ## [0.7.13] - 2026-08-25
 
 ### 新增

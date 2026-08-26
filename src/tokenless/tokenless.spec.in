@@ -470,6 +470,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Aug 26 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.14-1
+- feat(tokenless): unify external compression entry
+- feat(tokenless): attribute statistics and retrieval events
+- fix(tokenless): correct Codex savings path
+- fix(tokenless): enforce the TOON minimum
+
 * Tue Aug 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.13-1
 - feat(tokenless): add protocol v1 compression types
 - feat(tokenless): add content detection and registry routing
