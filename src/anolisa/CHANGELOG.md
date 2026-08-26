@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-08-26
+
+### Added
+
+- Tagged ANOLISA releases now include verified prebuilt CLI archives for Linux
+  x64, Linux arm64, and macOS arm64. Users can download a standalone binary
+  archive for each supported target directly from the GitHub Release
+  ([#2883](https://github.com/alibaba/anolisa/pull/2883)).
+
+### Fixed
+
+- Raw installs now preserve `${VAR}` references in rendered file content for
+  shell and systemd consumers, while continuing to expand nested ANOLISA layout
+  placeholders and reject environment references in destination paths.
+  `anolisa install cosh-ng --backend raw` can now install the gateway service
+  template instead of rejecting its `EnvironmentFile=`-backed workspace
+  reference as an unknown placeholder
+  ([#2903](https://github.com/alibaba/anolisa/pull/2903)).
+
 ## [0.3.7] - 2026-08-25
 
 ### Changed

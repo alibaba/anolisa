@@ -9,6 +9,24 @@
 
 ## [未发布]
 
+## [0.3.8] - 2026-08-26
+
+### 新增
+
+- 带 tag 的 ANOLISA Release 现会提供经过验证的 Linux x64、Linux arm64 和
+  macOS arm64 CLI 预编译归档。用户可直接从 GitHub Release 下载各受支持 target
+  的独立 binary 归档
+  ([#2883](https://github.com/alibaba/anolisa/pull/2883))。
+
+### 修复
+
+- Raw 安装现会在渲染 file content 时保留供 shell 与 systemd 消费的 `${VAR}`
+  reference，同时继续展开嵌套的 ANOLISA layout placeholder，并拒绝 destination
+  path 中的 environment reference。`anolisa install cosh-ng --backend raw` 现可安装
+  gateway service template，不再将其由 `EnvironmentFile=` 提供的 workspace
+  reference 误判为 unknown placeholder
+  ([#2903](https://github.com/alibaba/anolisa/pull/2903))。
+
 ## [0.3.7] - 2026-08-25
 
 ### 变更
