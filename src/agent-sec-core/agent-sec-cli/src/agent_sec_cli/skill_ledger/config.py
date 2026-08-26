@@ -39,13 +39,16 @@ logger = logging.getLogger(__name__)
 
 _SKILL_MANIFEST = "SKILL.md"
 _DEPRECATED_SKILL_DIRS_KEY = "skillDirs"
+DEFAULT_SYSTEM_SKILL_ROOTS = (
+    Path("/usr/share/anolisa/skills"),
+    Path("/usr/local/share/anolisa/skills"),
+)
 DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",
     "~/.copilot-shell/skills/*",
     "~/.hermes/skills/**",
     "~/.qoder/skills/*",
-    "/usr/share/anolisa/skills/*",
-    "/usr/local/share/anolisa/skills/*",
+    *(f"{root}/*" for root in DEFAULT_SYSTEM_SKILL_ROOTS),
 ]
 _IGNORED_RECURSIVE_DIRS = frozenset(
     {".git", ".github", ".hub", ".archive", ".skill-meta"}
@@ -352,6 +355,12 @@ def is_managed_covered(skill_dir: Path, config: dict[str, Any] | None = None) ->
         skill_dir,
         managed_skill_dir_entries(config),
     )
+
+
+def is_default_system_skill_dir(skill_dir: str | Path) -> bool:
+    """Return whether *skill_dir* is an immediate child of a packaged system root."""
+    canonical_dir = _lexical_path(Path(skill_dir).expanduser())
+    return canonical_dir.parent in DEFAULT_SYSTEM_SKILL_ROOTS
 
 
 def _is_path_covered_by_entries(skill_dir: Path, entries: list[str]) -> bool:

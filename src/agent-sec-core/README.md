@@ -347,6 +347,15 @@ For an existing manifest, authenticity is verified before file drift; an unsigne
 The six integrity states are `pass` / `none` / `drifted` / `warn` / `deny` /
 `tampered`.
 
+`scan` and the default `init` baseline are signed-ledger write paths; use
+`analyze` for read-only content findings. In batch mode, a host-backed packaged
+Skill under `/usr/share/anolisa/skills/` or `/usr/local/share/anolisa/skills/`
+whose ledger state is read-only is reported as `status=skipped`,
+`reasonCode=readonly_system_skill`, `persisted=false`. This operational skip is
+not a `pass` result or an attestation. An explicit `scan <dir>` remains an error.
+When a skipped Skill has no prior ledger artifacts, `check` and `status`
+continue to report `none` / `unscanned`; neither value means `pass`.
+
 ### Key Commands
 
 | Command | Description |
