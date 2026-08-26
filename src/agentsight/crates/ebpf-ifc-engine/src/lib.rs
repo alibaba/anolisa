@@ -2891,10 +2891,12 @@ mod tests {
         assert_eq!(std::mem::size_of::<DeltaRequest>(), 48);
         // CConfig mirrors bpf/taint.h exactly:
         // 8-byte header + 320 taint_update entries + 128 taint_rule entries.
+        // CRule carries a trailing ttl_ns (u64) for enforce-mode TTL expiry, so
+        // each rule is 232 bytes and the full blob is 8 + 320*144 + 128*232.
         assert_eq!(std::mem::align_of::<CConfig>(), 8);
         assert_eq!(std::mem::size_of::<CUpdate>(), 144);
-        assert_eq!(std::mem::size_of::<CRule>(), 224);
-        assert_eq!(std::mem::size_of::<CConfig>(), 74_760);
+        assert_eq!(std::mem::size_of::<CRule>(), 232);
+        assert_eq!(std::mem::size_of::<CConfig>(), 75_784);
         assert_eq!(std::mem::align_of::<Event>(), 8);
         assert_eq!(std::mem::size_of::<Event>(), 384);
         assert_eq!(
