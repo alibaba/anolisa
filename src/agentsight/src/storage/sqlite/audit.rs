@@ -187,6 +187,21 @@ impl AuditStore {
         Ok(deleted as u64)
     }
 
+    /// Number of records in the table.
+    ///
+    /// Used by size-based purging to size deletion batches proportionally.
+    /// The table name is interpolated, not parameterized (SQL placeholders do
+    /// not support identifiers); it is built internally from config, never
+    /// from user input.
+    pub fn count(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM {}", self.table_name),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
     /// Delete the oldest N records by timestamp.
     ///
     /// Used for size-based pruning when the database file exceeds its

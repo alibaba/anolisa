@@ -368,16 +368,16 @@ impl Storage {
     /// companions — in WAL mode a large share of recent data lives in the WAL
     /// file, so checking the main file alone would under-report.
     ///
-    /// Work is organized in rounds: each round deletes a fixed number of
-    /// oldest-record batches from all tables, then runs one VACUUM +
-    /// checkpoint before re-measuring. VACUUM rewrites the whole file, so it
-    /// must not run per batch — bounding it per round keeps a multi-GB
-    /// cleanup tractable. VACUUM failures are tolerated: freed pages are
-    /// still reusable by future inserts.
+    /// Work is organized in rounds: each round deletes a fraction of every
+    /// table's oldest rows, then runs one VACUUM + checkpoint before
+    /// re-measuring. VACUUM rewrites the whole file, so it must not run per
+    /// batch — bounding it per round keeps a multi-GB cleanup tractable.
     ///
-    /// Rounds continue until the size is within the limit; termination is
-    /// guaranteed because every round must strictly shrink the file (or empty
-    /// the tables), otherwise the purge stops and reports the stall.
+    /// Rounds continue until the size is within the limit. A round that does
+    /// not shrink the file is not necessarily a failure (deleting small rows
+    /// may free no page), so the bite doubles while the file stands still;
+    /// the purge stops early only when VACUUM/checkpoint itself keeps failing
+    /// or after 20 rounds, both reported as errors.
     ///
     /// Called automatically by `store()` during purge checks and by
     /// `with_sqlite_config()` on startup.
@@ -386,13 +386,12 @@ impl Storage {
             return Ok(());
         }
 
-        // Rows deleted per table per batch, and batches per round: up to
-        // 20 000 rows per table between two VACUUM runs.
-        const BATCH_ROWS: usize = 1000;
-        const BATCHES_PER_ROUND: u32 = 20;
-
-        let mut prev_size = u64::MAX;
         let mut round = 0u32;
+        let mut reclaim_failures = 0u32;
+        // Rows and bytes can decouple (B-tree page sharing): deleting many
+        // small rows may free no page at all, so a non-shrinking round is
+        // normal and triggers a bigger bite next round instead of a stall.
+        let mut pct_boost = 1.0f64;
 
         loop {
             let size = self.total_db_size();
@@ -400,60 +399,95 @@ impl Storage {
                 break;
             }
 
-            // A round of deletes + VACUUM that does not shrink the file means
-            // VACUUM is failing (e.g. disk full). Deleting further rows would
-            // destroy data without freeing disk space, so stop and escalate:
-            // freed pages are still reused by future inserts, which prevents
-            // the main file from growing, but the size cap is no longer
-            // enforceable without operator action.
-            if size >= prev_size {
+            if round >= 20 {
                 log::error!(
-                    "Size-based purge stalled: database is {} bytes (limit {}) and \
-                     did not shrink after round {round}. VACUUM is likely failing \
-                     (e.g. disk full). Size enforcement is suspended — manual \
+                    "Size-based purge did not converge after {round} rounds: database is \
+                     {size} bytes (limit {}). Size enforcement is suspended — manual \
                      intervention required (free disk space or remove the database).",
-                    size,
                     self.max_db_size_bytes
                 );
                 break;
             }
-            prev_size = size;
             round += 1;
 
+            // Delete a fraction of each table's rows per round and re-measure
+            // after the round's VACUUM+checkpoint. A fixed per-batch row
+            // count without re-measuring between batches wipes any table
+            // smaller than the per-round batch total (#2870). Bigger bites
+            // when far over the limit; mirrors the genai store's prune policy.
+            let overshoot = size as f64 / self.max_db_size_bytes as f64;
+            let base_pct = if overshoot > 5.0 {
+                0.50
+            } else if overshoot > 2.0 {
+                0.25
+            } else {
+                0.10
+            };
+            let pct = (base_pct * pct_boost).min(0.9);
+
             let mut round_deleted = 0usize;
-            for _ in 0..BATCHES_PER_ROUND {
-                let deleted = self.audit_store.delete_oldest_batch(BATCH_ROWS)?
-                    + self.token_store.delete_oldest_batch(BATCH_ROWS)?
-                    + self.http_store.delete_oldest_batch(BATCH_ROWS)?
-                    + self
-                        .token_consumption_store
-                        .delete_oldest_batch(BATCH_ROWS)?;
-                round_deleted += deleted;
-                if deleted == 0 {
-                    break; // All tables empty
-                }
+            round_deleted += self
+                .audit_store
+                .delete_oldest_batch(purge_share(self.audit_store.count()?, pct))?;
+            round_deleted += self
+                .token_store
+                .delete_oldest_batch(purge_share(self.token_store.count(), pct))?;
+            round_deleted += self
+                .http_store
+                .delete_oldest_batch(purge_share(self.http_store.count()?, pct))?;
+            round_deleted += self
+                .token_consumption_store
+                .delete_oldest_batch(purge_share(self.token_consumption_store.count(), pct))?;
+
+            if round_deleted == 0 {
+                break; // Nothing left to delete
             }
 
             // VACUUM first, then checkpoint: in WAL mode VACUUM writes the
             // rebuilt database through the WAL, so the file only shrinks once
-            // a TRUNCATE checkpoint flushes it back. Both are best-effort:
-            // freed pages are reusable even when they fail.
+            // a TRUNCATE checkpoint flushes it back. Failures are the real
+            // stall signal (e.g. disk full): deleting further rows would
+            // destroy data without freeing space, so stop after repeated
+            // failures and escalate.
+            let mut reclaim_ok = true;
             if let Err(e) = self.audit_store.vacuum() {
                 log::warn!("VACUUM during size-based purge failed: {e}");
+                reclaim_ok = false;
             }
             if let Err(e) = self.audit_store.checkpoint() {
                 log::warn!("WAL checkpoint during size-based purge failed: {e}");
+                reclaim_ok = false;
+            }
+            if reclaim_ok {
+                reclaim_failures = 0;
+            } else {
+                reclaim_failures += 1;
+                if reclaim_failures >= 3 {
+                    log::error!(
+                        "Size-based purge suspended after {reclaim_failures} failed \
+                         VACUUM/checkpoint rounds at {size} bytes (limit {}). Freed \
+                         pages remain reusable by future inserts; free disk space or \
+                         remove the database to enforce the cap.",
+                        self.max_db_size_bytes
+                    );
+                    break;
+                }
             }
 
+            let new_size = self.total_db_size();
             log::info!(
                 "Size-based purge round {round}: deleted {round_deleted} rows, \
-                 database now {} bytes (limit {})",
-                self.total_db_size(),
+                 database now {new_size} bytes (limit {})",
                 self.max_db_size_bytes
             );
 
-            if round_deleted == 0 {
-                break; // Nothing left to delete
+            if new_size < size {
+                pct_boost = 1.0;
+            } else {
+                // Deletion made no dent in the file (page sharing). Double the
+                // bite so subsequent rounds reach the rows that dominate the
+                // file instead of stalling on small-row deletions.
+                pct_boost = (pct_boost * 2.0).min(9.0);
             }
         }
 
@@ -530,6 +564,12 @@ impl Drop for Storage {
             log::warn!("WAL checkpoint during Storage drop failed: {e}");
         }
     }
+}
+
+/// Rows to delete from a table in one purge round: `pct` of its rows, at
+/// least 1 (deleting from an empty table is a no-op).
+fn purge_share(rows: u64, pct: f64) -> usize {
+    ((rows as f64 * pct) as usize).max(1)
 }
 
 #[cfg(test)]
@@ -693,6 +733,112 @@ mod tests {
             "database must be within the size limit after purge, got {} bytes",
             storage.total_db_size()
         );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for #2870: a database only slightly over the limit must be
+    /// trimmed oldest-first, not wiped. The previous fixed-batch loop
+    /// (20x1000 rows per table per round, without re-measuring between
+    /// batches) emptied every table in the first round; this test fails under
+    /// it because nothing would survive.
+    #[test]
+    fn test_purge_oversized_trims_oldest_keeps_newest() {
+        let dir = unique_base_dir("trim_oldest");
+        let limit_mb = 1u64;
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+
+        // ~1.2MB over a 1MB limit (~17% overshoot): 110 rows x ~10KB payload.
+        let base_ts = 1_000_000_000u64;
+        for i in 0..110u64 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(base_ts + i, 10 * 1024))
+                .unwrap();
+        }
+        storage.checkpoint().unwrap();
+        let size_before = storage.total_db_size();
+        assert!(
+            size_before > limit_mb * 1024 * 1024,
+            "setup must exceed the limit, got {size_before}"
+        );
+
+        storage.purge_oversized().unwrap();
+
+        let remaining = storage.token_store.count();
+        assert!(remaining > 0, "purge must not wipe the table (#2870)");
+        assert!(remaining < 110, "oversized db must be trimmed");
+        assert!(
+            storage.total_db_size() <= limit_mb * 1024 * 1024,
+            "must converge below the limit"
+        );
+
+        // Oldest-first trimming removes low timestamps, so the newest seeded
+        // row must survive.
+        let conn = rusqlite::Connection::open(dir.join("agentsight.db")).unwrap();
+        let max_ts: u64 = conn
+            .query_row("SELECT MAX(timestamp_ns) FROM token_records", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(max_ts, base_ts + 109, "newest row must survive");
+        drop(conn);
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When the file is dominated by a few large NEW rows and the oldest rows
+    /// are tiny, deleting the oldest fraction frees no page (B-tree page
+    /// sharing). Treating a non-shrinking round as a stall exits with the cap
+    /// still exceeded; the purge must keep trimming until it reaches the rows
+    /// that dominate the file.
+    #[test]
+    fn test_purge_oversized_skewed_row_sizes_still_converges() {
+        let dir = unique_base_dir("skewed");
+        let limit_mb = 1u64;
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+
+        // 100 tiny old rows (~5KB total, sharing B-tree pages) + 4 large new
+        // rows (~260KB each): ~1.05MB, slightly over the 1MB limit.
+        for i in 0..100u64 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(1_000 + i, 50))
+                .unwrap();
+        }
+        for i in 0..4u64 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(1_000_000 + i, 260 * 1024))
+                .unwrap();
+        }
+        storage.checkpoint().unwrap();
+        // Compact once up front so the first purge round's VACUUM cannot hide
+        // behind rebuild gains instead of actual deletions.
+        storage.audit_store.vacuum().unwrap();
+        let size_before = storage.total_db_size();
+        assert!(
+            size_before > limit_mb * 1024 * 1024,
+            "setup must exceed the limit, got {size_before}"
+        );
+
+        storage.purge_oversized().unwrap();
+
+        assert!(
+            storage.total_db_size() <= limit_mb * 1024 * 1024,
+            "must converge below the limit even when early rounds free nothing, got {}",
+            storage.total_db_size()
+        );
+        let conn = rusqlite::Connection::open(dir.join("agentsight.db")).unwrap();
+        let max_ts: u64 = conn
+            .query_row("SELECT MAX(timestamp_ns) FROM token_records", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(max_ts, 1_000_003, "newest large row must survive");
+        drop(conn);
+
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }
