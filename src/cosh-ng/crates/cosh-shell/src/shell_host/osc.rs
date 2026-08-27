@@ -447,7 +447,7 @@ impl OscParser {
             return None;
         }
         let path = marker.path.as_deref()?;
-        if path.len() > SHELL_PATH_MAX_BYTES {
+        if path.len() > SHELL_PATH_MAX_BYTES || path.chars().any(char::is_control) {
             return None;
         }
         let normalized = normalize_shell_path(path);

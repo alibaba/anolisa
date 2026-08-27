@@ -90,13 +90,42 @@ _cosh_apply_internal_recovery() {
   rm -f -- "$COSH_RECOVERY_REQUEST_FILE" 2>/dev/null || true
   stty echo icanon isig iexten opost 2>/dev/null || true
 }
+# Shell variables cannot represent NUL; escape every representable C0 byte and DEL.
 _cosh_json_escape() {
   local value="$1"
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
+  value=${value//$'\001'/\\u0001}; value=${value//$'\002'/\\u0002}
+  value=${value//$'\003'/\\u0003}
+  value=${value//$'\004'/\\u0004}
+  value=${value//$'\005'/\\u0005}
+  value=${value//$'\006'/\\u0006}
+  value=${value//$'\a'/\\u0007}
+  value=${value//$'\b'/\\b}
   value=${value//$'\n'/\\n}
+  value=${value//$'\v'/\\u000b}
+  value=${value//$'\f'/\\f}
   value=${value//$'\r'/\\r}
+  value=${value//$'\016'/\\u000e}
+  value=${value//$'\017'/\\u000f}
+  value=${value//$'\020'/\\u0010}
+  value=${value//$'\021'/\\u0011}
+  value=${value//$'\022'/\\u0012}
+  value=${value//$'\023'/\\u0013}
+  value=${value//$'\024'/\\u0014}
+  value=${value//$'\025'/\\u0015}
+  value=${value//$'\026'/\\u0016}
+  value=${value//$'\027'/\\u0017}
+  value=${value//$'\030'/\\u0018}
+  value=${value//$'\031'/\\u0019}
+  value=${value//$'\032'/\\u001a}
+  value=${value//$'\e'/\\u001b}
+  value=${value//$'\034'/\\u001c}
+  value=${value//$'\035'/\\u001d}
+  value=${value//$'\036'/\\u001e}
+  value=${value//$'\037'/\\u001f}
   value=${value//$'\t'/\\t}
+  value=${value//$'\177'/\\u007f}
   printf '%s' "$value"
 }
 _cosh_now_ms() {

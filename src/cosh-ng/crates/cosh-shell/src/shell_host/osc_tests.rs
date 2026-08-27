@@ -717,6 +717,65 @@ fn path_snapshot_accepts_exact_eight_kibibyte_boundary() {
 }
 
 #[test]
+fn environment_marker_with_control_path_does_not_update_state() {
+    let mut parser = parser_for_test("path-control");
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo unsafe path"),
+        "/safe:/control\u{7}entry:/tail",
+        true,
+        Some("path-control"),
+    );
+
+    let start = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("command start");
+    assert_eq!(start.shell_environment_generation, None);
+    assert!(parser.shell_environment_snapshot.is_none());
+}
+
+#[test]
+fn control_physical_cwd_stays_untrusted_until_clean_prompt() {
+    let mut parser = parser_for_test("physical-cwd-control");
+    let prompt_cwd = crate::input::ShellPromptCwd::default();
+    parser.set_prompt_cwd(prompt_cwd.clone());
+
+    // #2918 may route a path-bearing prompt only from a trusted physical cwd.
+    for unsafe_cwd in [
+        "/tmp/bell\u{7}cwd",
+        "/tmp/st\u{1b}\\cwd",
+        "/tmp/del\u{7f}cwd",
+    ] {
+        let marker = serde_json::json!({
+            "e": "p",
+            "t": TEST_MARKER_TOKEN,
+            "c": unsafe_cwd,
+            "pc": unsafe_cwd,
+            "s": 0,
+        });
+        let bytes = format!("\x1b]1337;COSH;{marker}\x07");
+        parser.feed(bytes.as_bytes()).expect("feed unsafe prompt");
+        assert_eq!(prompt_cwd.current(), None, "{unsafe_cwd:?}");
+    }
+
+    let clean_cwd = "/tmp/clean-after-control";
+    let marker = serde_json::json!({
+        "e": "p",
+        "t": TEST_MARKER_TOKEN,
+        "c": clean_cwd,
+        "pc": clean_cwd,
+        "s": 0,
+    });
+    let bytes = format!("\x1b]1337;COSH;{marker}\x07");
+    parser.feed(bytes.as_bytes()).expect("feed clean prompt");
+    assert_eq!(prompt_cwd.current().as_deref(), Some(clean_cwd));
+}
+
+#[test]
 fn environment_marker_with_wrong_token_does_not_update_state() {
     let mut parser = parser_for_test("path-wrong-token");
     let marker = serde_json::json!({

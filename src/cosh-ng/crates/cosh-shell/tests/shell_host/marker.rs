@@ -1,6 +1,139 @@
 use super::*;
 
 #[test]
+fn marker_json_escape_removes_raw_controls_and_preserves_utf8() {
+    let input = concat!(
+        "A中\"\\",
+        "\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\t\n\u{b}\u{c}\r",
+        "\u{e}\u{f}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}",
+        "\u{18}\u{19}\u{1a}\u{1b}\\\u{1c}\u{1d}\u{1e}\u{1f}\u{7f}Z"
+    );
+    let expected = concat!(
+        "A中\\\"\\\\",
+        "\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r",
+        "\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017",
+        "\\u0018\\u0019\\u001a\\u001b\\\\\\u001c\\u001d\\u001e\\u001f\\u007fZ"
+    );
+    let scripts = [
+        ("bash", include_str!("../../src/shell_host/marker/bash.sh")),
+        ("zsh", include_str!("../../src/shell_host/marker/zsh.rs")),
+    ];
+
+    for (shell, script) in scripts {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let function = shell_function(script, "_cosh_json_escape");
+        let command = format!("{function}\n_cosh_json_escape \"$1\"");
+        let output = Command::new(shell)
+            .args(["-c", command.as_str(), "cosh-marker-test", input])
+            .output()
+            .unwrap_or_else(|error| panic!("run {shell}: {error}"));
+
+        assert!(output.status.success(), "{shell}: {output:?}");
+        assert_eq!(output.stdout, expected.as_bytes(), "{shell}");
+        assert!(
+            output.stdout.iter().all(|byte| !byte.is_ascii_control()),
+            "{shell}: {:?}",
+            output.stdout
+        );
+    }
+}
+
+fn shell_function<'a>(script: &'a str, name: &str) -> &'a str {
+    let start_pattern = format!("{name}() {{\n");
+    let start = script
+        .find(&start_pattern)
+        .unwrap_or_else(|| panic!("missing {name}"));
+    let rest = &script[start..];
+    let end = rest
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("unterminated {name}"));
+    &rest[..end + 2]
+}
+
+#[test]
+fn shell_host_marker_control_cwd_keeps_json_frame_intact() {
+    let control_name = concat!(
+        "cwd-中-",
+        "\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\t\n\u{b}\u{c}\r",
+        "\u{e}\u{f}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}",
+        "\u{18}\u{19}\u{1a}\u{1b}\\\u{1c}\u{1d}\u{1e}\u{1f}\u{7f}"
+    );
+    let shell_control_name = concat!(
+        "$'cwd-中-",
+        "\\001\\002\\003\\004\\005\\006\\007\\010\\011\\012\\013\\014\\015",
+        "\\016\\017\\020\\021\\022\\023\\024\\025\\026\\027",
+        "\\030\\031\\032\\033\\\\\\034\\035\\036\\037\\177'"
+    );
+    let tail_sentinel = "__post_cwd_marker_tail__";
+
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir =
+            std::env::temp_dir().join(format!("cosh-marker-control-{shell}-{}", unique_suffix()));
+        let control_dir = work_dir.join(control_name);
+        std::fs::create_dir_all(&control_dir).expect("control cwd");
+        let path = format!(
+            "/{tail_sentinel}:{}",
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let config = ShellHostConfig::new(format!("marker-control-{shell}"), &work_dir)
+            .with_env("PATH", path);
+        let cd = format!(
+            "builtin cd -- {}/{shell_control_name}",
+            shell_arg(&work_dir)
+        );
+        let command = "printf '__marker_frame_survived__\\n'";
+        let output = if shell == "bash" {
+            run_scripted_bash(
+                &config,
+                &[
+                    ScriptedInput::user_line(cd.clone()),
+                    ScriptedInput::user_line(command),
+                ],
+            )
+        } else {
+            run_scripted_zsh(
+                &config,
+                &[
+                    ScriptedInput::user_line(cd.clone()),
+                    ScriptedInput::user_line(command),
+                ],
+            )
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+        assert!(
+            terminal.contains("__marker_frame_survived__"),
+            "{shell}: {terminal}"
+        );
+        assert!(!terminal.contains(tail_sentinel), "{shell}: {terminal}");
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::CommandStarted
+                    && event.command.as_deref() == Some(command)
+                    && event.cwd.as_deref() == control_dir.to_str()
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::ComponentFailed
+                    && event.component.as_deref() == Some("osc_parser")
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+        std::fs::remove_dir_all(&work_dir).expect("cleanup control cwd");
+    }
+}
+
+#[test]
 fn shell_host_runs_bash_pty_and_emits_command_events() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
