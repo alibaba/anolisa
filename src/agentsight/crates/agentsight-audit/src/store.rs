@@ -619,7 +619,12 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
-    pub fn case_count(&self, agent_id: Option<&str>, status: Option<&str>, blocked: Option<bool>) -> Result<u64, AuditError> {
+    pub fn case_count(
+        &self,
+        agent_id: Option<&str>,
+        status: Option<&str>,
+        blocked: Option<bool>,
+    ) -> Result<u64, AuditError> {
         let conn = self.connection()?;
         let mut conditions = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -725,8 +730,10 @@ impl AuditStore {
             );
             let mut stmt = conn.prepare(&sql)?;
             let params: Vec<String> = chunk.iter().map(|id| id.to_string()).collect();
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
             let rows = stmt.query_map(param_refs.as_slice(), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;

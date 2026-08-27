@@ -391,7 +391,12 @@ fn case_count_is_independent_of_case_page_size() {
             .len(),
         1
     );
-    assert_eq!(store.case_count(None, None, None).expect("case total should load"), 2);
+    assert_eq!(
+        store
+            .case_count(None, None, None)
+            .expect("case total should load"),
+        2
+    );
 }
 
 #[test]
@@ -1193,7 +1198,12 @@ fn list_cases_and_count_filter_by_agent_id() {
             .expect("beta total should load"),
         1
     );
-    assert_eq!(store.case_count(None, None, None).expect("grand total should load"), 3);
+    assert_eq!(
+        store
+            .case_count(None, None, None)
+            .expect("grand total should load"),
+        3
+    );
 }
 
 #[test]

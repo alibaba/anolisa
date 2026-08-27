@@ -492,10 +492,7 @@ pub(super) async fn list_violations(
             // event_id to the exact case that generated it, instead of the coarse
             // (agent, policy, revision) index which picks the latest case and
             // mis-links violations from earlier bursts.
-            let event_ids: Vec<uuid::Uuid> = violations
-                .iter()
-                .map(|v| v.event_id)
-                .collect();
+            let event_ids: Vec<uuid::Uuid> = violations.iter().map(|v| v.event_id).collect();
             let case_map = audit_service
                 .case_ids_for_events(&event_ids)
                 .unwrap_or_default();

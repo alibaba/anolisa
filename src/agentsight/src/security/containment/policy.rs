@@ -120,7 +120,13 @@ fn resolve_policy_binding(
         || source_policy.policy_id != request.policy_id
         || source_policy.revision.to_string() != request.policy_revision
         || source_policy.taint_label != "CREDENTIAL"
-        || source_policy.source_patterns != compiled.source_paths.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice()
+        || source_policy.source_patterns
+            != compiled
+                .source_paths
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .as_slice()
         || source_policy.trusted_endpoints != compiled.trusted_endpoints
     {
         return None;

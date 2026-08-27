@@ -164,7 +164,10 @@ pub(super) async fn cases(
         Ok(total) => total,
         Err(error) => return store_error(error),
     };
-    match data.audit_service.cases(limit, offset, agent_id, status, blocked) {
+    match data
+        .audit_service
+        .cases(limit, offset, agent_id, status, blocked)
+    {
         Ok(items) => response(
             StatusCode::OK,
             if items.is_empty() { "empty" } else { "ok" },
