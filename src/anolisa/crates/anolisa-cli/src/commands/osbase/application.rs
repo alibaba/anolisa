@@ -533,6 +533,17 @@ mod tests {
                 Some(SandboxOutputEvent::Scenario("gvisor".to_string())),
             ),
             (
+                SandboxRequest::Uninstall {
+                    scenario: "gvisor".to_string(),
+                    intent: ExecutionIntent::Plan,
+                },
+                HelperRequest::OsbaseUninstall {
+                    scenario: "gvisor".to_string(),
+                    dry_run: true,
+                },
+                Some(SandboxOutputEvent::Scenario("gvisor".to_string())),
+            ),
+            (
                 SandboxRequest::Remove {
                     target: "gvisor".to_string(),
                     purge: true,
@@ -716,6 +727,28 @@ mod tests {
         assert_eq!(
             direct.uninstall_requests.borrow().as_slice(),
             &[("gvisor".to_string(), false)]
+        );
+        direct
+            .uninstall_results
+            .borrow_mut()
+            .push_back(Ok("planned".to_string()));
+
+        let uninstall_preview = run_with_dependencies(
+            SandboxRequest::Uninstall {
+                scenario: "gvisor".to_string(),
+                intent: ExecutionIntent::Plan,
+            },
+            || Err(connect_error()),
+            true,
+            &direct,
+            &mut |_| {},
+        )
+        .expect("direct uninstall preview");
+
+        assert!(matches!(uninstall_preview, SandboxOutcome::DirectUninstall));
+        assert_eq!(
+            direct.uninstall_requests.borrow().as_slice(),
+            &[("gvisor".to_string(), false), ("gvisor".to_string(), true),]
         );
     }
 

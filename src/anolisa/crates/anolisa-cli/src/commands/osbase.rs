@@ -176,7 +176,14 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
         return handle_sandbox_list(*json);
     }
 
-    let request = match command {
+    let request = sandbox_request(command, ctx.dry_run);
+    let mut output = render_sandbox_event;
+    let outcome = application::run(request, &mut output)?;
+    render_sandbox_outcome(outcome)
+}
+
+fn sandbox_request(command: SandboxCommands, global_dry_run: bool) -> SandboxRequest {
+    match command {
         SandboxCommands::Install {
             target,
             dry_run,
@@ -184,21 +191,18 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
             no_verify,
         } => SandboxRequest::Install {
             target,
-            intent: execution_intent(dry_run || ctx.dry_run),
+            intent: execution_intent(dry_run || global_dry_run),
             force,
             skip_verify: no_verify,
         },
         SandboxCommands::Uninstall { scenario, dry_run } => SandboxRequest::Uninstall {
             scenario,
-            intent: execution_intent(dry_run),
+            intent: execution_intent(dry_run || global_dry_run),
         },
         SandboxCommands::Remove { target, purge, .. } => SandboxRequest::Remove { target, purge },
         SandboxCommands::List { .. } => unreachable!(),
         SandboxCommands::Status { target, .. } => SandboxRequest::Status { target },
-    };
-    let mut output = render_sandbox_event;
-    let outcome = application::run(request, &mut output)?;
-    render_sandbox_outcome(outcome)
+    }
 }
 
 fn execution_intent(dry_run: bool) -> ExecutionIntent {
@@ -299,6 +303,31 @@ mod tests {
 
     use super::*;
     use crate::helper_client::HelperOperationOutcome;
+
+    #[test]
+    fn sandbox_uninstall_combines_global_and_local_dry_run() {
+        for (global_dry_run, local_dry_run, expected_intent) in [
+            (false, false, ExecutionIntent::Apply),
+            (false, true, ExecutionIntent::Plan),
+            (true, false, ExecutionIntent::Plan),
+            (true, true, ExecutionIntent::Plan),
+        ] {
+            let request = sandbox_request(
+                SandboxCommands::Uninstall {
+                    scenario: "gvisor".to_string(),
+                    dry_run: local_dry_run,
+                },
+                global_dry_run,
+            );
+
+            match request {
+                SandboxRequest::Uninstall { intent, .. } => {
+                    assert_eq!(intent, expected_intent);
+                }
+                _ => panic!("uninstall command must map to an uninstall request"),
+            }
+        }
+    }
 
     #[test]
     fn helper_operation_preserves_success_degraded_and_failure_codes() {
