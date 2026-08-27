@@ -1995,6 +1995,10 @@ fn shell_host_bash_prompt_hook_observes_only_bounded_capture() {
                 || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
                 || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
                 || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || command == "_COSH_PROMPT_XTRACE=0"
+                || command == "_COSH_PROMPT_XTRACE=1"
+                || command == "(( _COSH_PROMPT_XTRACE == 1 ))"
+                || command == "unset _COSH_PROMPT_XTRACE"
                 || (command.starts_with("trap -p DEBUG >")
                     && command.contains("COSH_RECOVERY_REQUEST_FILE")),
             "unexpected Cosh internals in user trap: {line}\n{trace_log}"

@@ -635,6 +635,12 @@ _cosh_delegate_bash_command_not_found() {
     _COSH_IN_USER_COMMAND_NOT_FOUND=1
     _cosh_user_command_not_found_handle "$@"
     local status=$?
+    local final_xtrace=0
+    if [[ $- == *x* ]]; then
+      final_xtrace=1
+      set +x
+    fi
+    _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE="$final_xtrace"
     _COSH_IN_USER_COMMAND_NOT_FOUND=0
     return "$status"
   fi
@@ -644,13 +650,19 @@ _cosh_delegate_bash_command_not_found() {
 _cosh_user_handler_definition="$(declare -f command_not_found_handle 2>/dev/null || true)"
 if [[ -n "$_cosh_user_handler_definition"
    && "$_cosh_user_handler_definition" != "$_COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE" ]]; then
-  eval "${_cosh_user_handler_definition/command_not_found_handle/_cosh_user_command_not_found_handle}"
+  _cosh_user_handler_definition="${_cosh_user_handler_definition/command_not_found_handle/_cosh_user_command_not_found_handle}"
+  # Resume at the start of user code so the private wrapper invocation cannot
+  # expose dynamic handler arguments before the user's own trace begins.
+  _cosh_user_handler_xtrace_prefix=$'{ \n  if [[ "${_COSH_COMMAND_NOT_FOUND_XTRACE:-0}" == 1 ]]; then set -x; fi\n'
+  _cosh_user_handler_definition="${_cosh_user_handler_definition/\{ /$_cosh_user_handler_xtrace_prefix}"
+  eval "$_cosh_user_handler_definition"
   _COSH_HAS_USER_COMMAND_NOT_FOUND=1
 else
   _COSH_HAS_USER_COMMAND_NOT_FOUND=0
 fi
-unset _cosh_user_handler_definition _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE
-command_not_found_handle() {
+unset _cosh_user_handler_definition _cosh_user_handler_xtrace_prefix \
+  _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE
+_cosh_command_not_found_handle() {
   local command="$1"
   shift || true
   if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
@@ -675,7 +687,7 @@ command_not_found_handle() {
     return $?
   fi
   if [[ "${_COSH_ATTEMPT_SUBSHELL:-}" != "${BASH_SUBSHELL:-0}"
-     || "${#FUNCNAME[@]}" != 1
+     || "${#FUNCNAME[@]}" != 2
      || "${_COSH_ATTEMPT_EXPANSION_DRIFT:-0}" == 1 ]]; then
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
@@ -727,6 +739,19 @@ command_not_found_handle() {
   _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
   _cosh_delegate_bash_command_not_found "$command" "$@"
   return $?
+}
+command_not_found_handle() {
+  local _COSH_COMMAND_NOT_FOUND_XTRACE=0
+  local _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE=0
+  if [[ $- == *x* ]]; then
+    _COSH_COMMAND_NOT_FOUND_XTRACE=1
+    _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE=1
+    set +x
+  fi
+  _cosh_command_not_found_handle "$@"
+  local status=$?
+  (( _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE == 1 )) && set -x
+  return "$status"
 }
 
 # Expands the leading command word of a history line following bash alias
@@ -817,9 +842,6 @@ _cosh_compact_alias_expanded() {
 }
 
 _cosh_bounded_preexec_marker() {
-  if [[ $- == *x* ]]; then
-    set +x
-  fi
   local history_entry history_no command first_word argc=1 display_command sensitive=false
   history_entry="$(_cosh_history_entry)"
   history_no="$(_cosh_history_no "$history_entry")"
@@ -873,13 +895,7 @@ _cosh_bounded_preexec_marker() {
   _cosh_emit_marker "preexec" "$display_command" 0 false
 }
 _cosh_bounded_prompt_marker() {
-  local status="${1:-$?}" restore_xtrace=0
-  if [[ $- == *x* ]]; then
-    restore_xtrace=1
-    set +x
-  fi
-  _cosh_precmd_marker "$status"
-  (( restore_xtrace == 1 )) && set -x
+  _cosh_precmd_marker "${1:-$?}"
   return 0
 }
 _cosh_precmd_marker() {
@@ -912,7 +928,7 @@ _cosh_precmd_marker() {
   _cosh_initial_history_entry="$(_cosh_history_entry)"
   _cosh_remember_preexec_history_no "$(_cosh_history_no "$_cosh_initial_history_entry")"
   unset _cosh_initial_history_entry
-  PS0='$(trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_preexec_marker > /dev/tty)'"$_COSH_USER_PS0"
+  PS0='$(set +x; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_preexec_marker > /dev/tty)'"$_COSH_USER_PS0"
   _COSH_USER_PROMPT_COMMAND=()
   if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
     if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
@@ -926,9 +942,9 @@ _cosh_precmd_marker() {
   # resume. Bash before 5.1 executes only element zero of an array
   # PROMPT_COMMAND, so those versions receive the same sequence as one scalar
   # command.
-  PROMPT_COMMAND=('_COSH_PROMPT_STATUS="$?"; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; eval "unset _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"')
+  PROMPT_COMMAND=('_COSH_PROMPT_STATUS="$?"; _COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; eval "unset _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
   PROMPT_COMMAND+=("${_COSH_USER_PROMPT_COMMAND[@]}")
-  PROMPT_COMMAND+=('_COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_prompt_marker "$_COSH_PROMPT_STATUS" > /dev/tty; eval "unset _COSH_PROMPT_STATUS _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"')
+  PROMPT_COMMAND+=('_COSH_PROMPT_XTRACE=0; case "$-" in *x*) _COSH_PROMPT_XTRACE=1; set +x;; esac; _COSH_PROMPT_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null)"; _COSH_PROMPT_RETURN_TRAP="$(trap -p RETURN 2>/dev/null)"; _COSH_PROMPT_ERR_TRAP="$(trap -p ERR 2>/dev/null)"; trap - DEBUG RETURN ERR 2>/dev/null; _cosh_bounded_prompt_marker "$_COSH_PROMPT_STATUS" > /dev/tty; eval "unset _COSH_PROMPT_STATUS _COSH_PROMPT_DEBUG_TRAP _COSH_PROMPT_RETURN_TRAP _COSH_PROMPT_ERR_TRAP ${_COSH_PROMPT_RETURN_TRAP:+; ${_COSH_PROMPT_RETURN_TRAP}} ${_COSH_PROMPT_ERR_TRAP:+; ${_COSH_PROMPT_ERR_TRAP}} ${_COSH_PROMPT_DEBUG_TRAP:+; ${_COSH_PROMPT_DEBUG_TRAP}}"; if (( _COSH_PROMPT_XTRACE == 1 )); then unset _COSH_PROMPT_XTRACE; set -x; else unset _COSH_PROMPT_XTRACE; fi')
   if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
     _COSH_PROMPT_COMMAND_SCALAR="${PROMPT_COMMAND[0]}"
     if [[ -n "${_COSH_USER_PROMPT_COMMAND[0]-}" ]]; then

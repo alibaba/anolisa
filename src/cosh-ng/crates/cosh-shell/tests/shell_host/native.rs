@@ -14,11 +14,48 @@ fn assert_debug_log_has_only_bounded_cosh_capture(debug_log: &str) {
                 || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
                 || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
                 || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || command == "_COSH_PROMPT_XTRACE=0"
+                || command == "_COSH_PROMPT_XTRACE=1"
+                || command == "(( _COSH_PROMPT_XTRACE == 1 ))"
+                || command == "unset _COSH_PROMPT_XTRACE"
                 || (command.starts_with("trap -p DEBUG >")
                     && command.contains("COSH_RECOVERY_REQUEST_FILE")),
             "unexpected Cosh internals in DEBUG trap: {line}\n{debug_log}"
         );
     }
+}
+
+fn assert_bash_xtrace_has_only_bounded_cosh_entries(trace: &str) {
+    let mut cosh_lines = 0;
+    for line in trace
+        .lines()
+        .filter(|line| line.contains("_cosh") || line.contains("_COSH"))
+    {
+        cosh_lines += 1;
+        let command = line
+            .split_once("BASH_USER_TRACE__ ")
+            .map(|(_, command)| command)
+            .unwrap_or(line);
+        let prompt_status = command
+            .strip_prefix("_COSH_PROMPT_STATUS=")
+            .is_some_and(|status| {
+                !status.is_empty() && status.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        assert!(
+            prompt_status
+                || matches!(
+                    command,
+                    "_COSH_PROMPT_XTRACE=0"
+                        | "_COSH_PROMPT_XTRACE=1"
+                        | "local _COSH_COMMAND_NOT_FOUND_XTRACE=0"
+                        | "local _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE=0"
+                        | "_COSH_COMMAND_NOT_FOUND_XTRACE=1"
+                        | "_COSH_COMMAND_NOT_FOUND_FINAL_XTRACE=1"
+                ),
+            "unexpected Cosh xtrace entry: {line}\n{trace}"
+        );
+    }
+    assert!(cosh_lines <= 64, "unbounded Cosh xtrace entries: {trace}");
 }
 
 #[test]
@@ -405,9 +442,10 @@ set +E +T
     let return_log = std::fs::read_to_string(home_dir.join("return.log")).unwrap_or_default();
     let err_log = std::fs::read_to_string(home_dir.join("err.log")).unwrap_or_default();
     for trap_log in [&debug_log, &return_log, &err_log] {
-        assert!(!trap_log.contains("_cosh"), "{trap_log}");
         assert!(!trap_log.contains(marker_token), "{trap_log}");
     }
+    assert!(!return_log.contains("_cosh"), "{return_log}");
+    assert!(!err_log.contains("_cosh"), "{err_log}");
     assert_debug_log_has_only_bounded_cosh_capture(&debug_log);
     assert!(
         debug_log.contains("DBG=[echo user-visible-cmd]"),
@@ -424,6 +462,72 @@ set +E +T
             && event.command.as_deref() == Some("echo user-visible-cmd")
             && event.exit_code == Some(0)
     }));
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_bash_functrace_keeps_prompt_internals_bounded() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-functrace-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        r#"PS1='functrace$ '
+set -T
+trap 'printf "DBG=[%s]\n" "$BASH_COMMAND" >> "$HOME/functrace.log"' DEBUG
+"#,
+    )
+    .expect("bashrc");
+    let sensitive_path = "/cosh-functrace-private-2683:/usr/bin:/bin";
+    let config = ShellHostConfig::new("enhanced-functrace", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("PATH", sensitive_path);
+
+    let mut rendered = Vec::new();
+    run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("set -x"),
+            RawRelayAction::line("printf '__FUNCTRACE_USER_COMMAND__\\n'"),
+            RawRelayAction::line("set +x"),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced Bash functrace relay");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    assert!(
+        terminal.contains("__FUNCTRACE_USER_COMMAND__"),
+        "{terminal}"
+    );
+    let debug_log =
+        std::fs::read_to_string(home_dir.join("functrace.log")).expect("functrace DEBUG log");
+    assert_debug_log_has_only_bounded_cosh_capture(&debug_log);
+    assert!(!debug_log.contains("_cosh_"), "{debug_log}");
+    assert!(!debug_log.contains(sensitive_path), "{debug_log}");
+    assert!(
+        !debug_log.contains(work_dir.to_str().expect("UTF-8 work dir")),
+        "{debug_log}"
+    );
+    let marker =
+        std::fs::read_to_string(work_dir.join("cosh-marker.bash")).expect("enhanced Bash marker");
+    let marker_token = marker
+        .lines()
+        .find_map(|line| line.strip_prefix("COSH_MARKER_TOKEN='")?.strip_suffix('\''))
+        .expect("marker token");
+    assert!(!debug_log.contains(marker_token), "{debug_log}");
 
     let _ = std::fs::remove_dir_all(&work_dir);
 }
@@ -782,6 +886,241 @@ fn enhanced_zsh_xtrace_hides_assistance_state_path() {
     assert!(
         !terminal.contains(&assistance_state_path),
         "assistance state path leaked through Zsh xtrace: {terminal}"
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_bash_xtrace_bounds_internal_hooks_and_preserves_user_state() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-bash-bounded-xtrace-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "PS1='bash-xtrace$ '\nPROMPT_COMMAND='printf \"__USER_PROMPT_HOOK__\\n\"'\n\
+         command_not_found_handle() {\n\
+           case \"$1\" in\n\
+             toggle-off) set +x; return 41;;\n\
+             toggle-on) set -x; return 42;;\n\
+             *) printf '__USER_BASH_MISSING__\\n'; return 43;;\n\
+           esac\n\
+         }\n",
+    )
+    .expect("bashrc");
+    let trace_path = home_dir.join("xtrace.log");
+    let sensitive_path = "/cosh-private-path-2683:/usr/bin:/bin";
+    let config = ShellHostConfig::new("enhanced-bash-bounded-xtrace", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("PATH", sensitive_path);
+
+    let mut rendered = Vec::new();
+    run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!("exec 9>{}", trace_path.display())),
+            RawRelayAction::line("BASH_XTRACEFD=9; PS4='__BASH_USER_TRACE__ '"),
+            RawRelayAction::line("set -x"),
+            RawRelayAction::line("printf '__BASH_USER_COMMAND__\\n'"),
+            RawRelayAction::line(
+                "missing-cosh-xtrace-command; printf '__BASH_MISSING_STATUS__=%s\\n' \"$?\"",
+            ),
+            RawRelayAction::line(
+                "case $- in *x*) printf '__BASH_XTRACE_ON__\\n';; *) printf '__BASH_XTRACE_LOST__\\n';; esac",
+            ),
+            RawRelayAction::line(
+                "command_not_found_handle toggle-off; s=$?; case $- in *x*) f=on;; *) f=off;; esac; printf '__BASH_HANDLER_OFF__=%s:%s\\n' \"$s\" \"$f\"",
+            ),
+            RawRelayAction::line(
+                "command_not_found_handle toggle-on; s=$?; case $- in *x*) f=on;; *) f=off;; esac; printf '__BASH_HANDLER_ON__=%s:%s\\n' \"$s\" \"$f\"; set +x",
+            ),
+            RawRelayAction::line("printf '__BASH_PS4__=%s\\n' \"$PS4\""),
+            RawRelayAction::line("printf '__BASH_XTRACEFD__=%s\\n' \"$BASH_XTRACEFD\""),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced Bash bounded xtrace relay");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    assert!(terminal.contains("__BASH_USER_COMMAND__"), "{terminal}");
+    assert!(terminal.contains("__USER_BASH_MISSING__"), "{terminal}");
+    assert!(
+        terminal.contains("__BASH_MISSING_STATUS__=43"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("__BASH_XTRACE_ON__"), "{terminal}");
+    assert!(!terminal.contains("__BASH_XTRACE_LOST__\r\n"), "{terminal}");
+    assert!(
+        terminal.contains("__BASH_HANDLER_OFF__=41:off"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("__BASH_HANDLER_ON__=42:on"), "{terminal}");
+    assert!(
+        terminal.contains("__BASH_PS4__=__BASH_USER_TRACE__ "),
+        "{terminal}"
+    );
+    assert!(terminal.contains("__BASH_XTRACEFD__=9"), "{terminal}");
+
+    let trace = std::fs::read_to_string(&trace_path).expect("Bash xtrace log");
+    assert!(trace.contains("__BASH_USER_COMMAND__"), "{trace}");
+    assert!(trace.contains("__USER_PROMPT_HOOK__"), "{trace}");
+    assert!(
+        trace
+            .lines()
+            .any(|line| line.contains("printf '__USER_BASH_MISSING__")),
+        "{trace}"
+    );
+    assert_bash_xtrace_has_only_bounded_cosh_entries(&trace);
+    for private_value in [sensitive_path, work_dir.to_str().expect("UTF-8 work dir")] {
+        assert!(
+            !trace.contains(private_value),
+            "private value leaked: {trace}"
+        );
+    }
+    for internal in [
+        "_cosh_json_escape",
+        "_cosh_emit_marker",
+        "_cosh_emit_boundary_marker",
+        "_cosh_precmd_marker",
+        "COSH_SESSION_ID",
+        "_COSH_MARKER_TOKEN",
+    ] {
+        assert!(!trace.contains(internal), "internal xtrace leaked: {trace}");
+    }
+    let marker =
+        std::fs::read_to_string(work_dir.join("cosh-marker.bash")).expect("enhanced Bash marker");
+    let marker_token = marker
+        .lines()
+        .find_map(|line| line.strip_prefix("COSH_MARKER_TOKEN='")?.strip_suffix('\''))
+        .expect("marker token");
+    assert!(
+        !trace.contains(marker_token),
+        "marker token leaked: {trace}"
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_zsh_xtrace_bounds_internal_hooks_and_preserves_user_state() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-zsh-bounded-xtrace-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "PS1='zsh-xtrace% '\n_user_precmd_2683() { print '__USER_ZSH_PRECMD__' }\n\
+         precmd_functions+=(_user_precmd_2683)\n\
+         command_not_found_handler() {\n\
+           case \"$1\" in\n\
+             toggle-off) set +x; return 44;;\n\
+             toggle-on) set -x; return 45;;\n\
+             *) print '__USER_ZSH_MISSING__'; return 46;;\n\
+           esac\n\
+         }\n",
+    )
+    .expect("zshrc");
+    let sensitive_path = "/cosh-private-zsh-path-2683:/usr/bin:/bin";
+    let config = ShellHostConfig::new("enhanced-zsh-bounded-xtrace", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("ZDOTDIR", home_dir.display().to_string())
+        .with_env("PATH", sensitive_path);
+
+    let mut rendered = Vec::new();
+    run_raw_relay_zsh_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("PS4='__ZSH_USER_TRACE__ '"),
+            RawRelayAction::line("set -x"),
+            RawRelayAction::line("print '__ZSH_USER_COMMAND__'"),
+            RawRelayAction::line(
+                "missing-cosh-zsh-xtrace-command; print '__ZSH_MISSING_STATUS__='$?",
+            ),
+            RawRelayAction::line(
+                "if [[ -o xtrace ]]; then print '__ZSH_XTRACE_ON__'; else print '__ZSH_XTRACE_LOST__'; fi",
+            ),
+            RawRelayAction::line(
+                "command_not_found_handler toggle-off; s=$?; print '__ZSH_HANDLER_OFF__='$s:${options[xtrace]}; set +x",
+            ),
+            RawRelayAction::line(
+                "command_not_found_handler toggle-on; s=$?; print '__ZSH_HANDLER_ON__='$s:${options[xtrace]}",
+            ),
+            RawRelayAction::line("print -r -- \"__ZSH_PS4__=$PS4\""),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced Zsh bounded xtrace relay");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    assert!(terminal.contains("__ZSH_USER_COMMAND__"), "{terminal}");
+    assert!(terminal.contains("__USER_ZSH_PRECMD__"), "{terminal}");
+    assert!(terminal.contains("__USER_ZSH_MISSING__"), "{terminal}");
+    assert!(terminal.contains("__ZSH_MISSING_STATUS__=46"), "{terminal}");
+    assert!(terminal.contains("__ZSH_XTRACE_ON__"), "{terminal}");
+    assert!(!terminal.contains("__ZSH_XTRACE_LOST__\r\n"), "{terminal}");
+    // zsh always restores XTRACE when a function returns, even without
+    // LOCAL_OPTIONS. Match that native contract while preserving the status.
+    assert!(terminal.contains("__ZSH_HANDLER_OFF__=44:on"), "{terminal}");
+    assert!(terminal.contains("__ZSH_HANDLER_ON__=45:off"), "{terminal}");
+    assert!(
+        terminal.contains("__ZSH_PS4__=__ZSH_USER_TRACE__ "),
+        "{terminal}"
+    );
+    assert!(
+        !terminal.lines().any(|line| {
+            line.contains("__ZSH_USER_TRACE__")
+                && (line.contains("_cosh") || line.contains("_COSH"))
+        }),
+        "Cosh hook escaped the zsh xtrace guard: {terminal}"
+    );
+    for private_value in [sensitive_path, work_dir.to_str().expect("UTF-8 work dir")] {
+        assert!(
+            !terminal.contains(private_value),
+            "private value leaked: {terminal}"
+        );
+    }
+    for internal in [
+        "_cosh_json_escape",
+        "_cosh_emit_marker",
+        "_cosh_precmd_marker:",
+        "_cosh_preexec_marker:2",
+        "_cosh_zshaddhistory_marker:2",
+        "COSH_SESSION_ID",
+    ] {
+        assert!(
+            !terminal.contains(internal),
+            "internal xtrace leaked: {terminal}"
+        );
+    }
+    let marker = std::fs::read_to_string(work_dir.join(".zshrc")).expect("enhanced Zsh marker");
+    let marker_token = marker
+        .lines()
+        .find_map(|line| line.strip_prefix("COSH_MARKER_TOKEN='")?.strip_suffix('\''))
+        .expect("marker token");
+    assert!(
+        !terminal.contains(marker_token),
+        "marker token leaked: {terminal}"
     );
 
     let _ = std::fs::remove_dir_all(&work_dir);

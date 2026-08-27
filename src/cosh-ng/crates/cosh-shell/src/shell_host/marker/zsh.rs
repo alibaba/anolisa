@@ -364,6 +364,7 @@ _cosh_command_has_secret() {
   return 1
 }
 _cosh_zshaddhistory_marker() {
+  setopt localoptions noxtrace
   local command="${1%$'\n'}"
   if _cosh_is_handoff_wrapper "$command"; then
     local history_command="$(_cosh_unwrap_handoff_command "$command")"
@@ -427,8 +428,14 @@ _cosh_delegate_zsh_command_not_found() {
   fi
   if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
     _COSH_IN_USER_COMMAND_NOT_FOUND=1
+    if [[ "${_COSH_COMMAND_NOT_FOUND_XTRACE:-off}" == on ]]; then
+      setopt xtrace
+    fi
     _cosh_user_command_not_found_handler "$@"
     local result=$?
+    local final_xtrace="${options[xtrace]}"
+    unsetopt xtrace
+    _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE="$final_xtrace"
     _COSH_IN_USER_COMMAND_NOT_FOUND=0
     return "$result"
   fi
@@ -444,7 +451,7 @@ else
   _COSH_HAS_USER_COMMAND_NOT_FOUND=0
 fi
 unset _cosh_user_handler_definition _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLER
-command_not_found_handler() {
+_cosh_command_not_found_handler() {
   local command="$1"
   shift || true
   local original="${_COSH_ATTEMPT_INPUT:-}"
@@ -458,7 +465,7 @@ command_not_found_handler() {
     return $?
   fi
   if (( ${ZSH_SUBSHELL:-0} != ${_COSH_ATTEMPT_SUBSHELL:-0} + 1 )) \
-     || (( ${#funcstack[@]} != 1 )) \
+     || (( ${#funcstack[@]} != 2 )) \
      || [[ "${_COSH_ATTEMPT_EXPANSION_DRIFT:-0}" == 1 ]]; then
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
@@ -511,7 +518,23 @@ command_not_found_handler() {
   _cosh_delegate_zsh_command_not_found "$command" "$@"
   return $?
 }
+command_not_found_handler() {
+  local _COSH_COMMAND_NOT_FOUND_XTRACE="${options[xtrace]}"
+  # zsh restores XTRACE at every function return even without LOCAL_OPTIONS;
+  # the observed post-handler state therefore already matches native zsh.
+  local _COSH_COMMAND_NOT_FOUND_FINAL_XTRACE="$_COSH_COMMAND_NOT_FOUND_XTRACE"
+  unsetopt xtrace
+  _cosh_command_not_found_handler "$@"
+  local result=$?
+  if [[ "$_COSH_COMMAND_NOT_FOUND_FINAL_XTRACE" == on ]]; then
+    setopt xtrace
+  else
+    unsetopt xtrace
+  fi
+  return "$result"
+}
 _cosh_preexec_marker() {
+  setopt localoptions noxtrace
   local command="$1"
   # zsh passes the abbreviated, size-limited form in $2 and the full text of
   # the command being executed in $3. Long inputs truncate $2, so comparing
@@ -591,6 +614,7 @@ _cosh_preexec_marker() {
 }
 _cosh_precmd_marker() {
   local exit_status=$?
+  setopt localoptions noxtrace
   setopt NO_PROMPT_CR 2>/dev/null || true
   setopt NO_PROMPT_SP 2>/dev/null || true
   _cosh_apply_internal_recovery
