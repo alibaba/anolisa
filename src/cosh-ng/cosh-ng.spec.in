@@ -87,6 +87,11 @@ install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 install -d %{buildroot}%{_datadir}/anolisa/components/cosh-ng
 install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-ng/component.toml
 
+# Install the managed Task checkpoint workflow for the outer COSH Agent.
+install -d %{buildroot}%{_datadir}/anolisa/skills/manage-task-checkpoints
+install -m 0644 skills/manage-task-checkpoints/SKILL.md \
+    %{buildroot}%{_datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md
+
 %files
 %license %{_docdir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/README.md
@@ -99,6 +104,7 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_libexecdir_cosh}/cosh-shell
 %{_unitdir}/cosh-gateway@.service
 %{_datadir}/anolisa/components/cosh-ng/component.toml
+%{_datadir}/anolisa/skills/manage-task-checkpoints/
 
 %preun
 if [ "$1" -eq 0 ]; then

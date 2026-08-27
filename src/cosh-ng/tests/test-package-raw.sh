@@ -11,7 +11,10 @@ LINUX_CONTRACT="$SOURCE/.anolisa/component.toml"
 MACOS_CONTRACT="$SOURCE/.anolisa/component.macos.toml"
 VERSION="$(awk -F'"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
 
-install -d -m 0755 "$SOURCE/.anolisa" "$SOURCE/packaging/systemd"
+install -d -m 0755 \
+    "$SOURCE/.anolisa" \
+    "$SOURCE/packaging/systemd" \
+    "$SOURCE/skills/manage-task-checkpoints"
 install -p -m 0644 "$ROOT/.anolisa/component.toml" "$LINUX_CONTRACT"
 install -p -m 0644 "$ROOT/.anolisa/component.macos.toml" "$MACOS_CONTRACT"
 install -p -m 0644 "$ROOT/Cargo.toml" "$SOURCE/Cargo.toml"
@@ -19,6 +22,8 @@ install -p -m 0644 "$ROOT/LICENSE" "$SOURCE/LICENSE"
 install -p -m 0644 "$ROOT/README.md" "$SOURCE/README.md"
 install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
     "$SOURCE/packaging/systemd/cosh-gateway@.service.in"
+install -p -m 0644 "$ROOT/skills/manage-task-checkpoints/SKILL.md" \
+    "$SOURCE/skills/manage-task-checkpoints/SKILL.md"
 
 test_rpm_systemd_unit_render() {
     local rpm_libexec rpm_libexec_cosh rpm_libexec_cosh_macro rendered_unit
@@ -201,6 +206,7 @@ test_native_without_metadata() {
     install -d -m 0755 \
         "$native_source/.anolisa" \
         "$native_source/packaging/systemd" \
+        "$native_source/skills/manage-task-checkpoints" \
         "$native_bins"
     sed "0,/version = \"$VERSION\"/s//version = \"$native_version\"/" \
         "$ROOT/Cargo.toml" > "$native_source/Cargo.toml"
@@ -210,6 +216,8 @@ test_native_without_metadata() {
     install -p -m 0644 "$ROOT/README.md" "$native_source/README.md"
     install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
         "$native_source/packaging/systemd/cosh-gateway@.service.in"
+    install -p -m 0644 "$ROOT/skills/manage-task-checkpoints/SKILL.md" \
+        "$native_source/skills/manage-task-checkpoints/SKILL.md"
     for binary in cosh-cli cosh-core cosh-gateway cosh-shell; do
         install -p -m 0755 "$python_bin" "$native_bins/$binary"
     done
@@ -296,6 +304,8 @@ cmp "$LINUX_X64/cosh-gateway" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway"
 cmp "$LINUX_X64/cosh-shell" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell"
 cmp "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
     "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
+cmp "$ROOT/skills/manage-task-checkpoints/SKILL.md" \
+    "$EXTRACTED/share/anolisa/skills/manage-task-checkpoints/SKILL.md"
 test ! -e "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in"
 grep -Fqx 'EnvironmentFile=/etc/cosh/gateway-%i.env' \
     "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
@@ -338,6 +348,7 @@ test "$(file_mode "$EXTRACTED/bin/cosh")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell")" = 755
 test "$(file_mode "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in")" = 644
+test "$(file_mode "$EXTRACTED/share/anolisa/skills/manage-task-checkpoints/SKILL.md")" = 644
 test "$(file_mode "$EXTRACTED/share/doc/cosh-ng/README.md")" = 644
 test ! -e "$EXTRACTED/share/anolisa/hooks"
 cmp "$STAGED/bin/cosh" "$EXTRACTED/bin/cosh"
@@ -420,8 +431,15 @@ gateway_service_file = {
     "mode": "0644",
     "render": "anolisa-paths-v1",
 }
+task_checkpoint_skill_file = {
+    "source": "share/anolisa/skills/manage-task-checkpoints/SKILL.md",
+    "target": "{datadir}/anolisa/skills/manage-task-checkpoints/SKILL.md",
+    "mode": "0644",
+}
 assert gateway_service_file in linux_common["layout"]["files"]
 assert gateway_service_file not in macos_common["layout"]["files"]
+assert task_checkpoint_skill_file in linux_common["layout"]["files"]
+assert task_checkpoint_skill_file not in macos_common["layout"]["files"]
 assert linux_common.pop("services") == [
     {
         "unit": "cosh-gateway@.service",
@@ -435,7 +453,7 @@ linux_common["layout"] = dict(linux_common["layout"])
 linux_common["layout"]["files"] = [
     entry
     for entry in linux_common["layout"]["files"]
-    if entry != gateway_service_file
+    if entry not in (gateway_service_file, task_checkpoint_skill_file)
 ]
 assert linux_common == macos_common
 assert linux.get("backends") == macos.get("backends")
@@ -456,6 +474,7 @@ tar -xzf "$TMP/out-macos-arm64/$MACOS_ARTIFACT" -C "$MACOS_EXTRACTED"
 cmp "$MACOS_CONTRACT" "$MACOS_EXTRACTED/.anolisa/component.toml"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway-acp@.service.in"
+test ! -e "$MACOS_EXTRACTED/share/anolisa/skills/manage-task-checkpoints"
 grep -Fq 'name = "openssl1.1"' "$ROOT/.anolisa/component.toml"
 test -z "$(grep -F 'name = "openssl1.1"' \
     "$ROOT/.anolisa/component.macos.toml" || true)"
