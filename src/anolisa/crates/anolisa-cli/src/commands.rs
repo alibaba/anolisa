@@ -445,7 +445,7 @@ fn telemetry_command_scope(args: &telemetry::TelemetryArgs) -> CommandScope {
     match &args.command {
         telemetry::TelemetryCommands::Status { .. } => CommandScope::ReadOnly,
         // enable / disable / link / unlink / upload / init mutate system state
-        // and need root; an explicit dry-run may preview without root.
+        // and need root; an explicit system-mode dry-run may preview without root.
         telemetry::TelemetryCommands::Enable
         | telemetry::TelemetryCommands::Disable
         | telemetry::TelemetryCommands::Link
@@ -664,6 +664,40 @@ mod tests {
 
         validate_global_args_with_euid(&ctx, system_only("repair", true), 1000, true)
             .expect("non-root system dry-run should reach preview-capable system handlers");
+    }
+
+    #[test]
+    fn telemetry_mutations_allow_non_root_system_dry_run_only() {
+        let commands = [
+            telemetry::TelemetryCommands::Enable,
+            telemetry::TelemetryCommands::Disable,
+            telemetry::TelemetryCommands::Link,
+            telemetry::TelemetryCommands::Unlink,
+            telemetry::TelemetryCommands::Upload { loop_flag: false },
+            telemetry::TelemetryCommands::Upload { loop_flag: true },
+            telemetry::TelemetryCommands::Init,
+        ];
+
+        for command in commands {
+            let command =
+                Commands::Management(ManagementCommands::Telemetry(telemetry::TelemetryArgs {
+                    command,
+                }));
+            let policy = command_policy(&command);
+            let mut preview = ctx_with_prefix(PathBuf::from("/"));
+            preview.dry_run = true;
+
+            validate_global_args_with_euid(&preview, policy, 1000, true)
+                .expect("non-root telemetry dry-run should reach the preview dispatcher");
+            let err = validate_global_args_with_euid(
+                &ctx_with_prefix(PathBuf::from("/")),
+                policy,
+                1000,
+                true,
+            )
+            .expect_err("telemetry apply still requires root in system mode");
+            assert_eq!(err.code(), "PERMISSION_DENIED");
+        }
     }
 
     #[test]

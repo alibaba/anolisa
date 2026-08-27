@@ -14,8 +14,9 @@ use anolisa_core::{
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::systemd::{Systemd, SystemdError};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 
-use crate::context::CliContext;
+use crate::context::{CliContext, InstallMode};
 use crate::response::{CliError, render_json};
 
 /// systemd unit that runs the resident upload loop.
@@ -66,7 +67,51 @@ pub enum TelemetryCommands {
 
 /// Dispatch `telemetry` subcommands.
 pub fn handle(args: TelemetryArgs, ctx: &CliContext) -> Result<(), CliError> {
-    match args.command {
+    dispatch(args.command, ctx, apply)
+}
+
+fn dispatch(
+    command: TelemetryCommands,
+    ctx: &CliContext,
+    apply: impl FnOnce(TelemetryCommands, &CliContext) -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    if ctx.dry_run
+        && let Some((command_name, message)) = preview(&command)
+    {
+        if ctx.install_mode != InstallMode::System {
+            return Err(CliError::InvalidArgument {
+                command: command_name.to_string(),
+                reason: format!(
+                    "command '{command_name}' operates on system scope; use `--install-mode system` to preview it"
+                ),
+            });
+        }
+        if ctx.json {
+            return render_json(
+                command_name,
+                TelemetryPreviewPayload {
+                    dry_run: true,
+                    message,
+                },
+            );
+        }
+        if !ctx.quiet {
+            println!("[dry-run] {message}");
+        }
+        return Ok(());
+    }
+
+    apply(command, ctx)
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct TelemetryPreviewPayload {
+    dry_run: bool,
+    message: &'static str,
+}
+
+fn apply(command: TelemetryCommands, ctx: &CliContext) -> Result<(), CliError> {
+    match command {
         TelemetryCommands::Enable => handle_enable(ctx),
         TelemetryCommands::Disable => handle_disable(ctx),
         TelemetryCommands::Status { json } => handle_status(json),
@@ -74,6 +119,39 @@ pub fn handle(args: TelemetryArgs, ctx: &CliContext) -> Result<(), CliError> {
         TelemetryCommands::Unlink => handle_unlink(),
         TelemetryCommands::Upload { loop_flag } => handle_upload(loop_flag),
         TelemetryCommands::Init => handle_init(ctx),
+    }
+}
+
+fn preview(command: &TelemetryCommands) -> Option<(&'static str, &'static str)> {
+    match command {
+        TelemetryCommands::Enable => Some((
+            "telemetry enable",
+            "would enable telemetry collection and start the uploader",
+        )),
+        TelemetryCommands::Disable => Some((
+            "telemetry disable",
+            "would disable telemetry collection and stop the uploader",
+        )),
+        TelemetryCommands::Status { .. } => None,
+        TelemetryCommands::Link => Some((
+            "telemetry link",
+            "would link this instance to named reporting",
+        )),
+        TelemetryCommands::Unlink => Some((
+            "telemetry unlink",
+            "would unlink this instance and erase the cached identity",
+        )),
+        TelemetryCommands::Upload { loop_flag: true } => Some((
+            "telemetry upload",
+            "would start the continuous telemetry upload loop",
+        )),
+        TelemetryCommands::Upload { loop_flag: false } => {
+            Some(("telemetry upload", "would upload buffered telemetry once"))
+        }
+        TelemetryCommands::Init => Some((
+            "telemetry init",
+            "would initialize the telemetry operations channel",
+        )),
     }
 }
 
@@ -322,6 +400,9 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    use crate::context::InstallMode;
+    use crate::test_support::{TestContextOptions, context_for_root};
+
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
@@ -330,6 +411,31 @@ mod tests {
 
     fn parse(args: &[&str]) -> TelemetryCommands {
         TestCli::parse_from(args).command
+    }
+
+    fn ctx(dry_run: bool) -> CliContext {
+        context_for_root(
+            Path::new("/tmp/anolisa-telemetry-validation"),
+            InstallMode::System,
+            None,
+            TestContextOptions {
+                dry_run,
+                quiet: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn mutation_commands() -> Vec<TelemetryCommands> {
+        vec![
+            TelemetryCommands::Enable,
+            TelemetryCommands::Disable,
+            TelemetryCommands::Link,
+            TelemetryCommands::Unlink,
+            TelemetryCommands::Upload { loop_flag: false },
+            TelemetryCommands::Upload { loop_flag: true },
+            TelemetryCommands::Init,
+        ]
     }
 
     #[test]
@@ -385,6 +491,117 @@ mod tests {
             parse(&["t", "upload"]),
             TelemetryCommands::Upload { loop_flag: false }
         ));
+    }
+
+    #[test]
+    fn dry_run_never_enters_the_apply_dispatcher() {
+        for command in mutation_commands() {
+            let mut applied = false;
+            dispatch(command, &ctx(true), |_, _| {
+                applied = true;
+                Ok(())
+            })
+            .expect("telemetry preview");
+            assert!(!applied, "dry-run must not dispatch telemetry effects");
+        }
+    }
+
+    #[test]
+    fn user_mode_dry_run_rejects_every_mutation_before_apply() {
+        for command in mutation_commands() {
+            let mut user_ctx = ctx(true);
+            user_ctx.install_mode = InstallMode::User;
+            let mut applied = false;
+
+            let error = dispatch(command, &user_ctx, |_, _| {
+                applied = true;
+                Ok(())
+            })
+            .expect_err("user mode cannot preview system telemetry mutations");
+
+            assert_eq!(error.code(), "INVALID_ARGUMENT");
+            assert!(
+                error
+                    .to_string()
+                    .contains("use `--install-mode system` to preview it")
+            );
+            assert!(!applied, "rejected preview must not dispatch effects");
+        }
+    }
+
+    #[test]
+    fn apply_dispatches_every_mutation() {
+        for command in mutation_commands() {
+            let mut applied = false;
+            dispatch(command, &ctx(false), |_, _| {
+                applied = true;
+                Ok(())
+            })
+            .expect("telemetry apply dispatch");
+            assert!(applied, "apply must retain the existing dispatcher");
+        }
+    }
+
+    #[test]
+    fn status_remains_read_only_when_global_dry_run_is_set() {
+        let mut user_ctx = ctx(true);
+        user_ctx.install_mode = InstallMode::User;
+        let mut dispatched = false;
+        dispatch(
+            TelemetryCommands::Status { json: false },
+            &user_ctx,
+            |_, _| {
+                dispatched = true;
+                Ok(())
+            },
+        )
+        .expect("telemetry status dispatch");
+        assert!(dispatched, "dry-run must not replace the status read path");
+    }
+
+    #[test]
+    fn upload_preview_distinguishes_once_from_loop() {
+        assert_eq!(
+            preview(&TelemetryCommands::Upload { loop_flag: false }),
+            Some(("telemetry upload", "would upload buffered telemetry once"))
+        );
+        assert_eq!(
+            preview(&TelemetryCommands::Upload { loop_flag: true }),
+            Some((
+                "telemetry upload",
+                "would start the continuous telemetry upload loop"
+            ))
+        );
+    }
+
+    #[test]
+    fn json_preview_never_enters_the_apply_dispatcher() {
+        let mut ctx = ctx(true);
+        ctx.json = true;
+
+        let mut applied = false;
+        dispatch(TelemetryCommands::Enable, &ctx, |_, _| {
+            applied = true;
+            Ok(())
+        })
+        .expect("telemetry JSON preview");
+
+        assert!(!applied, "JSON preview must not dispatch telemetry effects");
+    }
+
+    #[test]
+    fn preview_payload_is_machine_readable() {
+        let payload = TelemetryPreviewPayload {
+            dry_run: true,
+            message: preview(&TelemetryCommands::Link).expect("link preview").1,
+        };
+        let value = serde_json::to_value(payload).expect("serialize telemetry preview");
+
+        assert_eq!(value["dry_run"], true);
+        assert_eq!(
+            value["message"],
+            "would link this instance to named reporting"
+        );
     }
 
     #[test]
