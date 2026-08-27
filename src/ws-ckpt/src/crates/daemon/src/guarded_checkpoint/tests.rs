@@ -468,7 +468,7 @@ async fn listener_binds_kernel_peer_uid_for_guarded_round_trip() {
             assert_eq!(evidence.caller_uid, nix::unistd::geteuid().as_raw());
             assert!(matches!(
                 evidence.outcome,
-                GuardedCheckpointOutcomeV2::Skipped { .. }
+                GuardedCheckpointOutcomeV2::Created { .. }
             ));
         }
         other => panic!("expected guarded response, got {other:?}"),
@@ -479,28 +479,28 @@ async fn listener_binds_kernel_peer_uid_for_guarded_round_trip() {
 }
 
 #[tokio::test]
-async fn skipped_checkpoint_publishes_only_after_durable_save() {
+async fn empty_workspace_checkpoint_is_created_and_published_after_durable_save() {
     let fixture = Fixture::new(false);
     let response = create_checkpoint(&fixture, 1000).await;
     match response {
         Response::GuardedCheckpointV2Ok { evidence } => assert!(matches!(
             evidence.outcome,
-            GuardedCheckpointOutcomeV2::Skipped { .. }
+            GuardedCheckpointOutcomeV2::Created { .. }
         )),
-        other => panic!("expected skipped evidence, got {other:?}"),
+        other => panic!("expected created evidence, got {other:?}"),
     }
-    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 1);
     let workspace = fixture.state.get_by_wsid(WS_ID).expect("registered");
+    let workspace = workspace.read().await;
+    assert!(workspace.index.snapshots.contains_key(CHECKPOINT_ID));
     assert!(workspace
-        .read()
-        .await
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
 }
 
 #[tokio::test]
-async fn skipped_save_failure_does_not_publish_evidence_in_memory() {
+async fn empty_workspace_save_failure_does_not_publish_evidence_in_memory() {
     let fixture = Fixture::new(false);
     std::fs::create_dir_all(
         fixture
@@ -513,15 +513,15 @@ async fn skipped_save_failure_does_not_publish_evidence_in_memory() {
     std::fs::write(fixture.state.index_dir(WS_ID), "not a directory")
         .expect("create index path obstruction");
 
-    assert_rejected(
+    assert!(matches!(
         create_checkpoint(&fixture, 1000).await,
-        GuardedCheckpointRejectionCodeV2::DaemonNotReady,
-    );
-    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 0);
+        Response::Error { .. }
+    ));
+    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 1);
     let workspace = fixture.state.get_by_wsid(WS_ID).expect("registered");
+    let workspace = workspace.read().await;
+    assert!(!workspace.index.snapshots.contains_key(CHECKPOINT_ID));
     assert!(!workspace
-        .read()
-        .await
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
