@@ -73,6 +73,8 @@ mod input_intent;
 mod marker;
 #[path = "shell_host/native.rs"]
 mod native;
+#[path = "shell_host/parity.rs"]
+mod parity;
 #[path = "shell_host/relay.rs"]
 mod relay;
 #[path = "shell_host/termios.rs"]
