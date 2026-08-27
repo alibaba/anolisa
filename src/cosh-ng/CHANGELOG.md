@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-08-27
+
+### Added
+- Enhanced Assisted mode no longer relies on a global Bash DEBUG trap or forced tracing options; user-defined traps, shell options, and prompt hooks are preserved, and slash-command handoffs keep normal interactive shell semantics (#2832)
+- System extensions installed outside the package-managed root (e.g. under `/usr/local/share/anolisa/extensions`) are now discovered automatically, so raw-installed sec-core and tokenless extensions load without a separate enable step; conflicting duplicate system installs stay disabled unless an exact source selection is persisted (#2909)
+
+### Fixed
+- With xtrace enabled, cosh's internal hook activity no longer appears in the trace, so dynamic marker, working-directory, and environment data are not exposed; user commands and user-defined hooks keep producing trace output as before (#2914)
+- Slash-bearing Han prompts such as `打开./missing/SKILL.md` are routed to the Agent again instead of failing as a shell path, and the Agent now receives the correct prompt-time working directory, including after `cd` (#2918)
+- Slash commands entered in the interactive shell are now persisted in Bash history so Up-arrow recall retrieves them correctly instead of an older command (#2917)
+
 ## [0.21.1] — 2026-08-26
 
 ### Fixed
