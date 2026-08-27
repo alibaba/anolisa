@@ -1207,6 +1207,86 @@ fn list_cases_and_count_filter_by_agent_id() {
 }
 
 #[test]
+fn list_cases_and_count_filter_by_status_and_blocked() {
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    let mut open_a = fixture_case(Uuid::new_v4(), RiskCaseStatus::Open);
+    open_a.blocked = false;
+    let mut open_blocked = fixture_case(Uuid::new_v4(), RiskCaseStatus::Open);
+    open_blocked.blocked = true;
+    let confirmed = fixture_case(Uuid::new_v4(), RiskCaseStatus::Confirmed);
+    for case in &[&open_a, &open_blocked, &confirmed] {
+        store.upsert_case(case, &[]).expect("case should persist");
+    }
+
+    // status filter must apply at the store, not just in-memory.
+    assert_eq!(
+        store
+            .case_count(None, Some("open"), None)
+            .expect("open total should load"),
+        2
+    );
+    assert_eq!(
+        store
+            .list_cases(10, 0, None, Some("confirmed"), None)
+            .expect("confirmed page should load")
+            .len(),
+        1
+    );
+
+    // blocked=true filter must return only the blocked case.
+    let blocked_only = store
+        .list_cases(10, 0, None, None, Some(true))
+        .expect("blocked page should load");
+    assert_eq!(blocked_only.len(), 1);
+    assert!(blocked_only[0].blocked);
+    assert_eq!(
+        store
+            .case_count(None, None, Some(true))
+            .expect("blocked total should load"),
+        1
+    );
+
+    // Combined filters (open + blocked=false) must match a single case.
+    assert_eq!(
+        store
+            .case_count(None, Some("open"), Some(false))
+            .expect("open+unblocked total should load"),
+        1
+    );
+}
+
+#[test]
+fn case_ids_for_events_maps_evidence_to_producing_case() {
+    use uuid::Uuid;
+    let store = SecurityStore::open_in_memory().expect("fixture store should open");
+    // Two cases in the same agent/policy/revision triplet (different bursts).
+    let case_a = fixture_case(Uuid::new_v4(), RiskCaseStatus::Open);
+    let case_b = fixture_case(Uuid::new_v4(), RiskCaseStatus::Open);
+    let event_a = Uuid::new_v4();
+    let event_b = Uuid::new_v4();
+    let event_c = Uuid::new_v4(); // never linked
+    store
+        .upsert_case(&case_a, &[event_a])
+        .expect("case A should persist");
+    store
+        .upsert_case(&case_b, &[event_b])
+        .expect("case B should persist");
+
+    let map = store
+        .case_ids_for_events(&[event_a, event_b, event_c])
+        .expect("lookup should succeed");
+    assert_eq!(map.get(&event_a).copied(), Some(case_a.case_id));
+    assert_eq!(map.get(&event_b).copied(), Some(case_b.case_id));
+    assert!(!map.contains_key(&event_c));
+
+    // Empty input must return an empty map without hitting the DB.
+    let empty = store
+        .case_ids_for_events(&[])
+        .expect("empty lookup should succeed");
+    assert!(empty.is_empty());
+}
+
+#[test]
 fn case_index_maps_agent_policy_revision_triplet_to_latest_case() {
     let store = SecurityStore::open_in_memory().expect("fixture store should open");
     // Older and newer cases share the (agent, policy, revision) triplet; the
