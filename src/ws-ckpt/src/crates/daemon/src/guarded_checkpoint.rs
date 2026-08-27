@@ -193,60 +193,12 @@ pub(crate) async fn checkpoint(
         );
     }
 
-    // The registered path is user-replaceable. Inspect the same internal live
-    // subvolume that `create_snapshot(ws_id, ..)` will operate on.
-    let live_path = state.backend.data_root().join(ws_id);
-    let is_empty = match tokio::fs::read_dir(&live_path).await {
-        Ok(mut entries) => match entries.next_entry().await {
-            Ok(entry) => entry.is_none(),
-            Err(error) => {
-                return rejected(
-                    GuardedCheckpointRejectionCodeV2::DaemonNotReady,
-                    format!("failed to inspect workspace contents: {error}"),
-                )
-            }
-        },
-        Err(error) => {
-            return rejected(
-                GuardedCheckpointRejectionCodeV2::DaemonNotReady,
-                format!("failed to inspect workspace contents: {error}"),
-            )
-        }
-    };
-
     let Some(registered_path) = workspace.path.to_str().map(str::to_owned) else {
         return rejected(
             GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath,
             "registered workspace path is not valid UTF-8",
         );
     };
-    if is_empty {
-        let reason = "Empty workspace, no snapshot created.".to_string();
-        let evidence = evidence(
-            ws_id,
-            registered_path,
-            expected_generation,
-            checkpoint_id,
-            operation_digest,
-            caller_uid,
-            GuardedCheckpointOutcomeV2::Skipped {
-                reason: reason.clone(),
-            },
-        );
-        next_index
-            .governed_evidence
-            .insert(checkpoint_id.to_string(), evidence.clone());
-        if let Err(error) =
-            crate::index_store::save_durable(&state.index_dir(ws_id), &next_index).await
-        {
-            return rejected(
-                GuardedCheckpointRejectionCodeV2::DaemonNotReady,
-                format!("failed to durably save skipped checkpoint evidence: {error:#}"),
-            );
-        }
-        workspace.index = next_index;
-        return Response::GuardedCheckpointV2Ok { evidence };
-    }
 
     if let Err(error) = state.backend.create_snapshot(ws_id, checkpoint_id).await {
         return backend_effect_error(format!(
