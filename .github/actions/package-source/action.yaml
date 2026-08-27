@@ -10,6 +10,10 @@ inputs:
   version:
     description: 'Version string without v prefix (e.g. 2.1.0)'
     required: true
+  tokenless-source-root:
+    description: 'Repository root containing the Tokenless source tree'
+    required: false
+    default: '.'
   artifact-suffix:
     description: 'Suffix appended to both the tar.gz filename and artifact name (e.g. ".preview"). Leave empty for official builds.'
     required: false
@@ -40,6 +44,8 @@ runs:
     # -----------------------------------------------------------------
     - name: Resolve source directory
       shell: bash
+      env:
+        TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless-source-root }}
       run: |
         COMPONENT="${{ inputs.component }}"
         VERSION="${{ inputs.version }}"
@@ -50,7 +56,7 @@ runs:
           cosh-ng)        SRC_DIR="src/cosh-ng" ;;
           agent-sec-core) SRC_DIR="src/agent-sec-core" ;;
           agentsight)     SRC_DIR="src/agentsight" ;;
-          tokenless)     SRC_DIR="src/tokenless" ;;
+          tokenless)     SRC_DIR="${TOKENLESS_SOURCE_ROOT}/src/tokenless" ;;
           os-skills)      SRC_DIR="src/os-skills" ;;
           ws-ckpt)        SRC_DIR="src/ws-ckpt" ;;
           agent-memory)   SRC_DIR="src/agent-memory" ;;
@@ -157,7 +163,7 @@ runs:
         cd /tmp/build/${ARCHIVE_NAME}
 
         rm -rf third_party/rtk
-        bash scripts/setup-rtk.sh third_party/rtk
+        bash "$GITHUB_ACTION_PATH/../build-tokenless-prebuilt/setup-rtk.sh" "$PWD"
         rm -rf third_party/rtk/.git
 
     - name: Generate tokenless component contract

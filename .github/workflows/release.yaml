@@ -185,6 +185,15 @@ jobs:
           if-no-files-found: error
           retention-days: 28
 
+      - name: Upload Tokenless Python wheels
+        if: matrix.component == 'tokenless'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenless-python-wheels-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.tokenless-prebuilt.outputs.wheel-directory }}/*
+          if-no-files-found: error
+          retention-days: 28
+
   # =========================================================================
   # Step 2: Publish (requires manual approval via GitHub Environment)
   #
@@ -258,6 +267,25 @@ jobs:
             --version "$VERSION" \
             --layout actions
 
+      - name: Download Tokenless Python wheels
+        if: needs.package.outputs.component == 'tokenless'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tokenless-python-wheels-${{ needs.package.outputs.version }}-*
+          merge-multiple: true
+          path: /tmp/python-wheels
+
+      - name: Verify Tokenless Python wheels
+        if: needs.package.outputs.component == 'tokenless'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 .github/actions/build-tokenless-prebuilt/verify-wheels.py \
+            --directory /tmp/python-wheels \
+            --version "$VERSION" \
+            --layout aggregate \
+            --write-checksums /tmp/python-wheels/SHA256SUMS-python-wheels.txt
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -302,6 +330,15 @@ jobs:
             done < <(
               find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
                 LC_ALL=C sort
+            )
+          fi
+          if [ "$COMPONENT" = tokenless ]; then
+            while IFS= read -r asset; do
+              ASSETS+=("$asset")
+            done < <(
+              find /tmp/python-wheels -maxdepth 1 -type f \
+                \( -name '*.whl' -o -name 'SHA256SUMS-python-wheels.txt' \) \
+                -print | LC_ALL=C sort
             )
           fi
 

@@ -213,6 +213,8 @@ run_profile() {
     shift
     local image target target_env image_env safe_path linker archiver
     local cargo_home container_opts deployment encoded
+    local argument requested_target separator
+    local -a cargo_args rustc_args
 
     target="$(profile_target "$profile")"
     image="$(profile_image_id "$profile")"
@@ -221,6 +223,41 @@ run_profile() {
     image_env="CROSS_TARGET_${target_env}_IMAGE"
     safe_path="$(profile_path "$profile")"
     cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    separator=0
+    cargo_args=()
+    rustc_args=()
+    while [ "$#" -gt 0 ]; do
+        argument="$1"
+        shift
+        if [ "$separator" -eq 1 ]; then
+            rustc_args+=("$argument")
+            continue
+        fi
+        case "$argument" in
+            --)
+                separator=1
+                ;;
+            --target)
+                [ "$#" -gt 0 ] || die '--target requires a value'
+                requested_target="$1"
+                shift
+                [ "$requested_target" = "$target" ] || \
+                    die "Cargo target $requested_target does not match profile $profile"
+                ;;
+            --target=*)
+                requested_target="${argument#--target=}"
+                [ "$requested_target" = "$target" ] || \
+                    die "Cargo target $requested_target does not match profile $profile"
+                ;;
+            *)
+                cargo_args+=("$argument")
+                ;;
+        esac
+    done
+    cargo_args+=(--target "$target")
+    if [ "$separator" -eq 1 ]; then
+        cargo_args+=(-- "${rustc_args[@]}")
+    fi
     install -d -m 0755 "$cargo_home/sccache"
     case "$profile" in
         gnu2.17-x86_64|gnu2.28-x86_64) linker=gcc; archiver='ar' ;;
@@ -264,7 +301,7 @@ run_profile() {
             "AR_${target//-/_}=$archiver" \
             "CFLAGS_${target//-/_}=-mmacosx-version-min=$deployment" \
             "CXXFLAGS_${target//-/_}=-mmacosx-version-min=$deployment" \
-            cross "$@" --target "$target"
+            cross "${cargo_args[@]}"
     else
         if [ "$profile" = gnu2.17-aarch64 ] || [ "$profile" = gnu2.28-aarch64 ]; then
             local sysroot=/usr/xcc/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
@@ -277,7 +314,7 @@ run_profile() {
             "CARGO_TARGET_${target_env}_LINKER=$linker" \
             "CC_${target//-/_}=$linker" \
             "AR_${target//-/_}=$archiver" \
-            cross "$@" --target "$target"
+            cross "${cargo_args[@]}"
     fi
 }
 

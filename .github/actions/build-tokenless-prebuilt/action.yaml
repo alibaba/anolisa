@@ -15,7 +15,7 @@ inputs:
     description: Prepared Cross release profile.
     required: true
   tag:
-    description: Release tag to bind to the checked-out commit. Empty for previews.
+    description: Exact Tokenless source tag to bind; empty uses the checked-out commit.
     required: false
     default: ''
 
@@ -23,6 +23,9 @@ outputs:
   artifact-directory:
     description: Directory containing the tar, checksums, and CycloneDX SBOM.
     value: ${{ steps.build.outputs.artifact-directory }}
+  wheel-directory:
+    description: Directory containing the Python wheels for this target.
+    value: ${{ steps.build.outputs.wheel-directory }}
 
 runs:
   using: composite
@@ -31,6 +34,11 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+
+    - name: Select uv
+      uses: astral-sh/setup-uv@v8.0.0
+      with:
+        version: '0.11.7'
 
     - name: Select Node.js 22
       uses: actions/setup-node@v4
@@ -42,6 +50,8 @@ runs:
       shell: bash
       env:
         TOKENLESS_OUTPUT_DIR: ${{ runner.temp }}/tokenless-prebuilt-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        TOKENLESS_WHEEL_DIR: ${{ runner.temp }}/tokenless-python-wheels-${{ inputs.target-os }}-${{ inputs.target-arch }}
+        TOKENLESS_SOURCE_WORKTREE: ${{ runner.temp }}/anolisa-raw-release-source-worktrees/tokenless
         TOKENLESS_VERSION: ${{ inputs.version }}
         TOKENLESS_TARGET_OS: ${{ inputs.target-os }}
         TOKENLESS_TARGET_ARCH: ${{ inputs.target-arch }}
@@ -51,9 +61,11 @@ runs:
         "$GITHUB_ACTION_PATH/build.sh" \
           --source-repo "$GITHUB_WORKSPACE" \
           --output-dir "$TOKENLESS_OUTPUT_DIR" \
+          --wheel-output-dir "$TOKENLESS_WHEEL_DIR" \
           --version "$TOKENLESS_VERSION" \
           --target-os "$TOKENLESS_TARGET_OS" \
           --target-arch "$TOKENLESS_TARGET_ARCH" \
           --profile "$TOKENLESS_PROFILE" \
           --tag "$TOKENLESS_TAG"
         echo "artifact-directory=$TOKENLESS_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+        echo "wheel-directory=$TOKENLESS_WHEEL_DIR" >> "$GITHUB_OUTPUT"

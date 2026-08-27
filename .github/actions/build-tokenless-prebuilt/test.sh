@@ -6,20 +6,32 @@ ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMON_DIR="$(cd "$ACTION_DIR/../prebuilt-rust-common" && pwd)"
 REPO_ROOT="$(git -C "$ACTION_DIR" rev-parse --show-toplevel)"
 TEMPORARY="$(mktemp -d)"
-trap 'rm -rf -- "$TEMPORARY"' EXIT
+HISTORICAL_ARCHIVE_NAME="tokenless-historical-${TEMPORARY##*/}"
+HISTORICAL_BUILD="/tmp/build/$HISTORICAL_ARCHIVE_NAME"
+HISTORICAL_DRIFT_BUILD="${HISTORICAL_BUILD}-drift"
+trap 'rm -rf -- "$TEMPORARY" "$HISTORICAL_BUILD" "$HISTORICAL_DRIFT_BUILD"' EXIT
 
-python3 - "$ACTION_DIR/action.yaml" <<'PY'
+python3 - \
+    "$ACTION_DIR/action.yaml" \
+    "$REPO_ROOT/.github/workflows/release-preview.yaml" \
+    "$ACTION_DIR/build.sh" <<'PY'
 import sys
 from pathlib import Path
 
 
 action = Path(sys.argv[1]).read_text(encoding="utf-8")
+pinned_uv = "uses: astral-sh/setup-uv@v8.0.0\n      with:\n        version: '0.11.7'"
+if pinned_uv not in action:
+    raise SystemExit("composite action does not install the pinned uv release")
 expected_bindings = (
+    "TOKENLESS_WHEEL_DIR: ${{ runner.temp }}/tokenless-python-wheels-${{ inputs.target-os }}-${{ inputs.target-arch }}",
+    "TOKENLESS_SOURCE_WORKTREE: ${{ runner.temp }}/anolisa-raw-release-source-worktrees/tokenless",
     "TOKENLESS_VERSION: ${{ inputs.version }}",
     "TOKENLESS_TARGET_OS: ${{ inputs.target-os }}",
     "TOKENLESS_TARGET_ARCH: ${{ inputs.target-arch }}",
     "TOKENLESS_PROFILE: ${{ inputs.profile }}",
     "TOKENLESS_TAG: ${{ inputs.tag }}",
+    "wheel-directory=$TOKENLESS_WHEEL_DIR",
 )
 for binding in expected_bindings:
     if binding not in action:
@@ -31,6 +43,36 @@ if marker not in action:
 run_block = action.split(marker, 1)[1]
 if "${{ inputs." in run_block:
     raise SystemExit("composite action interpolates an input directly into Bash")
+
+preview = Path(sys.argv[2]).read_text(encoding="utf-8")
+expected_preview_bindings = (
+    "      - uses: actions/checkout@v4\n\n      - name: Checkout Tokenless source tag",
+    "if: inputs.tokenless_source_tag != ''",
+    "description: 'Optional exact Tokenless source tag with Python packaging (v0.7.7+, e.g. tokenless/v0.7.14)'",
+    'if [ "$SOURCE_TAG" != "tokenless/v$VERSION" ]; then',
+    "ref: ${{ format('refs/tags/{0}', inputs.tokenless_source_tag) }}",
+    "path: tokenless-source",
+    "tokenless-source-root: ${{ inputs.tokenless_source_tag != '' && 'tokenless-source' || '.' }}",
+    "python3 .github/actions/prebuilt-rust-common/plan_matrix.py",
+)
+for binding in expected_preview_bindings:
+    if binding not in preview:
+        raise SystemExit(f"preview workflow does not bind every artifact to the source tag: {binding}")
+
+build = Path(sys.argv[3]).read_text(encoding="utf-8")
+if 'bash "$ACTION_DIR/setup-rtk.sh" "$COMPONENT_ROOT"' not in build:
+    raise SystemExit("prebuilt build does not use the shared immutable RTK setup")
+maturin = build.index('uvx --from "maturin==$MATURIN_VERSION" maturin build')
+wrapper = build.rfind('python3 "$COMMON_DIR/reproducible-build.py"', 0, maturin)
+if wrapper == -1:
+    raise SystemExit("Maturin build does not use the reproducible environment")
+wrapped_command = build[wrapper:maturin]
+for binding in (
+    '--source-root "$COMPONENT_ROOT"',
+    '--source-date-epoch "$SOURCE_DATE_EPOCH"',
+):
+    if binding not in wrapped_command:
+        raise SystemExit(f"Maturin reproducible build is missing: {binding}")
 PY
 
 python3 - "$REPO_ROOT/.github/actions/package-source/action.yaml" <<'PY'
@@ -39,25 +81,147 @@ from pathlib import Path
 
 
 action = Path(sys.argv[1]).read_text(encoding="utf-8")
-if "bash scripts/setup-rtk.sh third_party/rtk" not in action:
-    raise SystemExit("source packaging does not use the pinned RTK setup script")
-if "RTK_TAG=" in action or "git clone --depth 1 --branch" in action:
+setup_command = (
+    'bash "$GITHUB_ACTION_PATH/../build-tokenless-prebuilt/setup-rtk.sh" "$PWD"'
+)
+if setup_command not in action:
+    raise SystemExit("source packaging does not use the shared immutable RTK setup")
+if "git clone --depth 1 --branch" in action:
     raise SystemExit("source packaging still resolves RTK through a mutable tag")
+expected_source_root_bindings = (
+    "tokenless-source-root:",
+    "TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless-source-root }}",
+    'tokenless)     SRC_DIR="${TOKENLESS_SOURCE_ROOT}/src/tokenless" ;;',
+)
+for binding in expected_source_root_bindings:
+    if binding not in action:
+        raise SystemExit(f"source packaging does not isolate tagged Tokenless sources: {binding}")
 PY
 
-RTK_SETUP="$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh"
-PINNED_RTK_COMMIT="$(
-    sed -n 's/^RTK_COMMIT="\([0-9a-f]\{40\}\)"$/\1/p' "$RTK_SETUP"
-)"
-[ -n "$PINNED_RTK_COMMIT" ] || {
-    printf 'ERROR: RTK setup script has no pinned 40-character commit\n' >&2
+install -d -m 0755 "$HISTORICAL_BUILD"
+HISTORICAL_SOURCE_REF="refs/tags/tokenless/v0.7.12"
+if ! git cat-file -e "${HISTORICAL_SOURCE_REF}^{commit}" 2>/dev/null; then
+    git fetch --no-tags --depth=1 origin "$HISTORICAL_SOURCE_REF"
+    HISTORICAL_SOURCE_REF="FETCH_HEAD"
+fi
+git archive "${HISTORICAL_SOURCE_REF}:src/tokenless" | tar -x -C "$HISTORICAL_BUILD"
+[ ! -f "$HISTORICAL_BUILD/scripts/setup-rtk.sh" ] || {
+    printf 'ERROR: historical source fixture unexpectedly has setup-rtk.sh\n' >&2
     exit 1
 }
+cp -a "$HISTORICAL_BUILD" "$HISTORICAL_DRIFT_BUILD"
+
+HISTORICAL_RTK_SETUP="$ACTION_DIR/setup-rtk.sh"
+PINNED_RTK_COMMIT="$(
+    sed -n 's/^[[:space:]]*v0\.43\.0) RTK_COMMIT="\([0-9a-f]\{40\}\)".*/\1/p' \
+        "$HISTORICAL_RTK_SETUP"
+)"
+CURRENT_RTK_COMMIT="$(
+    sed -n 's/^RTK_COMMIT="\([0-9a-f]\{40\}\)"$/\1/p' \
+        "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh"
+)"
+[ -n "$PINNED_RTK_COMMIT" ] || {
+    printf 'ERROR: historical RTK setup has no pinned 40-character commit\n' >&2
+    exit 1
+}
+[ "$PINNED_RTK_COMMIT" = "$CURRENT_RTK_COMMIT" ] || {
+    printf 'ERROR: historical and current RTK commits differ\n' >&2
+    exit 1
+}
+
+HISTORICAL_FAKE_BIN="$TEMPORARY/historical-fake-bin"
+install -d -m 0755 "$HISTORICAL_FAKE_BIN"
+# shellcheck disable=SC2016  # Expand the fixture variables when the fake runs.
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >> "$HISTORICAL_GIT_LOG"' \
+    'case "${1:-}" in' \
+    '    init)' \
+    '        destination="${!#}"' \
+    '        mkdir -p "$destination/.git"' \
+    '        ;;' \
+    '    -C)' \
+    '        repository="$2"' \
+    '        shift 2' \
+    '        case "${1:-}" in' \
+    '            remote | fetch) ;;' \
+    '            checkout)' \
+    '                printf "[workspace]\n" > "$repository/Cargo.toml"' \
+    '                printf "version = 3\n" > "$repository/Cargo.lock"' \
+    '                ;;' \
+    '            rev-parse) printf "%s\n" "$HISTORICAL_FAKE_HEAD" ;;' \
+    '            *) exit 91 ;;' \
+    '        esac' \
+    '        ;;' \
+    '    *) exit 92 ;;' \
+    'esac' \
+    > "$HISTORICAL_FAKE_BIN/git"
+# shellcheck disable=SC2016  # Expand the fixture variables when the fake runs.
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >> "$HISTORICAL_PATCH_LOG"' \
+    'cat >/dev/null' \
+    > "$HISTORICAL_FAKE_BIN/patch"
+chmod 0755 "$HISTORICAL_FAKE_BIN/git" "$HISTORICAL_FAKE_BIN/patch"
+
+python3 - "$REPO_ROOT/.github/actions/package-source/action.yaml" \
+    "$TEMPORARY/vendor-rtk-step.sh" <<'PY'
+import sys
+from pathlib import Path
+
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+start = lines.index("    - name: Vendor rtk source (tokenless)")
+run = lines.index("      run: |", start) + 1
+end = next(
+    index for index in range(run, len(lines)) if lines[index].startswith("    - name:")
+)
+script = "\n".join(line[8:] for line in lines[run:end]) + "\n"
+Path(sys.argv[2]).write_text(script, encoding="utf-8")
+PY
+HISTORICAL_GIT_LOG="$TEMPORARY/historical-git.log"
+HISTORICAL_PATCH_LOG="$TEMPORARY/historical-patch.log"
+PATH="$HISTORICAL_FAKE_BIN:$PATH" \
+    ARCHIVE_NAME="$HISTORICAL_ARCHIVE_NAME" \
+    GITHUB_ACTION_PATH="$REPO_ROOT/.github/actions/package-source" \
+    HISTORICAL_FAKE_HEAD="$PINNED_RTK_COMMIT" \
+    HISTORICAL_GIT_LOG="$HISTORICAL_GIT_LOG" \
+    HISTORICAL_PATCH_LOG="$HISTORICAL_PATCH_LOG" \
+    bash "$TEMPORARY/vendor-rtk-step.sh"
+grep -Fq "fetch --quiet --depth 1 origin $PINNED_RTK_COMMIT" \
+    "$HISTORICAL_GIT_LOG"
+if grep -Fq -- '--branch' "$HISTORICAL_GIT_LOG"; then
+    printf 'ERROR: historical RTK setup fetched a mutable tag\n' >&2
+    exit 1
+fi
+[ "$(wc -l < "$HISTORICAL_PATCH_LOG")" -eq 2 ]
+[ -f "$HISTORICAL_BUILD/third_party/rtk/Cargo.toml" ]
+[ -f "$HISTORICAL_BUILD/third_party/rtk/Cargo.lock" ]
+[ "$(cat "$HISTORICAL_BUILD/third_party/rtk/.anolisa-rtk-commit")" = \
+    "$PINNED_RTK_COMMIT" ]
+[ ! -e "$HISTORICAL_BUILD/third_party/rtk/.git" ]
+make -C "$HISTORICAL_BUILD" generate-component-contract >/dev/null
+[ -f "$HISTORICAL_BUILD/.anolisa/component.toml" ]
+
+if PATH="$HISTORICAL_FAKE_BIN:$PATH" \
+    HISTORICAL_FAKE_HEAD="$(printf '%040d' 0)" \
+    HISTORICAL_GIT_LOG="$TEMPORARY/historical-drift-git.log" \
+    HISTORICAL_PATCH_LOG="$TEMPORARY/historical-drift-patch.log" \
+    bash "$HISTORICAL_RTK_SETUP" "$HISTORICAL_DRIFT_BUILD" \
+        >"$TEMPORARY/historical-drift.log" 2>&1; then
+    printf 'ERROR: historical RTK setup accepted the wrong commit\n' >&2
+    exit 1
+fi
+grep -Fq "does not match pinned commit $PINNED_RTK_COMMIT" \
+    "$TEMPORARY/historical-drift.log"
+[ ! -e "$HISTORICAL_DRIFT_BUILD/third_party/rtk" ]
+
 RTK_DRIFT="$TEMPORARY/rtk-drift"
 install -d -m 0755 "$RTK_DRIFT"
 printf '[package]\nname = "rtk"\nversion = "0.0.0"\n' > "$RTK_DRIFT/Cargo.toml"
 printf '%040d\n' 0 > "$RTK_DRIFT/.anolisa-rtk-commit"
-if bash "$RTK_SETUP" "$RTK_DRIFT" >"$TEMPORARY/rtk-drift.log" 2>&1; then
+if bash "$REPO_ROOT/src/tokenless/scripts/setup-rtk.sh" "$RTK_DRIFT" \
+    >"$TEMPORARY/rtk-drift.log" 2>&1; then
     printf 'ERROR: mismatched RTK revision marker was accepted\n' >&2
     exit 1
 fi
@@ -115,6 +279,7 @@ if TOKENLESS_SOURCE_WORKTREE="$TEMPORARY/version-worktree/tokenless" \
     "$ACTION_DIR/build.sh" \
         --source-repo "$REPO_ROOT" \
         --output-dir "$TEMPORARY/version-output" \
+        --wheel-output-dir "$TEMPORARY/version-wheels" \
         --version "0.7.12\$(touch ${MARKER})" \
         --target-os linux \
         --target-arch x86_64 \
@@ -132,6 +297,7 @@ if TOKENLESS_SOURCE_WORKTREE="$TEMPORARY/tag-worktree/tokenless" \
     "$ACTION_DIR/build.sh" \
         --source-repo "$REPO_ROOT" \
         --output-dir "$TEMPORARY/tag-output" \
+        --wheel-output-dir "$TEMPORARY/tag-wheels" \
         --version 0.7.12 \
         --target-os linux \
         --target-arch x86_64 \
@@ -145,6 +311,103 @@ fi
     printf 'ERROR: malicious tag input executed a command\n' >&2
     exit 1
 }
+
+SOURCE_FIXTURE="$TEMPORARY/source-fixture"
+install -d -m 0755 "$SOURCE_FIXTURE/src/tokenless"
+git -C "$SOURCE_FIXTURE" init -q
+git -C "$SOURCE_FIXTURE" config user.name 'Tokenless CI Test'
+git -C "$SOURCE_FIXTURE" config user.email 'tokenless-ci@example.com'
+printf 'tag source\n' > "$SOURCE_FIXTURE/src/tokenless/source.txt"
+git -C "$SOURCE_FIXTURE" add src/tokenless/source.txt
+git -C "$SOURCE_FIXTURE" commit -q -m 'tag source'
+TAG_COMMIT="$(git -C "$SOURCE_FIXTURE" rev-parse HEAD)"
+git -C "$SOURCE_FIXTURE" tag tokenless/v1.2.3
+printf 'checkout source\n' > "$SOURCE_FIXTURE/src/tokenless/source.txt"
+git -C "$SOURCE_FIXTURE" commit -q -am 'checkout source'
+git -C "$SOURCE_FIXTURE" branch tokenless/v1.2.3
+
+FAKE_BIN="$TEMPORARY/fake-bin"
+install -d -m 0755 "$FAKE_BIN"
+# shellcheck disable=SC2016  # Expand the fixture variable when the fake runs.
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'git rev-parse HEAD > "$SOURCE_SELECTION_RESULT"' \
+    'exit 73' > "$FAKE_BIN/make"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 74' > "$FAKE_BIN/uvx"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 75' > "$FAKE_BIN/just"
+chmod 0755 "$FAKE_BIN/make" "$FAKE_BIN/uvx" "$FAKE_BIN/just"
+SOURCE_SELECTION_RESULT="$TEMPORARY/source-selection"
+if PATH="$FAKE_BIN:$PATH" \
+    SOURCE_SELECTION_RESULT="$SOURCE_SELECTION_RESULT" \
+    TOKENLESS_SOURCE_WORKTREE="$TEMPORARY/source-worktree/tokenless" \
+    "$ACTION_DIR/build.sh" \
+        --source-repo "$SOURCE_FIXTURE" \
+        --output-dir "$TEMPORARY/source-output" \
+        --wheel-output-dir "$TEMPORARY/source-wheels" \
+        --version 1.2.3 \
+        --target-os linux \
+        --target-arch x86_64 \
+        --profile gnu2.17-x86_64 \
+        --tag tokenless/v1.2.3 >"$TEMPORARY/source.log" 2>&1; then
+    printf 'ERROR: source selection fixture unexpectedly completed\n' >&2
+    exit 1
+fi
+[ -f "$SOURCE_SELECTION_RESULT" ] || {
+    cat "$TEMPORARY/source.log" >&2
+    printf 'ERROR: source selection did not reach the tagged worktree\n' >&2
+    exit 1
+}
+[ "$(cat "$SOURCE_SELECTION_RESULT")" = "$TAG_COMMIT" ] || {
+    printf 'ERROR: tagged build used the checkout commit instead of the tag commit\n' >&2
+    exit 1
+}
+
+SHIM_LOG="$TEMPORARY/cargo-shim.log"
+SHIM_RUSTFLAGS_LOG="$TEMPORARY/cargo-shim-rustflags.log"
+# shellcheck disable=SC2016  # Expand shim arguments and log paths in the fakes.
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "cargo" >> "$SHIM_LOG"' \
+    'printf " <%s>" "$@" >> "$SHIM_LOG"' \
+    'printf "\n" >> "$SHIM_LOG"' > "$FAKE_BIN/host-cargo"
+# shellcheck disable=SC2016  # Expand shim arguments and log paths in the fakes.
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "cross" >> "$SHIM_LOG"' \
+    'printf " <%s>" "$@" >> "$SHIM_LOG"' \
+    'printf "\n" >> "$SHIM_LOG"' \
+    'printf "%s\n" "${CARGO_ENCODED_RUSTFLAGS:-}" >> "$SHIM_RUSTFLAGS_LOG"' \
+    > "$FAKE_BIN/cross-profile"
+chmod 0755 "$FAKE_BIN/host-cargo" "$FAKE_BIN/cross-profile"
+SHIM_ENV=(
+    TOKENLESS_HOST_CARGO="$FAKE_BIN/host-cargo"
+    TOKENLESS_CROSS_PROFILE_SCRIPT="$FAKE_BIN/cross-profile"
+    TOKENLESS_CROSS_PROFILE=gnu2.17-x86_64
+    TOKENLESS_RUST_TARGET=x86_64-unknown-linux-gnu
+    CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=/source=/workspace
+    SHIM_LOG="$SHIM_LOG"
+    SHIM_RUSTFLAGS_LOG="$SHIM_RUSTFLAGS_LOG"
+)
+env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" metadata --locked
+env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+    --target x86_64-unknown-linux-gnu --profile python-release
+grep -Fxq 'cargo <metadata> <--locked>' "$SHIM_LOG"
+grep -Fxq \
+    'cross <gnu2.17-x86_64> <rustc> <--profile> <python-release>' \
+    "$SHIM_LOG"
+grep -Fxq -- '--remap-path-prefix=/source=/workspace' "$SHIM_RUSTFLAGS_LOG"
+if env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+    --target "x86_64-unknown-linux-gnu;\$(touch ${MARKER})" \
+    >"$TEMPORARY/shim-target.log" 2>&1; then
+    printf 'ERROR: mismatched Cargo shim target was accepted\n' >&2
+    exit 1
+fi
+[ ! -e "$MARKER" ] || {
+    printf 'ERROR: Cargo shim target executed a command\n' >&2
+    exit 1
+}
+
+python3 "$ACTION_DIR/test_verify_wheels.py"
 
 for project in tokenless-fixture rtk-fixture; do
     install -d -m 0755 "$TEMPORARY/$project/src"

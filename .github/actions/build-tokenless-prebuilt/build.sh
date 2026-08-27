@@ -12,7 +12,10 @@ PROFILE=""
 TAG=""
 SOURCE_REPO=""
 OUTPUT_DIR=""
+WHEEL_OUTPUT_DIR=""
 WORKTREE_READY=0
+MATURIN_VERSION=1.15.0
+PYPROJECT_BUILD_VERSION=1.3.0
 
 die() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -21,7 +24,8 @@ die() {
 
 usage() {
     cat <<'EOF'
-Usage: build.sh --source-repo PATH --output-dir PATH --version X.Y.Z \
+Usage: build.sh --source-repo PATH --output-dir PATH --wheel-output-dir PATH \
+  --version X.Y.Z \
   --target-os {linux|macos} --target-arch {x86_64|aarch64} \
   --profile PROFILE [--tag tokenless/vX.Y.Z]
 EOF
@@ -31,6 +35,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --source-repo) SOURCE_REPO="${2:-}"; shift 2 ;;
         --output-dir) OUTPUT_DIR="${2:-}"; shift 2 ;;
+        --wheel-output-dir) WHEEL_OUTPUT_DIR="${2:-}"; shift 2 ;;
         --version) VERSION="${2:-}"; shift 2 ;;
         --target-os) TARGET_OS="${2:-}"; shift 2 ;;
         --target-arch) TARGET_ARCH="${2:-}"; shift 2 ;;
@@ -46,6 +51,7 @@ done
 [ -n "$PROFILE" ] || die '--profile is required'
 [ -n "$SOURCE_REPO" ] || die '--source-repo is required'
 [ -n "$OUTPUT_DIR" ] || die '--output-dir is required'
+[ -n "$WHEEL_OUTPUT_DIR" ] || die '--wheel-output-dir is required'
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || \
     die "invalid Tokenless version: $VERSION"
 
@@ -67,7 +73,7 @@ esac
 if [ -n "$TAG" ] && [ "$TAG" != "tokenless/v$VERSION" ]; then
     die "release tag $TAG does not match requested version $VERSION"
 fi
-for command in cargo flock git install just make node npm patch python3 sha256sum; do
+for command in cargo flock git install just make node npm patch python3 sha256sum uvx; do
     command -v "$command" >/dev/null || die "missing required command: $command"
 done
 SOURCE_REPO="$(git -C "$SOURCE_REPO" rev-parse --show-toplevel)" || \
@@ -75,10 +81,8 @@ SOURCE_REPO="$(git -C "$SOURCE_REPO" rev-parse --show-toplevel)" || \
 SOURCE_COMMIT="$(git -C "$SOURCE_REPO" rev-parse HEAD)"
 
 if [ -n "$TAG" ]; then
-    TAG_COMMIT="$(git -C "$SOURCE_REPO" rev-parse --verify "refs/tags/$TAG^{commit}")" || \
+    SOURCE_COMMIT="$(git -C "$SOURCE_REPO" rev-parse --verify "refs/tags/$TAG^{commit}")" || \
         die "release tag is unavailable in the checkout: $TAG"
-    [ "$TAG_COMMIT" = "$SOURCE_COMMIT" ] || \
-        die "release tag $TAG does not point at checked-out commit $SOURCE_COMMIT"
 fi
 
 install -d -m 0755 "$(dirname "$FIXED_WORKTREE")"
@@ -117,7 +121,7 @@ git -C "$SOURCE_REPO" worktree lock --reason 'Tokenless prebuilt package build' 
 COMPONENT_ROOT="$FIXED_WORKTREE/src/tokenless"
 (
     cd "$COMPONENT_ROOT"
-    make -B stamp-adapter-templates
+    make -B stamp-adapter-templates stamp-python-packages
 )
 CONTRACT="$COMPONENT_ROOT/.anolisa/component.toml"
 SOURCE_VERSION="$(
@@ -129,7 +133,7 @@ SOURCE_VERSION="$(
 (
     cd "$COMPONENT_ROOT"
     make build-openclaw-plugin build-dsh-plugin
-    just setup-rtk
+    bash "$ACTION_DIR/setup-rtk.sh" "$COMPONENT_ROOT"
 )
 RTK_ROOT="$COMPONENT_ROOT/third_party/rtk"
 # RTK is excluded from Tokenless's workspace; make its cloned source an explicit
@@ -139,7 +143,12 @@ printf '\n[workspace]\n' >> "$RTK_ROOT/Cargo.toml"
 if [ -e "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
     die "output directory must be empty: $OUTPUT_DIR"
 fi
+if [ -e "$WHEEL_OUTPUT_DIR" ] && \
+    [ -n "$(find "$WHEEL_OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
+    die "wheel output directory must be empty: $WHEEL_OUTPUT_DIR"
+fi
 install -d -m 0755 "$OUTPUT_DIR"
+install -d -m 0755 "$WHEEL_OUTPUT_DIR"
 SOURCE_DATE_EPOCH="$(git -C "$FIXED_WORKTREE" show -s --format=%ct HEAD)"
 case "$SOURCE_DATE_EPOCH" in
     '' | *[!0-9]*) die 'source commit timestamp is not numeric' ;;
@@ -172,6 +181,55 @@ done
         --locked \
         --manifest-path src/tokenless/third_party/rtk/Cargo.toml
 )
+
+HOST_CARGO="$(command -v cargo)"
+CARGO_SHIM_DIR="$COMPONENT_ROOT/target/maturin-cargo-shim"
+install -d -m 0755 "$CARGO_SHIM_DIR"
+ln -s "$ACTION_DIR/cargo-shim.sh" "$CARGO_SHIM_DIR/cargo"
+PYTHON_RTK_DIR="$COMPONENT_ROOT/python/tokenless/python/anolisa_tokenless/_bin"
+(
+    set -e
+    install -d -m 0755 "$PYTHON_RTK_DIR"
+    install -p -m 0755 \
+        "$RTK_ROOT/target/$RUST_TARGET/release/rtk" \
+        "$PYTHON_RTK_DIR/rtk"
+    trap 'rm -f "$PYTHON_RTK_DIR/rtk"' EXIT
+    cd "$COMPONENT_ROOT/python/tokenless"
+    compatibility=(--compatibility pypi)
+    if [ "$TARGET_OS" = linux ]; then
+        compatibility=(--compatibility manylinux2014)
+    else
+        export MACOSX_DEPLOYMENT_TARGET=11.0
+    fi
+    PATH="$CARGO_SHIM_DIR:$PATH" \
+    TOKENLESS_HOST_CARGO="$HOST_CARGO" \
+    TOKENLESS_CROSS_PROFILE_SCRIPT="$COMMON_DIR/cross-profile.sh" \
+    TOKENLESS_CROSS_PROFILE="$PROFILE" \
+    TOKENLESS_RUST_TARGET="$RUST_TARGET" \
+        python3 "$COMMON_DIR/reproducible-build.py" \
+            --source-root "$COMPONENT_ROOT" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            -- uvx --from "maturin==$MATURIN_VERSION" maturin build \
+            --profile python-release \
+            --interpreter python3 \
+            --target "$RUST_TARGET" \
+            --locked \
+            "${compatibility[@]}" \
+            --auditwheel check \
+            --out "$WHEEL_OUTPUT_DIR"
+)
+if [ "$TARGET_OS/$TARGET_ARCH" = linux/x86_64 ]; then
+    uvx --from "build==$PYPROJECT_BUILD_VERSION" pyproject-build \
+        --wheel \
+        --outdir "$WHEEL_OUTPUT_DIR" \
+        "$COMPONENT_ROOT/python/agentscope"
+fi
+python3 "$ACTION_DIR/verify-wheels.py" \
+    --directory "$WHEEL_OUTPUT_DIR" \
+    --version "$VERSION" \
+    --layout flat \
+    --os "$TARGET_OS" \
+    --arch "$TARGET_ARCH"
 
 BIN_DIR="$COMPONENT_ROOT/target/raw-prebuilt/$RUST_TARGET"
 install -d -m 0755 "$BIN_DIR"
@@ -223,3 +281,5 @@ python3 "$COMMON_DIR/verify-artifacts.py" \
     --arch "$TARGET_ARCH"
 printf 'Built Tokenless %s for %s/%s at %s\n' \
     "$VERSION" "$TARGET_OS" "$TARGET_ARCH" "$OUTPUT_DIR"
+printf 'Built Tokenless Python wheels for %s/%s at %s\n' \
+    "$TARGET_OS" "$TARGET_ARCH" "$WHEEL_OUTPUT_DIR"
