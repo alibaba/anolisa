@@ -46,9 +46,9 @@ fn spawn_hook_session(
     let session = thread::spawn(move || {
         let home = home.to_string_lossy().into_owned();
         // These tests measure hook deadlines after observing the hook PID.
-        // Keep their startup outside competing raw CLI sessions so scheduler
-        // load cannot consume the independent hook-start watchdog first.
-        run_raw_cli_serial_with_args_env_and_delayed_input_after_start(
+        // Keep startup outside the independent hook-start watchdog and away
+        // from competing raw CLI sessions.
+        run_raw_cli_serial_with_args_env_and_delayed_input_after_ready(
             "fake",
             &[],
             &[("HOME", home.as_str())],
@@ -63,10 +63,10 @@ fn spawn_hook_session(
 }
 
 fn large_hook_input_command() -> Vec<u8> {
-    let mut command = b"printf '' #".to_vec();
-    command.resize(command.len() + 1024 * 1024, b'x');
-    command.push(b'\n');
-    command
+    // Produce more than the maximum Linux pipe capacity using lines below
+    // the redaction line limit. The short source avoids spending the hook
+    // startup watchdog on echoing and parsing a 1 MiB interactive command.
+    b"printf '%32767s\\n' {1..40}\n".to_vec()
 }
 
 #[test]
@@ -316,9 +316,8 @@ fn raw_cli_external_hook_ignoring_large_stdin_respects_deadline() {
     );
     install_user_hook(&home, "ignore_stdin.sh", &body);
 
-    // Keep the serialized command itself larger than a pipe buffer. Bounded
-    // output retention may replace an oversized output line with a short
-    // fail-closed placeholder before hook evaluation.
+    // Keep the serialized hook input larger than a pipe buffer without an
+    // oversized output line, which bounded retention replaces fail-closed.
     let command = large_hook_input_command();
     let (session, session_started) = spawn_hook_session(&home, &command);
     session_started.recv().expect("raw CLI session to start");
