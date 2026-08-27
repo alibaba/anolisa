@@ -847,6 +847,43 @@ name = "copilot-shell"
     }
 
     #[test]
+    fn repository_component_indexes_v1_and_v2_register_the_same_components() {
+        // The CLI resolves identities only through the v2 index, while released
+        // clients keep reading v1; a component registered in one file but not
+        // the other becomes unresolvable for one of the two populations.
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let v1_path = manifest_dir.join("../../manifests/components.toml");
+        let v2_path = manifest_dir.join("../../manifests/components-v2.toml");
+
+        let v2 = ComponentIndex::load(&v2_path).expect("component index v2 must parse");
+        let v2_names: BTreeSet<String> = v2
+            .components
+            .iter()
+            .map(|component| component.name.clone())
+            .collect();
+
+        let v1_body = std::fs::read_to_string(&v1_path).expect("read v1 component index");
+        let v1: toml::Table = toml::from_str(&v1_body).expect("parse v1 component index");
+        let v1_names: BTreeSet<String> = v1["components"]
+            .as_array()
+            .expect("v1 index declares [[components]] rows")
+            .iter()
+            .map(|entry| {
+                entry["name"]
+                    .as_str()
+                    .expect("v1 component row carries a name")
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            v1_names, v2_names,
+            "components registered in only one of components.toml / components-v2.toml \
+             cannot be resolved by clients reading the other"
+        );
+    }
+
+    #[test]
     fn component_index_requires_at_least_one_target() {
         let source = r#"
 schema_version = 2
