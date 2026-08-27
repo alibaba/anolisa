@@ -339,10 +339,15 @@ impl ActPlaneBackend {
 impl EnforcementBackend for ActPlaneBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
         let runtime_error = self.state.runtime_error().clone();
+        // Report file-guard coverage from the profile actually loaded into the
+        // kernel, so callers can gate APPLY_READY on real enforcement capability
+        // rather than a static assumption (closes the silent-false-positive gap).
+        let mut capabilities = EnforcementCapabilities::actplane();
+        capabilities.file_delete_guard = self.engine.supports_file_delete_guard();
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
-            capabilities: EnforcementCapabilities::actplane(),
+            capabilities,
             message: runtime_error,
         });
         Ok(self.state.security_events.reflect_delivery_loss(health))
