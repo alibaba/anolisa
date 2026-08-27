@@ -18,6 +18,12 @@ grep -Fxq \
     "$SPEC"
 grep -Fq "systemctl stop 'cosh-gateway@*.service' 'cosh-gateway-acp@*.service'" "$SPEC"
 grep -Fxq '%systemd_preun cosh-gateway@.service' "$SPEC"
+grep -Fq \
+    'skills/manage-task-checkpoints/SKILL.md' \
+    "$SPEC"
+grep -Fxq \
+    '%{_datadir}/anolisa/skills/manage-task-checkpoints/' \
+    "$SPEC"
 if grep -Fxq '%systemd_preun cosh-gateway-acp@.service' "$SPEC"; then
     echo "ERROR: removed legacy ACP unit still has a lifecycle macro" >&2
     exit 1
