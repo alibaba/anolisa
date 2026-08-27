@@ -2,46 +2,49 @@
 
 [中文版](README_zh.md)
 
-**LLM token optimization toolkit** — schema/response compression + command rewriting + tool environment readiness.
+**LLM token optimization toolkit** — content-aware compression + command rewriting + diagnostics.
 
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
-- **Schema & Response Compression** — Compresses OpenAI Function Calling tool definitions and API responses via the `tokenless-schema` library, cutting structural overhead before tokens ever reach the context window.
+- **Content-aware Compression** — Routes tool schemas, JSON records, build logs, and long plain text through a capability-aware pipeline, accepting only a smaller end-to-end result.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing syntax overhead for suitable structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
 Agent adapters are available for:
 
-- **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
+- **OpenClaw plugin** — covers command rewriting and response/TOON compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
 - **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and registered but hard-disabled Tool Ready via Hermes's native plugin system.
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, and response compression via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
 - **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
+- **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
 - **DeepSeek Harness plugin** — native response compression and environment-error attribution through DSH's `tools/post-execute` seam.
 
-For framework developers, the self-contained Python SDK and separate **AgentScope integration**
-cover schema compression, RTK rewriting, response compression, TOON, retrieval, and attribution.
+For framework developers, the Python SDK has a framework-neutral layer and an **AgentScope-specific
+layer**. Together they cover schema compression, RTK rewriting, response compression, TOON,
+retrieval, and attribution.
 
 ## Features
 
 | Capability | Savings indicator | Details |
 |---|---|---|
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
-| Response compression | 65.8% on reference fixture | Compresses API / tool responses |
+| Content-aware response compression | 65.8% on the JSON reference fixture | Routes JSON, build logs, and long plain text through matching compressors |
 | Reversible compression (stash) | — | Dropped array items are stashed and retrievable via `<<tokenless:KEY>>` markers |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
-| OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ✅ |
-| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ✅ |
+| OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, optional TOON ✅, Schema compression — |
+| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅; Cosh-NG can replace pipeline output, legacy Copilot Shell cannot |
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
+| Qwen Code extension | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response/Schema replacement unavailable in current host |
 | DeepSeek Harness plugin | — | Response compression ✅, Environment-error attribution ✅ |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
@@ -107,6 +110,9 @@ Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
 ├── crates/tokenless-runtime/  # Stateful in-process compression and retrieval API
+├── crates/tokenless-protocol/ # Versioned adapter request/response contract
+├── crates/tokenless-pipeline/ # Content detection, routing, staging, and arbitration
+├── crates/tokenless-compressors/ # Terminal and build/log compressors
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
 ├── python/tokenless/          # PyO3 package: `anolisa_tokenless`
 ├── python/agentscope/         # Pure-Python AgentScope integration package
@@ -200,7 +206,7 @@ make setup
 The source setup installs `tokenless` to `~/.local/bin`, places the `rtk`
 helper alongside it, and deploys all adapters for development.
 
-### Build the Python runtime
+### Build the Python SDK
 
 Framework authors can build the in-process Python API from source:
 
@@ -222,8 +228,12 @@ where its native wheel was built. It exposes the four Tokenless lifecycle
 methods and bundles the matching RTK executable; TOON is linked into the native
 runtime. It does not require the Tokenless CLI or system helper binaries. The
 package is built and tested in this repository but is not yet published to
-PyPI. See the [runtime design](docs/design/runtime-library.md)
-and the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#build-the-python-runtime-from-source).
+PyPI. See the [Python SDK guide](../../docs/user-guide/en/token-saving/tokenless/sdk.md) for
+runnable lifecycle and Stats examples, the
+[AgentScope SDK integration](../../docs/user-guide/en/token-saving/tokenless/sdk/agentscope.md) for
+AgentScope attachment, the
+[Agent integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md)
+for product adapters, and the [runtime design](docs/design/runtime-library.md) for internal contracts.
 
 The same wheel provides typed, read-only statistics queries without requiring
 the CLI. Point `TokenlessStats` at the state directory used by the runtime, or
@@ -255,7 +265,17 @@ The description, string, array, and depth limits in the
 [CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md)
 trigger individual transformations; they are not minimum total payload sizes.
 Agent adapters may apply separate pre-check thresholds; see the
-[framework integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#adapter-processing-rules).
+[Agent integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#adapter-processing-rules).
+
+### compress
+
+Shared Agent hooks send a compression request to `tokenless compress`. The command
+detects content, filters compressors by the host's declared
+capabilities, and returns a structured disposition plus the exact output to
+emit. It currently handles model tool schemas, JSON records, build logs, and
+long plain text; other detected content types pass through. See the
+[CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#compress)
+for the request/response contract and an executable example.
 
 ### compress-schema
 

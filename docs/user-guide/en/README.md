@@ -75,8 +75,10 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 |----------|-----------|-------------|
 | [Tokenless Quick Start](token-saving/tokenless/QUICKSTART.md) | tokenless | Install, connect an agent, run the first compression, and verify |
 | [Tokenless User Manual](token-saving/tokenless/user-manual.md) | tokenless | Capability boundaries, runtime behavior, and task navigation |
-| [Tokenless Framework Integration](token-saving/tokenless/framework-integration.md) | tokenless | cosh, OpenClaw, Hermes, Qoder, Claude Code, Codex, and Qwen Code |
-| [Tokenless CLI Reference](token-saving/tokenless/cli-reference.md) | tokenless | Compression, environment checks, Stash, MCP, and statistics commands |
+| [Tokenless Python SDK](token-saving/tokenless/sdk.md) | tokenless | Framework-neutral and AgentScope layers, Runtime operations, statistics, and examples |
+| [Tokenless AgentScope SDK Integration](token-saving/tokenless/sdk/agentscope.md) | tokenless | AgentScope 1.x, 2.x, and App attachment to the generic SDK |
+| [Tokenless Agent Integration](token-saving/tokenless/framework-integration.md) | tokenless | Product adapters, hooks, and plugins |
+| [Tokenless CLI Reference](token-saving/tokenless/cli-reference.md) | tokenless | Protocol pipeline, direct compression, Stash, MCP, and statistics commands |
 | [Measuring Tokenless Savings](token-saving/tokenless/measuring-savings.md) | tokenless | Statistics, diffs, dry runs, AgentSight, and SLS measurement |
 | [Tokenless Configuration and Data Privacy](token-saving/tokenless/configuration-and-privacy.md) | tokenless | Configuration precedence, local data, and sensitive workloads |
 | [Tokenless Troubleshooting](token-saving/tokenless/troubleshooting.md) | tokenless | Adapters, databases, Stash, upgrades, and uninstall |

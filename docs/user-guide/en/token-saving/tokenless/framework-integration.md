@@ -1,24 +1,24 @@
-# Tokenless Agent and Framework Integration
+# Tokenless Agent Integration
 
 [中文版](../../../zh/token-saving/tokenless/framework-integration.md)
 
-Tokenless has two integration layers. Agent adapters connect the installed binaries to concrete
-Agent products through plugins, hooks, and extensions. AgentScope support is instead an in-process
-Python framework package that application developers install and register explicitly.
+Tokenless connects to Agent products through plugins, hooks, and extensions. This guide covers
+product adapters. The Python SDK and its AgentScope-specific child document live under
+[Python SDK](sdk.md).
 
 ## Agent adapter support matrix
 
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell appends context | Attempted after response compression | ✅ |
+| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | ✅ |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
-| Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
-| Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
+| Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
+| Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
 | DeepSeek Harness | `dsh` | — | — | Replaces an accepted single-text JSON result when the replacement is smaller | — | — |
-| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
-| Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
+| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
+| Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 
 “—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
 
@@ -26,14 +26,37 @@ Schema compression reaches the model path differently per host: cosh and Cosh-NG
 
 Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
 
-`additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
-
-OpenCode currently uses the bundled lifecycle scripts documented below and is not registered with
-the `anolisa adapter enable` driver set in this release.
+`additionalContext` is an additive hook field. The shared hook does not place compressed copies
+there because the original would remain visible and total context would grow. It uses that field
+only for additive environment-error guidance. A statistics record proves that a candidate became
+smaller, not by itself that the host removed the original from its model request.
 
 ## Adapter processing rules
 
-The standalone `compress-response` defaults are not the defaults used by most adapters. Shared adapters classify tools as follows:
+The shared Cosh-NG, Qoder, Claude Code, and OpenCode hook sends one compression request to
+`tokenless compress`. The command detects the model-visible content, filters compressors by the
+host's declared replacement and retrieval capabilities, runs the eligible stages, and returns the
+original for every non-`applied` disposition. It currently routes:
+
+| Content | Current shared-hook behavior |
+|---------|------------------------------|
+| JSON records | Structural response cleanup, with TOON considered for text-capable replacement slots |
+| Build/test/package logs | Lossless terminal cleanup, then signal-preserving build/log compression with retrievable gap markers |
+| Long plain text | Lossless terminal cleanup, then conservative head/tail retention with retrievable gap markers |
+| Diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching compressor exists |
+
+Build/log compression requires all three capabilities: replace the original output, publish a
+retrieval Tool, and replace with arbitrary text. It preserves signal lines and stack-trace regions,
+keeps context around failures plus fixed head/tail windows, and stashes each omitted gap. Short logs
+or candidates saving fewer than 200 characters pass through. Plain text engages at 100 lines, or at
+65,536 characters for the single-line safety path.
+
+Legacy OpenClaw, Hermes, and DeepSeek Harness integrations still use their dedicated response paths.
+Their response thresholds and feature sets are described below; the content-aware build/log path
+does not run there yet. The standalone `compress-response` command also remains the explicit JSON
+cleanup interface.
+
+For JSON response cleanup, shared and legacy adapters classify tools as follows:
 
 | Class | Default adapter behavior |
 |-------|--------------------------|
@@ -41,7 +64,13 @@ The standalone `compress-response` defaults are not the defaults used by most ad
 | Shell/exec | 65,536-character strings, 128 retained array items, depth 8 |
 | Other structured tools | 1,048,576-character strings, 65,536 retained array items, depth 32 |
 
-The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Skill-like text with YAML frontmatter is also skipped by the shared paths. The TOON encoding step only runs on payloads of at least 500 characters (the current implementation threshold, which may be adjusted later); smaller payloads keep the compressed form, because TOON savings on small JSON are negligible. The threshold applies to every TOON-capable pipeline: the shared response hook, the standalone TOON hook, OpenClaw, Hermes, and the standalone `tokenless compress-toon` CLI with the runtime/SDK TOON path (the CLI can lower the threshold per call with `--min-toon-chars`). Codex does not run response compression or TOON because its PostToolUse hook cannot replace the original output.
+The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Skill-like
+text with YAML frontmatter is also skipped by the shared paths. TOON runs only on payloads of at
+least 500 characters and only when the selected host slot accepts text; smaller payloads keep the
+prior candidate. The same default minimum applies to the standalone `compress-toon` CLI and SDK
+TOON path, while the CLI can lower it per call with `--min-toon-chars`. Codex and Qwen Code do not
+run response compression or TOON because their current PostToolUse contracts cannot replace the
+original model-visible output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
@@ -162,6 +191,7 @@ anolisa adapter enable tokenless hermes
 anolisa adapter enable tokenless qoder
 anolisa adapter enable tokenless claude-code
 anolisa adapter enable tokenless codex
+anolisa adapter enable tokenless opencode
 anolisa adapter enable tokenless qwencode
 anolisa adapter enable tokenless dsh \
   --profile web \
@@ -176,9 +206,6 @@ DeepSeek Harness is profile-scoped and therefore requires at least one
 `--profile`. Each name must match one passed to `dsh --profile <profile>`; the
 generic command without a profile is rejected. A later enable or re-enable
 must repeat every profile that should remain registered.
-
-OpenCode uses its bundled install script under
-[Manual integration after npm installation](#manual-integration-after-npm-installation).
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
@@ -304,151 +331,12 @@ The extension loads in a new Qwen Code session. Restart and run one tool call to
 
 ## AgentScope framework integration
 
-The Python package supports AgentScope 1.0.11 through 1.0.x and AgentScope
-2.0.x. Choose the attachment point for the installed framework version:
+AgentScope is the second Python SDK layer, not a product adapter. Its complete build, version,
+attachment, configuration, and validation guidance now lives in
+[AgentScope SDK integration](sdk/agentscope.md). This heading remains as a compatibility pointer for
+existing links.
 
-| AgentScope version | Supported entry point |
-|---|---|
-| 1.0.11 through 1.0.x | Tokenless Toolkit plus `install(..., session_id=...)` |
-| 2.0.0 | Direct Agent construction with `integration.tools` and `integration.middlewares` |
-| 2.0.1 through 2.0.x | Direct Agent construction or App through `integration.app_options()` |
-
-The native `anolisa-tokenless` runtime wheel and AgentScope integration wheel
-are not currently published to a Python package index. Build and install both
-same-version wheels from a source checkout:
-
-```bash
-make python-wheel agentscope-wheel
-python -m pip install \
-  target/wheels/anolisa_tokenless-*.whl \
-  target/wheels/anolisa_tokenless_agentscope-*.whl
-```
-
-The native wheel also exposes the same read-only statistics capabilities as
-the CLI through typed Python values:
-
-```python
-from anolisa_tokenless import TokenlessStats
-
-stats = TokenlessStats("/absolute/path/to/tenant-tokenless-data")
-
-status = stats.status
-summary = stats.summary()
-recent = stats.list(limit=20)
-record = stats.show(recent[0].id)
-session_diff = stats.diff(session_id="conversation-id")
-comparison = stats.compare("baseline-session", "tokenless-session")
-```
-
-`TokenlessSdk.stats` lazily returns a client bound to that SDK's data directory.
-Token counts are estimates and only operations with positive savings are
-recorded. `show()` and record/tool-use `diff()` results may contain sensitive
-tool input and output from `stats.db`; summary, list, and comparison results do
-not return stored content. The API cannot clear data or change recording
-settings. Read-only describes those public operations: opening the client
-follows CLI initialization and may create or migrate `stats.db`, so the data
-directory must be writable. `limit=None` for summary or comparison reads at most
-the newest 10,000 records. Session and tool-use diffs also read at most the
-newest 10,000 matching records. For a meaningful comparison, pass a dry-run
-baseline session first and an active Tokenless session second.
-
-Both major versions use `TokenlessAgentScope` and `TokenlessConfig`; only the
-final attachment step differs. AgentScope 1.x uses a Tokenless Toolkit whose
-regular and MCP registration paths also cover tools added after construction:
-
-```python
-from agentscope.agent import ReActAgent
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
-
-integration = TokenlessAgentScope(
-    TokenlessConfig(
-        mode="balanced",
-        data_dir="/absolute/path/to/tenant-tokenless-data",
-    ),
-)
-toolkit = integration.create_toolkit()
-toolkit.register_tool_function(application_tool)
-agent = ReActAgent(..., toolkit=toolkit)
-integration.install(agent, session_id="conversation-id")
-```
-
-In AgentScope 2.x, pass the retrieval Tool and middleware when constructing the
-Toolkit and Agent. This works from 2.0.0 and does not depend on mutable Toolkit
-APIs introduced in later patch releases:
-
-```python
-from agentscope.agent import Agent
-from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
-
-integration = TokenlessAgentScope(
-    TokenlessConfig(
-        mode="balanced",
-        data_dir="/absolute/path/to/tenant-tokenless-data",
-        # retrieve_tool_name="tenant_tokenless_retrieve",
-    ),
-)
-toolkit = Toolkit(tools=[*application_tools, *integration.tools])
-
-agent = Agent(
-    ...,
-    toolkit=toolkit,
-    middlewares=integration.middlewares,
-)
-```
-
-AgentScope App is supported from 2.0.1. `app_options()` derives an isolated
-Tokenless data directory for every user/agent/session below the configured
-absolute base directory:
-
-```python
-from agentscope.app import create_app
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
-
-integration = TokenlessAgentScope(
-    TokenlessConfig(data_dir="/srv/tokenless-tenants"),
-)
-app = create_app(..., **integration.app_options())
-```
-
-Set a unique `retrieve_tool_name` in `TokenlessConfig` if the application
-already defines `tokenless_retrieve`; App assembly does not expose other tools
-to its factory for a preflight collision check. AgentScope 2.0.0 does not
-provide App-level Agent middleware or Tool injection, so it supports direct
-Agent construction only. The existing `TokenlessMiddleware` 2.x API remains
-available for compatibility; new code should use `TokenlessAgentScope` to
-avoid patch-specific Toolkit mutation and automatic Tool collection behavior.
-
-Choose a mode according to how much inline truncation the application accepts:
-
-| Mode | Read/Glob/Grep | Other tools |
-|------|----------------|-------------|
-| `conservative` | Compress | 1 MiB strings, 65,536 array items, depth 32 |
-| `balanced` (default) | Skip | Shell: 65,536 / 128 / depth 8; others: conservative limits |
-| `aggressive` | Skip | CLI defaults: 4,096 / 32 / depth 8 |
-
-The integration passes intermediate streaming chunks through unchanged, preserves framework
-objects, and transforms only copied call arguments and final model-visible text. Tokenless keeps
-the original whenever an optimization fails or does not make the UTF-8 result strictly smaller.
-`DataBlock` values are never changed.
-
-The integration also exposes a retrieval Tool named `tokenless_retrieve` by
-default. It is published to the model only when a marker is visible and returns
-content only for an exact 24-character hexadecimal hash retained in that
-session's marker set. The Tool is permanently excluded from compression. This
-narrow permission still depends on storage isolation: pass a
-separate absolute `data_dir` for every user or tenant. If `data_dir` is omitted,
-`TOKENLESS_DATA_DIR` is only a process-wide fallback and must not be shared by
-multiple tenants. Retrieval does not work across nodes. Stash entries expire
-after the current fixed one-hour TTL, so the Agent should retrieve necessary
-content before that boundary.
-
-Both adapters enable schema compression, RTK command rewriting, response compression, TOON,
-retrieval, environment-error guidance, and per-call attribution. The platform wheel contains RTK
-and links TOON directly, so it does not search for system helper binaries. Tool Ready remains
-hard-disabled.
-
-## Verify the actual integration
+## Verify an Agent adapter
 
 For an Agent adapter, do not treat a zero install exit code as the only success criterion. At
 minimum, run:
@@ -461,20 +349,11 @@ tokenless stats list --limit 5
 
 Then execute a tool task with visible output in the target agent. If `stats list` remains empty, follow [No statistics appear after enabling the adapter](troubleshooting.md#no-statistics-appear-after-enabling-the-adapter).
 
-For the AgentScope framework package, validate the two wheels and the declared AgentScope version
-range from a source checkout with:
-
-```bash
-make test-agentscope-integration
-```
-
-Then exercise one successful, compressible tool response in the application and confirm that the
-middleware returns the smaller result and that `tokenless_retrieve` can recover marker-scoped
-content from the same `data_dir`.
-
 ## Related documents
 
 - [Quick Start](QUICKSTART.md)
+- [Python SDK](sdk.md)
+- [AgentScope SDK integration](sdk/agentscope.md)
 - [Measuring savings](measuring-savings.md)
 - [Configuration and data privacy](configuration-and-privacy.md)
 - [Troubleshooting](troubleshooting.md)

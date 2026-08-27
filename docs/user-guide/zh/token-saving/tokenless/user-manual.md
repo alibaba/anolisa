@@ -19,10 +19,9 @@ cargo build --release --locked -p tokenless-cli
 
 这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](QUICKSTART.md)通过 anolisa CLI 安装。
 
-## 从源码构建 Python Runtime
+## 从源码构建 Python SDK
 
-运行在 CPython 中的框架集成可以在进程内使用 Tokenless，无需为每个响应启动
-CLI：
+CPython 应用可以在进程内使用 Tokenless，无需为每个生命周期操作启动 CLI：
 
 ```bash
 make python-wheel
@@ -30,51 +29,24 @@ python3 -m venv /tmp/tokenless-python
 /tmp/tokenless-python/bin/pip install target/wheels/anolisa_tokenless-*.whl
 ```
 
-构建时要求系统可发现 CPython 3.11+ 开发环境。`make python-wheel` 默认通过
-`uvx` 提供 Maturin，因此需要先安装 [`uv`](https://docs.astral.sh/uv/)；也可以
-先安装 Maturin，再执行 `make python-wheel MATURIN=maturin`。完整的
-`cargo test --workspace` 也会编译 Python member，需要相同环境；默认的 Cargo
-workspace 命令则不包含它。
+构建要求系统可发现 CPython 3.11+ 开发环境。Wheel 使用 CPython 3.11 stable ABI，但仍与
+构建时的操作系统和 CPU 架构绑定。
 
-Wheel 使用 CPython 3.11 stable ABI，因此支持构建平台上的 CPython 3.11 及更高
-版本，但仍受操作系统和 CPU 架构限制。该包目前尚未发布到 PyPI。
-
-首版 API 接收 JSON 文本，开放响应压缩和 Stash 取回：
-
-```python
-import json
-from pathlib import Path
-
-from anolisa_tokenless import TokenlessRuntime
-
-runtime = TokenlessRuntime(Path.home() / ".local/state/my-agent/tokenless")
-result = runtime.compress_response(
-    json.dumps({"items": list(range(200))}),
-    truncate_arrays_at=32,
-    agent_id="my-agent",
-    session_id="session-42",
-    tool_use_id="tool-7",
-)
-model_visible_output = result.output
-```
-
-Python API 默认采用可逆 fail-open 策略：请求使用 Stash，但数据库不可用、
-写入失败或配置阈值无法容纳取回 marker 时，`result.output` 保留原始 JSON，
-`result.disposition` 为 `reversibility-unavailable`。每个用户或租户应使用独立的
-绝对数据目录。
-首版 API 不包含 Schema 压缩、TOON、RTK、MCP 或框架 Middleware。状态和并发
-契约见 [Runtime 设计](../../../../../src/tokenless/docs/design/runtime-library_zh.md)。
+Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、可直接调用的
+`TokenlessRuntime` 操作和 typed `TokenlessStats` 查询；相同版本的
+`anolisa-tokenless-agentscope` 包把该通用生命周期映射到 AgentScope。两层结构、可运行示例与
+配置见 [Python SDK 指南](sdk.md)。
 
 ## 能力与边界
 
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | 通过 cosh/Cosh-NG 的 `BeforeModel` Hook 和 OpenCode 的逐工具定义 Hook 运行（Qwen Code 清单中的条目会被当前宿主跳过）；其他场景可直接调用 CLI |
-| 响应压缩 | 移除名称完全匹配且区分大小写的调试字段、`null`、空字符串/数组/对象，并按配置阈值截断 | 输入必须是 JSON；Adapter 会主动跳过内容读取类工具 |
-| TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | TOON 是替换原文还是与原文并存，取决于 Adapter |
+| Content-aware 响应压缩 | 把 JSON Records、构建日志和长纯文本路由到匹配 Compressor，只接受端到端更小的结果 | 直接 `compress-response` 仍只处理 JSON；宿主能力决定共享 Hook 能否用文本替换并发布恢复能力 |
+| TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 真正提交给 Shell 的命令会变化；无规则或被拒绝时透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
-| Stash | 保存因字符串、数组、深度或 Schema 描述截断而移除的内容 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
+| Stash | 保存因字符串、数组、深度或 Schema 描述截断以及 build/log 间隙移除而省略的内容 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
 
 代码没有提供固定节省率保证。结果取决于 Payload、Adapter 交付语义，以及工具数据在模型上下文中的占比。请按[效果度量](measuring-savings.md)使用自己的工作负载测量。
 
@@ -84,11 +56,14 @@ Python API 默认采用可逆 fail-open 策略：请求使用 Stash，但数据�
 
 ```text
 工具调用前：已硬关闭的 Tool Ready Hook → 命令重写
-工具调用后：响应压缩 → 可选 Stash → TOON 编码 → 写入统计
+工具调用后：内容检测 → 符合条件的 Compressor → 可选 Stash/TOON → 写入统计
 模型调用前：Schema 压缩
 ```
 
-这是能力示意，不是所有框架都会完整执行的固定流水线。例如 OpenClaw 默认关闭 TOON，Codex 依靠 RTK 从源头缩减输出且不运行响应压缩，Schema 压缩只在 cosh/Cosh-NG（`BeforeModel` Hook）和 OpenCode（逐工具定义）上运行。具体见[框架集成](framework-integration.md)。
+这是能力示意，不是所有框架都会完整执行的固定流水线。例如 content-aware Protocol 路径
+当前服务于 Cosh-NG、Qoder、受支持的 Claude Code 版本和 OpenCode；OpenClaw、Hermes 与
+DeepSeek Harness 保留专用 JSON 响应路径。Codex 和 Qwen Code 当前宿主契约不能替换工具后
+输出。具体见 [Agent 集成](framework-integration.md)。
 
 ## 需要特别理解的行为
 
@@ -102,9 +77,11 @@ anolisa adapter enable tokenless <framework>
 
 CLI-only 用法不需要 Adapter。
 
-### “关闭压缩”只影响三个压缩操作
+### “关闭压缩”只影响压缩操作
 
-设置 `compression_enabled=false` 或 `TOKENLESS_COMPRESSION_ENABLED=0` 后，无论是直接调用还是通过 Adapter 调用，`compress-schema`、`compress-response` 和 `compress-toon` 都仍会计算预测节省并可能写入统计，但会返回原始输入。该模式不会写入 Stash 条目。
+设置 `compression_enabled=false` 或 `TOKENLESS_COMPRESSION_ENABLED=0` 后，`compress`、
+`compress-schema`、`compress-response` 和 `compress-toon` 仍会计算预测节省并可能写入统计，
+但会返回原始输入。该模式不会写入 Stash 条目。
 
 这个设置不会关闭 RTK 命令重写、Adapter 执行或内容取回。Tool Ready 已独立硬关闭。如需停止 Agent 中的所有 Tokenless 行为，应禁用 Adapter：
 
@@ -114,7 +91,8 @@ anolisa adapter disable tokenless <framework>
 
 ### 可逆压缩是有条件的
 
-启用压缩时，响应和 Schema 截断默认会把被移除的 Payload 写入 `~/.tokenless/stash.db`，并在输出中加入：
+启用压缩时，响应/Schema 截断和 build/log 省略区间默认会把被移除的 Payload 写入
+`~/.tokenless/stash.db`，并在输出中加入：
 
 ```text
 <<tokenless:0123456789abcdef01234567>>
@@ -133,7 +111,9 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 ### 普通处理错误通常 fail-open
 
-缺少 `tokenless` 或 `rtk`、压缩无收益或发生普通处理错误时，压缩和重写 Hook 通常不返回修改。Tool Ready 会在旧版检查、修复和阻断逻辑之前硬退出。工具执行后的失败归因是独立能力，保持不变。Stash 写入失败时，仍可能继续执行有损压缩。
+缺少 `tokenless` 或 `rtk`、压缩无收益或发生普通处理错误时，压缩和重写 Hook 通常不返回
+修改。`compress` 命令的所有非 `applied` 响应都会返回原文。Tool Ready 会在旧版检查、修复和
+阻断逻辑之前硬退出；工具执行后的失败归因是独立能力，保持不变。
 
 命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes 会先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
 
@@ -141,14 +121,14 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 | Agent 产品 | 集成方式 | 当前代码路径 |
 |------|----------|--------------|
-| cosh | Extension | Tool Ready（已硬关闭）、命令重写、响应压缩 + TOON、Schema；Cosh-NG 有替换路径，旧版 Copilot Shell 则追加额外上下文 |
+| cosh | Extension | Tool Ready（已硬关闭）、命令重写、Schema；Cosh-NG 替换符合条件的 Pipeline 输出，旧版 Copilot Shell 透传工具后输出 |
 | OpenClaw | Plugin | Tool Ready（已硬关闭）、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
 | Hermes | Plugin | Tool Ready（已硬关闭）、阻止后重试的命令重写、用响应压缩 + TOON 替换结果；无 Schema |
-| Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON；无 Schema |
+| Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `updatedToolOutput` 交付响应 Pipeline；无 Schema |
 | Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
 | Codex | Plugin | Tool Ready（已硬关闭）、RTK 命令重写、环境失败诊断；不替换响应/TOON，无 Schema |
 | OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Schema |
-| Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON、Schema |
+| Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写；当前宿主缺少工具后替换能力，并跳过声明的 BeforeModel 事件 |
 
 ## 支持的 Agent 开发框架
 
@@ -162,8 +142,9 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 |------------|------|
 | 第一次安装并验证 | [快速开始](QUICKSTART.md) |
 | 从源码构建独立 CLI | [本页 · 从源码构建独立 CLI](#从源码构建独立-cli) |
-| 从源码构建进程内 Python Runtime | [本页 · 从源码构建 Python Runtime](#从源码构建-python-runtime) |
-| 接入 Agent 产品或集成 AgentScope | [Agent 与框架集成](framework-integration.md) |
+| 使用进程内 Python SDK | [Python SDK](sdk.md) |
+| 集成 AgentScope | [AgentScope SDK 集成](sdk/agentscope.md) |
+| 接入 Agent 产品 | [Agent 集成](framework-integration.md) |
 | 手动压缩、取回或运行 MCP | [CLI 参考](cli-reference.md) |
 | 查看节省或内容变化、做双跑对比 | [效果度量](measuring-savings.md) |
 | 修改配置或了解本地数据 | [配置与数据隐私](configuration-and-privacy.md) |

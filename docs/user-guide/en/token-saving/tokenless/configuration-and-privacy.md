@@ -103,7 +103,7 @@ An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory th
 | Data | Default path | Default content | Retention | Stop new data |
 |------|--------------|-----------------|-----------|---------------|
 | Local statistics | `~/.tokenless/stats.db` | Complete before/after text, identifiers, and metrics | No automatic TTL; retained until cleared | `tokenless stats disable` |
-| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, deep subtrees, and schema descriptions removed by truncation | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
+| Stash | `~/.tokenless/stash.db` | Original strings, dropped middle segments of truncated arrays, deep subtrees, schema descriptions removed by truncation, and build/log gaps | One-hour TTL and 10,000 live entries; expired rows are purged lazily | CLI: `--no-stash`; agent: disable the adapter |
 | Configuration | `~/.tokenless/config.json` | Three Boolean toggles | Persistent | Not applicable |
 | SLS JSONL | `/var/log/anolisa/sls/ops/tokenless.jsonl` | Metrics and identifiers, no compressed source text | Managed by SLS/Logtail infrastructure | `TOKENLESS_SLS_ENABLED=0` or config false |
 
@@ -238,5 +238,5 @@ These values are managed by OpenClaw plugin configuration, not `~/.tokenless/con
 
 - [Measuring savings](measuring-savings.md)
 - [CLI reference](cli-reference.md)
-- [Framework integration](framework-integration.md)
+- [Agent integration](framework-integration.md)
 - [Troubleshooting](troubleshooting.md)

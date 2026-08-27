@@ -121,7 +121,7 @@ anolisa adapter scan
 | Claude Code | `anolisa adapter enable tokenless claude-code` |
 | Codex | `anolisa adapter enable tokenless codex` |
 | DeepSeek Harness (dsh) | `anolisa adapter enable tokenless dsh --profile <profile>` |
-| OpenCode | Lifecycle script (see below) |
+| OpenCode | `anolisa adapter enable tokenless opencode` |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` |
 
 Restart the Agent CLI or IDE after setting it up. OpenClaw also requires
@@ -140,9 +140,8 @@ anolisa adapter enable tokenless dsh \
 Every later enable or re-enable replaces the entire recorded profile set.
 Include every profile that should retain Tokenless each time.
 
-OpenCode is not registered with `anolisa adapter enable` in this release; use
-the bundled lifecycle script described in the
-[OpenCode integration instructions](framework-integration.md#opencode).
+OpenCode is available through the same adapter command. The bundled lifecycle script remains an
+alternative for npm installations that have no ANOLISA component record.
 
 ## Optional: test compression without an Agent
 
@@ -175,7 +174,9 @@ standalone CLI from source, see
 
 ## Next steps
 
-- [Agent and framework integration](framework-integration.md): Agent adapter activation and AgentScope application integration
+- [Python SDK](sdk.md): framework-neutral and AgentScope layers with runnable examples
+- [AgentScope SDK integration](sdk/agentscope.md): AgentScope 1.x, 2.x, and App attachment
+- [Agent integration](framework-integration.md): product adapter activation
 - [User manual](user-manual.md): behavior boundaries and documentation map
 - [CLI reference](cli-reference.md): all subcommands and options
 - [Measuring savings](measuring-savings.md): statistics, dual runs, and AgentSight/SLS

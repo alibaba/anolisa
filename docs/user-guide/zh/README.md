@@ -75,8 +75,10 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 |------|------|------|
 | [Tokenless 快速开始](token-saving/tokenless/QUICKSTART.md) | tokenless | 安装、接入 Agent、首次压缩与验收 |
 | [Tokenless 用户手册](token-saving/tokenless/user-manual.md) | tokenless | 能力边界、运行行为与任务导航 |
-| [Tokenless 框架集成](token-saving/tokenless/framework-integration.md) | tokenless | cosh、OpenClaw、Hermes、Qoder、Claude Code、Codex、Qwen Code |
-| [Tokenless CLI 参考](token-saving/tokenless/cli-reference.md) | tokenless | 压缩、环境检查、Stash、MCP 与统计命令 |
+| [Tokenless Python SDK](token-saving/tokenless/sdk.md) | tokenless | 通用与 AgentScope 两层、Runtime 操作、统计与示例 |
+| [Tokenless AgentScope SDK 集成](token-saving/tokenless/sdk/agentscope.md) | tokenless | 把 AgentScope 1.x、2.x 与 App 挂载到通用 SDK |
+| [Tokenless Agent 集成](token-saving/tokenless/framework-integration.md) | tokenless | 产品 Adapter、Hook 与 Plugin |
+| [Tokenless CLI 参考](token-saving/tokenless/cli-reference.md) | tokenless | Protocol Pipeline、直接压缩、Stash、MCP 与统计命令 |
 | [Tokenless 效果度量](token-saving/tokenless/measuring-savings.md) | tokenless | 统计、diff、dry-run、AgentSight 与 SLS 度量 |
 | [Tokenless 配置与数据隐私](token-saving/tokenless/configuration-and-privacy.md) | tokenless | 配置优先级、本地数据与敏感工作负载 |
 | [Tokenless 故障排查](token-saving/tokenless/troubleshooting.md) | tokenless | Adapter、数据库、Stash、升级与卸载 |

@@ -177,7 +177,7 @@ anolisa adapter scan
 anolisa --verbose adapter enable tokenless <framework>
 ```
 
-For npm installations, use [Framework integration · Manual integration after npm installation](framework-integration.md#manual-integration-after-npm-installation).
+For npm installations, use [Agent integration · Manual integration after npm installation](framework-integration.md#manual-integration-after-npm-installation).
 
 For a directly installed RPM, create the missing state record, then rerun the
 adapter command as the target framework user:
@@ -274,7 +274,12 @@ Expired or never-successfully-written content cannot be recovered.
 
 ## Statistics exist but the prompt is not smaller
 
-First check the framework's response-delivery path in the [support matrix](framework-integration.md#agent-adapter-support-matrix). Qoder and Qwen Code emit `additionalContext`, and legacy Copilot Shell appends it. Codex intentionally avoids response compression because it cannot replace the original result; its PostToolUse context is limited to classified environment failures. Actual Codex savings should be measured on RTK-rewritten shell calls.
+First check the framework's response-delivery path in the
+[support matrix](framework-integration.md#agent-adapter-support-matrix). Qoder replaces output
+through `updatedToolOutput`. Qwen Code and legacy Copilot Shell pass post-tool output through because
+their current contracts provide no replacement field; compressed copies are not injected through
+`additionalContext`. Codex also avoids response compression and limits its PostToolUse context to
+classified environment failures. Measure Codex savings on RTK-rewritten shell calls.
 
 For Claude Code, response replacement requires version 2.1.121 or later. Older or unrecognized versions pass the original through. OpenClaw replaces persisted results, but TOON remains off unless `toon_compression_enabled=true`.
 

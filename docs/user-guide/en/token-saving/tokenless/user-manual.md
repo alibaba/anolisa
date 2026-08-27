@@ -19,10 +19,10 @@ cargo build --release --locked -p tokenless-cli
 
 This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
 
-## Build the Python runtime from source
+## Build the Python SDK from source
 
-Framework integrations running in CPython can use Tokenless in-process instead of starting the
-CLI for every response:
+CPython applications can use Tokenless in process instead of starting the CLI for every lifecycle
+operation:
 
 ```bash
 make python-wheel
@@ -30,53 +30,25 @@ python3 -m venv /tmp/tokenless-python
 /tmp/tokenless-python/bin/pip install target/wheels/anolisa_tokenless-*.whl
 ```
 
-The build requires a discoverable CPython 3.11+ development environment.
-`make python-wheel` uses `uvx` to provision Maturin, so install
-[`uv`](https://docs.astral.sh/uv/) first; alternatively, install Maturin and run
-`make python-wheel MATURIN=maturin`. Full `cargo test --workspace` commands also
-compile the Python member and require the same environment, while default
-workspace Cargo commands exclude it.
+The build requires a discoverable CPython 3.11+ development environment. The wheel uses the
+CPython 3.11 stable ABI and remains specific to the operating system and architecture for which it
+was built.
 
-The wheel uses the CPython 3.11 stable ABI, so it supports CPython 3.11 and later on the operating
-system and CPU architecture where it was built. The package is not yet published to PyPI.
-
-The first API accepts JSON text and exposes response compression and Stash retrieval:
-
-```python
-import json
-from pathlib import Path
-
-from anolisa_tokenless import TokenlessRuntime
-
-runtime = TokenlessRuntime(Path.home() / ".local/state/my-agent/tokenless")
-result = runtime.compress_response(
-    json.dumps({"items": list(range(200))}),
-    truncate_arrays_at=32,
-    agent_id="my-agent",
-    session_id="session-42",
-    tool_use_id="tool-7",
-)
-model_visible_output = result.output
-```
-
-The Python API defaults to reversible fail-open behavior: when Stash was requested but is
-unavailable, a write fails, or a configured limit cannot fit a retrieval marker,
-`result.output` remains the original JSON and
-`result.disposition` is `reversibility-unavailable`. Use a separate absolute data directory for
-each user or tenant. Schema compression, TOON, RTK, MCP, and framework middleware are not included
-in this first API. See the [runtime design](../../../../../src/tokenless/docs/design/runtime-library.md)
-for the state and concurrency contract.
+The Python SDK has two layers. The `anolisa-tokenless` package exposes the framework-neutral
+`TokenlessSdk`, direct `TokenlessRuntime` operations, and typed `TokenlessStats` queries. The
+same-version `anolisa-tokenless-agentscope` package maps that generic lifecycle to AgentScope. See
+the [Python SDK guide](sdk.md) for both layers, runnable examples, and configuration.
 
 ## Capabilities and boundaries
 
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Runs on the cosh/Cosh-NG `BeforeModel` hook and per OpenCode tool definition (Qwen Code's manifest entry is skipped by current hosts); other users can call the CLI |
-| Response compression | Removes exact, case-sensitive debug-field names, `null`, empty strings/arrays/objects, and truncates values past configured limits | Accepts JSON; content-retrieval tools are intentionally skipped by adapters |
-| TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Whether TOON replaces or accompanies the original depends on the adapter |
+| Content-aware response compression | Routes JSON records, build logs, and long plain text through matching compressors, then accepts only a smaller end-to-end result | Direct `compress-response` remains JSON-only; host capabilities decide whether shared hooks can replace with text and publish retrieval |
+| TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
-| Stash | Stores content removed by string, array, depth, or schema-description truncation | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
+| Stash | Stores content removed by string, array, depth, or schema-description truncation and by build/log gap removal | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
 
@@ -86,11 +58,15 @@ After an adapter is enabled, a tool call may pass through these stages:
 
 ```text
 Before the tool: hard-disabled Tool Ready hook → command rewrite
-After the tool: response compression → optional Stash → TOON encoding → statistics
+After the tool: content detection → eligible compressors → optional Stash/TOON → statistics
 Before the model: schema compression
 ```
 
-This is a capability map, not a pipeline that every framework runs. For example, OpenClaw disables TOON by default, Codex relies on RTK source reduction and does not run response compression, and schema compression only runs on cosh/Cosh-NG (`BeforeModel` hook) and OpenCode (per tool definition). See [Framework integration](framework-integration.md).
+This is a capability map, not a pipeline that every framework runs. For example, the content-aware
+protocol path currently serves Cosh-NG, Qoder, supported Claude Code releases, and OpenCode;
+OpenClaw, Hermes, and DeepSeek Harness retain dedicated JSON response paths. Codex and Qwen Code do
+not replace post-tool output under their current host contracts. See
+[Agent integration](framework-integration.md).
 
 ## Behaviors to understand
 
@@ -106,7 +82,9 @@ CLI-only use does not require an adapter.
 
 ### “Compression off” affects only compression operations
 
-With `compression_enabled=false` or `TOKENLESS_COMPRESSION_ENABLED=0`, `compress-schema`, `compress-response`, and `compress-toon`—whether called directly or through an adapter—still calculate predicted savings and may write statistics, but return the original input. They do not write Stash entries in this mode.
+With `compression_enabled=false` or `TOKENLESS_COMPRESSION_ENABLED=0`, `compress`,
+`compress-schema`, `compress-response`, and `compress-toon` still calculate predicted savings and
+may write statistics, but return the original input. They do not write Stash entries in this mode.
 
 This setting does not disable RTK command rewriting, adapter execution, or retrieval. Tool Ready is independently hard-disabled. To stop all Tokenless behavior in an agent, disable the adapter:
 
@@ -116,7 +94,8 @@ anolisa adapter disable tokenless <framework>
 
 ### Reversible compression is conditional
 
-Active response and schema truncation stash the removed payload in `~/.tokenless/stash.db` by default and add a marker such as:
+Active response/schema truncation and build/log gap removal stash the removed payload in
+`~/.tokenless/stash.db` by default and add a marker such as:
 
 ```text
 <<tokenless:0123456789abcdef01234567>>
@@ -135,7 +114,10 @@ Stash does not make all compression reversible. Removed `debug`/`trace` fields, 
 
 ### Processing errors usually fail open
 
-Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing, compression provides no savings, or an ordinary processing error occurs. Tool Ready is hard-disabled before its legacy check, repair, and blocking logic. Post-tool failure attribution is independent and remains unchanged. A Stash write failure may still allow lossy compression to continue.
+Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing,
+compression provides no savings, or an ordinary processing error occurs. The `compress` command returns
+the original in every non-`applied` response. Tool Ready is hard-disabled before its legacy check,
+repair, and blocking logic. Post-tool failure attribution is independent and remains unchanged.
 
 Command rewriting also changes the shell command submitted by the host. Most adapters replace the command input directly; Hermes blocks the first call and tells the agent to retry with the rewritten command. Validate important command workflows as well as compressed output.
 
@@ -143,14 +125,14 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 
 | Agent product | Integration | Current code path |
 |-----------|-------------|-------------------|
-| cosh | Extension | Hard-disabled Tool Ready, rewrite, response + TOON, Schema; Cosh-NG has a replacement path, while legacy Copilot Shell appends additional context |
+| cosh | Extension | Hard-disabled Tool Ready, rewrite, Schema; Cosh-NG replaces eligible pipeline output, while legacy Copilot Shell passes post-tool output through |
 | OpenClaw | Plugin | Hard-disabled Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
 | Hermes | Plugin | Hard-disabled Tool Ready, block-and-retry rewrite, result replacement with response + TOON; no Schema |
-| Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`; no Schema |
+| Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response pipeline through `updatedToolOutput`; no Schema |
 | Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
 | Codex | Plugin | Hard-disabled Tool Ready, RTK rewrite, environment-failure diagnostics; no response/TOON replacement or Schema |
 | OpenCode | Plugin | Hard-disabled Tool Ready, Bash rewrite, tool-output replacement with response + TOON, Schema |
-| Qwen Code | Extension | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`, Schema |
+| Qwen Code | Extension | Hard-disabled Tool Ready, rewrite; current host lacks post-tool replacement and skips the declared BeforeModel event |
 
 ## Supported Agent development frameworks
 
@@ -164,8 +146,9 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 |-----------|----------|
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
-| Build the in-process Python runtime | [This page · Build the Python runtime from source](#build-the-python-runtime-from-source) |
-| Connect an Agent product or integrate AgentScope | [Agent and framework integration](framework-integration.md) |
+| Use the in-process Python SDK | [Python SDK](sdk.md) |
+| Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |
+| Connect an Agent product | [Agent integration](framework-integration.md) |
 | Compress, retrieve, or run MCP manually | [CLI reference](cli-reference.md) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |
 | Change settings or understand local data | [Configuration and data privacy](configuration-and-privacy.md) |

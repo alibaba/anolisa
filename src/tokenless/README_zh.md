@@ -2,14 +2,14 @@
 
 [English](README.md)
 
-LLM Token 优化工具包——Schema/响应压缩 + 命令重写 + 工具环境就绪检查。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
+LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失败诊断。Token-Less 是 [ANOLISA](../../README_zh.md) 的 Token 节省组件，通过多种互补策略最小化 LLM Token 消耗。
 
 ## 核心能力
 
 | 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
-| 响应压缩 | 参考 fixture 65.8% | 压缩 API/工具响应 |
+| Content-aware 响应压缩 | JSON 参考 fixture 65.8% | 把 JSON、构建日志和长纯文本路由到匹配 Compressor |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
@@ -74,20 +74,22 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ### Agent Adapter
 
-- **OpenClaw 插件** — 命令重写 + 响应压缩 + Schema 压缩
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **OpenClaw 插件** — 命令重写 + 响应压缩 + 可选 TOON；不支持 Schema 压缩
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + Schema；Cosh-NG 可替换 Pipeline 输出，旧版 Copilot Shell 透传
 - **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
-- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩
+- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
 - **DeepSeek Harness 插件**。通过 DSH 原生 `tools/post-execute` 接入响应压缩和环境错误归因
+- **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 
 ### Agent 开发框架集成
 
-- **AgentScope Python 集成** — 完整开放 Schema 压缩、RTK 改写、响应压缩、TOON、
-  受 marker 约束的恢复和归属统计。
+- **通用 Python SDK** — 面向任意 Agent 框架的生命周期 API、单项 Runtime 操作与统计查询。
+- **AgentScope 专用层** — 基于通用 SDK，完整开放 Schema 压缩、RTK 改写、响应压缩、
+  TOON、受 marker 约束的恢复和归属统计。
 
 ## 快速开始
 
@@ -141,6 +143,14 @@ anolisa adapter enable tokenless dsh --profile <profile>
 dsh --profile <profile>
 ```
 
+### `compress` 压缩入口
+
+共享 Agent Hook 会向 `tokenless compress` 发送压缩请求。该命令检测内容，根据
+宿主声明能力筛选 Compressor，并返回结构化 disposition 与应当交付的精确输出。当前覆盖
+模型工具 Schema、JSON Records、构建日志和长纯文本；其他已检测内容类型原样透传。请求/
+响应契约和可执行示例见
+[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
+
 ### Schema 压缩 CLI
 
 `compress-schema` 支持单个工具定义、工具定义 JSON 数组，以及包含顶层
@@ -189,7 +199,7 @@ make setup
 源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 辅助
 二进制也位于同一个目录，并部署开发所需的全部 adapter。
 
-### 构建 Python Runtime
+### 构建 Python SDK
 
 框架开发者可以从源码构建进程内 Python API：
 
@@ -208,9 +218,11 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 `anolisa_tokenless` 模块支持 CPython 3.11 及更高版本，但只能在构建该原生
 Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
 TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
-但目前尚未发布到
-PyPI。具体见 [Runtime 设计](docs/design/runtime-library_zh.md) 和
-[用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#从源码构建-python-runtime)。
+但目前尚未发布到 PyPI。可运行生命周期与 Stats 示例见
+[Python SDK 指南](../../docs/user-guide/zh/token-saving/tokenless/sdk.md)，AgentScope 挂载见
+[AgentScope SDK 集成](../../docs/user-guide/zh/token-saving/tokenless/sdk/agentscope.md)，产品 Adapter 见
+[Agent 集成指南](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md)，内部契约见
+[Runtime 设计](docs/design/runtime-library_zh.md)。
 
 同一个 Wheel 还提供不依赖 CLI 的只读 typed Stats 查询。可以让 `TokenlessStats` 指向
 Runtime 使用的状态目录，或使用延迟创建的 `sdk.stats`：
@@ -464,6 +476,9 @@ tokenless env-check --tool Shell --fix
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-runtime/` — CLI 与语言绑定共用的有状态 Rust API
+- `crates/tokenless-protocol/` — 版本化 Adapter 请求/响应契约
+- `crates/tokenless-pipeline/` — 内容检测、路由、分阶段执行与仲裁
+- `crates/tokenless-compressors/` — Terminal 与 build/log Compressor
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据
