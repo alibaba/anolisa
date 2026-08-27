@@ -232,11 +232,39 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DryRunPolicy {
+    Unsupported,
+    PrivilegedPreview,
+    UnprivilegedPreview,
+}
+
+impl DryRunPolicy {
+    const fn is_supported(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+
+    const fn waives_root(self) -> bool {
+        matches!(self, Self::UnprivilegedPreview)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandScope {
     ReadOnly,
-    ModeScopedMutation { dry_run_without_root: bool },
-    SystemOnlyMutation { dry_run_without_root: bool },
-    HelperGatedSystemOperation,
+    ModeScopedMutation { dry_run: DryRunPolicy },
+    SystemOnlyMutation { dry_run: DryRunPolicy },
+    HelperGatedSystemOperation { dry_run: DryRunPolicy },
+}
+
+impl CommandScope {
+    const fn dry_run_policy(self) -> Option<DryRunPolicy> {
+        match self {
+            Self::ReadOnly => None,
+            Self::ModeScopedMutation { dry_run }
+            | Self::SystemOnlyMutation { dry_run }
+            | Self::HelperGatedSystemOperation { dry_run } => Some(dry_run),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +314,7 @@ fn validate_global_args_with_euid(
         CommandScope::SystemOnlyMutation { .. } if ctx.install_mode != InstallMode::System => {
             return Err(system_scope_error(policy.label, install_mode_explicit));
         }
-        CommandScope::HelperGatedSystemOperation
+        CommandScope::HelperGatedSystemOperation { .. }
             if install_mode_explicit && ctx.install_mode != InstallMode::System =>
         {
             return Err(system_scope_error(policy.label, true));
@@ -294,25 +322,36 @@ fn validate_global_args_with_euid(
         _ => {}
     }
 
+    if ctx.dry_run
+        && policy
+            .scope
+            .dry_run_policy()
+            .is_some_and(|dry_run| !dry_run.is_supported())
+    {
+        return Err(CliError::InvalidArgument {
+            command: policy.label.to_string(),
+            reason: format!(
+                "command '{}' does not support --dry-run; no action was taken",
+                policy.label
+            ),
+        });
+    }
+
     match policy.scope {
         CommandScope::ReadOnly => {}
-        CommandScope::ModeScopedMutation {
-            dry_run_without_root,
-        } => {
-            let dry_run_preview = ctx.dry_run && dry_run_without_root;
+        CommandScope::ModeScopedMutation { dry_run } => {
+            let dry_run_preview = ctx.dry_run && dry_run.waives_root();
             if ctx.install_mode == InstallMode::System && effective_uid != 0 && !dry_run_preview {
                 return Err(system_permission_error(ctx, policy.label, true));
             }
         }
-        CommandScope::SystemOnlyMutation {
-            dry_run_without_root,
-        } => {
-            let dry_run_preview = ctx.dry_run && dry_run_without_root;
+        CommandScope::SystemOnlyMutation { dry_run } => {
+            let dry_run_preview = ctx.dry_run && dry_run.waives_root();
             if effective_uid != 0 && !dry_run_preview {
                 return Err(system_permission_error(ctx, policy.label, false));
             }
         }
-        CommandScope::HelperGatedSystemOperation => {}
+        CommandScope::HelperGatedSystemOperation { .. } => {}
     }
 
     if ctx.install_mode == InstallMode::User && effective_uid == 0 {
@@ -350,22 +389,12 @@ fn system_scope_error(command: &str, install_mode_explicit: bool) -> CliError {
     }
 }
 
-const fn mode_scoped(label: &'static str, dry_run_without_root: bool) -> CommandPolicy {
-    CommandPolicy::new(
-        label,
-        CommandScope::ModeScopedMutation {
-            dry_run_without_root,
-        },
-    )
+const fn mode_scoped(label: &'static str, dry_run: DryRunPolicy) -> CommandPolicy {
+    CommandPolicy::new(label, CommandScope::ModeScopedMutation { dry_run })
 }
 
-const fn system_only(label: &'static str, dry_run_without_root: bool) -> CommandPolicy {
-    CommandPolicy::new(
-        label,
-        CommandScope::SystemOnlyMutation {
-            dry_run_without_root,
-        },
-    )
+const fn system_only(label: &'static str, dry_run: DryRunPolicy) -> CommandPolicy {
+    CommandPolicy::new(label, CommandScope::SystemOnlyMutation { dry_run })
 }
 
 fn system_permission_error(ctx: &CliContext, command: &str, user_mode_supported: bool) -> CliError {
@@ -392,15 +421,21 @@ fn command_policy(command: &Commands) -> CommandPolicy {
     match command {
         Commands::Component(cmd) => match cmd {
             ComponentCommands::List(_) => CommandPolicy::new("list", CommandScope::ReadOnly),
-            ComponentCommands::Install(_) => mode_scoped("install", true),
-            ComponentCommands::Uninstall(_) => mode_scoped("uninstall", true),
+            ComponentCommands::Install(_) => {
+                mode_scoped("install", DryRunPolicy::UnprivilegedPreview)
+            }
+            ComponentCommands::Uninstall(_) => {
+                mode_scoped("uninstall", DryRunPolicy::UnprivilegedPreview)
+            }
             ComponentCommands::Status(_) => CommandPolicy::new("status", CommandScope::ReadOnly),
             ComponentCommands::Doctor(_) => CommandPolicy::new("doctor", CommandScope::ReadOnly),
             ComponentCommands::Logs(_) => CommandPolicy::new("logs", CommandScope::ReadOnly),
             // Preview lists recorded/discovered units and does not
             // daemon-reload, restart, or take the exclusive install lock,
             // so `--dry-run` can waive root like install/uninstall/repair/forget.
-            ComponentCommands::Restart(_) => mode_scoped("restart", true),
+            ComponentCommands::Restart(_) => {
+                mode_scoped("restart", DryRunPolicy::UnprivilegedPreview)
+            }
             // `update --check` is read-only upgrade detection: it only runs
             // read-only rpm/dnf queries (no package transaction, no state
             // writes), so it must not be gated behind the mutating-update root
@@ -408,15 +443,23 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ComponentCommands::Update(args) if args.check => {
                 CommandPolicy::new("update", CommandScope::ReadOnly)
             }
-            ComponentCommands::Update(_) => mode_scoped("update", true),
+            ComponentCommands::Update(_) => {
+                mode_scoped("update", DryRunPolicy::UnprivilegedPreview)
+            }
             // `upgrade` is a system-only RPM image mutation: real execution
             // needs root. `--dry-run` waives only the root requirement, not the
             // system-mode one, so an explicit system-mode dry-run can preview
             // the plan without root (matching `repair`).
-            ComponentCommands::Upgrade(_) => system_only("upgrade", true),
-            ComponentCommands::Repair(_) => mode_scoped("repair", true),
-            ComponentCommands::Forget(_) => mode_scoped("forget", true),
-            ComponentCommands::Adopt(_) => system_only("adopt", false),
+            ComponentCommands::Upgrade(_) => {
+                system_only("upgrade", DryRunPolicy::UnprivilegedPreview)
+            }
+            ComponentCommands::Repair(_) => {
+                mode_scoped("repair", DryRunPolicy::UnprivilegedPreview)
+            }
+            ComponentCommands::Forget(_) => {
+                mode_scoped("forget", DryRunPolicy::UnprivilegedPreview)
+            }
+            ComponentCommands::Adopt(_) => system_only("adopt", DryRunPolicy::UnprivilegedPreview),
             ComponentCommands::Adapter(args) => {
                 CommandPolicy::new("adapter", adapter_command_scope(args))
             }
@@ -425,7 +468,9 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ManagementCommands::Register(args) => {
                 CommandPolicy::new("register", register_command_scope(args))
             }
-            ManagementCommands::Unregister(_) => system_only("unregister", false),
+            ManagementCommands::Unregister(_) => {
+                system_only("unregister", DryRunPolicy::Unsupported)
+            }
             ManagementCommands::Env(_) => CommandPolicy::new("env", CommandScope::ReadOnly),
             ManagementCommands::Bug(_) => CommandPolicy::new("bug", CommandScope::ReadOnly),
             ManagementCommands::Osbase(args) => {
@@ -452,7 +497,7 @@ fn telemetry_command_scope(args: &telemetry::TelemetryArgs) -> CommandScope {
         | telemetry::TelemetryCommands::Unlink
         | telemetry::TelemetryCommands::Upload { .. }
         | telemetry::TelemetryCommands::Init => CommandScope::ModeScopedMutation {
-            dry_run_without_root: true,
+            dry_run: DryRunPolicy::UnprivilegedPreview,
         },
     }
 }
@@ -462,19 +507,20 @@ fn adapter_command_scope(args: &adapter::AdapterArgs) -> CommandScope {
         adapter::AdapterCommands::Scan | adapter::AdapterCommands::Status { .. } => {
             CommandScope::ReadOnly
         }
-        adapter::AdapterCommands::Enable { .. } => CommandScope::ModeScopedMutation {
-            dry_run_without_root: true,
-        },
-        adapter::AdapterCommands::Disable { .. } => CommandScope::ModeScopedMutation {
-            dry_run_without_root: false,
-        },
+        // Both adapter mutations take the install lock before planning, so
+        // their previews still require the same privilege as real execution.
+        adapter::AdapterCommands::Enable { .. } | adapter::AdapterCommands::Disable { .. } => {
+            CommandScope::ModeScopedMutation {
+                dry_run: DryRunPolicy::PrivilegedPreview,
+            }
+        }
     }
 }
 
 fn register_command_scope(args: &register::RegisterArgs) -> CommandScope {
     match &args.command {
         Some(register::RegisterCommands::Status { .. }) => CommandScope::ReadOnly,
-        None => system_only_scope(false),
+        None => system_only_scope(DryRunPolicy::Unsupported),
     }
 }
 
@@ -483,7 +529,7 @@ fn system_command_scope(args: &system::SystemArgs) -> CommandScope {
         system::SystemCommands::Status { .. } => CommandScope::ReadOnly,
         system::SystemCommands::Serve { .. }
         | system::SystemCommands::Setup { .. }
-        | system::SystemCommands::Teardown => system_only_scope(false),
+        | system::SystemCommands::Teardown => system_only_scope(DryRunPolicy::Unsupported),
     }
 }
 
@@ -492,34 +538,35 @@ fn osbase_command_scope(args: &osbase::OsbaseArgs) -> CommandScope {
         osbase::OsbaseCommands::Kernel(kernel) => match &kernel.command {
             osbase::KernelCommands::Status => CommandScope::ReadOnly,
             osbase::KernelCommands::Install { .. } | osbase::KernelCommands::Remove => {
-                helper_gated_system_operation_scope()
+                helper_gated_system_operation_scope(DryRunPolicy::Unsupported)
             }
         },
         osbase::OsbaseCommands::Sandbox(sandbox) => match &sandbox.command {
             osbase::SandboxCommands::List { .. } | osbase::SandboxCommands::Status { .. } => {
                 CommandScope::ReadOnly
             }
-            osbase::SandboxCommands::Install { .. }
-            | osbase::SandboxCommands::Uninstall { .. }
-            | osbase::SandboxCommands::Remove { .. } => helper_gated_system_operation_scope(),
+            osbase::SandboxCommands::Install { .. } | osbase::SandboxCommands::Uninstall { .. } => {
+                helper_gated_system_operation_scope(DryRunPolicy::UnprivilegedPreview)
+            }
+            osbase::SandboxCommands::Remove { .. } => {
+                helper_gated_system_operation_scope(DryRunPolicy::Unsupported)
+            }
         },
         osbase::OsbaseCommands::Security(security) => match &security.command {
             osbase::SecurityCommands::Status { .. } => CommandScope::ReadOnly,
             osbase::SecurityCommands::Install { .. } | osbase::SecurityCommands::Remove { .. } => {
-                helper_gated_system_operation_scope()
+                helper_gated_system_operation_scope(DryRunPolicy::Unsupported)
             }
         },
     }
 }
 
-const fn system_only_scope(dry_run_without_root: bool) -> CommandScope {
-    CommandScope::SystemOnlyMutation {
-        dry_run_without_root,
-    }
+const fn system_only_scope(dry_run: DryRunPolicy) -> CommandScope {
+    CommandScope::SystemOnlyMutation { dry_run }
 }
 
-const fn helper_gated_system_operation_scope() -> CommandScope {
-    CommandScope::HelperGatedSystemOperation
+const fn helper_gated_system_operation_scope(dry_run: DryRunPolicy) -> CommandScope {
+    CommandScope::HelperGatedSystemOperation { dry_run }
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
@@ -568,7 +615,7 @@ mod tests {
     fn global_prefix_must_be_absolute() {
         let err = validate_global_args_with_euid(
             &ctx_with_prefix(PathBuf::from("relative")),
-            mode_scoped("global", false),
+            mode_scoped("global", DryRunPolicy::Unsupported),
             0,
             true,
         )
@@ -581,7 +628,7 @@ mod tests {
     fn global_prefix_rejects_traversal_segments() {
         let err = validate_global_args_with_euid(
             &ctx_with_prefix(PathBuf::from("/opt/../etc")),
-            mode_scoped("global", false),
+            mode_scoped("global", DryRunPolicy::Unsupported),
             0,
             true,
         )
@@ -594,7 +641,7 @@ mod tests {
     fn system_mode_without_root_is_rejected_before_writes() {
         let err = validate_global_args_with_euid(
             &ctx_with_prefix(PathBuf::from("/")),
-            mode_scoped("install", true),
+            mode_scoped("install", DryRunPolicy::UnprivilegedPreview),
             1000,
             true,
         )
@@ -610,8 +657,13 @@ mod tests {
         let mut ctx = ctx_with_prefix(PathBuf::from("/"));
         ctx.dry_run = true;
 
-        validate_global_args_with_euid(&ctx, mode_scoped("install", true), 1000, true)
-            .expect("non-root system dry-run should reach preview-capable handlers");
+        validate_global_args_with_euid(
+            &ctx,
+            mode_scoped("install", DryRunPolicy::UnprivilegedPreview),
+            1000,
+            true,
+        )
+        .expect("non-root system dry-run should reach preview-capable handlers");
     }
 
     #[test]
@@ -662,8 +714,13 @@ mod tests {
         let mut ctx = ctx_with_prefix(PathBuf::from("/"));
         ctx.dry_run = true;
 
-        validate_global_args_with_euid(&ctx, system_only("repair", true), 1000, true)
-            .expect("non-root system dry-run should reach preview-capable system handlers");
+        validate_global_args_with_euid(
+            &ctx,
+            system_only("repair", DryRunPolicy::UnprivilegedPreview),
+            1000,
+            true,
+        )
+        .expect("non-root system dry-run should reach preview-capable system handlers");
     }
 
     #[test]
@@ -701,32 +758,176 @@ mod tests {
     }
 
     #[test]
-    fn system_mode_dry_run_without_root_is_rejected_without_preview_contract() {
+    fn adopt_policy_allows_non_root_system_preview() {
+        let command = Commands::Component(ComponentCommands::Adopt(tier1::adopt::AdoptArgs {
+            component: "cosh".to_string(),
+            package: None,
+        }));
+        let policy = command_policy(&command);
         let mut ctx = ctx_with_prefix(PathBuf::from("/"));
         ctx.dry_run = true;
 
-        let err = validate_global_args_with_euid(&ctx, mode_scoped("restart", false), 1000, true)
-            .expect_err("dry-run should not bypass commands without preview semantics");
-
-        assert_eq!(err.code(), "PERMISSION_DENIED");
+        assert_eq!(
+            policy.scope.dry_run_policy(),
+            Some(DryRunPolicy::UnprivilegedPreview)
+        );
+        validate_global_args_with_euid(&ctx, policy, 1000, true)
+            .expect("adopt preview does not take the install lock or mutate state");
     }
 
     #[test]
-    fn system_only_dry_run_without_root_is_rejected_without_preview_contract() {
+    fn adapter_mutation_previews_retain_the_system_root_requirement() {
+        let commands = [
+            adapter::AdapterCommands::Enable {
+                component: "tokenless".to_string(),
+                framework: Some("openclaw".to_string()),
+                allow_unsafe_plugin_install: false,
+                profiles: Vec::new(),
+            },
+            adapter::AdapterCommands::Disable {
+                component: "tokenless".to_string(),
+                framework: Some("openclaw".to_string()),
+            },
+        ];
         let mut ctx = ctx_with_prefix(PathBuf::from("/"));
         ctx.dry_run = true;
 
-        let err = validate_global_args_with_euid(&ctx, system_only("adopt", false), 1000, true)
-            .expect_err("dry-run should not bypass system commands without preview semantics");
+        for adapter_command in commands {
+            let command = Commands::Component(ComponentCommands::Adapter(adapter::AdapterArgs {
+                command: adapter_command,
+            }));
+            let policy = command_policy(&command);
+
+            assert_eq!(
+                policy.scope.dry_run_policy(),
+                Some(DryRunPolicy::PrivilegedPreview)
+            );
+            let err = validate_global_args_with_euid(&ctx, policy, 1000, true)
+                .expect_err("adapter previews take the privileged install lock");
+            assert_eq!(err.code(), "PERMISSION_DENIED");
+            validate_global_args_with_euid(&ctx, policy, 0, true)
+                .expect("root should reach the adapter preview handler");
+        }
+    }
+
+    #[test]
+    fn unsupported_management_dry_runs_fail_closed_for_root() {
+        let commands = [
+            Commands::Management(ManagementCommands::Register(register::RegisterArgs {
+                command: None,
+                yes: true,
+            })),
+            Commands::Management(ManagementCommands::Unregister(register::UnregisterArgs {
+                force: true,
+            })),
+            Commands::Management(ManagementCommands::System(system::SystemArgs {
+                command: system::SystemCommands::Setup {
+                    helper_path: None,
+                    upgrade: false,
+                },
+            })),
+        ];
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        for command in commands {
+            let err = validate_global_args_with_euid(&ctx, command_policy(&command), 0, true)
+                .expect_err("commands without preview implementations must fail closed");
+
+            assert_eq!(err.code(), "INVALID_ARGUMENT");
+            assert!(err.reason().contains("does not support --dry-run"));
+        }
+    }
+
+    #[test]
+    fn sandbox_install_and_uninstall_support_global_dry_run_but_remove_does_not() {
+        let supported = [
+            osbase::SandboxCommands::Install {
+                target: "kata-containers".to_string(),
+                dry_run: false,
+                force: false,
+                no_verify: false,
+            },
+            osbase::SandboxCommands::Uninstall {
+                scenario: "kata-containers".to_string(),
+                dry_run: false,
+            },
+        ];
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        for sandbox_command in supported {
+            let command = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
+                command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
+                    command: sandbox_command,
+                }),
+            }));
+            let policy = command_policy(&command);
+
+            assert_eq!(
+                policy.scope.dry_run_policy(),
+                Some(DryRunPolicy::UnprivilegedPreview)
+            );
+            validate_global_args_with_euid(&ctx, policy, 1000, true)
+                .expect("sandbox install and uninstall forward dry-run to the helper request");
+        }
+
+        let remove = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
+            command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
+                command: osbase::SandboxCommands::Remove {
+                    target: "kata-containers".to_string(),
+                    purge: false,
+                    dry_run: false,
+                },
+            }),
+        }));
+        let err = validate_global_args_with_euid(&ctx, command_policy(&remove), 0, true)
+            .expect_err("sandbox remove does not yet propagate dry-run");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("does not support --dry-run"));
+    }
+
+    #[test]
+    fn unsupported_dry_run_is_rejected_before_execution() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        let err = validate_global_args_with_euid(
+            &ctx,
+            mode_scoped("restart", DryRunPolicy::Unsupported),
+            0,
+            true,
+        )
+        .expect_err("unsupported dry-run must fail closed even for root");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("does not support --dry-run"));
+        assert!(err.reason().contains("no action was taken"));
+    }
+
+    #[test]
+    fn privileged_preview_still_requires_root_in_system_mode() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        let policy = mode_scoped("adapter", DryRunPolicy::PrivilegedPreview);
+        let err = validate_global_args_with_euid(&ctx, policy, 1000, true)
+            .expect_err("privileged preview must retain the system root requirement");
 
         assert_eq!(err.code(), "PERMISSION_DENIED");
+        validate_global_args_with_euid(&ctx, policy, 0, true)
+            .expect("root should reach a privileged preview handler");
     }
 
     #[test]
     fn helper_gated_system_operation_reaches_handler_without_root_in_explicit_system_mode() {
         validate_global_args_with_euid(
             &ctx_with_prefix(PathBuf::from("/")),
-            CommandPolicy::new("osbase", helper_gated_system_operation_scope()),
+            CommandPolicy::new(
+                "osbase",
+                helper_gated_system_operation_scope(DryRunPolicy::UnprivilegedPreview),
+            ),
             1000,
             true,
         )
@@ -754,7 +955,10 @@ mod tests {
     fn helper_gated_system_operation_rejects_explicit_user_mode() {
         let err = validate_global_args_with_euid(
             &user_ctx(),
-            CommandPolicy::new("osbase", helper_gated_system_operation_scope()),
+            CommandPolicy::new(
+                "osbase",
+                helper_gated_system_operation_scope(DryRunPolicy::UnprivilegedPreview),
+            ),
             1000,
             true,
         )
@@ -766,21 +970,28 @@ mod tests {
     }
 
     #[test]
-    fn read_only_system_mode_without_root_is_not_preemptively_rejected() {
+    fn read_only_global_dry_run_without_root_is_not_preemptively_rejected() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
         validate_global_args_with_euid(
-            &ctx_with_prefix(PathBuf::from("/")),
+            &ctx,
             CommandPolicy::new("status", CommandScope::ReadOnly),
             1000,
             true,
         )
-        .expect("read-only commands should reach their normal read path");
+        .expect("read-only commands should ignore global dry-run and reach their read path");
     }
 
     #[test]
     fn root_user_mode_is_rejected() {
-        let err =
-            validate_global_args_with_euid(&user_ctx(), mode_scoped("install", true), 0, true)
-                .expect_err("root user-mode would create ambiguous ownership semantics");
+        let err = validate_global_args_with_euid(
+            &user_ctx(),
+            mode_scoped("install", DryRunPolicy::UnprivilegedPreview),
+            0,
+            true,
+        )
+        .expect_err("root user-mode would create ambiguous ownership semantics");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("not supported while running as root"));
@@ -827,9 +1038,13 @@ mod tests {
 
     #[test]
     fn system_only_user_mode_points_at_sudo_default() {
-        let err =
-            validate_global_args_with_euid(&user_ctx(), system_only("adopt", false), 1000, false)
-                .expect_err("system-only command should reject user mode");
+        let err = validate_global_args_with_euid(
+            &user_ctx(),
+            system_only("adopt", DryRunPolicy::UnprivilegedPreview),
+            1000,
+            false,
+        )
+        .expect_err("system-only command should reject user mode");
 
         assert_eq!(err.code(), "PERMISSION_DENIED");
         assert!(err.hint().unwrap().contains("sudo anolisa adopt"));
@@ -838,9 +1053,13 @@ mod tests {
 
     #[test]
     fn system_only_explicit_user_mode_is_invalid_argument() {
-        let err =
-            validate_global_args_with_euid(&user_ctx(), system_only("adopt", false), 1000, true)
-                .expect_err("explicit user mode is invalid for system-only commands");
+        let err = validate_global_args_with_euid(
+            &user_ctx(),
+            system_only("adopt", DryRunPolicy::UnprivilegedPreview),
+            1000,
+            true,
+        )
+        .expect_err("explicit user mode is invalid for system-only commands");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("system scope"));
@@ -849,8 +1068,13 @@ mod tests {
 
     #[test]
     fn root_system_only_user_mode_reports_scope_error() {
-        let err = validate_global_args_with_euid(&user_ctx(), system_only("adopt", false), 0, true)
-            .expect_err("system-only command should not use generic root user-mode guidance");
+        let err = validate_global_args_with_euid(
+            &user_ctx(),
+            system_only("adopt", DryRunPolicy::UnprivilegedPreview),
+            0,
+            true,
+        )
+        .expect_err("system-only command should not use generic root user-mode guidance");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("system scope"));
