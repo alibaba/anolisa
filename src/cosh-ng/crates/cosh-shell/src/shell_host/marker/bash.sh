@@ -395,16 +395,23 @@ _cosh_guard_slash_submission() {
     return 0
   fi
 
-  local sensitive=false
+  local sensitive=false restore_xtrace=0
+  if [[ $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   if _cosh_command_has_secret "$input"; then
     sensitive=true
   fi
   _COSH_PENDING_SLASH_INPUT="$input"
   _COSH_PENDING_SLASH_SENSITIVE="$sensitive"
-  # Accept a static no-op so Readline records a replaceable native-history
-  # entry before the prompt hook restores the original slash text.
-  READLINE_LINE='builtin true __cosh_slash_guard__'
+  # Arm one bounded guard-display window; marker failure remains visual-only.
+  printf '\033]1337;COSH;{"e":"slash_guard","t":"%s"}\a' \
+    "$_COSH_MARKER_TOKEN" > /dev/tty || true
+  # The static no-op makes one replaceable native-history entry.
+  READLINE_LINE='case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac'
   READLINE_POINT=${#READLINE_LINE}
+  (( restore_xtrace == 1 )) && set -x
   return 0
 }
 _cosh_guard_private_slash_submission() {
@@ -421,7 +428,7 @@ _cosh_commit_pending_slash() {
   history_entry="$(_cosh_history_entry)"
   history_no="$(_cosh_history_no "$history_entry")"
   history_command="$(_cosh_history_command_from_entry "$history_entry")"
-  if [[ "$history_command" == 'builtin true __cosh_slash_guard__' ]]; then
+  if [[ "$history_command" == 'case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac' ]]; then
     builtin history -d "$history_no" 2>/dev/null || true
   fi
   if [[ "$sensitive" != true && -o history ]]; then

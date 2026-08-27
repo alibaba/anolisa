@@ -248,7 +248,8 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
         home.join(".bashrc"),
         "export HISTFILE=\"$HOME/.bash_history\"\n\
          export HISTSIZE=1000\n\
-         shopt -s histappend\n",
+         shopt -s histappend\n\
+         PS1='guard$ '\n",
     )
     .expect("bashrc");
     std::fs::write(home.join(".bash_history"), "echo prior-shell-cmd\n").expect("history");
@@ -293,6 +294,14 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
     assert!(!recalled_prior_shell_cmd, "{rendered_text}");
     // The routed line must never execute as a shell command.
     assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal slash guard must never reach the terminal: {rendered_text}"
+    );
+    assert!(
+        rendered_text.contains("/skills detail xlsx"),
+        "the original slash line must remain visible: {rendered_text}"
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
@@ -347,7 +356,194 @@ fn raw_relay_bash_vi_mode_guards_slash_without_mutating_commands() {
         "{rendered_text}"
     );
     assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal slash guard must never reach the vi terminal: {rendered_text}"
+    );
     assert!(!rendered_text.contains("bash: exiT"), "{rendered_text}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_xtrace_hides_guard_protocol_and_sentinel() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-xtrace-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "PS4='xtrace-guard: '; set -x\n").expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-xtrace-guard", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let xtrace_probe = "case $- in *x*) probe=ON ;; *) probe=OFF ;; esac; \
+                        printf '__XTRACE_%s__\\n' \"$probe\"; unset probe";
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line(xtrace_probe),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("xtrace slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/mode")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some(xtrace_probe)
+    }));
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "xtrace leaked the internal sentinel: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("1337;COSH;"),
+        "xtrace leaked the authenticated marker protocol: {rendered_text}"
+    );
+    assert!(
+        rendered_text.contains("__XTRACE_ON__"),
+        "slash guard did not preserve xtrace: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("__XTRACE_OFF__"),
+        "slash guard disabled the user's xtrace state: {rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn assert_bash_guard_preserves_partial_debug_output(
+    test_id: &str,
+    trap_output: &str,
+    expected_output: &str,
+) {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-{test_id}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "PS1='guard$ '\n").expect("bashrc");
+
+    let mut config =
+        ShellHostConfig::new(test_id, &work_dir).with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let trap_setup = format!(
+        "set -T; trap 'case \"$BASH_COMMAND\" in READLINE_LINE=*) \
+         {trap_output} > /dev/tty;; esac' DEBUG"
+    );
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(&trap_setup),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("trap - DEBUG"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("partial-output slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/mode")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(
+        rendered_text.contains(expected_output),
+        "the guard filter dropped unrelated partial output: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal sentinel reached the terminal: {rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_preserves_partial_debug_output_before_guard_shadow() {
+    assert_bash_guard_preserves_partial_debug_output(
+        "partial-guard",
+        "printf \"BACKGROUND_%s\" PARTIAL",
+        "BACKGROUND_PARTIAL",
+    );
+}
+
+#[test]
+fn raw_relay_bash_preserves_carriage_return_debug_output_before_guard_shadow() {
+    assert_bash_guard_preserves_partial_debug_output(
+        "carriage-partial-guard",
+        "printf \"BEFORE\\rBACKGROUND_%s\" PARTIAL",
+        "BACKGROUND_PARTIAL",
+    );
+}
+
+#[test]
+fn raw_relay_bash_verbose_mode_hides_both_guard_echoes() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-verbose-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "PS1='guard$ '\n").expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-verbose-guard", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("set -v"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("set +v"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("verbose slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/mode")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "verbose mode leaked the internal sentinel: {rendered_text}"
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
@@ -404,9 +600,14 @@ fn routing_c4_bash_route_enters_native_history_file() {
     // Bash owns persistence after the Readline guard records the slash line.
     let history = std::fs::read_to_string(home.join(".bash_history")).expect("histfile");
     assert!(history.contains(&slash_input), "{history}");
+    assert!(!history.contains("__cosh_slash_guard__"), "{history}");
     assert!(
         !expansion_side_effect.exists(),
         "slash input reached Bash expansion"
+    );
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "a slash longer than the guard must not leak the guard: {rendered_text}"
     );
 
     std::fs::remove_dir_all(root).expect("cleanup");
@@ -458,6 +659,10 @@ fn raw_relay_bash_guards_each_slash_in_shell_owned_batch() {
         "batched slash reached Bash expansion"
     );
     assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "same-write slash guards leaked internal redisplay: {rendered_text}"
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
@@ -612,6 +817,10 @@ fn routing_c4_history_privacy_secret_slash_never_persists() {
             && event.component.as_deref() == Some("slash")
     });
     assert!(intercepted, "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "sensitive slash submission leaked the guard: {rendered_text}"
+    );
     // The Readline guard recognizes the secret and omits it from history.
     let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
     assert!(!history.contains("api_key"), "{history}");
@@ -676,6 +885,10 @@ fn raw_relay_bash_intercepts_history_recalled_slash_with_enter_and_ctrl_o() {
     assert!(
         !rendered_text.contains("bash: /skills: No such file or directory"),
         "{rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal slash guard must never reach Ctrl-O or Enter output: {rendered_text}"
     );
 
     std::fs::remove_dir_all(root).expect("cleanup");

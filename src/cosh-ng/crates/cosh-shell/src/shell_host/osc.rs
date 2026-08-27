@@ -1,23 +1,24 @@
-// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs;
-// the pending-handoff claim slot (#2142) is owned by osc/handoff_claim.rs;
-// alt-screen tracking (#2025) is owned by osc/alt_screen.rs; CurrentCommand
-// state and the display-window helpers are owned by osc/command.rs.
+// Owner: shell_host. Routing lives in osc/routing.rs; the pending-handoff
+// claim lives in osc/handoff_claim.rs; alt-screen tracking in osc/alt_screen.rs.
+// CurrentCommand state and display-window helpers are owned by osc/command.rs.
 mod alt_screen;
 mod command;
 mod event_store;
 mod handoff_claim;
 mod marker_sequence;
 mod routing;
+mod slash_guard_echo;
 mod transcript_store;
 
 use alt_screen::AltScreenTracker;
-use command::CurrentCommand;
+use command::{is_shell_exit_command, CurrentCommand};
 pub(crate) use command::{VisibleTailTracker, VISIBLE_TAIL_MAX_CHARS};
 use event_store::EventStore;
 use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
 use marker_sequence::{find_bytes, osc_prefix_suffix_len, HistoryFileTracker, Marker};
+use slash_guard_echo::PendingSlashGuardEcho;
 
 use std::collections::HashSet;
 use std::io;
@@ -87,6 +88,7 @@ pub(super) struct OscParser {
     /// staged request/token sidecars the shell never claimed.
     expired_handoff_staging: bool,
     pending_handoff_echo: Option<PendingHandoffEcho>,
+    pending_slash_guard_echo: Option<PendingSlashGuardEcho>,
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
     history_file_tracker: HistoryFileTracker,
@@ -240,6 +242,13 @@ impl OscParser {
         }
 
         let compact_prompt_marker = marker.normalize_compact_prompt();
+
+        if marker.event == "slash_guard" {
+            self.flush_pending_slash_guard_echo()?;
+            self.pending_slash_guard_echo = Some(PendingSlashGuardEcho::new());
+            return Ok(());
+        }
+        self.flush_pending_slash_guard_echo()?;
 
         if marker.has_trusted_history_context(&self.session_id, compact_prompt_marker) {
             self.history_file_tracker
@@ -481,11 +490,13 @@ impl OscParser {
     pub(super) fn flush_pending(&mut self) -> io::Result<()> {
         let pending = std::mem::take(&mut self.pending);
         self.append_passthrough(&pending)?;
+        self.flush_pending_slash_guard_echo()?;
         self.flush_pending_clean_control()
     }
 
     fn append_passthrough(&mut self, data: &[u8]) -> io::Result<()> {
-        let data = self.filter_pending_handoff_echo(data);
+        let data = PendingSlashGuardEcho::filter(&mut self.pending_slash_guard_echo, data);
+        let data = self.filter_pending_handoff_echo(&data);
         if data.is_empty() {
             return Ok(());
         }
@@ -875,11 +886,6 @@ impl OscParser {
             capture: None,
         });
     }
-}
-
-fn is_shell_exit_command(command: &str) -> bool {
-    let trimmed = command.trim();
-    trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
 }
 
 fn command_finished_event(

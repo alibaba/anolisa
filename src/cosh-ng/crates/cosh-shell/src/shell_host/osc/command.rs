@@ -8,6 +8,11 @@ use super::OscParser;
 use crate::evidence::ControlSequenceScanner;
 use crate::types::{CommandOrigin, ShellCommandAuditIdentity};
 
+pub(super) fn is_shell_exit_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
+}
+
 /// A foreground command tracked between its preexec and precmd markers.
 #[derive(Debug)]
 pub(super) struct CurrentCommand {

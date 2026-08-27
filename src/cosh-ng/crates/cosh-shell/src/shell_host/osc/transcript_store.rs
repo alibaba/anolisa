@@ -100,6 +100,7 @@ impl OscParser {
             pending_command_origin: None,
             expired_handoff_staging: false,
             pending_handoff_echo: None,
+            pending_slash_guard_echo: None,
             shell_environment_snapshot: None,
             environment_observer: None,
             history_file_tracker: super::HistoryFileTracker::default(),
