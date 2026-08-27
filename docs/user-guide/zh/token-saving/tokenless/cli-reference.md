@@ -2,12 +2,15 @@
 
 [English](../../../en/token-saving/tokenless/cli-reference.md)
 
-`tokenless` CLI 可独立压缩 Schema 和响应、进行 TOON 编解码、取回 Stash 内容、检查工具环境并查询统计。Agent Adapter 在内部调用同一组能力。
+`tokenless` CLI 开放统一的 content-aware 压缩命令、直接 Schema/JSON/TOON 操作、Stash
+恢复、环境状态与统计。共享 Agent Hook 使用 `tokenless compress`；直接命令继续用于脚本和
+诊断。
 
 ## 命令总览
 
 | 命令 | 用途 |
 |------|------|
+| `tokenless compress` | 让模型可见内容进入 content-aware Pipeline |
 | `tokenless compress-schema` | 压缩 Function Calling 工具 Schema |
 | `tokenless compress-response` | 压缩 JSON/API/工具响应 |
 | `tokenless compress-toon` | 将 JSON 编码为 TOON |
@@ -55,6 +58,70 @@ cat response.json | tokenless compress-response
 字符串、数组和深度阈值只决定单项转换何时触发，并不是整个 Payload 的最小大小。
 Agent Adapter 还可能在启动 CLI 前应用独立的大小门槛，详见
 [Adapter 处理规则](framework-integration.md#adapter-处理规则)。
+
+## `compress`
+
+`compress` 是共享 Agent Hook 使用的稳定 JSON 边界。它从 stdin 或 `--file` 接收一个
+`CompressionRequest`；请求可解码时，始终输出一个 `CompressionResponse` JSON 对象：
+
+```bash
+jq -n \
+  --rawfile content build.log \
+  '{
+    protocol_version: 1,
+    content: $content,
+    agent_id: "my-agent",
+    session_id: "session-42",
+    tool_use_id: "tool-7",
+    tool_name: "Bash",
+    seam: "post_tool",
+    capabilities: {
+      replace_output: true,
+      publish_retrieve_tool: true,
+      replace_with_text: true
+    }
+  }' \
+  | tokenless compress \
+  | jq '{disposition, content_type, compressor_chain, reversibility, output}'
+```
+
+请求字段：
+
+| 字段 | 是否必需 | 含义 |
+|------|----------|------|
+| `protocol_version` | 是 | 压缩请求格式版本；当前为 `1` |
+| `content` | 是 | 要处理的精确模型可见字符串 |
+| `agent_id` | 是 | 稳定的前端标识 |
+| `session_id`、`tool_use_id`、`tool_name` | 否 | 归属与工具路由数据 |
+| `seam` | 是 | `before_model`、`pre_tool`、`post_tool` 或 `proxy` |
+| `capabilities.replace_output` | 否；默认 `false` | 宿主可以替换原始模型可见值 |
+| `capabilities.publish_retrieve_tool` | 否；默认 `false` | 宿主暴露可用的恢复 Tool |
+| `capabilities.replace_with_text` | 否；默认 `false` | 替换槽接受任意文本，而不是要求保持稳定 JSON Schema |
+
+Pipeline 会检测 `json_records`、`search_results`、`build_log`、`stack_trace`、`diff`、
+`html`、`tabular`、`source_code`、`plain_text` 或 `unknown`，随后只运行与 seam 和宿主声明
+能力兼容的 Compressor。当前生产路由为：
+
+- `before_model` JSON 工具数组：Schema 压缩。
+- `post_tool` JSON Records：结构化响应清理；文本槽还可能选择 TOON。
+- `post_tool` 构建日志与长纯文本：无损 Terminal 清理；同时具备替换、恢复与文本能力时，
+  再执行可恢复的 build/log 压缩。
+- 其他检测类型：尚无匹配 Compressor，原样透传。
+
+只有 `disposition: "applied"` 表示 `output` 与原文不同。`dry_run`、`passthrough`、
+`no_savings`、`reversibility_unavailable`、`timeout` 和 `error` 的 `output` 都携带原始
+`content`，Adapter 可以无条件交付。响应还会报告 `content_type`、有序
+`compressor_chain`、`reversibility`、Token 估算、已提交 `stash_keys`、`tokenizer_id` 和
+可选的限长诊断。
+
+无法读取、超过大小限制、格式错误或版本不支持的请求以状态 `2` 退出，因为 CLI 无法从合法
+请求中恢复原文。解码成功后，压缩失败会表示为 fail-open 响应，并以状态 `0` 退出。
+`--stash-db` 按与直接命令相同的路径安全规则覆盖 Stash 路径。
+
+build/log Compressor 只处理真实多行日志，保留 Signal 与 Trace 区域、固定头尾窗口和失败
+周围 Context，并把每个符合条件的省略区间替换为可恢复 marker。节省少于 200 字符的候选会
+被拒绝。通用纯文本在达到 100 行后使用保守的 40 行头尾窗口；达到 65,536 字符的文本还会
+使用 16,384 字符头尾的单行保护路径。
 
 ## `compress-schema`
 
@@ -161,7 +228,7 @@ debug, trace, traces, stack, stacktrace, logs, logging
 
 Stash 只作用于字符串、截断数组中被丢弃的中间段和深层子树截断。尾部元素直接保留在输出中，不进入 Stash。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
 
-大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[框架集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)。
+大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[Agent 集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)。
 
 ## `compress-toon` 与 `decompress-toon`
 

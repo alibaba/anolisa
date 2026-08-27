@@ -1,24 +1,23 @@
-# Tokenless Agent 与框架集成
+# Tokenless Agent 集成
 
 [English](../../../en/token-saving/tokenless/framework-integration.md)
 
-Tokenless 提供两类集成。Agent Adapter 通过 Plugin、Hook 和 Extension，把已安装的
-二进制接入具体 Agent 产品；AgentScope 支持则是供应用开发者显式安装和注册的进程内
-Python 框架包。
+Tokenless 通过 Plugin、Hook 和 Extension 接入具体 Agent 产品。本文只说明产品 Adapter。
+Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) 下。
 
 ## Agent Adapter 支持矩阵
 
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
-| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换响应；旧版 Copilot Shell 追加上下文 | 在响应压缩后尝试 | ✅ |
+| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换响应；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | ✅ |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并要求 Agent 重试 | 替换结果字符串 | 在响应压缩后尝试 | — |
-| Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
-| Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 仅在替换结果可保持文本时使用 | — |
+| Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
+| Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 只在结果更小时替换已接受的单文本块 JSON 结果 | 未注册 | 未注册 |
-| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 在响应压缩后尝试 | ✅ |
-| Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
+| OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
+| Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -26,14 +25,33 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 
 这些 Adapter 仍会注册 Tool Ready，但会在检查、修复或阻断之前无条件硬退出，任何运行时设置都无法重新启用。工具执行后的失败归因不受影响。
 
-`additionalContext` 是追加型 Hook 字段。在这些路径上，Tokenless 源码本身不会删除原始结果，最终处理方式还取决于宿主实现。统计记录只能证明压缩候选内容变小了，不能证明宿主已经从模型请求中移除原文。
-
-OpenCode 当前使用下文说明的随附生命周期脚本，本版本尚未把它注册到
-`anolisa adapter enable` 的驱动集合。
+`additionalContext` 是追加型 Hook 字段。共享 Hook 不会把压缩副本放入其中，否则原文
+仍然可见，总 Context 反而增加；该字段只用于追加环境错误指引。统计记录只能证明压缩候选
+内容变小了，不能单独证明宿主已经从模型请求中移除原文。
 
 ## Adapter 处理规则
 
-独立运行 `compress-response` 的默认值并不是大多数 Adapter 使用的默认值。共享 Adapter 按以下方式分类工具：
+共享 Cosh-NG、Qoder、Claude Code 和 OpenCode Hook 会向 `tokenless compress` 发送一个
+压缩请求。该命令检测模型可见内容，根据宿主声明的替换与恢复能力筛选 Compressor，
+运行符合条件的阶段，并对所有非 `applied` disposition 返回原文。当前路由如下：
+
+| 内容 | 当前共享 Hook 行为 |
+|------|--------------------|
+| JSON Records | 结构化响应清理；文本替换槽还会考虑 TOON |
+| 构建/测试/包管理日志 | 无损 Terminal 清理，再运行保留 Signal 的 build/log 压缩，并为省略区间写入可恢复 marker |
+| 长纯文本 | 无损 Terminal 清理，再保守保留头尾，并为省略区间写入可恢复 marker |
+| Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 尚无匹配 Compressor，原样透传 |
+
+build/log 压缩要求宿主同时具备三项能力：替换原输出、发布恢复 Tool、以任意文本替换。它会
+保留 Signal 行和 Stack Trace 区域、失败周围 Context 以及固定头尾窗口，并把每个省略区间
+写入 Stash。短日志或节省少于 200 字符的候选会透传。纯文本在达到 100 行时触发；单行保护
+路径在达到 65,536 字符时触发。
+
+旧版 OpenClaw、Hermes 和 DeepSeek Harness 集成仍使用各自的专用响应路径，其阈值与能力见
+下文；content-aware build/log 路径尚未接入这些 Adapter。独立 `compress-response` 命令也
+继续作为显式 JSON 清理入口。
+
+对于 JSON 响应清理，共享与旧版 Adapter 按以下方式分类工具：
 
 | 类别 | Adapter 默认行为 |
 |------|------------------|
@@ -41,7 +59,11 @@ OpenCode 当前使用下文说明的随附生命周期脚本，本版本尚未�
 | Shell/exec | 字符串 65,536 字符、数组保留 128 项、深度 8 |
 | 其他结构化工具 | 字符串 1,048,576 字符、数组保留 65,536 项、深度 32 |
 
-共享响应 Hook、OpenClaw 和 Hermes 会跳过短于 200 字符的输入。共享路径还会跳过带 YAML frontmatter、形似 Skill 的文本。TOON 编码仅对至少 500 字符的负载执行（当前实现的阈值，后续可能调整）；更小的负载保留压缩后的形式，因为 TOON 对小型 JSON 的节省可以忽略不计。该阈值适用于所有支持 TOON 的管线：共享响应 Hook、独立 TOON Hook、OpenClaw、Hermes，以及独立的 `tokenless compress-toon` CLI 与 Runtime/SDK TOON 路径（CLI 可通过 `--min-toon-chars` 按次调低该阈值）。Codex 的 PostToolUse Hook 不能替换原始输出，因此不执行响应压缩或 TOON。
+共享响应 Hook、OpenClaw 与 Hermes 会跳过短于 200 字符的输入；共享路径也会跳过带 YAML
+Frontmatter 的 Skill 文本。TOON 只处理至少 500 字符的 Payload，并且要求选中的宿主槽支持
+文本；更短 Payload 保留前一阶段结果。独立 `compress-toon` CLI 和 SDK TOON 路径使用相同
+默认阈值，CLI 可通过 `--min-toon-chars` 为单次调用降低阈值。Codex 和 Qwen Code 当前的
+PostToolUse 契约不能替换原始模型可见输出，因此不运行响应压缩或 TOON。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
@@ -152,6 +174,7 @@ anolisa adapter enable tokenless hermes
 anolisa adapter enable tokenless qoder
 anolisa adapter enable tokenless claude-code
 anolisa adapter enable tokenless codex
+anolisa adapter enable tokenless opencode
 anolisa adapter enable tokenless qwencode
 anolisa adapter enable tokenless dsh \
   --profile web \
@@ -164,8 +187,6 @@ anolisa adapter enable tokenless dsh \
 DeepSeek Harness 按 profile 管理，因此必须至少提供一个 `--profile`。每个名称应与
 `dsh --profile <profile>` 使用的名称一致，不带 profile 的通用命令会被拒绝。
 后续 enable 或 re-enable 必须再次列出需要保留的全部 profile。
-
-OpenCode 应使用 [npm 安装后的手动接入](#npm-安装后的手动接入)中的随附安装脚本。
 
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
@@ -299,134 +320,10 @@ Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调�
 
 ## AgentScope 框架集成
 
-Python 包支持 AgentScope 1.0.11 至 1.0.x 和 AgentScope 2.0.x。应根据已安装版本选择
-挂载入口：
+AgentScope 是 Python SDK 的第二层，不是产品 Adapter。完整的构建、版本、挂载、配置与验证说明
+现已放在 [AgentScope SDK 集成](sdk/agentscope.md) 子文档。本标题继续保留，作为已有链接的兼容入口。
 
-| AgentScope 版本 | 支持的入口 |
-|---|---|
-| 1.0.11 至 1.0.x | 使用 Tokenless Toolkit 和 `install(..., session_id=...)` |
-| 2.0.0 | 通过 `integration.tools` 和 `integration.middlewares` 直接构造 Agent |
-| 2.0.1 至 2.0.x | 直接构造 Agent，或通过 `integration.app_options()` 接入 App |
-
-原生 `anolisa-tokenless` Runtime Wheel 和 AgentScope 集成 Wheel 当前都尚未发布到
-Python 包索引。请从源码 checkout 构建并同时安装两个相同版本的 Wheel：
-
-```bash
-make python-wheel agentscope-wheel
-python -m pip install \
-  target/wheels/anolisa_tokenless-*.whl \
-  target/wheels/anolisa_tokenless_agentscope-*.whl
-```
-
-原生 Wheel 还通过 typed Python 对象开放与 CLI 相同的只读 Stats 查询能力：
-
-```python
-from anolisa_tokenless import TokenlessStats
-
-stats = TokenlessStats("/absolute/path/to/tenant-tokenless-data")
-
-status = stats.status
-summary = stats.summary()
-recent = stats.list(limit=20)
-record = stats.show(recent[0].id)
-session_diff = stats.diff(session_id="conversation-id")
-comparison = stats.compare("baseline-session", "tokenless-session")
-```
-
-`TokenlessSdk.stats` 会延迟返回绑定该 SDK 数据目录的客户端。Token 数量是估算值，并且
-只有产生正向节省的操作才会记录。`show()` 和 Record/Tool-use 的 `diff()` 结果可能包含
-`stats.db` 中保存的敏感工具输入与输出；Summary、List 和 Compare 不返回保存的内容。
-该 API 不能清空数据或修改记录开关。这里的只读是指这些公开操作；打开客户端时遵循
-CLI 初始化流程，可能创建或迁移 `stats.db`，所以数据目录必须可写。Summary 或 Compare
-未指定 Limit 时，最多读取最近 10,000 条记录；Session 和 Tool-use Diff 同样最多读取
-最近 10,000 条匹配记录。要获得有意义的对比，应先传入 dry-run Baseline Session，再
-传入启用 Tokenless 的 Session。
-
-两个大版本都使用 `TokenlessAgentScope` 和 `TokenlessConfig`，只有最后的挂载方式不同。
-AgentScope 1.x 使用 Tokenless Toolkit；普通工具与 MCP 注册入口也会覆盖构造后新增的工具：
-
-```python
-from agentscope.agent import ReActAgent
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
-
-integration = TokenlessAgentScope(
-    TokenlessConfig(
-        mode="balanced",
-        data_dir="/absolute/path/to/tenant-tokenless-data",
-    ),
-)
-toolkit = integration.create_toolkit()
-toolkit.register_tool_function(application_tool)
-agent = ReActAgent(..., toolkit=toolkit)
-integration.install(agent, session_id="conversation-id")
-```
-
-AgentScope 2.x 应在构造 Toolkit 和 Agent 时传入恢复 Tool 和中间件。该方式从 2.0.0
-即可使用，不依赖后续补丁版本才引入的 Toolkit 动态修改 API：
-
-```python
-from agentscope.agent import Agent
-from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
-
-integration = TokenlessAgentScope(
-    TokenlessConfig(
-        mode="balanced",
-        data_dir="/absolute/path/to/tenant-tokenless-data",
-        # retrieve_tool_name="tenant_tokenless_retrieve",
-    ),
-)
-toolkit = Toolkit(tools=[*application_tools, *integration.tools])
-
-agent = Agent(
-    ...,
-    toolkit=toolkit,
-    middlewares=integration.middlewares,
-)
-```
-
-AgentScope App 从 2.0.1 开始支持。`app_options()` 会在配置的绝对基础目录下，为每个
-user/agent/session 派生独立的 Tokenless 数据目录：
-
-```python
-from agentscope.app import create_app
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
-
-integration = TokenlessAgentScope(
-    TokenlessConfig(data_dir="/srv/tokenless-tenants"),
-)
-app = create_app(..., **integration.app_options())
-```
-
-如果应用已经定义 `tokenless_retrieve`，应在 `TokenlessConfig` 中设置唯一的
-`retrieve_tool_name`；App 组装阶段不会把其他工具暴露给该 factory，无法预先检查重名。
-AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此只支持直接构造
-Agent。原有 `TokenlessMiddleware` 2.x API 继续保留兼容；新代码应使用
-`TokenlessAgentScope`，避免依赖特定补丁版本的 Toolkit 动态修改或 Tool 自动收集行为。
-
-请根据应用可接受的 inline 截断程度选择模式：
-
-| 模式 | Read/Glob/Grep | 其他工具 |
-|------|----------------|----------|
-| `conservative` | 压缩 | 字符串 1 MiB、数组 65,536 项、深度 32 |
-| `balanced`（默认） | 跳过 | Shell：65,536 / 128 / 深度 8；其他采用 conservative 限制 |
-| `aggressive` | 跳过 | CLI 默认值：4,096 / 32 / 深度 8 |
-
-集成会原样转发中间流式 chunk 并保留框架对象，只转换复制后的调用参数和最终模型可见
-文本。Tokenless 优化失败或 UTF-8 结果没有严格变小时保留原文，`DataBlock` 永不修改。
-
-集成还提供默认名为 `tokenless_retrieve` 的恢复 Tool。只有 marker 对当前模型可见时才
-会向模型发布该 Tool，并且只接受该 Session 精确保留的 marker 集合中的 24 位十六进制
-hash；该 Tool 永远不参与压缩。这一窄权限仍依赖
-存储隔离：每个用户或租户必须显式传入独立的绝对 `data_dir`。省略 `data_dir` 时，
-`TOKENLESS_DATA_DIR` 只作为进程级回退，不得由多个租户共用；也不要依赖跨节点恢复。
-stash 当前使用固定的一小时 TTL，Agent 应在这一边界前恢复所需内容。
-
-两个 Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、环境错误提示
-和逐调用归属。平台 Wheel 内置 RTK 并直接链接 TOON，不会搜索系统 helper。Tool Ready
-仍保持硬关闭。
-
-## 验证是否真正接入
+## 验证 Agent Adapter
 
 对于 Agent Adapter，不要只以“安装命令退出码为 0”作为成功标准。至少完成：
 
@@ -438,19 +335,11 @@ tokenless stats list --limit 5
 
 然后在目标 Agent 中执行一次有明显输出的工具任务。如果 `stats list` 仍为空，请按照[启用后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)排查。
 
-对于 AgentScope 框架包，在源码 checkout 中运行下面的命令，验证两个 Wheel 和声明
-支持的 AgentScope 版本范围：
-
-```bash
-make test-agentscope-integration
-```
-
-随后在应用中执行一次成功且可压缩的工具响应，确认中间件返回更小的结果，并确认
-`tokenless_retrieve` 可以从同一个 `data_dir` 恢复 marker 对应的内容。
-
 ## 相关文档
 
 - [快速开始](QUICKSTART.md)
+- [Python SDK](sdk.md)
+- [AgentScope SDK 集成](sdk/agentscope.md)
 - [效果度量](measuring-savings.md)
 - [配置与数据隐私](configuration-and-privacy.md)
 - [故障排查](troubleshooting.md)

@@ -6,8 +6,51 @@ TOON encoding, and marker-scoped Stash retrieval.
 The package is built from the ANOLISA monorepo and supports CPython 3.11 or later on the platform
 targeted by its wheel. The pinned RTK executable is included in the wheel; no Tokenless binary is
 required on `PATH`. See the
-[Tokenless user manual](https://github.com/alibaba/anolisa/blob/main/src/tokenless/README.md#build-the-python-runtime)
-for source-build prerequisites, instructions, and API boundaries.
+[Tokenless Python SDK guide](https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/token-saving/tokenless/sdk.md)
+for source-build prerequisites, lifecycle contracts, configuration, and runnable examples. This
+package is the framework-neutral SDK layer. The same-version `anolisa-tokenless-agentscope` package
+builds the AgentScope-specific layer on top; its detailed attachment steps are in the
+[AgentScope SDK integration guide](https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/token-saving/tokenless/sdk/agentscope.md).
+The [Tokenless component README](https://github.com/alibaba/anolisa/blob/main/src/tokenless/README.md)
+provides the CLI, adapter, and source-build overview.
+
+```python
+import asyncio
+import json
+
+from anolisa_tokenless import (
+    Attribution,
+    TokenlessConfig,
+    TokenlessSdk,
+    ToolCall,
+    ToolResult,
+    ToolStatus,
+)
+
+
+async def main() -> None:
+    sdk = TokenlessSdk(
+        TokenlessConfig(
+            data_dir="/absolute/path/to/tokenless-data",
+            mode="aggressive",
+            rtk_enabled=False,
+            toon_enabled=False,
+        )
+    )
+    call = ToolCall(
+        "api",
+        {},
+        Attribution("my-agent", "session-42", "tool-7"),
+    )
+    original = json.dumps({"items": list(range(300))})
+    result = await sdk.after_tool_call(
+        ToolResult(call, original, ToolStatus.SUCCESS)
+    )
+    print(result.content)
+
+
+asyncio.run(main())
+```
 
 The public `TokenlessStats` client provides typed, read-only status, summary, recent-record,
 record-detail, structured-diff, and session-comparison queries over the Runtime's `stats.db`.

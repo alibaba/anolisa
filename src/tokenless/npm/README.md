@@ -1,6 +1,9 @@
 # anolisa-tokenless
 
-LLM token optimization toolkit — schema/response compression, command rewriting, and tool environment readiness.
+LLM token optimization toolkit — content-aware compression, command rewriting, and diagnostics.
+
+Tool Ready's legacy pre-call checks remain registered but are hard-disabled. Post-tool environment
+failure diagnostics are independent and remain active where the host supports additive context.
 
 > **Release status:** These npm packages are private and are not currently
 > published to the public registry. This document describes the intended
@@ -19,7 +22,7 @@ This automatically installs the correct prebuilt binary for your platform.
 
 | Binary | Description |
 |--------|-------------|
-| `tokenless` | Main CLI — schema compression, response compression, TOON encoding, stats |
+| `tokenless` | Main CLI — content-aware protocol, direct compression, retrieval, and stats |
 | `rtk` | Command rewriting engine (filters CLI output noise) |
 
 TOON (Token-Oriented Object Notation) encoding is built into `tokenless`
@@ -45,9 +48,12 @@ The correct platform-specific binaries are automatically installed via `optional
 ## Agent Adapters
 
 The root package bundles the Tokenless adapters for Agent products (cosh,
-OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, and Qwen Code). The
+OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and DeepSeek Harness). The
 adapter hooks are plain bash/python scripts — OS and architecture independent —
 so they work on both Linux and macOS.
+
+DeepSeek Harness uses its dedicated `tools/post-execute` path for JSON response compression and
+environment-error attribution. It does not use the content-aware build/log Pipeline.
 
 On install, they are copied to the user-level data directory searched by the
 hook dispatcher:
@@ -66,6 +72,13 @@ bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ## Usage
 
 ```bash
+# Run the content-aware Pipeline used by shared Agent hooks
+jq -n --rawfile content build.log \
+  '{protocol_version: 1, content: $content, agent_id: "manual", seam: "post_tool",
+    capabilities: {replace_output: true, publish_retrieve_tool: true,
+                   replace_with_text: true}}' \
+  | tokenless compress
+
 # Compress an API response
 tokenless compress-response -f response.json
 
@@ -84,7 +97,7 @@ rtk ls -la
 # Or use rewrite subcommand
 rtk rewrite "ls -la"
 
-# Check tool environment readiness
+# Report the current hard-disabled Tool Ready status
 tokenless env-check --all
 ```
 

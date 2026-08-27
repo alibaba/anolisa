@@ -2,12 +2,15 @@
 
 [中文版](../../../zh/token-saving/tokenless/cli-reference.md)
 
-The `tokenless` CLI can compress schemas and responses, encode and decode TOON, retrieve Stash content, check tool environments, and query statistics. Agent adapters call the same capabilities internally.
+The `tokenless` CLI exposes a unified content-aware compression command, direct schema/JSON/TOON
+operations, Stash retrieval, environment status, and statistics. Shared Agent hooks use
+`tokenless compress`; the direct commands remain useful for scripts and diagnosis.
 
 ## Command overview
 
 | Command | Purpose |
 |---------|---------|
+| `tokenless compress` | Send model-visible content through the content-aware Pipeline |
 | `tokenless compress-schema` | Compress Function Calling tool schemas |
 | `tokenless compress-response` | Compress JSON/API/tool responses |
 | `tokenless compress-toon` | Encode JSON as TOON |
@@ -59,6 +62,73 @@ string, array, and depth thresholds below only decide when individual
 transformations run; they are not minimum total payload sizes. Agent adapters
 can apply separate pre-spawn size gates; see
 [Adapter processing rules](framework-integration.md#adapter-processing-rules).
+
+## `compress`
+
+`compress` is the stable JSON boundary used by shared Agent hooks. It accepts one
+`CompressionRequest` on stdin or through `--file` and always writes one `CompressionResponse` JSON
+object when the request is decodable:
+
+```bash
+jq -n \
+  --rawfile content build.log \
+  '{
+    protocol_version: 1,
+    content: $content,
+    agent_id: "my-agent",
+    session_id: "session-42",
+    tool_use_id: "tool-7",
+    tool_name: "Bash",
+    seam: "post_tool",
+    capabilities: {
+      replace_output: true,
+      publish_retrieve_tool: true,
+      replace_with_text: true
+    }
+  }' \
+  | tokenless compress \
+  | jq '{disposition, content_type, compressor_chain, reversibility, output}'
+```
+
+Request fields:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `protocol_version` | Yes | Compression request format version; currently `1` |
+| `content` | Yes | The exact model-visible string to consider |
+| `agent_id` | Yes | Stable frontend identifier |
+| `session_id`, `tool_use_id`, `tool_name` | No | Attribution and tool routing data |
+| `seam` | Yes | `before_model`, `pre_tool`, `post_tool`, or `proxy` |
+| `capabilities.replace_output` | No; default `false` | The host can replace the original model-visible value |
+| `capabilities.publish_retrieve_tool` | No; default `false` | The host exposes a usable retrieval Tool |
+| `capabilities.replace_with_text` | No; default `false` | The replacement slot accepts arbitrary text instead of schema-stable JSON |
+
+The pipeline detects `json_records`, `search_results`, `build_log`, `stack_trace`, `diff`, `html`,
+`tabular`, `source_code`, `plain_text`, or `unknown`, then runs only compressors compatible with the
+seam and declared host capabilities. Current production routing is:
+
+- `before_model` JSON tool arrays: schema compression.
+- `post_tool` JSON records: structural response cleanup; TOON may win for text-capable slots.
+- `post_tool` build logs and long plain text: lossless terminal cleanup followed by retrievable
+  build/log compression when replacement, retrieval, and text capabilities are all present.
+- Other detected content types: passthrough until a matching compressor is implemented.
+
+Only `disposition: "applied"` means `output` differs from the original. `dry_run`, `passthrough`,
+`no_savings`, `reversibility_unavailable`, `timeout`, and `error` all carry the original `content` in
+`output`, so adapters can emit it unconditionally. Responses also report `content_type`, ordered
+`compressor_chain`, `reversibility`, token estimates, committed `stash_keys`, `tokenizer_id`, and an
+optional bounded diagnostic.
+
+Unreadable, oversized, malformed, or unsupported-version requests exit with status `2` because the
+CLI cannot recover the original content from a valid request. Once decoding succeeds, compression
+failures are represented by a fail-open response and exit status `0`. `--stash-db` overrides the
+Stash path under the same path-safety rules as the direct commands.
+
+The build/log compressor engages only for real multi-line logs, preserves signal and trace regions,
+keeps fixed head/tail and failure-context windows, and replaces each eligible omitted gap with a
+retrievable marker. It rejects candidates saving fewer than 200 characters. Generic plain text uses
+a conservative 40-line head/tail window once it reaches 100 lines, plus a 16,384-character
+head/tail safety path for text at least 65,536 characters long.
 
 ## `compress-schema`
 
@@ -166,7 +236,7 @@ Field matching and truncation change the response representation seen by the mod
 
 Stash applies only to truncation of strings, the dropped middle segment of truncated arrays, and deep subtrees. Tail items are kept inline, not stashed. Blacklisted fields, `null`, and empty values are removed without a retrieval marker.
 
-Most adapters override these standalone defaults. Their shared shell profile uses `65536`, `128`, and `8`; the other-structured-tool profile uses `1048576`, `65536`, and `32`. Content-retrieval tools are skipped. See [Framework integration · Adapter processing rules](framework-integration.md#adapter-processing-rules).
+Most adapters override these standalone defaults. Their shared shell profile uses `65536`, `128`, and `8`; the other-structured-tool profile uses `1048576`, `65536`, and `32`. Content-retrieval tools are skipped. See [Agent integration · Adapter processing rules](framework-integration.md#adapter-processing-rules).
 
 ## `compress-toon` and `decompress-toon`
 

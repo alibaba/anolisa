@@ -172,7 +172,7 @@ anolisa adapter scan
 anolisa --verbose adapter enable tokenless <framework>
 ```
 
-npm 安装请使用[框架集成 · npm 安装后的手动接入](framework-integration.md#npm-安装后的手动接入)。
+npm 安装请使用[Agent 集成 · npm 安装后的手动接入](framework-integration.md#npm-安装后的手动接入)。
 
 直接安装 RPM 后，请先补充状态记录，再用拥有目标框架配置的用户重试 adapter
 命令。
@@ -269,7 +269,11 @@ tokenless retrieve <hash> --stash-db ~/.tokenless/stash.db
 
 ## 有统计记录但 Prompt 没有变小
 
-先查看[支持矩阵](framework-integration.md#agent-adapter-支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段。Codex 无法替换原始结果，因此有意不执行响应压缩；其 PostToolUse 上下文仅包含识别出的环境失败。Codex 的实际节省应在经过 RTK 重写的 Shell 调用上测量。
+先查看[支持矩阵](framework-integration.md#agent-adapter-支持矩阵)中的响应交付路径。Qoder 通过
+`updatedToolOutput` 替换输出。Qwen Code 与旧版 Copilot Shell 的当前契约没有替换字段，
+因此会透传工具后输出，也不会通过 `additionalContext` 注入压缩副本。Codex 同样不执行响应
+压缩，其 PostToolUse Context 只包含识别出的环境失败；实际节省应在经过 RTK 改写的 Shell
+调用上测量。
 
 Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。OpenClaw 会替换持久化结果，但只有设置 `toon_compression_enabled=true` 才会启用 TOON。
 

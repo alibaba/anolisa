@@ -117,7 +117,7 @@ anolisa adapter scan
 | Claude Code | `anolisa adapter enable tokenless claude-code` |
 | Codex | `anolisa adapter enable tokenless codex` |
 | DeepSeek Harness（dsh） | `anolisa adapter enable tokenless dsh --profile <profile>` |
-| OpenCode | 生命周期脚本（见下文） |
+| OpenCode | `anolisa adapter enable tokenless opencode` |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` |
 
 接入后重启对应的 Agent CLI 或 IDE。OpenClaw 还需要运行
@@ -136,9 +136,8 @@ anolisa adapter enable tokenless dsh \
 后续每次 enable 或 re-enable 都会替换 receipt 记录的完整 profile 集合。每次都要
 列出需要继续使用 Tokenless 的全部 profile。
 
-本版本尚未将
-OpenCode 注册到 `anolisa adapter enable`；请使用
-[OpenCode 接入说明](framework-integration.md#opencode)中的随附生命周期脚本。
+OpenCode 可使用相同的 Adapter 命令。对于没有 ANOLISA 组件记录的 npm 安装，随附生命周期
+脚本仍可作为替代方式。
 
 ## 可选：不接入 Agent 测试压缩
 
@@ -169,7 +168,9 @@ tokenless stats list --limit 1
 
 ## 下一步
 
-- [Agent 与框架集成](framework-integration.md)：Agent Adapter 激活和 AgentScope 应用集成
+- [Python SDK](sdk.md)：通用与 AgentScope 两层及可运行示例
+- [AgentScope SDK 集成](sdk/agentscope.md)：AgentScope 1.x、2.x 与 App 挂载
+- [Agent 集成](framework-integration.md)：产品 Adapter 激活
 - [用户手册](user-manual.md)：能力边界和文档导航
 - [CLI 参考](cli-reference.md)：全部子命令和参数
 - [效果度量](measuring-savings.md)：统计、双跑对比和 AgentSight/SLS
