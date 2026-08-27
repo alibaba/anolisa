@@ -1618,6 +1618,22 @@ async fn brokered_profile_rejects_a_checkpoint_execution_result() {
 /// `remove_var` could send the hanging test back to the 6h default.
 static APPROVAL_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[test]
+fn one_shot_approval_uses_a_short_default_timeout() {
+    let mut core = make_core(MockProvider::text_only(""));
+    assert_eq!(
+        core.approval_response_timeout_default,
+        Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS)
+    );
+
+    core.use_one_shot_approval_timeout();
+
+    assert_eq!(
+        core.approval_response_timeout_default,
+        Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_ONE_SHOT_DEFAULT_SECS)
+    );
+}
+
 #[tokio::test]
 async fn unanswered_approval_times_out_instead_of_hanging_forever() {
     // #1940 residual guard: hours-scale by default, overridden here so the

@@ -104,6 +104,10 @@ impl CoshCore {
             truncator: OutputTruncator::default(),
             loop_detector: LoopDetector::new(),
             client_capabilities: crate::protocol::ClientControlCapabilities::default(),
+            approval_response_timeout_default: Duration::from_secs(
+                APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS,
+            ),
+            approval_timed_out: std::sync::atomic::AtomicBool::new(false),
             control_transport_failure: std::sync::OnceLock::new(),
             execution_profile,
         };

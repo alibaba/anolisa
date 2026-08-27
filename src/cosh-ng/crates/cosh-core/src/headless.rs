@@ -34,6 +34,7 @@ use auth::request_auth;
 /// transport we cannot write to would only reproduce the #1994 hang.
 const EXIT_CONTROL_TRANSPORT_FAILURE: i32 = 74;
 const EXIT_PROTOCOL_MISMATCH: i32 = 65;
+const EXIT_TURN_FAILURE: i32 = 1;
 
 pub async fn run(
     args: &CliArgs,
@@ -170,6 +171,7 @@ pub async fn run(
         engine.model = session.record.model.clone();
     }
     if let Some(ref prompt) = args.prompt {
+        engine.use_one_shot_approval_timeout();
         if !session.resumable() {
             engine.emit(
                 &mut writer,
@@ -217,6 +219,11 @@ pub async fn run(
                 upload_handle = sls::emit(&engine.build_sls_record(start.elapsed())).await;
             }
         }
+        let turn_exit_code = if engine.approval_timed_out() {
+            EXIT_TURN_FAILURE
+        } else {
+            0
+        };
         let transport_failed = engine.control_transport_failure().is_some();
         engine.shutdown_extension_runtime().await;
         // Await the standalone upload handle with a 1-second grace period
@@ -231,7 +238,7 @@ pub async fn run(
         return Ok(if transport_failed {
             EXIT_CONTROL_TRANSPORT_FAILURE
         } else {
-            0
+            turn_exit_code
         });
     }
 

@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::io::AsyncBufReadExt;
@@ -94,6 +94,10 @@ pub struct CoshCore {
     /// both flags opts trust-mode shell commands into the core-issued
     /// approval channel instead (#2067).
     pub client_capabilities: ClientControlCapabilities,
+    // One-shot mode shortens only this fallback; explicit overrides and
+    // receipt-based handoff keep their existing semantics.
+    approval_response_timeout_default: Duration,
+    approval_timed_out: AtomicBool,
     /// First control-transport failure of this process, if any.
     ///
     /// Set from `&self` paths (`handle_ask_user`, `handle_shell_evidence`), so
@@ -110,6 +114,15 @@ impl CoshCore {
 
     pub(crate) fn set_session_resumed(&mut self, resumed: bool) {
         self.session_resumed = resumed;
+    }
+
+    pub(crate) fn use_one_shot_approval_timeout(&mut self) {
+        self.approval_response_timeout_default =
+            Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_ONE_SHOT_DEFAULT_SECS);
+    }
+
+    pub(crate) fn approval_timed_out(&self) -> bool {
+        self.approval_timed_out.load(Ordering::SeqCst)
     }
 
     fn apply_execution_profile_constraints(&mut self) {
@@ -351,6 +364,7 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        self.approval_timed_out.store(false, Ordering::SeqCst);
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -2070,14 +2084,20 @@ impl CoshCore {
         // guard is disarmed: a legitimate wait (a card pending on the user,
         // a host-executed command running) can then take as long as it
         // needs, and a dead shell still surfaces via EOF below.
-        let mut deadline = Some(tokio::time::Instant::now() + approval_response_timeout());
+        let mut deadline = Some(
+            tokio::time::Instant::now()
+                + approval_response_timeout(self.approval_response_timeout_default),
+        );
         loop {
             let line = match deadline {
                 Some(deadline) => {
                     match tokio::time::timeout_at(deadline, reader.next_line()).await {
                         Ok(Ok(Some(line))) => line,
                         Ok(Ok(None)) | Ok(Err(_)) => return ApprovalResult::Interrupted,
-                        Err(_) => return ApprovalResult::TimedOut,
+                        Err(_) => {
+                            self.approval_timed_out.store(true, Ordering::SeqCst);
+                            return ApprovalResult::TimedOut;
+                        }
                     }
                 }
                 None => match reader.next_line().await {
@@ -2282,14 +2302,16 @@ enum ApprovalResult {
 /// degrades through the shell's OwnerUnavailable recovery path.
 /// env override exists for tests and incident response.
 const APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS: u64 = 6 * 60 * 60;
+/// A one-shot caller has no built-in approval surface, so an unanswered
+/// request should fail closed instead of inheriting the terminal wait horizon.
+const APPROVAL_RESPONSE_TIMEOUT_ONE_SHOT_DEFAULT_SECS: u64 = 30;
 /// Upper bound for the env override: an absurd value would overflow
 /// `Instant + Duration` and panic at the next approval wait.
 const APPROVAL_RESPONSE_TIMEOUT_MAX_SECS: u64 = 30 * 24 * 60 * 60;
 
-fn approval_response_timeout() -> std::time::Duration {
-    let fallback = || std::time::Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS);
+fn approval_response_timeout(fallback: Duration) -> Duration {
     let Ok(raw) = std::env::var("COSH_CORE_APPROVAL_TIMEOUT_SECS") else {
-        return fallback();
+        return fallback;
     };
     match raw.parse::<u64>() {
         Ok(secs) if secs > 0 && secs <= APPROVAL_RESPONSE_TIMEOUT_MAX_SECS => {
@@ -2304,7 +2326,7 @@ fn approval_response_timeout() -> std::time::Duration {
                  falling back to the default approval timeout",
                 APPROVAL_RESPONSE_TIMEOUT_MAX_SECS
             );
-            fallback()
+            fallback
         }
     }
 }
