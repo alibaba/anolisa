@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.11.1
+
+**Prompt Scanner**
+
+- Restricted the invisible-character injection rule so emoji ZWJ sequences, Persian ZWNJ, and leading BOM no longer score as critical injections. (#2900)
+- Refused non-loopback model service base URLs derived from the environment in both the Rust and Python model service paths. (#2893)
+- Reported `daemon.health` prompt_scan state as untracked instead of unconditionally ready now that scanning runs in-process. (#2892)
+- Dropped the dead prompt model preload environment flag and the obsolete scan-prompt protocol document. (#2886)
+
+**Skill Ledger Runtime**
+
+- Skipped host-backed read-only system Skills in batch `scan --all` and default `init` instead of failing them. (#2906)
+- Rejected the placeholder `set-policy` and `rotate-keys` commands so they no longer report false success. (#2876)
+
+**Asset Verification**
+
+- Reported explicit `CHECKED` / `PASSED` / `FAILED` counters and a distinct zero-candidate outcome for `agent-sec-cli verify`. (#2875)
+
+**Security Events & CLI**
+
+- Enforced owner-only permissions on files created by the CLI. (#2873)
+
+**Documentation**
+
+- Documented the five hidden `agent-sec-cli` integration commands and their contract caveats. (#2887)
+- Documented the rule-only L1 detection boundary and how to read `pass` together with degraded fields. (#2895)
+
 ## 0.11.0
 
 **Prompt Scanner**
