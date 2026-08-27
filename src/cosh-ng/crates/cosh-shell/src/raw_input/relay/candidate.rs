@@ -12,7 +12,7 @@ use super::super::mode::new_delay_input_mode;
 use super::super::RawInputEvent;
 use super::{
     flush_candidate_line_to_shell, relay_passthrough_input_with_policy, send_shell_input_state,
-    submit_line_bytes_to_shell, InputRelayContext,
+    submit_line_bytes_to_shell, InputRelayContext, ShellBatchOwnership,
 };
 
 pub(super) fn relay_candidate_line(
@@ -87,7 +87,13 @@ pub(super) fn relay_candidate_line(
             wrapped.extend_from_slice(BRACKETED_PASTE_START);
             wrapped.extend_from_slice(&bytes);
             wrapped.extend_from_slice(BRACKETED_PASTE_END);
-            return submit_line_bytes_to_shell(relay, wrapped, after_paste, emit_activity);
+            return submit_line_bytes_to_shell(
+                relay,
+                wrapped,
+                after_paste,
+                emit_activity,
+                ShellBatchOwnership::Opaque,
+            );
         }
     }
     match candidate_line_status(
@@ -194,7 +200,13 @@ pub(super) fn relay_candidate_line(
                         // Readline records it in native history (#1718).
                         // Once accepted by Bash it remains Shell-owned; the
                         // bounded marker only observes its command boundary.
-                        return submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity);
+                        return submit_line_bytes_to_shell(
+                            relay,
+                            bytes,
+                            remainder,
+                            emit_activity,
+                            ShellBatchOwnership::ReadlineSafe,
+                        );
                     }
                     let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
                         redact_extension_setting_value(line.as_bytes()),
@@ -248,7 +260,13 @@ pub(super) fn relay_candidate_line(
                         wrapped.extend_from_slice(b"\x1b[201~");
                         bytes = wrapped;
                     }
-                    submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity)
+                    submit_line_bytes_to_shell(
+                        relay,
+                        bytes,
+                        remainder,
+                        emit_activity,
+                        ShellBatchOwnership::Opaque,
+                    )
                 }
                 InputDecision::Consume => {
                     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);

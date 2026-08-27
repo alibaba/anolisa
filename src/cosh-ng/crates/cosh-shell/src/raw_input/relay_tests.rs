@@ -2185,6 +2185,43 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
 }
 
 #[test]
+fn native_exact_slash_tab_submit_keeps_readline_guard() {
+    let (path, mut master) = output_file("native-slash-tab-submit");
+    let (tx, _rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: true,
+    };
+
+    relay_passthrough_input(b"/help\t\n", &mut relay).expect("submit completed slash");
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"/help\t\x1b[99~\n"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
 fn native_shell_input_reports_editing_then_empty_without_content() {
     let (path, mut master) = output_file("input-state");
     let (tx, rx) = mpsc::channel();
@@ -3820,6 +3857,46 @@ fn slash_guard_does_not_infer_follow_up_readline_ownership() {
             b"/mode approval\r\x1b[D/skills detail $(touch should-not-run)\r",
         ),
         Some(b"/mode approval\x1b[99~\r\x1b[D/skills detail $(touch should-not-run)\r".to_vec())
+    );
+}
+
+#[test]
+fn slash_guard_stops_after_ordinary_shell_submission() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            &classifier,
+            &line_submits,
+            b"/mode approval\necho ordinary\n/skills detail $(touch should-not-run)\n",
+        ),
+        Some(
+            b"/mode approval\x1b[99~\necho ordinary\n/skills detail $(touch should-not-run)\n"
+                .to_vec()
+        )
+    );
+}
+
+#[test]
+fn slash_guard_does_not_trust_blank_bytes_with_dirty_mirror() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    // `required` may represent an ordinary command recalled outside the
+    // mirror. The raw blank only submits that unknown line; it does not prove
+    // that a later slash is still owned by Readline.
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            &classifier,
+            &line_submits,
+            b"\n/skills detail $(touch should-not-run)\n",
+        ),
+        Some(b"\x1b[99~\n/skills detail $(touch should-not-run)\n".to_vec())
     );
 }
 

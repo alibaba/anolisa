@@ -513,6 +513,81 @@ fn raw_relay_bash_preserves_same_read_foreground_stdin_bytes() {
 }
 
 #[test]
+fn raw_relay_bash_shell_opaque_bytes_ignore_slash_route() {
+    struct ForegroundSynchronizedInput {
+        batch: Option<Vec<u8>>,
+        foreground_done: std::path::PathBuf,
+        exit_sent: bool,
+        deadline: Instant,
+    }
+
+    impl Read for ForegroundSynchronizedInput {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if let Some(batch) = self.batch.take() {
+                std::thread::sleep(Duration::from_millis(200));
+                assert!(batch.len() <= buf.len());
+                buf[..batch.len()].copy_from_slice(&batch);
+                return Ok(batch.len());
+            }
+            if !self.exit_sent {
+                while std::fs::metadata(&self.foreground_done)
+                    .map(|metadata| metadata.len() == 0)
+                    .unwrap_or(true)
+                {
+                    if Instant::now() >= self.deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "foreground reader did not complete",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                self.exit_sent = true;
+                buf[..b"exit\n".len()].copy_from_slice(b"exit\n");
+                return Ok(b"exit\n".len());
+            }
+            Ok(0)
+        }
+    }
+
+    fn run(slash_via_shell: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "cosh-shell-bash-shell-opaque-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let work_dir = root.join("work");
+        let captured = root.join("captured-stdin");
+        let command = format!(
+            "/bin/sh -c 'IFS= read -r first; IFS= read -r second; \
+             printf \"%s\\n%s\" \"$first\" \"$second\" > \"$1\"' sh {}",
+            shell_arg(&captured)
+        );
+
+        let mut config = ShellHostConfig::new("bash-shell-opaque", &work_dir);
+        config.slash_via_shell = slash_via_shell;
+        config.raw_action_watchdog = Duration::from_secs(10);
+        let mut rendered = Vec::new();
+        let mut batch = command.into_bytes();
+        batch.extend_from_slice(b"\n/help\nstdin-probe\nforeground-second\n");
+        let input = ForegroundSynchronizedInput {
+            batch: Some(batch),
+            foreground_done: captured.clone(),
+            exit_sent: false,
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        run_raw_relay_bash(&config, input, &mut rendered).expect("same-read shell-opaque relay");
+
+        let captured_bytes = std::fs::read(&captured).expect("captured foreground stdin");
+        assert!(!captured_bytes.contains(&0x1b), "{captured_bytes:?}");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    run(true);
+    run(false);
+}
+
+#[test]
 fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-switch-off-{}-{}",

@@ -17,15 +17,22 @@ pub(super) fn guarded_bash_submission(
     let mut guards = Vec::new();
     let mut line_start = 0;
     let mut readline_owned = false;
+    let mut batch_readline_safe = required;
     for (index, submit) in submissions.into_iter().enumerate() {
-        let needs_guard = if index == 0 {
+        let line = &bytes[line_start..submit];
+        let exact_slash = exact_slash_submission(input_classifier, line);
+        let blank = line.iter().all(u8::is_ascii_whitespace);
+        let ctrl_o = bytes[submit] == 0x0f;
+        let needs_guard = if !batch_readline_safe {
+            false
+        } else if index == 0 {
             required
         } else if readline_owned {
             // Ctrl-O loads another history entry before the next submitted
             // bytes, so the relay cannot prove the resulting Readline line.
             true
         } else {
-            exact_slash_submission(input_classifier, &bytes[line_start..submit])
+            exact_slash
         };
         if needs_guard {
             let guard = if index == 0 && history_private {
@@ -35,7 +42,15 @@ pub(super) fn guarded_bash_submission(
             };
             guards.push((submit, guard));
         }
-        readline_owned = bytes[submit] == 0x0f;
+        if index == 0 {
+            batch_readline_safe &= exact_slash || ctrl_o;
+        } else if (readline_owned && !ctrl_o) || (!exact_slash && !blank && !ctrl_o) {
+            // An ordinary command ends the part of the batch whose future
+            // consumer is provably Readline. Later bytes stay byte-exact for
+            // whichever shell/foreground reader owns the PTY next.
+            batch_readline_safe = false;
+        }
+        readline_owned = batch_readline_safe && ctrl_o;
         line_start = submit + 1;
     }
     if guards.is_empty() {

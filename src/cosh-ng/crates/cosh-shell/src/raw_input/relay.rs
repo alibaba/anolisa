@@ -523,7 +523,19 @@ fn flush_candidate_line_to_shell(
         wrapped.extend_from_slice(b"\x1b[201~");
         bytes = wrapped;
     }
-    submit_line_bytes_to_shell(relay, bytes, Vec::new(), emit_activity)
+    submit_line_bytes_to_shell(
+        relay,
+        bytes,
+        Vec::new(),
+        emit_activity,
+        ShellBatchOwnership::ReadlineSafe,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ShellBatchOwnership {
+    Opaque,
+    ReadlineSafe,
 }
 
 /// Clears the cosh-echoed candidate line and writes the whole read batch to
@@ -534,33 +546,39 @@ fn submit_line_bytes_to_shell(
     mut bytes: Vec<u8>,
     remainder: Vec<u8>,
     emit_activity: bool,
+    ownership: ShellBatchOwnership,
 ) -> io::Result<bool> {
     // A remainder was read with the candidate submission. Once any line in a
     // read is Shell-owned, the complete batch stays Shell-owned even if Bash
     // paints another prompt before this function returns.
     bytes.extend_from_slice(&remainder);
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-    let guard_submission = bash_submission_needs_guard(
-        relay.input_classifier.bash_slash_submission_guard_enabled(),
-        relay.main_prompt_gate.is_at_prompt(),
-        relay.input_classifier,
-        relay.native_line_state,
-        relay.line_submits,
-        &bytes,
-    );
+    let guard_submission = matches!(ownership, ShellBatchOwnership::ReadlineSafe)
+        && bash_submission_needs_guard(
+            relay.input_classifier.bash_slash_submission_guard_enabled(),
+            relay.main_prompt_gate.is_at_prompt(),
+            relay.input_classifier,
+            relay.native_line_state,
+            relay.line_submits,
+            &bytes,
+        );
     send_raw_input_events(&bytes, relay.input_events);
     observe_native_line(relay.native_line_state, &bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(&bytes);
-    let guarded_bytes = guarded_bash_submission(
-        guard_submission,
-        false,
-        relay.input_classifier,
-        relay.line_submits,
-        &bytes,
-    );
+    let guarded_bytes = matches!(ownership, ShellBatchOwnership::ReadlineSafe)
+        .then(|| {
+            guarded_bash_submission(
+                guard_submission,
+                false,
+                relay.input_classifier,
+                relay.line_submits,
+                &bytes,
+            )
+        })
+        .flatten();
     write_user_bytes_to_pty(
         relay.master,
         relay.input_generation,
