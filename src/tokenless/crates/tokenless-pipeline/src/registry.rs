@@ -102,9 +102,51 @@ pub const RESPONSE_CLEANUP: CompressorSpec = CompressorSpec {
     cost_class: CostClass::Moderate,
 };
 
+/// Routing spec of the lossless terminal cleanup (roadmap §6.1 level 1):
+/// ANSI colour and style codes, which carry no information. Redraws, cursor
+/// control, and glyph animation are left for the retrievable-lossy stage,
+/// which can stash what it decides to drop. The engine lives in
+/// `tokenless-compressors`; the adapter lives with the Runtime.
+/// Requires `replace_with_text` because its output is plain text — it must
+/// stay away from structured slots (JSON envelopes keep their own path).
+pub const TERMINAL_CLEANUP: CompressorSpec = CompressorSpec {
+    id: "terminal-cleanup",
+    content_types: &[ContentType::BuildLog, ContentType::PlainText],
+    seams: &[Seam::PostTool],
+    required_capabilities: Capabilities {
+        replace_output: true,
+        publish_retrieve_tool: false,
+        replace_with_text: true,
+    },
+    stage: Stage::Lossless,
+    cost_class: CostClass::Cheap,
+};
+
+/// Routing spec of the build/log compressor (roadmap §6.1 level 2). Also
+/// matches `PlainText`: shell text that is not a build log still gets the
+/// engine's conservative generic mode (bounded head/tail keep + stash),
+/// which replaces the blind mid-string truncation such text received on the
+/// legacy JSON-envelope path. Shell text detected as another specific type
+/// (diff, source code, stack trace, …) matches no spec yet and passes
+/// through — each gap closes when that type's own compressor lands.
+/// `publish_retrieve_tool` is required: without a reachable retrieve tool
+/// its per-gap markers would be dead ends.
+pub const BUILD_LOG: CompressorSpec = CompressorSpec {
+    id: "build-log",
+    content_types: &[ContentType::BuildLog, ContentType::PlainText],
+    seams: &[Seam::PostTool],
+    required_capabilities: Capabilities {
+        replace_output: true,
+        publish_retrieve_tool: true,
+        replace_with_text: true,
+    },
+    stage: Stage::RetrievableLossy,
+    cost_class: CostClass::Moderate,
+};
+
 /// The production registry. Entries are appended with the compressor that
 /// implements them, never speculatively.
-pub const REGISTRY: &[CompressorSpec] = &[RESPONSE_CLEANUP];
+pub const REGISTRY: &[CompressorSpec] = &[RESPONSE_CLEANUP, TERMINAL_CLEANUP, BUILD_LOG];
 
 /// Filters `registry` down to the candidates for one request, preserving
 /// registration order (the pipeline groups by [`Stage`] on top of it).

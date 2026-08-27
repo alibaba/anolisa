@@ -56,6 +56,7 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    SHELL_TOOLS,
     SKIP_TOOLS,
     build_compression_request,
     classify_env_error,
@@ -79,6 +80,13 @@ from hook_utils import (
 # entry would pass through anyway (normalization never grows the char
 # count, so raw < 200 implies normalized < 200).
 _MIN_RESPONSE_CHARS = 200
+
+# Shell tool envelopes carry the log in one dominant text field. Unwrapping
+# is worth a rebuilt envelope only when that field is large enough for the
+# build/log engine to bite (its own gates start at 30 lines / 200 chars;
+# 2000 chars keeps the rewrap machinery out of trivial outputs).
+_SHELL_TEXT_FIELDS = ("stdout", "stderr")
+_SHELL_UNWRAP_MIN_CHARS = 2_000
 
 # Below the qwen/cosh extension manifests' 10 s host wrapper so a
 # pathological input is killed here (fail-open skip) before the host kills
@@ -124,6 +132,31 @@ def _emit_attribution_or_skip(env_attribution: str) -> None:
         })
         sys.exit(0)
     skip()
+
+
+def _shell_text_field(tool_name: str, envelope) -> tuple | None:
+    """The dominant text field of a shell tool's envelope, or ``None``.
+
+    Shell envelopes (``{"stdout": …, "stderr": …}``) are JSON to the entry
+    point, which would compress them log-blind. Unwrapping the largest text
+    field sends the log itself through the text slot; step 13 re-injects the
+    compressed text into a same-shaped envelope, so the host's tool protocol
+    is untouched (adapters own envelope knowledge, §4.5). Only the single
+    largest field is compressed — one Tokenless subprocess per invocation
+    (§5.6) — the other field stays byte-identical.
+    """
+    if tool_name not in SHELL_TOOLS or not isinstance(envelope, dict):
+        return None
+    best = None
+    for name in _SHELL_TEXT_FIELDS:
+        value = envelope.get(name)
+        if (
+            isinstance(value, str)
+            and len(value) >= _SHELL_UNWRAP_MIN_CHARS
+            and (best is None or len(value) > len(best[1]))
+        ):
+            best = (name, value)
+    return best
 
 
 def _cached_claude_version(claude_bin: str) -> tuple | None:
@@ -235,10 +268,15 @@ def main() -> None:
     if isinstance(model_visible_before, str) and is_skill_file(model_visible_before):
         skip()
 
-    # 7. Copy the model-visible value into the request content (§4.5).
-    # ensure_ascii=False matches the entry point's normalization, so size
-    # gates measure Unicode characters on both sides.
-    if isinstance(model_visible_before, str):
+    # 7. Copy the model-visible value into the request content (§4.5). A
+    # shell envelope's dominant text field goes through the text slot
+    # instead of log-blind JSON; ensure_ascii=False matches the entry
+    # point's normalization, so size gates measure Unicode characters on
+    # both sides.
+    shell_field = _shell_text_field(tool_name, model_visible_before)
+    if shell_field is not None:
+        content = shell_field[1]
+    elif isinstance(model_visible_before, str):
         content = model_visible_before
     elif isinstance(model_visible_before, (dict, list)):
         content = json.dumps(
@@ -276,10 +314,15 @@ def main() -> None:
         replace_with_text = True  # updatedToolResponse accepts any text
     elif agent_id in {_QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
         can_replace = True
-        replace_with_text = not isinstance(tool_response_raw, (dict, list))
+        # An unwrapped shell field is plain text regardless of its envelope.
+        replace_with_text = shell_field is not None or not isinstance(
+            tool_response_raw, (dict, list)
+        )
     elif agent_id == _CLAUDE_AGENT_ID:
         can_replace = _claude_supports_replacement()
-        replace_with_text = not isinstance(tool_response_raw, (dict, list))
+        replace_with_text = shell_field is not None or not isinstance(
+            tool_response_raw, (dict, list)
+        )
         if not can_replace:
             warn(
                 "Claude Code < 2.1.121 (or version unknown): "
@@ -323,18 +366,28 @@ def main() -> None:
         warn("tokenless compress returned no output. Passing through unchanged.")
         _emit_attribution_or_skip(env_attribution)
 
-    # 13. Envelope construction — dispatch by agent runtime.
+    # 13. Envelope construction — dispatch by agent runtime. An unwrapped
+    # shell field is re-injected into a same-shaped envelope: the compressed
+    # text replaces exactly the field that was sent, every other field stays
+    # byte-identical.
+    rewrapped = None
+    if shell_field is not None:
+        rewrapped = dict(model_visible_before)
+        rewrapped[shell_field[0]] = output_text
+
     if cosh_ng_detected:
         hook_specific = {
             "hookEventName": "PostToolUse",
-            "updatedToolResponse": output_text,
+            "updatedToolResponse": rewrapped if rewrapped is not None else output_text,
         }
         if env_attribution:
             hook_specific["additionalContext"] = env_attribution
         _emit({"suppressOutput": True, "hookSpecificOutput": hook_specific})
         return
 
-    if replace_with_text:
+    if rewrapped is not None:
+        updated_output = rewrapped
+    elif replace_with_text:
         updated_output = output_text
     else:
         # Structured slot: the entry point guarantees schema-stable JSON for
@@ -347,9 +400,14 @@ def main() -> None:
 
     # Qoder validates updatedToolOutput as a string even when the original
     # tool response is structured. The entry point's compact serialization
-    # is exactly that string.
+    # is exactly that string; a rewrapped shell envelope serializes here.
     if agent_id == _QODER_AGENT_ID and not isinstance(updated_output, str):
-        updated_output = output_text
+        if rewrapped is not None:
+            updated_output = json.dumps(
+                rewrapped, separators=(",", ":"), ensure_ascii=False
+            )
+        else:
+            updated_output = output_text
 
     hook_output = {
         "hookEventName": "PostToolUse",

@@ -1,0 +1,16 @@
+make: Entering directory '/work/project'
+cc -O2 -Wall -c src/main.c -o build/main.o
+cc -O2 -Wall -c src/util.c -o build/util.o
+cc -O2 -Wall -c src/parser.c -o build/parser.o
+cc -O2 -Wall -c src/lexer.c -o build/lexer.o
+… (omitted 18 lines: 1 debug, 17 other; run: tokenless retrieve '<<tokenless:c4ee57a57a676df48c1f3e7c>>')
+cc -O2 -Wall -c src/gc.c -o build/gc.o
+cc -O2 -Wall -c src/ffi.c -o build/ffi.o
+cc -O2 -Wall -c src/platform.c -o build/platform.o
+src/util.c:42:5: error: 'foo' undeclared (first use in this function)
+   42 |     foo(x);
+      |     ^~~
+src/util.c:42:5: note: each undeclared identifier is reported only once
+make: *** [Makefile:12: build/util.o] Error 1
+make: Leaving directory '/work/project'
+Exit code: 2

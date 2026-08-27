@@ -90,6 +90,15 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
             }
             respond(json.dumps(compressed, separators=(",", ":")), "applied")
         """)
+    elif behavior == "compress-text":
+        # Text-slot path: the hook must have declared replace_with_text for
+        # the unwrapped shell field; the deterministic head-truncation lets
+        # tests assert exactly which field's text was sent.
+        script = prologue + textwrap.dedent("""\
+            if request["capabilities"].get("replace_with_text") is not True:
+                sys.exit(2)
+            respond(content[:40], "applied")
+        """)
     elif behavior == "no-savings":
         script = prologue + 'respond(content, "no_savings")\n'
     elif behavior == "passthrough":
@@ -562,6 +571,92 @@ class TestReplacementProtocol(unittest.TestCase):
         updated_str = json.dumps(updated) if isinstance(updated, (dict, list)) else str(updated)
         self.assertNotIn(sentinel * 30, updated_str,
                          "updatedToolOutput must not contain the full original sentinel")
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestShellEnvelopeUnwrap(unittest.TestCase):
+    """Shell envelopes ride the text slot: the dominant stdout/stderr field
+    is sent as plain text and the compressed text is re-injected into a
+    same-shaped envelope — the host's tool protocol stays intact."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+        self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress-text")
+        self.mock_claude = _create_mock_claude(self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
+
+    @staticmethod
+    def _bash_envelope(stdout: str, stderr: str) -> dict:
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "interrupted": False,
+            "isImage": False,
+        }
+
+    def test_stderr_dominant_envelope_is_rewrapped_in_place(self):
+        log = "error: build failed\n" + "junk line\n" * 300
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope("", log),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(updated, self._bash_envelope("", log[:40]),
+                         "Compressed text must replace exactly the sent field")
+        self.assertEqual(len(_spawn_log_lines(self.mock_bin)), 1,
+                         "Unwrapping must not add a second subprocess")
+
+    def test_largest_field_wins_and_the_other_stays_verbatim(self):
+        stdout = "info: routine progress line\n" * 100
+        stderr = "warn: something odd\n" * 110
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(stdout, stderr),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(updated, self._bash_envelope(stdout[:40], stderr))
+
+    def test_qoder_rewrapped_envelope_is_a_compact_json_string(self):
+        log = "npm ERR! code ELIFECYCLE\n" + "npm verbose stack line\n" * 150
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(log, ""),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIsInstance(updated, str,
+                              "Qoder requires a string updatedToolOutput")
+        self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

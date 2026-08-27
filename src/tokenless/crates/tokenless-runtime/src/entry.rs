@@ -4,8 +4,11 @@
 //! [`crate::TokenlessRuntime::compress`]: JSON detection, tool threshold
 //! selection, TOON selection, and final acceptance — previously five
 //! scattered size checks across the common Python hooks and two CLI
-//! subcommands — happen here exactly once. Adapters keep only envelope
-//! construction (§4.5).
+//! subcommands — happen here exactly once. Non-JSON content routes to the
+//! plain-text pipeline (terminal cleanup + build/log compressor, §6.1) when
+//! the host offers a text slot. Adapters keep only envelope construction
+//! (§4.5) — including unwrapping shell envelopes so their stdout/stderr text
+//! arrives here as plain text.
 //!
 //! Every failure past request decoding is fail-open and reported through
 //! the disposition: a failed optional compressor never blocks the agent
@@ -22,7 +25,7 @@ use tokenless_stats::{OperationType, estimate_tokens};
 
 use crate::{
     CompressOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS, ResponsePipelineRun,
-    finish_schema_compression, run_response_pipeline, taxonomy,
+    finish_schema_compression, run_response_pipeline, run_text_pipeline, taxonomy,
 };
 
 /// Minimum content size (Unicode scalar values, matching the Python hooks'
@@ -183,9 +186,9 @@ struct Winner {
     chain: Vec<String>,
     op: OperationType,
     reversibility: Reversibility,
-    /// Whether the cleanup candidate (and therefore its stash markers) is
-    /// part of the emitted text.
-    keeps_cleanup: bool,
+    /// Whether the pipeline's candidate (and therefore its stash markers)
+    /// is part of the emitted text.
+    keeps_pipeline: bool,
 }
 
 fn post_tool(
@@ -201,7 +204,7 @@ fn post_tool(
         return EntryOutcome::passthrough(request, None);
     }
     let Some((normalized, original_value)) = normalize_content(&request.content) else {
-        return EntryOutcome::passthrough(request, None);
+        return post_tool_text(request, options, stash_store);
     };
     let normalized_chars = normalized.chars().count();
     if normalized_chars < MIN_RESPONSE_CHARS {
@@ -261,6 +264,55 @@ fn post_tool(
     finish_post_tool(request, options, stash_store, run, winner)
 }
 
+/// The plain-text post-tool path (roadmap §6.1): terminal cleanup plus the
+/// build/log compressor. Content arrives verbatim — no JSON-string unwrap
+/// happens here (a JSON-quoted string stays one escaped line and never
+/// engages the line-oriented engine).
+fn post_tool_text(
+    request: &CompressionRequest,
+    options: &EntryOptions,
+    stash_store: Option<&Arc<dyn StashStore>>,
+) -> EntryOutcome {
+    // Non-JSON output needs a text slot; a structured slot keeps its
+    // envelope-owned JSON path (adapters own envelope knowledge, §4.5).
+    if !request.capabilities.replace_with_text {
+        return EntryOutcome::passthrough(request, None);
+    }
+    let content_chars = request.content.chars().count();
+    if content_chars < MIN_RESPONSE_CHARS {
+        return EntryOutcome::passthrough(request, None);
+    }
+
+    let run = run_text_pipeline(
+        request,
+        options.compression_enabled,
+        // Markers are only retrievable when the host publishes a retrieve
+        // tool; without one, attaching the stash would strand rows.
+        options.stash_enabled && request.capabilities.publish_retrieve_tool,
+        stash_store,
+    );
+
+    let pipeline_accepted = matches!(
+        run.response.disposition,
+        Disposition::Applied | Disposition::DryRun
+    );
+    // Character acceptance on top of token acceptance, composing the same
+    // two gates as the JSON path.
+    let winner = match &run.candidate {
+        Some(candidate) if pipeline_accepted && candidate.chars().count() < content_chars => {
+            Some(Winner {
+                text: candidate.clone(),
+                chain: run.chain.clone(),
+                op: OperationType::CompressResponse,
+                reversibility: run.response.reversibility,
+                keeps_pipeline: true,
+            })
+        }
+        _ => None,
+    };
+    finish_post_tool(request, options, stash_store, run, winner)
+}
+
 /// Restore-and-recheck for hosts whose replacement slot must keep a stable
 /// JSON schema. Returns the accepted candidate text, or `None` when the
 /// restore cancels the win.
@@ -308,10 +360,10 @@ fn decide_post_tool_winner(
     };
 
     if let Some(toon_text) = toon {
-        let keeps_cleanup = cleanup_candidate.is_some();
+        let keeps_pipeline = cleanup_candidate.is_some();
         return Some(Winner {
             text: toon_text,
-            chain: if keeps_cleanup {
+            chain: if keeps_pipeline {
                 vec!["response-cleanup".into(), "toon".into()]
             } else {
                 vec!["toon".into()]
@@ -319,12 +371,12 @@ fn decide_post_tool_winner(
             op: OperationType::CompressToon,
             // TOON is a decodable re-encoding: it degrades nothing beyond
             // what the cleanup already claimed.
-            reversibility: if keeps_cleanup {
+            reversibility: if keeps_pipeline {
                 run.response.reversibility
             } else {
                 Reversibility::Lossless
             },
-            keeps_cleanup,
+            keeps_pipeline,
         });
     }
     cleanup_candidate.map(|text| Winner {
@@ -332,7 +384,7 @@ fn decide_post_tool_winner(
         chain: vec!["response-cleanup".into()],
         op: OperationType::CompressResponse,
         reversibility: run.response.reversibility,
-        keeps_cleanup: true,
+        keeps_pipeline: true,
     })
 }
 
@@ -374,8 +426,8 @@ fn finish_post_tool(
     // covers both a full rejection and a TOON-over-original win after the
     // cleanup was rejected — cases where the old CLI-commits/hook-discards
     // split orphaned rows.
-    let keeps_cleanup = winner.as_ref().is_some_and(|winner| winner.keeps_cleanup);
-    let (removed, failed) = if !keeps_cleanup
+    let keeps_pipeline = winner.as_ref().is_some_and(|winner| winner.keeps_pipeline);
+    let (removed, failed) = if !keeps_pipeline
         && !run.committed_writes.is_empty()
         && let Some(store) = stash_store
     {
@@ -409,7 +461,7 @@ fn finish_post_tool(
             response.after_tokens = after_tokens;
             response.reversibility = winner.reversibility;
             response.compressor_chain = winner.chain;
-            if !winner.keeps_cleanup {
+            if !winner.keeps_pipeline {
                 response.stash_keys = Vec::new();
             }
             let (output, disposition) = if options.compression_enabled {
@@ -427,7 +479,7 @@ fn finish_post_tool(
             // every truncation in an emitted candidate is unmarked; dry-run
             // stays unmeasured (NULL) because it never attaches a store, so
             // a count would misstate what an active run with stash records.
-            let unrecoverable_truncations = if !winner.keeps_cleanup {
+            let unrecoverable_truncations = if !winner.keeps_pipeline {
                 None
             } else if run.unrecoverable_truncations.is_some() {
                 run.unrecoverable_truncations
@@ -670,6 +722,152 @@ mod tests {
         }
     }
 
+    /// A post-tool request whose host offers a text slot and a retrieve
+    /// tool — the shape the hook sends after unwrapping a shell envelope.
+    fn text_request(content: &str) -> CompressionRequest {
+        let mut request = post_tool_request(content, "Bash");
+        request.capabilities.replace_with_text = true;
+        request.capabilities.publish_retrieve_tool = true;
+        request
+    }
+
+    fn build_log_text() -> String {
+        let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
+        lines.extend((0..70).map(|i| format!("   Compiling pkg{i:03} v0.1.{i}")));
+        lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
+        lines.extend((0..12).map(|i| format!("summary tail line {i}")));
+        lines.join("\n") + "\n"
+    }
+
+    #[test]
+    fn text_slot_build_log_applies_and_round_trips() {
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let req = text_request(&build_log_text());
+        let outcome = compress_with_store(&req, &ENABLED, Some(&store));
+
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert!(
+            outcome
+                .response
+                .compressor_chain
+                .contains(&"build-log".to_string())
+        );
+        assert_eq!(outcome.stats.op, OperationType::CompressResponse);
+        assert!(!outcome.response.stash_keys.is_empty());
+        assert!(outcome.response.output.contains("error[E0308]"));
+        assert_eq!(outcome.stats.unrecoverable_truncations, Some(0));
+        assert!(outcome.stash_writes.is_some_and(|writes| writes > 0));
+        // Every emitted marker is backed by a byte-exact retrievable slice
+        // of the original content.
+        for key in &outcome.response.stash_keys {
+            assert!(
+                outcome
+                    .response
+                    .output
+                    .contains(&tokenless_ccr::marker_for(key))
+            );
+            let payload = store.retrieve(key).unwrap().expect("stashed payload");
+            assert!(build_log_text().contains(&payload));
+        }
+    }
+
+    #[test]
+    fn text_without_a_text_slot_stays_passthrough() {
+        let mut req = post_tool_request(&build_log_text(), "Bash");
+        req.capabilities.publish_retrieve_tool = true;
+        let outcome = compress_with_store(&req, &ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+        assert_eq!(outcome.response.output, build_log_text());
+    }
+
+    #[test]
+    fn short_text_is_passthrough() {
+        let outcome = compress_with_store(&text_request("error: boom\n"), &ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+    }
+
+    #[test]
+    fn text_dry_run_measures_without_a_store_and_keeps_the_chain() {
+        let req = text_request(&build_log_text());
+        let outcome = compress_with_store(&req, &DRY_RUN, None);
+
+        assert_eq!(outcome.response.disposition, Disposition::DryRun);
+        assert_eq!(outcome.response.output, build_log_text());
+        assert!(
+            outcome
+                .response
+                .compressor_chain
+                .contains(&"build-log".to_string())
+        );
+        // Markers are measurement-only: content-derived keys, no writes.
+        assert!(outcome.stats.measured_text.contains("<<tokenless:"));
+        assert!(outcome.response.stash_keys.is_empty());
+        assert_eq!(outcome.stash_writes, None);
+        assert_eq!(outcome.stats.unrecoverable_truncations, None);
+    }
+
+    #[test]
+    fn text_dry_run_chain_omits_a_rolled_back_cleanup() {
+        // A parameterless SGR is three characters, and `heuristic-v1` counts
+        // `chars.div_ceil(4)`: at a character count that is a multiple of
+        // four, removing it leaves the count unchanged, so the pipeline
+        // reverts the whole lossless stage and the build/log engine runs on
+        // the uncleaned text. The measurement chain must then name only what
+        // actually shaped the candidate.
+        let mut content = build_log_text().replacen("$ cargo", "$ \u{1b}[mcargo", 1);
+        while content.chars().count() % 4 != 0 {
+            content.push(' ');
+        }
+        let outcome = compress_with_store(&text_request(&content), &DRY_RUN, None);
+
+        assert_eq!(outcome.response.disposition, Disposition::DryRun);
+        assert_eq!(outcome.response.compressor_chain, ["build-log"]);
+        // The engine saw the escape because the cleanup was rolled back.
+        assert!(outcome.stats.measured_text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn text_active_without_stash_applies_cleanup_only() {
+        let mut lines: Vec<String> = (0..40)
+            .map(|i| format!("\u{1b}[1m\u{1b}[32m   Compiling\u{1b}[0m pkg{i:03} v0.1.{i}"))
+            .collect();
+        lines.push("\u{1b}[1m    Finished\u{1b}[0m `release` profile in 12.02s".to_string());
+        let content = lines.join("\n") + "\n";
+        let options = EntryOptions {
+            compression_enabled: true,
+            stash_enabled: false,
+        };
+        let outcome = compress_with_store(&text_request(&content), &options, None);
+
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(outcome.response.compressor_chain, ["terminal-cleanup"]);
+        assert!(!outcome.response.output.contains('\u{1b}'));
+        assert!(!outcome.response.output.contains("<<tokenless:"));
+        assert!(outcome.response.stash_keys.is_empty());
+        // The lossy stage was excluded, so the emitted candidate holds no
+        // unmarked omissions.
+        assert_eq!(outcome.stats.unrecoverable_truncations, Some(0));
+    }
+
+    #[test]
+    fn long_non_log_text_gets_the_generic_mode() {
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let prose: String = (0..120)
+            .map(|i| format!("record {i} holding some ordinary content\n"))
+            .collect();
+        let outcome = compress_with_store(&text_request(&prose), &ENABLED, Some(&store));
+
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(outcome.response.compressor_chain, ["build-log"]);
+        assert_eq!(outcome.response.stash_keys.len(), 1);
+        assert!(
+            outcome
+                .response
+                .output
+                .contains("… (omitted 40 lines, run: tokenless retrieve")
+        );
+    }
+
     #[test]
     fn size_gate_counts_code_points_not_bytes() {
         // 98 chars but 278 bytes: under the gate only when counted in
@@ -816,6 +1014,7 @@ mod tests {
             unrecoverable_truncations: Some(0),
             stash_size: Some(1),
             truncations: 0,
+            chain: vec![],
         };
         let outcome = finish_post_tool(&req, &ENABLED, Some(&store), run, None);
         assert_eq!(outcome.response.disposition, Disposition::NoSavings);

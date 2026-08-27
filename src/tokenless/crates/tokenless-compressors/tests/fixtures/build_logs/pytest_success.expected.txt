@@ -1,0 +1,46 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /work/proj
+configfile: pyproject.toml
+collected 38 items
+
+tests/test_core.py::test_case_00 PASSED [  2%]
+tests/test_core.py::test_case_01 PASSED [  5%]
+tests/test_core.py::test_case_02 PASSED [  7%]
+tests/test_core.py::test_case_03 PASSED [ 10%]
+tests/test_core.py::test_case_04 PASSED [ 13%]
+tests/test_core.py::test_case_05 PASSED [ 15%]
+tests/test_core.py::test_case_06 PASSED [ 18%]
+tests/test_core.py::test_case_07 PASSED [ 21%]
+tests/test_core.py::test_case_08 PASSED [ 23%]
+tests/test_core.py::test_case_09 PASSED [ 26%]
+tests/test_core.py::test_case_10 PASSED [ 28%]
+tests/test_core.py::test_case_11 PASSED [ 31%]
+tests/test_core.py::test_case_12 PASSED [ 34%]
+tests/test_core.py::test_case_13 PASSED [ 36%]
+tests/test_core.py::test_case_14 PASSED [ 39%]
+tests/test_core.py::test_case_15 PASSED [ 42%]
+tests/test_core.py::test_case_16 PASSED [ 44%]
+tests/test_core.py::test_case_17 PASSED [ 47%]
+tests/test_core.py::test_case_18 PASSED [ 50%]
+tests/test_core.py::test_case_19 PASSED [ 52%]
+tests/test_core.py::test_case_20 PASSED [ 55%]
+tests/test_core.py::test_case_21 PASSED [ 57%]
+tests/test_core.py::test_case_22 PASSED [ 60%]
+tests/test_core.py::test_case_23 PASSED [ 63%]
+tests/test_core.py::test_case_24 PASSED [ 65%]
+tests/test_core.py::test_case_25 PASSED [ 68%]
+tests/test_core.py::test_case_26 PASSED [ 71%]
+tests/test_core.py::test_case_27 PASSED [ 73%]
+tests/test_core.py::test_case_28 PASSED [ 76%]
+tests/test_core.py::test_case_29 PASSED [ 78%]
+tests/test_core.py::test_case_30 PASSED [ 81%]
+tests/test_core.py::test_case_31 PASSED [ 84%]
+tests/test_core.py::test_case_32 PASSED [ 86%]
+tests/test_core.py::test_case_33 PASSED [ 89%]
+tests/test_core.py::test_case_34 PASSED [ 92%]
+tests/test_core.py::test_case_35 PASSED [ 94%]
+tests/test_core.py::test_case_36 PASSED [ 97%]
+tests/test_core.py::test_case_37 PASSED [100%]
+
+============================== 38 passed in 1.23s ===============================

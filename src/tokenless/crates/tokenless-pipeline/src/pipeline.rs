@@ -60,6 +60,19 @@ pub trait Compressor {
         content: &str,
         stash: Option<&dyn StashStore>,
     ) -> Result<CompressOutcome, CompressError>;
+
+    /// Called when a stage rollback drops this compressor's candidate
+    /// mid-run: the pipeline continues, but from the content this
+    /// compressor was handed rather than what it returned.
+    ///
+    /// Only the lossless stage's token gate rolls back this way. The final
+    /// rejections do not call it — there the whole run is discarded and a
+    /// caller measuring a dry run still wants to know which compressors
+    /// produced the candidate it measured.
+    ///
+    /// An implementation that keeps no state for its caller needs no body;
+    /// one that reports what it did must stop claiming a contribution.
+    fn discarded(&self) {}
 }
 
 /// A successful compressor result.
@@ -162,6 +175,9 @@ pub fn run(
     }
     if !arb.chain.is_empty() && tokens(&arb.current) >= before_tokens {
         arb.revert();
+        for &compressor in &lossless {
+            compressor.discarded();
+        }
     }
 
     // §4.3 steps 3–4: escalate only while the size policy is unmet, one
@@ -215,6 +231,13 @@ impl Arbitration<'_> {
         match compressor.compress(&self.current, self.stash) {
             Ok(outcome) => {
                 self.ran_any = true;
+                // A compressor that changed nothing and wrote nothing
+                // contributed nothing: keeping it out of the chain keeps
+                // stats attribution on the compressors that actually shaped
+                // the result, and its claim cannot degrade reversibility.
+                if outcome.output == self.current && outcome.stash_writes.is_empty() {
+                    return;
+                }
                 self.current = outcome.output;
                 self.chain.push(compressor.spec().id.to_owned());
                 for write in outcome.stash_writes {

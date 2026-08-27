@@ -858,6 +858,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokenless-compressors"
+version = "0.7.13"
+dependencies = [
+ "tokenless-ccr",
+]
+
+[[package]]
 name = "tokenless-pipeline"
 version = "0.7.13"
 dependencies = [
@@ -896,6 +903,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokenless-ccr",
+ "tokenless-compressors",
  "tokenless-pipeline",
  "tokenless-protocol",
  "tokenless-schema",

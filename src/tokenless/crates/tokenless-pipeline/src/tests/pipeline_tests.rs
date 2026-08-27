@@ -90,8 +90,12 @@ impl Compressor for SpaceSquisher {
     }
 }
 
-/// Lossless that grows its input: must be rejected by arbitration.
-struct Bloater;
+/// Lossless that grows its input: must be rejected by arbitration. Counts
+/// its rollback notifications so the stage gate's contract is observable.
+#[derive(Default)]
+struct Bloater {
+    discarded: AtomicUsize,
+}
 
 static BLOATER_SPEC: CompressorSpec = test_spec("bloater", Stage::Lossless, REPLACE_ONLY);
 
@@ -110,6 +114,10 @@ impl Compressor for Bloater {
             reversibility: Reversibility::Lossless,
             stash_writes: Vec::new(),
         })
+    }
+
+    fn discarded(&self) {
+        self.discarded.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -368,11 +376,17 @@ fn undeclared_capabilities_filter_out_candidates() {
 #[test]
 fn growth_is_rejected_as_no_savings() {
     let request = request(SPACEY, REPLACE_ONLY);
-    let response = run(&request, &[&Bloater], None, &config());
+    let bloater = Bloater::default();
+    let response = run(&request, &[&bloater], None, &config());
     assert_eq!(response.disposition, Disposition::NoSavings);
     assert_eq!(response.output, SPACEY);
     assert_eq!(response.after_tokens, response.before_tokens);
     assert!(response.compressor_chain.is_empty());
+    // The stage gate dropped the candidate, so the compressor is told: a
+    // caller that reports what shaped the result must not name it. The
+    // final rejections carry no such notification — `text_dry_run_measures_
+    // without_a_store_and_keeps_the_chain` in the Runtime pins that side.
+    assert_eq!(bloater.discarded.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -575,4 +589,45 @@ fn timeout_rolls_back_and_preserves_the_original() {
     assert_eq!(response.disposition, Disposition::Timeout);
     assert_eq!(response.output, SPACEY);
     assert!(response.compressor_chain.is_empty());
+}
+
+/// Retrievable-lossy that returns its input untouched under a scary claim:
+/// it must contribute neither a chain entry nor a reversibility downgrade.
+struct IdentityPass;
+
+static IDENTITY_SPEC: CompressorSpec = test_spec("identity-pass", Stage::RetrievableLossy, FULL);
+
+impl Compressor for IdentityPass {
+    fn spec(&self) -> &CompressorSpec {
+        &IDENTITY_SPEC
+    }
+
+    fn compress(
+        &self,
+        content: &str,
+        _stash: Option<&dyn StashStore>,
+    ) -> Result<CompressOutcome, CompressError> {
+        Ok(CompressOutcome {
+            output: content.to_owned(),
+            reversibility: Reversibility::Unrecoverable,
+            stash_writes: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn no_op_compressor_joins_neither_chain_nor_reversibility() {
+    let request = request(SPACEY, FULL);
+    let mut config = config();
+    config.max_tokens = Some(0); // force escalation into the lossy stage
+
+    let response = run(&request, &[&SpaceSquisher, &IdentityPass], None, &config);
+    assert_eq!(response.disposition, Disposition::Applied);
+    assert_eq!(response.compressor_chain, ["space-squisher"]);
+    assert_eq!(response.reversibility, Reversibility::Lossless);
+
+    // A run where only no-ops executed resolves to NoSavings, not Applied.
+    let response = run(&request, &[&IdentityPass], None, &config);
+    assert_eq!(response.disposition, Disposition::NoSavings);
+    assert_eq!(response.output, SPACEY);
 }

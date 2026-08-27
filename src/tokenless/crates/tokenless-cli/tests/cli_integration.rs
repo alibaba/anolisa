@@ -1894,6 +1894,118 @@ fn compress_dry_run_emits_the_original_and_measures() {
 }
 
 #[test]
+fn compress_build_log_text_and_retrieve_round_trips() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
+    lines.extend((0..70).map(|i| format!("   Compiling pkg{i:03} v0.1.{i}")));
+    lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
+    lines.extend((0..12).map(|i| format!("summary tail line {i}")));
+    let content = lines.join("\n") + "\n";
+
+    let request = post_tool_request_json(&content, "Bash", true, "build-log-e2e");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["disposition"], "applied");
+    assert_eq!(
+        response["compressor_chain"],
+        serde_json::json!(["build-log"])
+    );
+    assert_eq!(response["reversibility"], "retrievable");
+    let emitted = response["output"].as_str().unwrap();
+    assert!(
+        emitted.contains("error[E0308]"),
+        "the Signal line must survive"
+    );
+    let marker_start = emitted
+        .find("<<tokenless:")
+        .expect("the omitted gap should emit a stash marker");
+    let marker_end = marker_start + emitted[marker_start..].find(">>").unwrap() + 2;
+    let marker = &emitted[marker_start..marker_end];
+
+    let retrieved = fixture
+        .command()
+        .args(["retrieve", marker])
+        .output()
+        .unwrap();
+    assert!(
+        retrieved.status.success(),
+        "retrieve failed: {}",
+        String::from_utf8_lossy(&retrieved.stderr)
+    );
+    let payload = String::from_utf8(retrieved.stdout).unwrap();
+    assert!(
+        content.contains(&payload),
+        "the stashed gap must be a byte-exact slice of the original log"
+    );
+}
+
+#[test]
+fn build_log_artifacts_attribute_to_the_stash_writer_not_the_chain_head() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    // ANSI makes terminal-cleanup a real step, so the chain has two entries
+    // and the attribution assertion is not trivially the chain head.
+    let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
+    lines.extend((0..70).map(|i| format!("\u{1b}[1;32m   Compiling\u{1b}[0m pkg{i:03} v0.1.{i}")));
+    lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
+    lines.extend((0..12).map(|i| format!("summary tail line {i}")));
+    let content = lines.join("\n") + "\n";
+
+    let request = post_tool_request_json(&content, "Bash", true, "build-log-artifacts");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "1")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &request,
+    );
+    assert!(
+        output.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["disposition"], "applied");
+    assert_eq!(
+        response["compressor_chain"],
+        serde_json::json!(["terminal-cleanup", "build-log"])
+    );
+    assert!(!response["stash_keys"].as_array().unwrap().is_empty());
+
+    // The stash writer owns its artifacts; a refactor that reverts attribution
+    // to the chain head would record "terminal-cleanup" here.
+    let conn = rusqlite::Connection::open(fixture.data_dir.join("stats.db")).unwrap();
+    let owners: Vec<String> = conn
+        .prepare("SELECT DISTINCT compressor_id FROM compression_artifacts")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(owners, ["build-log"]);
+}
+
+#[test]
 fn compress_undecodable_requests_exit_2() {
     for bad in [
         "not json",

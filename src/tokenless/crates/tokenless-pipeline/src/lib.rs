@@ -24,4 +24,7 @@ mod registry;
 
 pub use content::{ContentType, detect};
 pub use pipeline::{CompressError, CompressOutcome, Compressor, PipelineConfig, run};
-pub use registry::{CompressorSpec, CostClass, REGISTRY, RESPONSE_CLEANUP, Stage, candidates};
+pub use registry::{
+    BUILD_LOG, CompressorSpec, CostClass, REGISTRY, RESPONSE_CLEANUP, Stage, TERMINAL_CLEANUP,
+    candidates,
+};

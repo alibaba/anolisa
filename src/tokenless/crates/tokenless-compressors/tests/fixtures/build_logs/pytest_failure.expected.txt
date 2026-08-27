@@ -1,0 +1,52 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.2.0, pluggy-1.5.0
+rootdir: /work/proj
+collected 34 items
+
+tests/test_core.py::test_case_00 PASSED [  2%]
+tests/test_core.py::test_case_01 PASSED [  5%]
+tests/test_core.py::test_case_02 PASSED [  8%]
+tests/test_core.py::test_case_03 PASSED [ 11%]
+tests/test_core.py::test_case_04 PASSED [ 14%]
+tests/test_core.py::test_case_05 PASSED [ 17%]
+tests/test_core.py::test_case_06 PASSED [ 20%]
+tests/test_core.py::test_case_07 PASSED [ 23%]
+tests/test_core.py::test_case_08 PASSED [ 26%]
+tests/test_core.py::test_case_09 PASSED [ 29%]
+tests/test_core.py::test_case_10 PASSED [ 32%]
+tests/test_core.py::test_case_11 PASSED [ 35%]
+tests/test_core.py::test_case_12 PASSED [ 38%]
+tests/test_core.py::test_case_13 PASSED [ 41%]
+tests/test_core.py::test_case_14 PASSED [ 44%]
+tests/test_core.py::test_case_15 PASSED [ 47%]
+tests/test_core.py::test_case_16 PASSED [ 50%]
+tests/test_core.py::test_case_17 PASSED [ 52%]
+tests/test_core.py::test_case_18 PASSED [ 55%]
+tests/test_core.py::test_case_19 PASSED [ 58%]
+tests/test_math.py::test_answer FAILED [ 61%]
+tests/test_core.py::test_case_20 PASSED [ 61%]
+tests/test_core.py::test_case_21 PASSED [ 64%]
+tests/test_core.py::test_case_22 PASSED [ 67%]
+tests/test_core.py::test_case_23 PASSED [ 70%]
+tests/test_core.py::test_case_24 PASSED [ 73%]
+tests/test_core.py::test_case_25 PASSED [ 76%]
+tests/test_core.py::test_case_26 PASSED [ 79%]
+tests/test_core.py::test_case_27 PASSED [ 82%]
+tests/test_core.py::test_case_28 PASSED [ 85%]
+tests/test_core.py::test_case_29 PASSED [ 88%]
+tests/test_core.py::test_case_30 PASSED [ 91%]
+tests/test_core.py::test_case_31 PASSED [ 94%]
+tests/test_core.py::test_case_32 PASSED [ 97%]
+
+=================================== FAILURES ===================================
+_________________________________ test_answer __________________________________
+
+    def test_answer():
+>       assert compute() == 4
+E       assert 3 == 4
+E        +  where 3 = compute()
+
+tests/test_math.py:12: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_math.py::test_answer - assert 3 == 4
+========================= 1 failed, 33 passed in 2.14s =========================

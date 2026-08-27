@@ -1,0 +1,22 @@
+$ npm install
+npm http fetch GET 200 https://registry.npmjs.org/express 231ms
+⠧
+⠏
+⠹
+… (omitted 17 lines: 1 debug, 16 other; run: tokenless retrieve '<<tokenless:f4c01ae68be114a2f0740f3b>>')
+npm http fetch GET 200 https://registry.npmjs.org/forwarded 68ms
+npm http fetch GET 200 https://registry.npmjs.org/fresh 71ms
+npm http fetch GET 200 https://registry.npmjs.org/http-errors 74ms
+npm http fetch GET 200 https://registry.npmjs.org/iconv-lite 77ms
+npm http fetch GET 200 https://registry.npmjs.org/inherits 80ms
+… (omitted 15 lines: 15 other; run: tokenless retrieve '<<tokenless:e2f2d77615eac0f7a7a35311>>')
+npm http fetch GET 200 https://registry.npmjs.org/raw-body 128ms
+npm http fetch GET 200 https://registry.npmjs.org/safe-buffer 131ms
+npm http fetch GET 200 https://registry.npmjs.org/send 134ms
+
+added 41 packages, and audited 42 packages in 3s
+
+7 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities

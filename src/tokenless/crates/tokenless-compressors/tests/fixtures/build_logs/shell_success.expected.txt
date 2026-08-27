@@ -1,0 +1,17 @@
+make: Entering directory '/work/project'
+cc -O2 -Wall -c src/main.c -o build/main.o
+cc -O2 -Wall -c src/util.c -o build/util.o
+cc -O2 -Wall -c src/parser.c -o build/parser.o
+cc -O2 -Wall -c src/lexer.c -o build/lexer.o
+… (omitted 27 lines: 6 info, 1 debug, 20 other; run: tokenless retrieve '<<tokenless:41ecde6305d26c246bcc7fac>>')
+  6× info: waiting for file lock on build/.lock (attempt 0)
+info: waiting for file lock on build/.lock (attempt 7)
+info: waiting for file lock on build/.lock (attempt 8)
+info: waiting for file lock on build/.lock (attempt 9)
+info: waiting for file lock on build/.lock (attempt 10)
+info: waiting for file lock on build/.lock (attempt 11)
+info: waiting for file lock on build/.lock (attempt 12)
+ar rcs build/libapp.a build/main.o build/util.o build/parser.o build/lexer.o build/codegen.o build/optimizer.o build/linker.o build/loader.o
+cc build/main.o build/libapp.a -o build/app
+make: Leaving directory '/work/project'
+Exit code: 0

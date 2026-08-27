@@ -1,0 +1,23 @@
+$ cargo build --release
+    Updating crates.io index
+  Downloaded proc-macro2 v1.0.11
+  Downloaded unicode-ident v1.0.13
+  Downloaded quote v1.0.5
+… (omitted 11 lines: 11 other; run: tokenless retrieve '<<tokenless:99ab150bf551a010a7b4b627>>')
+   Compiling memchr v1.0.8
+   Compiling once_cell v1.0.9
+   Compiling thiserror-impl v1.0.10
+   Compiling thiserror v1.0.11
+   Compiling hashbrown v1.0.12
+   Compiling equivalent v1.0.13
+… (omitted 19 lines: 19 other; run: tokenless retrieve '<<tokenless:4cfa461eed6bcfd8e5a8af30>>')
+   Compiling either v1.0.33
+   Compiling rayon-core v1.0.34
+   Compiling rayon v1.0.35
+   Compiling crossbeam-utils v1.0.36
+   Compiling crossbeam-epoch v1.0.37
+   Compiling crossbeam-deque v1.0.38
+   Compiling getrandom v1.0.39
+    Building [===                 ] 6/40: app    Building [=========           ] 18/40: app    Building [=================   ] 34/40: app
+   Compiling app v0.1.0 (/work/app)
+    Finished `release` profile [optimized] target(s) in 42.18s

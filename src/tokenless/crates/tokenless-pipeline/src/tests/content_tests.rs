@@ -32,6 +32,15 @@ fn detects_build_log() {
 }
 
 #[test]
+fn detects_make_style_build_log() {
+    let make = "make: Entering directory '/work/project'\n\
+                cc -O2 -c src/main.c -o build/main.o\n\
+                ar rcs build/libapp.a build/main.o\n\
+                make: Leaving directory '/work/project'";
+    assert_eq!(detect(make), ContentType::BuildLog);
+}
+
+#[test]
 fn log_containing_a_traceback_stays_build_log() {
     let pytest = "$ pytest -q\n\
                   ...F\n\
@@ -126,6 +135,29 @@ fn readable_prose_is_plain_text() {
         ContentType::PlainText
     );
     assert_eq!(detect("just a short sentence"), ContentType::PlainText);
+}
+
+#[test]
+fn prose_carrying_two_generic_markers_is_a_known_detection_boundary() {
+    // `is_build_log` needs two distinct markers and counts several short,
+    // word-like ones (`gcc `, `make: `, `cc -`, `ld: `). Ordinary prose that
+    // happens to mention two of them therefore scores as BuildLog. This test
+    // pins that tolerance rather than endorsing it: raising the score
+    // threshold or adding word-boundary conditions should update it
+    // deliberately, not discover it through a golden diff elsewhere.
+    let mut doc = String::new();
+    doc.push_str("Toolchain notes for new contributors.\n\n");
+    doc.push_str("We build with gcc on every supported platform. The make: prefix in\n");
+    doc.push_str("the transcript below is the recursive build announcing itself.\n\n");
+    for i in 0..36 {
+        doc.push_str(&format!("Paragraph {i} explains one configuration knob in prose.\n"));
+    }
+    assert_eq!(detect(&doc), ContentType::BuildLog);
+
+    // One marker alone is not enough, which is what keeps the tolerance
+    // bounded: the misdetection needs two distinct mentions.
+    let single = doc.replace("make: ", "recursive ");
+    assert_eq!(detect(&single), ContentType::PlainText);
 }
 
 #[test]
