@@ -1969,21 +1969,18 @@ fn render_application_outcome(
             outcome,
             manifest_reconciliation,
         } => {
-            if matches!(
-                outcome.status(),
-                anolisa_core::execution::CommandOutcomeStatus::Partial
-            ) {
-                let reason = outcome
-                    .warnings()
-                    .first()
-                    .expect("partial repair outcome carries its reconciliation failure");
-                return Err(CliError::Runtime {
-                    command,
-                    reason: reason.clone(),
-                });
-            }
             for warning in outcome.warnings() {
                 eprintln!("warning: {warning}");
+            }
+            match outcome.status() {
+                anolisa_core::execution::CommandOutcomeStatus::Completed => {}
+                anolisa_core::execution::CommandOutcomeStatus::Partial { reason }
+                | anolisa_core::execution::CommandOutcomeStatus::Failed { reason } => {
+                    return Err(CliError::Runtime {
+                        command,
+                        reason: reason.clone(),
+                    });
+                }
             }
             RepairResultPayload {
                 component: subject.component,
@@ -2115,6 +2112,39 @@ mod tests {
             },
             manifest_reconciliation: None,
         }
+    }
+
+    #[test]
+    fn failed_application_outcome_uses_its_terminal_reason() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let outcome = application::ApplicationOutcome::Applied {
+            command: "repair cosh".to_string(),
+            subject: application::RepairSubject {
+                component: "cosh".to_string(),
+                package: Some("cosh".to_string()),
+                from_version: Some("2.6.0".to_string()),
+                to_version: Some("2.7.0".to_string()),
+            },
+            action: application::RepairAction::RefreshObservation,
+            steps: Vec::new(),
+            outcome: anolisa_core::execution::CommandOutcome::new(
+                anolisa_core::execution::CommandOutcomeStatus::Failed {
+                    reason: "native package transaction failed".to_string(),
+                },
+                None,
+                Vec::new(),
+                vec!["non-terminal diagnostic".to_string()],
+            ),
+            manifest_reconciliation: None,
+        };
+
+        let err = render_application_outcome(&ctx, outcome)
+            .expect_err("a failed outcome must use the error path");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.reason(), "native package transaction failed");
     }
 
     #[test]

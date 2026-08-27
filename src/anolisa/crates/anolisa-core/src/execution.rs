@@ -52,14 +52,20 @@ pub enum PreparedExecution {
 }
 
 /// Terminal classification of an applied command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcomeStatus {
     /// The requested work completed without a terminal failure.
     Completed,
     /// Some effects completed, but the operation needs reconciliation.
-    Partial,
+    Partial {
+        /// Why the applied work requires reconciliation.
+        reason: String,
+    },
     /// The operation failed without reporting partial completion.
-    Failed,
+    Failed {
+        /// Why the operation could not complete.
+        reason: String,
+    },
 }
 
 /// Typed terminal result returned by a lifecycle application service.
@@ -88,8 +94,8 @@ impl<C> CommandOutcome<C> {
     }
 
     /// Returns the terminal classification.
-    pub fn status(&self) -> CommandOutcomeStatus {
-        self.status
+    pub fn status(&self) -> &CommandOutcomeStatus {
+        &self.status
     }
 
     /// Returns the durable operation identifier when one was created.
@@ -156,26 +162,67 @@ mod tests {
     }
 
     #[test]
-    fn terminal_outcomes_preserve_all_evidence() {
-        for status in [
+    fn completed_outcome_preserves_non_terminal_evidence() {
+        let outcome = CommandOutcome::new(
             CommandOutcomeStatus::Completed,
-            CommandOutcomeStatus::Partial,
-            CommandOutcomeStatus::Failed,
-        ] {
-            let outcome = CommandOutcome::new(
-                status,
-                Some("op-adopt-1".to_string()),
-                vec!["tokenless"],
-                vec!["service state needs verification".to_string()],
-            );
+            Some("op-adopt-1".to_string()),
+            vec!["tokenless"],
+            vec!["service state needs verification".to_string()],
+        );
 
-            assert_eq!(outcome.status(), status);
-            assert_eq!(outcome.operation_id(), Some("op-adopt-1"));
-            assert_eq!(outcome.changes(), &["tokenless"]);
-            assert_eq!(
-                outcome.warnings(),
-                &["service state needs verification".to_string()]
-            );
-        }
+        assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+        assert_eq!(outcome.operation_id(), Some("op-adopt-1"));
+        assert_eq!(outcome.changes(), &["tokenless"]);
+        assert_eq!(
+            outcome.warnings(),
+            &["service state needs verification".to_string()]
+        );
+    }
+
+    #[test]
+    fn partial_outcome_separates_failure_from_warnings() {
+        let outcome = CommandOutcome::new(
+            CommandOutcomeStatus::Partial {
+                reason: "manifest reconciliation failed".to_string(),
+            },
+            Some("op-update-1".to_string()),
+            vec!["tokenless"],
+            vec!["service state needs verification".to_string()],
+        );
+
+        assert_eq!(
+            outcome.status(),
+            &CommandOutcomeStatus::Partial {
+                reason: "manifest reconciliation failed".to_string(),
+            }
+        );
+        assert_eq!(outcome.operation_id(), Some("op-update-1"));
+        assert_eq!(outcome.changes(), &["tokenless"]);
+        assert_eq!(
+            outcome.warnings(),
+            &["service state needs verification".to_string()]
+        );
+    }
+
+    #[test]
+    fn failed_outcome_requires_a_terminal_reason() {
+        let outcome = CommandOutcome::<&str>::new(
+            CommandOutcomeStatus::Failed {
+                reason: "package transaction failed".to_string(),
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            outcome.status(),
+            &CommandOutcomeStatus::Failed {
+                reason: "package transaction failed".to_string(),
+            }
+        );
+        assert_eq!(outcome.operation_id(), None);
+        assert!(outcome.changes().is_empty());
+        assert!(outcome.warnings().is_empty());
     }
 }

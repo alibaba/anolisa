@@ -89,26 +89,24 @@ impl ApplicationOutcome {
                 subject,
                 outcome,
                 ..
-            } => {
-                if matches!(outcome.status(), CommandOutcomeStatus::Partial) {
-                    let reason = outcome
-                        .warnings()
-                        .first()
-                        .expect("partial update outcome carries its reconciliation failure");
-                    return Err(CliError::Runtime {
-                        command: command.clone(),
-                        reason: format!(
-                            "the update of '{}' committed, but {reason}; run `anolisa repair {}` to reconcile",
-                            subject.component, subject.component
-                        ),
-                    });
-                }
-                Ok(if outcome.changes().is_empty() {
+            } => match outcome.status() {
+                CommandOutcomeStatus::Completed => Ok(if outcome.changes().is_empty() {
                     super::UpdateOutcome::AlreadyCurrent
                 } else {
                     super::UpdateOutcome::Updated
-                })
-            }
+                }),
+                CommandOutcomeStatus::Partial { reason } => Err(CliError::Runtime {
+                    command: command.clone(),
+                    reason: format!(
+                        "the update of '{}' committed, but {reason}; run `anolisa repair {}` to reconcile",
+                        subject.component, subject.component
+                    ),
+                }),
+                CommandOutcomeStatus::Failed { reason } => Err(CliError::Runtime {
+                    command: command.clone(),
+                    reason: reason.clone(),
+                }),
+            },
         }
     }
 
@@ -423,17 +421,15 @@ fn apply_delegated(
         to_version.as_deref(),
         completion_failure.as_deref(),
     );
-    let status = if completion_failure.is_some() {
-        CommandOutcomeStatus::Partial
-    } else {
-        CommandOutcomeStatus::Completed
-    };
     let changes = updated
         .then_some(UpdateChange::NativePackageUpdated)
         .into_iter()
         .collect();
-    let warnings = completion_failure.into_iter().collect();
-    let adapter_actions = if updated && matches!(status, CommandOutcomeStatus::Completed) {
+    let status = match completion_failure {
+        Some(reason) => CommandOutcomeStatus::Partial { reason },
+        None => CommandOutcomeStatus::Completed,
+    };
+    let adapter_actions = if updated && matches!(&status, CommandOutcomeStatus::Completed) {
         adapter_actions_after_update(ctx, &store, target, &prior_adapter_revisions)
     } else {
         Vec::new()
@@ -448,7 +444,7 @@ fn apply_delegated(
             to_version,
         },
         steps,
-        outcome: CommandOutcome::new(status, Some(operation_id), changes, warnings),
+        outcome: CommandOutcome::new(status, Some(operation_id), changes, Vec::new()),
         adapter_actions,
     })
 }
@@ -598,6 +594,26 @@ mod tests {
 
     use super::*;
 
+    fn applied_outcome(status: CommandOutcomeStatus, warnings: Vec<String>) -> ApplicationOutcome {
+        ApplicationOutcome::Applied {
+            command: "update cosh".to_string(),
+            subject: UpdateSubject {
+                component: "cosh".to_string(),
+                package: Some("cosh".to_string()),
+                from_version: Some("2.6.0".to_string()),
+                to_version: Some("2.7.0".to_string()),
+            },
+            steps: Vec::new(),
+            outcome: CommandOutcome::new(
+                status,
+                Some("operation-1".to_string()),
+                vec![UpdateChange::NativePackageUpdated],
+                warnings,
+            ),
+            adapter_actions: Vec::new(),
+        }
+    }
+
     #[test]
     fn plan_intent_never_prepares_update_effects() {
         let plan = Plan::Execute {
@@ -629,5 +645,59 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn completed_batch_outcome_preserves_non_terminal_warnings() {
+        let outcome = applied_outcome(
+            CommandOutcomeStatus::Completed,
+            vec!["service state needs verification".to_string()],
+        );
+
+        assert_eq!(
+            outcome.batch_outcome().expect("completed update"),
+            super::super::UpdateOutcome::Updated
+        );
+        assert_eq!(outcome.warnings(), ["service state needs verification"]);
+    }
+
+    #[test]
+    fn partial_batch_outcome_uses_terminal_reason_not_warning_order() {
+        let outcome = applied_outcome(
+            CommandOutcomeStatus::Partial {
+                reason: "manifest reconciliation did not complete".to_string(),
+            },
+            vec!["service state needs verification".to_string()],
+        );
+
+        let err = outcome
+            .batch_outcome()
+            .expect_err("partial update must use the error path");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(
+            err.reason(),
+            "the update of 'cosh' committed, but manifest reconciliation did not complete; run `anolisa repair cosh` to reconcile"
+        );
+        assert_eq!(outcome.warnings(), ["service state needs verification"]);
+    }
+
+    #[test]
+    fn failed_batch_outcome_uses_its_terminal_reason() {
+        let outcome = applied_outcome(
+            CommandOutcomeStatus::Failed {
+                reason: "native package transaction failed".to_string(),
+            },
+            vec!["service state needs verification".to_string()],
+        );
+
+        let err = outcome
+            .batch_outcome()
+            .expect_err("failed update must use the error path");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.reason(), "native package transaction failed");
     }
 }

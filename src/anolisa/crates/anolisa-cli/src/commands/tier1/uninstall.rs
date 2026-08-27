@@ -176,7 +176,7 @@ fn render_outcome(ctx: &CliContext, outcome: ApplicationOutcome) -> Result<(), C
         } => {
             debug_assert_eq!(
                 outcome.status(),
-                anolisa_core::execution::CommandOutcomeStatus::Completed
+                &anolisa_core::execution::CommandOutcomeStatus::Completed
             );
             let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
             render_result(

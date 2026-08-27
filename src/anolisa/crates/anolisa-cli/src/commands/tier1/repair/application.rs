@@ -196,10 +196,10 @@ pub(super) fn partially_applied(
         action,
         steps,
         outcome: CommandOutcome::new(
-            CommandOutcomeStatus::Partial,
+            CommandOutcomeStatus::Partial { reason },
             Some(operation_id),
             vec![action.change()],
-            vec![reason],
+            Vec::new(),
         ),
         manifest_reconciliation,
     }
@@ -671,10 +671,36 @@ mod tests {
         let ApplicationOutcome::Applied { outcome, .. } = result else {
             panic!("expected applied repair outcome");
         };
-        assert_eq!(outcome.status(), CommandOutcomeStatus::Partial);
         assert_eq!(
-            outcome.warnings(),
-            ["component manifest reconciliation did not complete"]
+            outcome.status(),
+            &CommandOutcomeStatus::Partial {
+                reason: "component manifest reconciliation did not complete".to_string(),
+            }
         );
+        assert!(outcome.warnings().is_empty());
+    }
+
+    #[test]
+    fn completed_repair_keeps_non_terminal_warnings() {
+        let result = applied(
+            "repair cosh",
+            RepairSubject {
+                component: "cosh".to_string(),
+                package: Some("cosh".to_string()),
+                from_version: Some("2.6.0".to_string()),
+                to_version: Some("2.7.0".to_string()),
+            },
+            RepairAction::RefreshObservation,
+            vec![Step::WriteRecord(RecordWrite::RefreshObservation)],
+            "operation-1".to_string(),
+            vec!["service state needs verification".to_string()],
+            None,
+        );
+
+        let ApplicationOutcome::Applied { outcome, .. } = result else {
+            panic!("expected applied repair outcome");
+        };
+        assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+        assert_eq!(outcome.warnings(), ["service state needs verification"]);
     }
 }

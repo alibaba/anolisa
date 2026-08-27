@@ -2148,7 +2148,7 @@ mod tests {
         assert_eq!(subject.version.as_deref(), Some("2.3.0"));
         assert_eq!(subject.backend, "rpm");
         assert!(!steps.is_empty());
-        assert_eq!(command_outcome.status(), CommandOutcomeStatus::Completed);
+        assert_eq!(command_outcome.status(), &CommandOutcomeStatus::Completed);
         assert!(command_outcome.operation_id().is_some());
         assert_eq!(
             command_outcome.changes(),

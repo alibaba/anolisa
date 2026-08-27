@@ -349,7 +349,7 @@ fn execute_merged_updates(
             },
             &suppressed_ctx,
         )?;
-        application::member_application_outcome(outcome)
+        Ok(application::member_application_outcome(outcome))
     };
     execute_merged_updates_with_deps(
         group,
@@ -746,13 +746,17 @@ fn execute_merged_updates_with_deps(
                         for warning in outcome.warnings {
                             output(BatchOutputEvent::Warning(warning));
                         }
-                        items.push(BatchMemberOutcome {
-                            component: name,
-                            status: batch_status(outcome.outcome, ExecutionIntent::Apply),
-                            reason: None,
-                            plan: None,
-                            adapter_actions: outcome.adapter_actions,
-                        });
+                        let item = match outcome.outcome {
+                            Ok(member) => BatchMemberOutcome {
+                                component: name.clone(),
+                                status: batch_status(member, ExecutionIntent::Apply),
+                                reason: None,
+                                plan: None,
+                                adapter_actions: outcome.adapter_actions,
+                            },
+                            Err(err) => failed_item(&name, err.reason().to_string()),
+                        };
+                        items.push(item);
                     }
                     Err(err) => items.push(failed_item(&name, err.reason().to_string())),
                 }
@@ -961,7 +965,7 @@ mod tests {
 
     fn applied_member(outcome: UpdateOutcome) -> MemberApplicationOutcome {
         MemberApplicationOutcome {
-            outcome,
+            outcome: Ok(outcome),
             warnings: Vec::new(),
             adapter_actions: Vec::new(),
         }

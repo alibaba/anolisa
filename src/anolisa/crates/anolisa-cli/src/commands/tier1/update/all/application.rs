@@ -93,7 +93,7 @@ pub(super) struct BatchEffectOutcome {
 
 /// Per-member fallback result returned to merged transaction orchestration.
 pub(super) struct MemberApplicationOutcome {
-    pub(super) outcome: UpdateOutcome,
+    pub(super) outcome: Result<UpdateOutcome, CliError>,
     pub(super) warnings: Vec<String>,
     pub(super) adapter_actions: Vec<AdapterAction>,
 }
@@ -225,21 +225,9 @@ pub(super) fn run(
                 intent: request.intent,
             },
             &suppressed_ctx,
-        )
-        .and_then(member_application_outcome);
+        );
         let item = match member {
-            Ok(member) => {
-                for warning in member.warnings {
-                    output(BatchOutputEvent::Warning(warning));
-                }
-                BatchMemberOutcome {
-                    component: name.clone(),
-                    status: batch_status(member.outcome, request.intent),
-                    reason: None,
-                    plan: None,
-                    adapter_actions: member.adapter_actions,
-                }
-            }
+            Ok(outcome) => project_member_application(name, request.intent, outcome, output),
             Err(error) => failed_item(name, error.reason().to_string()),
         };
         results.insert(name.clone(), item);
@@ -261,15 +249,39 @@ pub(super) fn run(
     })
 }
 
+fn project_member_application(
+    name: &str,
+    intent: ExecutionIntent,
+    outcome: update_application::ApplicationOutcome,
+    output: &mut dyn FnMut(BatchOutputEvent),
+) -> BatchMemberOutcome {
+    let member = member_application_outcome(outcome);
+    for warning in member.warnings {
+        output(BatchOutputEvent::Warning(warning));
+    }
+    match member.outcome {
+        Ok(outcome) => BatchMemberOutcome {
+            component: name.to_string(),
+            status: batch_status(outcome, intent),
+            reason: None,
+            plan: None,
+            adapter_actions: member.adapter_actions,
+        },
+        Err(error) => failed_item(name, error.reason().to_string()),
+    }
+}
+
 pub(super) fn member_application_outcome(
     outcome: update_application::ApplicationOutcome,
-) -> Result<MemberApplicationOutcome, CliError> {
-    let batch_outcome = outcome.batch_outcome()?;
-    Ok(MemberApplicationOutcome {
-        outcome: batch_outcome,
-        warnings: outcome.warnings().to_vec(),
-        adapter_actions: outcome.adapter_actions().to_vec(),
-    })
+) -> MemberApplicationOutcome {
+    let warnings = outcome.warnings().to_vec();
+    let adapter_actions = outcome.adapter_actions().to_vec();
+    let outcome = outcome.batch_outcome();
+    MemberApplicationOutcome {
+        outcome,
+        warnings,
+        adapter_actions,
+    }
 }
 
 pub(super) fn failed_item(name: &str, reason: String) -> BatchMemberOutcome {
@@ -292,6 +304,8 @@ pub(super) fn batch_status(outcome: UpdateOutcome, intent: ExecutionIntent) -> B
 
 #[cfg(test)]
 mod tests {
+    use anolisa_core::execution::{CommandOutcome, CommandOutcomeStatus};
+
     use super::*;
 
     #[test]
@@ -322,5 +336,47 @@ mod tests {
 
         assert!(outcome.has_failures());
         assert!(!outcome.is_preview());
+    }
+
+    #[test]
+    fn member_warning_is_surfaced_before_terminal_failure() {
+        let outcome = update_application::ApplicationOutcome::Applied {
+            command: "update cosh".to_string(),
+            subject: update_application::UpdateSubject {
+                component: "cosh".to_string(),
+                package: Some("cosh".to_string()),
+                from_version: Some("2.6.0".to_string()),
+                to_version: Some("2.7.0".to_string()),
+            },
+            steps: Vec::new(),
+            outcome: CommandOutcome::new(
+                CommandOutcomeStatus::Partial {
+                    reason: "manifest reconciliation did not complete".to_string(),
+                },
+                Some("operation-1".to_string()),
+                vec![update_application::UpdateChange::NativePackageUpdated],
+                vec!["service state needs verification".to_string()],
+            ),
+            adapter_actions: Vec::new(),
+        };
+        let mut events = Vec::new();
+
+        let item =
+            project_member_application("cosh", ExecutionIntent::Apply, outcome, &mut |event| {
+                events.push(event)
+            });
+
+        assert_eq!(item.status, BatchMemberStatus::Failed);
+        assert_eq!(
+            item.reason.as_deref(),
+            Some(
+                "the update of 'cosh' committed, but manifest reconciliation did not complete; run `anolisa repair cosh` to reconcile"
+            )
+        );
+        assert_eq!(events.len(), 1);
+        let BatchOutputEvent::Warning(warning) = events.pop().expect("warning event") else {
+            panic!("expected warning event");
+        };
+        assert_eq!(warning, "service state needs verification");
     }
 }

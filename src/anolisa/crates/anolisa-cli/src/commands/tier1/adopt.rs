@@ -480,7 +480,7 @@ mod tests {
         assert!(!steps.is_empty());
         assert_eq!(
             outcome.status(),
-            anolisa_core::execution::CommandOutcomeStatus::Completed
+            &anolisa_core::execution::CommandOutcomeStatus::Completed
         );
         assert!(outcome.operation_id().is_some());
         assert_eq!(outcome.changes(), &[AdoptChange::RecordCreated]);

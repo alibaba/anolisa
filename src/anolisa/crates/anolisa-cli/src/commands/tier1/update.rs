@@ -1137,6 +1137,9 @@ fn render_application_outcome(
     ctx: &CliContext,
     application_outcome: application::ApplicationOutcome,
 ) -> ComponentUpdateResult {
+    for warning in application_outcome.warnings() {
+        eprintln!("warning: {warning}");
+    }
     let batch_outcome = application_outcome.batch_outcome()?;
     match application_outcome {
         application::ApplicationOutcome::NoOp { subject } => {
@@ -1177,9 +1180,6 @@ fn render_application_outcome(
             outcome,
             adapter_actions,
         } => {
-            for warning in outcome.warnings() {
-                eprintln!("warning: {warning}");
-            }
             let updated = matches!(batch_outcome, UpdateOutcome::Updated);
             let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
             render_result(
