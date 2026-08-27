@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-27
+
+### Added
+
+- An optional Alibaba Cloud Linux 4 sidecar image now provides a reproducible
+  alternative to the existing Debian image, with bilingual guidance for
+  building and operating both variants
+  ([#2777](https://github.com/alibaba/anolisa/pull/2777),
+  [#2787](https://github.com/alibaba/anolisa/pull/2787)).
+
+### Fixed
+
+- Startup reconciliation now retries transient notify-daemon endpoint failures
+  with bounded backoff, allowing hidden skills to converge automatically when
+  the daemon starts late or restarts
+  ([#2790](https://github.com/alibaba/anolisa/pull/2790)).
+- Flat normal-mode mounts now resolve categorized skills through their stored
+  physical directories, so writes, truncation, renames, and synchronization no
+  longer fail with `ENOENT`
+  ([#2901](https://github.com/alibaba/anolisa/pull/2901)).
+
 ## [0.4.1] - 2026-08-21
 
 ### Added

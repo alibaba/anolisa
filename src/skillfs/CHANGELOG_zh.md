@@ -9,6 +9,24 @@
 
 ## [未发布]
 
+## [0.4.2] - 2026-08-27
+
+### 新增
+
+- 新增可选的 Alibaba Cloud Linux 4 Sidecar 镜像，为现有 Debian 镜像提供可复现的
+  替代方案，并通过中英文文档说明两个镜像版本的构建和运行方式
+  ([#2777](https://github.com/alibaba/anolisa/pull/2777)，
+  [#2787](https://github.com/alibaba/anolisa/pull/2787))。
+
+### 修复
+
+- 启动 reconcile 现在会通过有界退避重试 notify daemon endpoint 的临时故障，
+  当 daemon 延迟启动或重启时，隐藏 Skill 可自动恢复到正确状态
+  ([#2790](https://github.com/alibaba/anolisa/pull/2790))。
+- Flat normal-mode mount 现在会通过已记录的物理目录解析 categorized Skill，
+  write、truncate、rename 和同步操作不再因 `ENOENT` 失败
+  ([#2901](https://github.com/alibaba/anolisa/pull/2901))。
+
 ## [0.4.1] - 2026-08-21
 
 ### 新增
