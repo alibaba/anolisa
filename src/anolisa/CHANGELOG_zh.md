@@ -9,6 +9,21 @@
 
 ## [未发布]
 
+## [0.3.9] - 2026-08-27
+
+### 修复
+
+- `anolisa --dry-run osbase sandbox uninstall <scenario>` 现会在 helper 和
+  root-direct execution path 中传递 preview intent，与 command-local
+  `--dry-run` flag 保持一致。全局预览不再一边报告 planned operation，一边实际
+  卸载 sandbox package
+  ([#2922](https://github.com/alibaba/anolisa/pull/2922))。
+- System mode 的 `--dry-run` 现会在 privilege check 或 effect dispatch 前，
+  为所有 telemetry mutation（`enable`、`disable`、`link`、`unlink`、`upload`
+  和 `init`）返回只读预览。用户无需 root 权限或修改 telemetry state，即可检查
+  human-readable 或 JSON plan；`status` 保持既有只读行为
+  ([#2926](https://github.com/alibaba/anolisa/pull/2926))。
+
 ## [0.3.8] - 2026-08-26
 
 ### 新增

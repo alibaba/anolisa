@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-08-27
+
+### Fixed
+
+- `anolisa --dry-run osbase sandbox uninstall <scenario>` now passes preview
+  intent through both helper and root-direct execution paths, matching the
+  command-local `--dry-run` flag. Global previews no longer uninstall sandbox
+  packages while reporting a planned operation
+  ([#2922](https://github.com/alibaba/anolisa/pull/2922)).
+- System-mode `--dry-run` now returns a read-only preview for every telemetry
+  mutation (`enable`, `disable`, `link`, `unlink`, `upload`, and `init`) before
+  privilege checks or effect dispatch. Users can inspect human-readable or JSON
+  plans without root access or changing telemetry state, while `status` keeps
+  its existing read-only behavior
+  ([#2926](https://github.com/alibaba/anolisa/pull/2926)).
+
 ## [0.3.8] - 2026-08-26
 
 ### Added
