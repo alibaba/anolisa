@@ -386,7 +386,7 @@ fn case_count_is_independent_of_case_page_size() {
 
     assert_eq!(
         store
-            .list_cases(1, 0, None)
+            .list_cases(1, 0, None, None, None)
             .expect("page should load")
             .len(),
         1
@@ -448,7 +448,7 @@ fn correlated_case_preserves_strongest_outcome_from_out_of_order_events() {
         .expect("stale outcome should merge");
 
     let stored = store
-        .list_cases(10, 0, None)
+        .list_cases(10, 0, None, None, None)
         .expect("case should load")
         .pop()
         .expect("case should exist");
@@ -1172,7 +1172,7 @@ fn list_cases_and_count_filter_by_agent_id() {
         .expect("beta case should persist");
 
     let alpha_cases = store
-        .list_cases(10, 0, Some("agent-alpha"))
+        .list_cases(10, 0, Some("agent-alpha"), None, None)
         .expect("alpha page should load");
     assert_eq!(alpha_cases.len(), 2);
     assert!(
