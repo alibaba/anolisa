@@ -236,6 +236,23 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 let session_id = parser.session_id.clone();
                 parser.push_intercept_event(&session_id, input, None, reason.as_str())
             }
+            RawInputEvent::UserInterceptWithRouting {
+                input,
+                reason,
+                cwd,
+                sensitive,
+            } => {
+                let session_id = parser.session_id.clone();
+                parser.push_intercept_event_with_routing(
+                    &session_id,
+                    input,
+                    Some(cwd),
+                    reason.as_str(),
+                    None,
+                    false,
+                    sensitive,
+                )
+            }
             RawInputEvent::UserInterceptAtPrompt {
                 input,
                 reason,

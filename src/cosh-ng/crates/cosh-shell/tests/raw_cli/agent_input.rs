@@ -1,6 +1,285 @@
 use super::*;
 
 #[test]
+fn raw_cli_routes_slash_bearing_han_prompt_before_shell_execution() {
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-2913/SKILL.md";
+    for (shell, args) in [("bash", vec![]), ("zsh", vec!["--shell", "zsh"])] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let output = run_raw_cli_with_args_env_and_delayed_input(
+            "fake",
+            &args,
+            &[
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("LANG", "C.UTF-8"),
+                ("LC_ALL", "C.UTF-8"),
+            ],
+            vec![
+                (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
+                (b"\n".to_vec(), Duration::from_millis(50)),
+                (
+                    b"echo after-path-prompt\n".to_vec(),
+                    Duration::from_millis(500),
+                ),
+                (b"exit\n".to_vec(), Duration::from_millis(100)),
+            ],
+        );
+
+        assert!(
+            output.contains(&format!("Received shell prompt request: {prompt}")),
+            "{shell}: {output}"
+        );
+        assert!(output.contains("after-path-prompt"), "{shell}: {output}");
+        assert!(
+            !output.contains("No such file or directory")
+                && !output.contains("no such file or directory"),
+            "{shell}: {output}"
+        );
+        assert!(!output.contains("command not found"), "{shell}: {output}");
+    }
+}
+
+#[test]
+fn raw_cli_routes_slash_leading_path_prompt_in_one_input_batch() {
+    let prompt = "/nonexistent-cosh-2913/SKILL.md 帮我读一下";
+    let mut submission = prompt.as_bytes().to_vec();
+    submission.push(b'\n');
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (submission, Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains(&format!("Received shell prompt request: {prompt}")),
+        "{output}"
+    );
+    assert!(!output.contains("No such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_shell_only_keeps_slash_bearing_han_prompt_shell_owned() {
+    let prompt = "打开./nonexistent-cosh-2913";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b"\x1b[Z".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes().to_vec(), Duration::from_millis(100)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+    assert!(output.contains("No such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_routes_path_prompt_after_shell_cwd_change() {
+    let prompt = "打开./nonexistent-cosh-2913/SKILL.md";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b"cd /tmp\n".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes().to_vec(), Duration::from_millis(200)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains(&format!("Received shell prompt request: {prompt}")),
+        "{output}"
+    );
+    assert!(!output.contains("No such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_uses_physical_cwd_when_pwd_is_reassigned() {
+    let work_dir = tempfile::tempdir().expect("temp work dir");
+    let executable_dir = work_dir.path().join("打开.");
+    fs::create_dir(&executable_dir).expect("create executable dir");
+    let executable = executable_dir.join("existing");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf 'physical-cwd-shell-owned\\n'\n",
+    )
+    .expect("write executable");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod executable");
+
+    for (shell, args) in [("bash", vec![]), ("zsh", vec!["--shell", "zsh"])] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+            "fake",
+            &args,
+            &[
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("LANG", "C.UTF-8"),
+                ("LC_ALL", "C.UTF-8"),
+            ],
+            work_dir.path(),
+            vec![
+                (b"PWD=/tmp\n".to_vec(), Duration::from_millis(300)),
+                (
+                    "打开./existing\n".as_bytes().to_vec(),
+                    Duration::from_millis(300),
+                ),
+                (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+            ],
+        );
+
+        assert!(
+            output.contains("physical-cwd-shell-owned"),
+            "{shell}: {output}"
+        );
+        assert!(
+            !output.contains("Received shell prompt request"),
+            "{shell}: {output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_rejects_physical_cwd_with_trailing_newline() {
+    let work_dir = tempfile::tempdir().expect("temp work dir");
+    let plain_dir = work_dir.path().join("cwd");
+    let newline_dir = work_dir.path().join("cwd\n");
+    fs::create_dir(&plain_dir).expect("create plain cwd");
+    fs::create_dir(&newline_dir).expect("create newline cwd");
+
+    let executable_dir = newline_dir.join("打开.");
+    fs::create_dir(&executable_dir).expect("create executable dir");
+    let executable = executable_dir.join("existing");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf 'newline-cwd-shell-owned\\n'\n",
+    )
+    .expect("write executable");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod executable");
+
+    for (shell, args) in [("bash", vec![]), ("zsh", vec!["--shell", "zsh"])] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+            "fake",
+            &args,
+            &[
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("LANG", "C.UTF-8"),
+                ("LC_ALL", "C.UTF-8"),
+            ],
+            &newline_dir,
+            vec![
+                (
+                    "打开./existing\n".as_bytes().to_vec(),
+                    Duration::from_millis(300),
+                ),
+                (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+            ],
+        );
+
+        assert!(
+            output.contains("newline-cwd-shell-owned"),
+            "{shell}: {output}"
+        );
+        assert!(
+            !output.contains("Received shell prompt request"),
+            "{shell}: {output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_keeps_batched_path_prompt_shell_owned() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (
+                b"echo batch-before-path\n\xe6\x89\x93\xe5\xbc\x80./nonexistent-cosh-2913 API Key: sk-review-fixture\n"
+                    .to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("batch-before-path"), "{output}");
+    assert!(output.contains("No such file or directory"), "{output}");
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_keeps_slash_candidate_batch_shell_owned() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b"/".to_vec(), Duration::from_millis(100)),
+            (
+                b"bin/true\n\xe6\x89\x93\xe5\xbc\x80./nonexistent-cosh-2913\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("No such file or directory"), "{output}");
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_zsh_shell_arg_intercepts_fragmented_agent_marker() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

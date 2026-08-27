@@ -79,7 +79,7 @@ impl OscParser {
         ));
     }
 
-    pub(super) fn push_intercept_event_with_routing(
+    pub(in crate::shell_host) fn push_intercept_event_with_routing(
         &mut self,
         session_id: &str,
         input: String,

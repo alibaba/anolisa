@@ -379,6 +379,7 @@ where
         None => input_classifier,
     };
     let mut session = start_session(config)?;
+    session.parser.set_prompt_cwd(input_classifier.prompt_cwd());
     let mut prompt_presentation = PromptPresentation::new(config.integration.uses_markers());
     if let Some(control) = assistance_control.as_ref() {
         session.parser.set_assistance_control(control.clone());
@@ -410,6 +411,10 @@ where
     // #1721 D16: prompt_ready raises the gate on the output side; submits
     // and preexec lower it, keeping CJK drafts off PS2/heredoc continuations.
     let main_prompt_gate = MainPromptGate::default();
+    // Seed only path routing because startup consumed its first prompt marker.
+    if config.integration.uses_markers() {
+        main_prompt_gate.seed_initial_prompt();
+    }
     session
         .parser
         .set_main_prompt_gate(main_prompt_gate.clone());

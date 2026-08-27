@@ -2266,11 +2266,11 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
     assert_eq!(intercepts, 2, "{:?}", output.events);
 }
 
-// Bounded Enhanced does not cancel slash-bearing commands: Bash never calls
-// command_not_found_handle for them, and PS0 is observation-only. Preserve
-// Shell ownership instead of reintroducing a global DEBUG trap.
+// The shell-host marker layer remains observation-only: the raw input relay
+// owns #2913 routing, while direct PTY submissions still prove that no global
+// DEBUG trap or extdebug veto was reintroduced.
 #[test]
-fn shell_host_bash_missing_path_natural_language_fails_in_shell() {
+fn shell_host_bash_missing_path_without_input_relay_fails_in_shell() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -2310,12 +2310,10 @@ fn shell_host_bash_missing_path_natural_language_fails_in_shell() {
     assert_eq!(block.exit_code, 127);
 }
 
-/// #2138 review round 2: the missing-path route (#1919) must not keep its
-/// own secret veto — a slash-bearing NL prompt carrying a key intercepts
-/// like the CNF route, with the sensitive routing flag and the journal
-/// whole-field redaction (raw key never reaches durable evidence).
+/// Direct PTY input bypasses the #2913 Rust owner. The observation-only marker
+/// must still redact a sensitive path-shaped failure from durable evidence.
 #[test]
-fn shell_host_bash_sensitive_missing_path_stays_redacted() {
+fn shell_host_bash_sensitive_missing_path_without_input_relay_stays_redacted() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -3078,12 +3076,8 @@ fn routing_c2_valid_quoted_command_and_inner_whitespace_keep_their_owners() {
     }
 }
 
-// Issue #1919 fail-closed counterproofs: the missing-path branch must never
-// fire for existing paths (I1/D6) or plain-English typo paths (I2/D3) —
-// bash native behavior stays byte-identical. (The former I3 secret
-// counterproof is retired by #2138: secret-bearing missing-path NL now
-// intercepts with the sensitive flag, anchored in
-// shell_host_bash_sensitive_missing_path_natural_language_intercepts.)
+// The observation-only marker keeps existing paths and plain-English typo
+// paths byte-identical when submissions bypass the #2913 raw-input owner.
 #[test]
 fn shell_host_bash_missing_path_counterproofs_stay_native() {
     if Command::new("bash").arg("--version").output().is_err() {

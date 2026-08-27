@@ -34,6 +34,8 @@ pub(super) struct Marker {
     pub(super) timestamp_ms: Option<u64>,
     #[serde(alias = "c")]
     pub(super) cwd: Option<String>,
+    #[serde(alias = "pc")]
+    pub(super) physical_cwd: Option<String>,
     pub(super) command: Option<String>,
     pub(super) reason: Option<String>,
     #[serde(alias = "s")]

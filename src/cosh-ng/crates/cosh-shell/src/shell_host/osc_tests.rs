@@ -107,7 +107,7 @@ fn routing_markers_require_matching_attempt_generation() {
 }
 
 #[test]
-fn intercept_marker_sensitive_flag_reaches_routing_metadata() {
+fn sensitive_intercepts_preserve_routing_and_request_context() {
     let mut parser = parser_for_test("routing-sensitive");
     parser
         .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"session_id\":\"routing-sensitive\",\"command\":\"<redacted sensitive command>\",\"cwd\":\"/tmp\",\"generation\":1}\x07")
@@ -130,6 +130,33 @@ fn intercept_marker_sensitive_flag_reaches_routing_metadata() {
     assert!(intercept.routing.as_ref().is_some_and(|routing| {
         routing.sensitive && routing.top_level_missing && routing.proven
     }));
+    raw_input_sensitive_intercept_reaches_routing_metadata();
+}
+
+fn raw_input_sensitive_intercept_reaches_routing_metadata() {
+    let mut parser = parser_for_test("raw-routing-sensitive");
+    parser.push_intercept_event_with_routing(
+        "raw-routing-sensitive",
+        "打开./missing API Key: sk-fbaa6".to_string(),
+        Some("/workspace/after-cd".to_string()),
+        "natural_language",
+        None,
+        false,
+        true,
+    );
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::UserInputIntercepted)
+        .expect("sensitive raw intercept event");
+    assert!(intercept
+        .routing
+        .as_ref()
+        .is_some_and(|routing| routing.sensitive && !routing.top_level_missing));
+    let request = crate::parser::agent_request_from_intercepted_input(intercept, 1, true)
+        .expect("agent request");
+    assert_eq!(request.command_block.cwd, "/workspace/after-cd");
 }
 
 #[test]

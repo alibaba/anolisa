@@ -100,6 +100,8 @@ pub(super) struct OscParser {
     /// a submitted non-empty line rather than startup prompt initialization.
     submission_boundary_observed: bool,
     assistance_control: Option<crate::input::AssistanceControl>,
+    /// Trusted primary-prompt cwd shared with the submit-time input router.
+    shell_prompt_cwd: crate::input::ShellPromptCwd,
     /// Collapses consecutive PTY input writes into one prompt-cwd
     /// invalidation barrier; a fresh command-less prompt report
     /// (`ShellReady`) re-arms it.
@@ -134,6 +136,10 @@ impl OscParser {
 
     pub(crate) fn set_assistance_control(&mut self, control: crate::input::AssistanceControl) {
         self.assistance_control = Some(control);
+    }
+
+    pub(crate) fn set_prompt_cwd(&mut self, cwd: crate::input::ShellPromptCwd) {
+        self.shell_prompt_cwd = cwd;
     }
 
     pub(super) fn with_environment_observer(mut self, observer: ShellEnvironmentObserver) -> Self {
@@ -259,7 +265,7 @@ impl OscParser {
 
         match marker.event.as_str() {
             "prompt_ready" => {
-                self.mark_prompt_ready(marker.cwd);
+                self.mark_prompt_ready(marker.physical_cwd);
             }
             "preexec" => {
                 self.submission_boundary_observed = true;
@@ -311,7 +317,7 @@ impl OscParser {
             "precmd" => {
                 self.prompt_ready_display_start = None;
                 let Some(current) = self.current.take() else {
-                    let prompt_cwd = marker.cwd.clone();
+                    let prompt_cwd = marker.physical_cwd.clone();
                     self.intervention_cuts.push(self.clean.position());
                     self.intervention_display_cuts
                         .push((self.display.position(), DisplayCutKind::PromptBoundary));
@@ -386,7 +392,7 @@ impl OscParser {
                 );
                 event.command = Some(current.command);
                 event.cwd = Some(current.cwd.clone());
-                let prompt_cwd = marker.cwd.clone().or_else(|| Some(current.cwd.clone()));
+                let prompt_cwd = marker.physical_cwd.clone();
                 event.end_cwd = marker.cwd.or(Some(current.cwd));
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes =
@@ -406,6 +412,7 @@ impl OscParser {
     }
 
     fn mark_prompt_ready(&mut self, prompt_cwd: Option<String>) {
+        self.shell_prompt_cwd.set(prompt_cwd.clone());
         if !self.display.is_full() {
             self.start_prompt_display_capture();
         }

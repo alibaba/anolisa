@@ -284,16 +284,25 @@ _cosh_emit_boundary_marker() {
   fi
   local handoff_fragment=""
   local history_fragment=""
+  local physical_cwd=""
   if [[ -n "${_COSH_HANDOFF_TOKEN:-}" ]]; then
     handoff_fragment=",\"x\":\"$(_cosh_json_escape "$_COSH_HANDOFF_TOKEN")\""
   fi
   history_fragment="$(_cosh_native_history_file_fragment)"
+  # Keep path suffix newlines distinct from pwd's one record separator.
+  if physical_cwd="$(builtin pwd -P 2>/dev/null && printf x)"; then
+    physical_cwd="${physical_cwd%x}"
+    physical_cwd="${physical_cwd%$'\n'}"
+  else
+    physical_cwd=""
+  fi
   # The authenticated compact event is equivalent to precmd + prompt_ready;
   # omitted time and generation default in the parser. It is written directly
   # to the controlling terminal and never participates in Readline's PS1 width.
-  printf '\033]1337;COSH;{"e":"p","t":"%s","c":"%s","s":%s%s%s}\a' \
+  printf '\033]1337;COSH;{"e":"p","t":"%s","c":"%s","pc":"%s","s":%s%s%s}\a' \
     "$(_cosh_json_escape "$_COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$PWD")" \
+    "$(_cosh_json_escape "$physical_cwd")" \
     "$exit_status" \
     "$history_fragment" \
     "$handoff_fragment"
@@ -372,25 +381,6 @@ _cosh_is_slash_control_candidate() {
       ;;
   esac
   return 1
-}
-# bash executes slash-bearing command words as paths without consulting
-# command_not_found_handle, so the natural-language classifier never sees
-# them (#1919). Reclassify here with the missing-path context; only a
-# natural_language verdict on a provably-ENOENT path intercepts (dangling
-# symlinks and permission-opaque paths keep their native 126/127 errors),
-# everything else keeps the native bash error byte-identical to the
-# pre-fix behavior. Secret-bearing lines are not vetoed here (#2138):
-# both callers compute the sensitive flag, scrub history, and mark the
-# intercept so durable sinks redact the whole input field.
-_cosh_should_intercept_missing_path() {
-  local first_word="$1"
-  local command="$2"
-  [[ "$first_word" == */* ]] || return 1
-  _cosh_ai_enabled || return 1
-  _cosh_path_provably_missing "$first_word" || return 1
-  local intent
-  intent="$(_cosh_classify_missing "$command" "$first_word" missing_path)"
-  [[ "$intent" == "natural_language" ]]
 }
 _COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
 # Transport-only prefix for agent handoffs whose implicit pagers are disabled.

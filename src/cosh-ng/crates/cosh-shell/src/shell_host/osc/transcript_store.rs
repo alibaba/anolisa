@@ -107,6 +107,7 @@ impl OscParser {
             pending_prompt_intercepts: Vec::new(),
             submission_boundary_observed: false,
             assistance_control: None,
+            shell_prompt_cwd: crate::input::ShellPromptCwd::default(),
             pty_input_barrier_pushed: false,
             visible_tail: VisibleTailTracker::default(),
             alt_screen: AltScreenTracker::default(),

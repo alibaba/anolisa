@@ -351,7 +351,7 @@ fn relay_native_passthrough(
         relay.line_buffer.soft_newline_enabled = native_candidate_allows_soft_newline(&combined);
         relay.line_buffer.push(bytes);
         if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
-            return flush_candidate_line_to_shell(relay, emit_activity);
+            return flush_candidate_line_to_shell(relay, emit_activity, pending_shell_submits);
         }
         // Control bytes such as Tab must reach readline without first changing
         // the outer terminal cursor, whose display width differs from byte count.
@@ -359,6 +359,9 @@ fn relay_native_passthrough(
         return candidate::relay_candidate_line(relay, emit_activity, pending_shell_submits);
     }
     if !starts_paste {
+        if path_prompt_submit::route_missing_path_submission(bytes, relay, pending_shell_submits)? {
+            return Ok(true);
+        }
         if let Some(submit) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) {
             let line_end = submit + 1;
             if line_end < bytes.len() {
@@ -458,8 +461,41 @@ fn history_private_submission(
 fn flush_candidate_line_to_shell(
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
+    pending_shell_submits: usize,
 ) -> io::Result<bool> {
     let saw_paste = relay.line_buffer.saw_paste();
+    if !saw_paste {
+        let candidate = {
+            let bytes = relay.line_buffer.bytes.as_slice();
+            bytes
+                .iter()
+                .position(|byte| matches!(byte, b'\n' | b'\r'))
+                .and_then(|submit| {
+                    let submit_end = if bytes.get(submit) == Some(&b'\r')
+                        && bytes.get(submit + 1) == Some(&b'\n')
+                    {
+                        submit + 2
+                    } else {
+                        submit + 1
+                    };
+                    (submit_end == bytes.len())
+                        .then(|| std::str::from_utf8(&bytes[..submit]).ok())
+                        .flatten()
+                        .map(str::to_string)
+                })
+        };
+        if candidate.as_deref().is_some_and(|input| {
+            path_prompt_submit::route_candidate_missing_path_submission(
+                input,
+                relay,
+                pending_shell_submits,
+                false,
+            )
+        }) {
+            relay.line_buffer.clear();
+            return Ok(true);
+        }
+    }
     let mut bytes = relay.line_buffer.take();
     if saw_paste {
         // The draft absorbed a bracketed paste: replay the wrapper so bash's
@@ -474,15 +510,19 @@ fn flush_candidate_line_to_shell(
     submit_line_bytes_to_shell(relay, bytes, Vec::new(), emit_activity)
 }
 
-/// Clears the cosh-echoed candidate line and writes the taken bytes to the
-/// PTY, then relays any remainder. Shared by SendToShell submissions, unsafe
-/// candidate flushes, and shell-routed slash submissions (issue #1718).
+/// Clears the cosh-echoed candidate line and writes the whole read batch to
+/// the PTY. Shared by SendToShell submissions, unsafe candidate flushes, and
+/// shell-routed slash submissions (issue #1718).
 fn submit_line_bytes_to_shell(
     relay: &mut InputRelayContext<'_>,
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
     remainder: Vec<u8>,
     emit_activity: bool,
 ) -> io::Result<bool> {
+    // A remainder was read with the candidate submission. Once any line in a
+    // read is Shell-owned, the complete batch stays Shell-owned even if Bash
+    // paints another prompt before this function returns.
+    bytes.extend_from_slice(&remainder);
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
     send_raw_input_events(&bytes, relay.input_events);
     observe_native_line(relay.native_line_state, &bytes, relay.input_events);
@@ -498,9 +538,6 @@ fn submit_line_bytes_to_shell(
         relay.main_prompt_gate,
         &bytes,
     )?;
-    if !remainder.is_empty() {
-        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-    }
     Ok(false)
 }
 
@@ -559,6 +596,7 @@ fn held_input_requests_cancel(bytes: &[u8]) -> bool {
 
 mod candidate;
 mod exit_tracker;
+mod path_prompt_submit;
 mod soft_newline_upgrade;
 pub(super) use exit_tracker::ExplicitExitTracker;
 use soft_newline_upgrade::{handle_prompt_line_soft_newline, PromptLineSoftNewline};

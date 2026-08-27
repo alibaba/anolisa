@@ -30,6 +30,9 @@ pub mod journal;
 pub mod ledger;
 #[path = "parser/public.rs"]
 pub mod parser;
+#[cfg(test)]
+#[path = "input/path_prompt_tests.rs"]
+mod path_prompt_tests;
 #[allow(dead_code)]
 #[path = "question/public.rs"]
 mod question;

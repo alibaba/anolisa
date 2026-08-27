@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub(crate) mod path_prompt;
+pub(crate) use path_prompt::{PathPromptIntercept, ShellPromptCwd};
+
 #[derive(Debug, Clone)]
 pub(crate) struct AssistanceControl {
     enabled: Arc<AtomicBool>,
@@ -76,6 +79,7 @@ pub struct InputClassifier {
     shell_passthrough: bool,
     bash_readline_history_privacy: bool,
     assistance_control: Option<AssistanceControl>,
+    shell_prompt_cwd: ShellPromptCwd,
 }
 
 impl InputClassifier {
@@ -98,6 +102,10 @@ impl InputClassifier {
         self.assistance_control = Some(control);
         self
     }
+
+    pub(crate) fn prompt_cwd(&self) -> ShellPromptCwd {
+        self.shell_prompt_cwd.clone()
+    }
 }
 
 impl Default for InputClassifier {
@@ -113,6 +121,7 @@ impl Default for InputClassifier {
             shell_passthrough: false,
             bash_readline_history_privacy: false,
             assistance_control: None,
+            shell_prompt_cwd: ShellPromptCwd::default(),
         }
     }
 }
@@ -138,6 +147,22 @@ impl InputClassifier {
         self.assistance_control
             .as_ref()
             .is_none_or(AssistanceControl::is_enabled)
+    }
+
+    pub(crate) fn classify_missing_path_submission(
+        &self,
+        input: &str,
+    ) -> Option<PathPromptIntercept> {
+        if self.shell_passthrough || !self.ai_enabled || !self.assistance_enabled() {
+            return None;
+        }
+        let shell_cwd = self.shell_prompt_cwd.current()?;
+        path_prompt::is_slash_bearing_han_prompt(input, Some(std::path::Path::new(&shell_cwd)))
+            .then(|| PathPromptIntercept {
+                input: input.to_string(),
+                reason: InterceptReason::NaturalLanguage,
+                cwd: shell_cwd,
+            })
     }
 
     pub(crate) fn is_slash_control_candidate(&self, token: &str) -> bool {

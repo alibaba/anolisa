@@ -33,31 +33,8 @@ pub(super) const CTRL_C: u8 = 0x03;
 pub(super) const CTRL_U: u8 = 0x15;
 pub(super) const ESC: u8 = 0x1b;
 
-/// Shared "bash is sitting at its primary prompt" gate (#1721 D16).
-///
-/// Set by the output side when the shell marker emits `prompt_ready` (PS1
-/// only); cleared whenever user bytes carrying a line submit reach the PTY
-/// or a command starts. Explicit slash/`??` candidates may only open while
-/// the gate is up, so PS2 continuations, heredocs, and running commands keep
-/// byte passthrough (fail-closed: a lost signal disables capture).
-///
-/// Ordering: `Relaxed` is sufficient because the gate is a standalone
-/// boolean latch — readers only branch on the flag and never rely on it to
-/// order access to other shared state; a stale read degrades to the
-/// fail-closed passthrough behavior.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MainPromptGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl MainPromptGate {
-    pub(crate) fn set_at_prompt(&self, at_prompt: bool) {
-        self.0
-            .store(at_prompt, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(crate) fn is_at_prompt(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
+mod main_prompt_gate;
+pub(crate) use main_prompt_gate::MainPromptGate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
@@ -94,6 +71,12 @@ pub(crate) enum RawInputEvent {
     },
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
+    UserInterceptWithRouting {
+        input: String,
+        reason: InterceptReason,
+        cwd: String,
+        sensitive: bool,
+    },
     /// Delivers a queued control only after all preceding shell submissions
     /// in the same input batch reach their primary prompts.
     UserInterceptAtPrompt {

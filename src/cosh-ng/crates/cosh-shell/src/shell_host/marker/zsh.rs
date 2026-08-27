@@ -112,10 +112,24 @@ _cosh_emit_marker() {
   # Optional handoff-claim fragment (#2142): only approved-handoff preexec
   # lines carry a token, every other marker stays byte-identical.
   local handoff_fragment=""
+  local physical_cwd_fragment=""
   if [[ -n "${_COSH_HANDOFF_TOKEN:-}" ]]; then
     handoff_fragment=",\"handoff\":\"$(_cosh_json_escape "$_COSH_HANDOFF_TOKEN")\""
   fi
-  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s}\a' \
+  if [[ "$event" == "prompt_ready" ]]; then
+    local physical_cwd=""
+    # Keep path suffix newlines distinct from pwd's one record separator.
+    if physical_cwd="$(builtin pwd -P 2>/dev/null && printf x)"; then
+      physical_cwd="${physical_cwd%x}"
+      physical_cwd="${physical_cwd%$'\n'}"
+    else
+      physical_cwd=""
+    fi
+    if [[ "$physical_cwd" == /* ]]; then
+      physical_cwd_fragment=",\"physical_cwd\":\"$(_cosh_json_escape "$physical_cwd")\""
+    fi
+  fi
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s%s}\a' \
     "$(_cosh_json_escape "$event")" \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
@@ -126,6 +140,7 @@ _cosh_emit_marker() {
     "$(_cosh_json_escape "$PATH")" \
     "$path_trusted" \
     "${_COSH_ATTEMPT_GENERATION:-0}" \
+    "$physical_cwd_fragment" \
     "$handoff_fragment"
 }
 _cosh_emit_intercept_marker() {

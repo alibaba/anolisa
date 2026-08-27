@@ -102,7 +102,9 @@ pub(super) fn relay_candidate_line(
             send_shell_input_state(true, relay.input_events);
             Ok(true)
         }
-        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(relay, emit_activity),
+        CandidateLineStatus::Unsafe => {
+            flush_candidate_line_to_shell(relay, emit_activity, pending_shell_submits)
+        }
         CandidateLineStatus::Complete { line, line_len } => {
             let force_agent_intercept = relay.line_buffer.force_agent_intercept;
             let suggestion_id = relay.line_buffer.forced_agent_suggestion_id.clone();
@@ -222,6 +224,16 @@ pub(super) fn relay_candidate_line(
                     Ok(true)
                 }
                 InputDecision::SendToShell(_) => {
+                    if !saw_paste
+                        && super::path_prompt_submit::route_candidate_missing_path_submission(
+                            &line,
+                            relay,
+                            pending_shell_submits,
+                            !remainder.is_empty(),
+                        )
+                    {
+                        return Ok(true);
+                    }
                     let mut bytes = bytes;
                     let mut remainder = remainder;
                     if saw_paste {
