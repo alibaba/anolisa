@@ -51,6 +51,7 @@ export PATH="$HOME/.local/bin:$PATH"
 | 创建工作区恢复点 | [ws-ckpt](user-guide/zh/runtime/ws-ckpt.md) |
 | 按需挂载 Skills | [SkillFS](user-guide/zh/runtime/skillfs.md) |
 | 跨 Session 复用上下文 | [Agent Memory](user-guide/zh/token-saving/agent-memory.md) |
+| 确定性调优内核参数 | [ktuner](user-guide/zh/user-entrypoint/ktuner.md) |
 
 每个组件页面都会首先说明支持的平台和首选安装路径。仅支持 Linux 的组件必须在
 Linux 上安装和运行。

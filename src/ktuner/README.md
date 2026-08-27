@@ -90,11 +90,25 @@ All output goes to **stdout as JSON**. Errors go to **stderr as JSON**. No ANSI 
 
 ## Installation
 
-Install ktuner via the ANOLISA component manager:
+Install ktuner via the ANOLISA component manager (RPM backend):
 
 ```bash
-sudo anolisa install ktuner
+sudo anolisa install ktuner --backend rpm
 ```
+
+ktuner ships as an RPM only. Pass `--backend rpm` explicitly: the default
+backend resolves raw artifacts and has no ktuner release, and there is no
+cross-backend fallback.
+
+Install via yum/dnf:
+
+```bash
+sudo yum install ktuner
+```
+
+Installs:
+- `/usr/local/bin/ktuner` — CLI binary
+- `/usr/share/anolisa/components/ktuner/component.toml` — component contract
 
 Or build from source:
 

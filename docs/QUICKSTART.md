@@ -52,6 +52,7 @@ macOS arm64, use `--backend raw --install-mode user` instead.
 | Create workspace recovery points | [ws-ckpt](user-guide/en/runtime/ws-ckpt.md) |
 | Mount Skills on demand | [SkillFS](user-guide/en/runtime/skillfs.md) |
 | Reuse context across sessions | [Agent Memory](user-guide/en/token-saving/agent-memory.md) |
+| Tune kernel parameters deterministically | [ktuner](user-guide/en/user-entrypoint/ktuner.md) |
 
 Each component page starts with its supported platforms and preferred
 installation path. Linux-only components must be installed and run on Linux.

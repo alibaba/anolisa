@@ -14,7 +14,20 @@ ktuner 是规则引擎，不是 LLM：每条建议都来自读取 `/proc/sys` �
 
 ## 安装
 
-ktuner 随 ANOLISA 源码树发布，位于 `src/ktuner/`。从源码构建：
+ktuner 以 RPM 形式发布，支持 Linux x86_64（仅 system mode）。通过 ANOLISA 组件管理器安装，显式选择 RPM backend——ktuner 没有 raw 发布，且 backend 之间没有回退：
+
+```bash
+sudo anolisa install ktuner --backend rpm
+```
+
+也可以直接安装 RPM 并让 ANOLISA 纳入管理：
+
+```bash
+sudo yum install ktuner
+sudo anolisa --install-mode system adopt ktuner
+```
+
+或者从源码构建：
 
 ```bash
 cd src/ktuner
@@ -29,8 +42,6 @@ sudo install -o root -g root -m 755 target/release/ktuner /usr/local/bin/ktuner
 ```
 
 下面的示例假设 `ktuner` 已在 `PATH` 中。
-
-> 打包分发方式（`anolisa install ktuner` / RPM）仍在与维护者规划中；在此之前请从源码构建。
 
 ---
 
