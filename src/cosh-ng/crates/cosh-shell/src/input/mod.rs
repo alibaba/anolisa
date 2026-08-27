@@ -78,6 +78,7 @@ pub struct InputClassifier {
     ai_enabled: bool,
     shell_passthrough: bool,
     bash_readline_history_privacy: bool,
+    bash_slash_submission_guard: bool,
     assistance_control: Option<AssistanceControl>,
     shell_prompt_cwd: ShellPromptCwd,
 }
@@ -95,6 +96,11 @@ impl InputClassifier {
 
     pub(crate) fn with_bash_readline_history_privacy(mut self, enabled: bool) -> Self {
         self.bash_readline_history_privacy = enabled;
+        self
+    }
+
+    pub(crate) fn with_bash_slash_submission_guard(mut self, enabled: bool) -> Self {
+        self.bash_slash_submission_guard = enabled;
         self
     }
 
@@ -120,6 +126,7 @@ impl Default for InputClassifier {
             ai_enabled: true,
             shell_passthrough: false,
             bash_readline_history_privacy: false,
+            bash_slash_submission_guard: false,
             assistance_control: None,
             shell_prompt_cwd: ShellPromptCwd::default(),
         }
@@ -137,6 +144,10 @@ impl InputClassifier {
 
     pub(crate) fn bash_readline_history_privacy_enabled(&self) -> bool {
         self.bash_readline_history_privacy
+    }
+
+    pub(crate) fn bash_slash_submission_guard_enabled(&self) -> bool {
+        self.bash_slash_submission_guard
     }
 
     pub(crate) fn assistance_control(&self) -> Option<&AssistanceControl> {

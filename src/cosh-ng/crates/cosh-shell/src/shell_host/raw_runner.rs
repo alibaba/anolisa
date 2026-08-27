@@ -381,6 +381,11 @@ where
     let mut session = start_session(config)?;
     session.parser.set_prompt_cwd(input_classifier.prompt_cwd());
     let mut prompt_presentation = PromptPresentation::new(config.integration.uses_markers());
+    // Attach the gate before startup output consumes the first prompt_ready marker.
+    let main_prompt_gate = MainPromptGate::default();
+    session
+        .parser
+        .set_main_prompt_gate(main_prompt_gate.clone());
     if let Some(control) = assistance_control.as_ref() {
         session.parser.set_assistance_control(control.clone());
         prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
@@ -410,17 +415,11 @@ where
     let input_generation = UserPtyInputGeneration::default();
     // #1721 D16: prompt_ready raises the gate on the output side; submits
     // and preexec lower it, keeping CJK drafts off PS2/heredoc continuations.
-    let main_prompt_gate = MainPromptGate::default();
-    // Seed only path routing because startup consumed its first prompt marker.
-    if config.integration.uses_markers() {
-        main_prompt_gate.seed_initial_prompt();
-    }
-    session
-        .parser
-        .set_main_prompt_gate(main_prompt_gate.clone());
-    // Bounded Enhanced hooks observe shell execution but cannot cancel it.
-    // Route slash controls in the Rust relay before bytes reach the PTY.
-    let slash_route_enabled = false;
+    // Keep #1718's prompt-gated route behind the bounded Readline guard.
+    let slash_route_enabled = bounded_bash_handoff
+        && config.integration.uses_markers()
+        && config.slash_via_shell
+        && config.native_mode;
     let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
         RelayWake::new()?.into_parts();
     // Keep the channel open after the driver and completion notifier exit;
@@ -435,7 +434,8 @@ where
             .with_shell_passthrough(!config.integration.uses_markers())
             .with_bash_readline_history_privacy(
                 bounded_bash_handoff && config.integration.uses_markers(),
-            ),
+            )
+            .with_bash_slash_submission_guard(slash_route_enabled),
         Arc::clone(&input_mode),
         input_generation.clone(),
         main_prompt_gate,

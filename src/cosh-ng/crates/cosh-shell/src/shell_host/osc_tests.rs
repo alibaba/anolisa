@@ -409,7 +409,7 @@ fn precmd_count_tracks_shell_ready_and_command_events() {
 }
 
 // #2413: a status-less precmd marker can only be truncated, forged, or
-// protocol-drifted — both generator scripts (marker/bash.rs, marker/zsh.rs)
+// protocol-drifted — both marker scripts (marker/bash.sh, marker/zsh.rs)
 // emit `"status":%s` unconditionally with the shell's `$?` value. Defaulting
 // the missing field to success fabricates a CommandCompleted for a command
 // whose real outcome is unknown; fall toward the -1 missing-exit-code

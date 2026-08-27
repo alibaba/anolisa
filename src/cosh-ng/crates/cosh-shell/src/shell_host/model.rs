@@ -157,8 +157,10 @@ pub struct ShellHostConfig {
     /// Cosh marker hooks.
     pub native_mode: bool,
     pub login_shell: bool,
-    /// Retained for source compatibility. Bounded Enhanced integration always
-    /// routes slash controls in Rust before they reach the shell.
+    /// Routes exact slash-control submissions through Bash Readline so they
+    /// enter native history without reaching shell parsing (issue #2912).
+    /// Defaults from `COSH_SLASH_VIA_SHELL` (on unless "0"); disabling keeps
+    /// the Rust intercept path. Zsh never enables this Bash-only route.
     pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
     pub raw_action_watchdog: Duration,
@@ -195,7 +197,7 @@ impl ShellHostConfig {
             integration: ShellIntegration::Enhanced,
             native_mode: true,
             login_shell: false,
-            slash_via_shell: false,
+            slash_via_shell: slash_via_shell_default(),
             env_overrides: Vec::new(),
             raw_action_watchdog: Duration::from_secs(120),
             input_wait_status: InputWaitStatus::default(),
@@ -271,6 +273,14 @@ impl ShellHostConfig {
             window_bytes: INTERACTIVE_TRANSCRIPT_WINDOW_BYTES,
         };
     }
+}
+
+/// `COSH_SLASH_VIA_SHELL` gates native Bash history for exact slash
+/// submissions; any value other than "0" (including unset) keeps it on.
+fn slash_via_shell_default() -> bool {
+    std::env::var("COSH_SLASH_VIA_SHELL")
+        .map(|value| value != "0")
+        .unwrap_or(true)
 }
 
 fn default_winsize() -> Winsize {

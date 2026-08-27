@@ -250,7 +250,7 @@ pub(super) enum CandidateLineStatus {
     Unsafe,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct NativeLineState {
     visible: Vec<u8>,
     /// The mirror no longer matches readline's buffer: Tab completion or

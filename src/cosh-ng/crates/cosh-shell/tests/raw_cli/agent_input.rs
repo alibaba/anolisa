@@ -941,13 +941,14 @@ fn routing_c3_explicit_draft_shows_composition_hint() {
 
 #[test]
 fn raw_cli_passthrough_shortcut_shows_one_time_tip() {
-    // #1721 matrix #18 (T-c): a shortcut pressed while bash owns the input is
-    // relayed unchanged and surfaces a one-time discoverability tip at the
-    // next prompt.
+    // #1721 matrix #18 (T-c): after cursor movement makes the Readline buffer
+    // impossible to mirror safely, the shortcut is stripped and surfaces a
+    // one-time discoverability tip at the next prompt.
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
             (b"echo tip-probe".to_vec(), Duration::ZERO),
+            (b"\x1b[D".to_vec(), Duration::from_millis(50)),
             (b"\x1b[13;2u".to_vec(), Duration::from_millis(50)),
             (b"\n".to_vec(), Duration::from_millis(100)),
             (b"echo tip-once\n".to_vec(), Duration::from_millis(400)),

@@ -397,7 +397,16 @@ fn relay_native_passthrough(
             .input_classifier
             .bash_readline_history_privacy_enabled(),
         relay.native_line_state,
+        relay.line_submits,
         relay.main_prompt_gate.is_at_prompt(),
+        bytes,
+    );
+    let guard_submission = bash_submission_needs_guard(
+        relay.input_classifier.bash_slash_submission_guard_enabled(),
+        relay.main_prompt_gate.is_at_prompt(),
+        relay.input_classifier,
+        relay.native_line_state,
+        relay.line_submits,
         bytes,
     );
     send_raw_input_events(bytes, relay.input_events);
@@ -406,13 +415,21 @@ fn relay_native_passthrough(
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(bytes);
+    let pty_bytes = private_history_bytes.as_deref().unwrap_or(bytes);
+    let guarded_bytes = guarded_bash_submission(
+        guard_submission,
+        private_history_bytes.is_some(),
+        relay.input_classifier,
+        relay.line_submits,
+        pty_bytes,
+    );
     write_user_bytes_to_pty(
         relay.master,
         relay.input_generation,
         relay.line_submits,
         relay.input_events,
         relay.main_prompt_gate,
-        private_history_bytes.as_deref().unwrap_or(bytes),
+        guarded_bytes.as_deref().unwrap_or(pty_bytes),
     )?;
     Ok(false)
 }
@@ -420,15 +437,14 @@ fn relay_native_passthrough(
 fn history_private_submission(
     bash_readline_history_privacy: bool,
     state: &NativeLineState,
+    line_submits: &LineSubmitCounter,
     at_prompt: bool,
     bytes: &[u8],
 ) -> Option<Vec<u8>> {
     if !bash_readline_history_privacy || !at_prompt {
         return None;
     }
-    let submit = bytes
-        .iter()
-        .position(|byte| matches!(byte, b'\n' | b'\r'))?;
+    let submit = line_submits.first_submission(bytes)?;
     let private = match state.clean_visible_line() {
         Some(prior) => {
             let mut command = Vec::with_capacity(prior.len() + submit);
@@ -524,19 +540,34 @@ fn submit_line_bytes_to_shell(
     // paints another prompt before this function returns.
     bytes.extend_from_slice(&remainder);
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
+    let guard_submission = bash_submission_needs_guard(
+        relay.input_classifier.bash_slash_submission_guard_enabled(),
+        relay.main_prompt_gate.is_at_prompt(),
+        relay.input_classifier,
+        relay.native_line_state,
+        relay.line_submits,
+        &bytes,
+    );
     send_raw_input_events(&bytes, relay.input_events);
     observe_native_line(relay.native_line_state, &bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(&bytes);
+    let guarded_bytes = guarded_bash_submission(
+        guard_submission,
+        false,
+        relay.input_classifier,
+        relay.line_submits,
+        &bytes,
+    );
     write_user_bytes_to_pty(
         relay.master,
         relay.input_generation,
         relay.line_submits,
         relay.input_events,
         relay.main_prompt_gate,
-        &bytes,
+        guarded_bytes.as_deref().unwrap_or(&bytes),
     )?;
     Ok(false)
 }
@@ -594,10 +625,12 @@ fn held_input_requests_cancel(bytes: &[u8]) -> bool {
         .any(|line| line.split_whitespace().next() == Some("/cancel"))
 }
 
+mod bash_submission_guard;
 mod candidate;
 mod exit_tracker;
 mod path_prompt_submit;
 mod soft_newline_upgrade;
+use bash_submission_guard::{bash_submission_needs_guard, guarded_bash_submission};
 pub(super) use exit_tracker::ExplicitExitTracker;
 use soft_newline_upgrade::{handle_prompt_line_soft_newline, PromptLineSoftNewline};
 

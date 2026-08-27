@@ -491,7 +491,7 @@ mod tests {
     fn shell_marker_exact_tokens_match_registry_routing_c4_per_shell_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
         for (shell, marker) in [
-            ("bash", include_str!("../shell_host/marker/bash.rs")),
+            ("bash", include_str!("../shell_host/marker/bash.sh")),
             ("zsh", include_str!("../shell_host/marker/zsh.rs")),
         ] {
             let case_lines = marker

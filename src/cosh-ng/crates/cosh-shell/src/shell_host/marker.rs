@@ -1,7 +1,7 @@
-// Owner: shell_host. Bash/zsh marker scripts live in per-shell owner files
-// (marker/bash.rs, marker/zsh.rs) under the registered split plan; this hub
-// keeps the single shell_host::marker module path so marker and
-// attempt-generation changes remain atomic.
+// Owner: shell_host. Bash/zsh marker scripts live in per-shell owner files;
+// Bash uses a thin Rust loader plus marker/bash.sh so shell syntax does not
+// grow the Rust module. This hub keeps the single shell_host::marker module
+// path so marker and attempt-generation changes remain atomic.
 mod bash;
 mod zsh;
 

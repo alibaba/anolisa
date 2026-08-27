@@ -235,7 +235,7 @@ fn routing_c3_valid_slash_intercepts_fragmented_input() {
 }
 
 #[test]
-fn raw_relay_bash_up_skips_rust_intercepted_slash_command() {
+fn raw_relay_bash_up_recalls_intercepted_slash_command() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-recall-{}-{}",
         std::process::id(),
@@ -287,10 +287,10 @@ fn raw_relay_bash_up_skips_rust_intercepted_slash_command() {
         event.kind == ShellEventKind::CommandStarted
             && event.command.as_deref() == Some("echo prior-shell-cmd")
     });
-    // Bounded Enhanced routes slash controls before their bytes reach Bash.
-    // They cannot enter native history, so Up recalls the prior shell line.
-    assert_eq!(intercept_count, 1, "{rendered_text}");
-    assert!(recalled_prior_shell_cmd, "{rendered_text}");
+    // The Readline guard records the first submission and intercepts both it
+    // and the recalled copy before Bash parses either command.
+    assert_eq!(intercept_count, 2, "{rendered_text}");
+    assert!(!recalled_prior_shell_cmd, "{rendered_text}");
     // The routed line must never execute as a shell command.
     assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
 
@@ -298,7 +298,62 @@ fn raw_relay_bash_up_skips_rust_intercepted_slash_command() {
 }
 
 #[test]
-fn routing_c4_bash_route_stays_out_of_native_history_file() {
+fn raw_relay_bash_vi_mode_guards_slash_without_mutating_commands() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-vi-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "set -o vi\n").expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-vi-guard", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("echo probe-ordinary-tail"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("vi-mode slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/skills detail xlsx")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some("echo probe-ordinary-tail")
+    }));
+    assert!(
+        rendered_text.contains("probe-ordinary-tail"),
+        "{rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("probe-ordinary-taiL"),
+        "{rendered_text}"
+    );
+    assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(!rendered_text.contains("bash: exiT"), "{rendered_text}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn routing_c4_bash_route_enters_native_history_file() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-histfile-{}-{}",
         std::process::id(),
@@ -306,6 +361,11 @@ fn routing_c4_bash_route_stays_out_of_native_history_file() {
     ));
     let home = root.join("home");
     let work_dir = root.join("work");
+    let expansion_side_effect = root.join("slash-expanded");
+    let slash_input = format!(
+        "/skills detail $(touch {})",
+        expansion_side_effect.display()
+    );
     std::fs::create_dir_all(&home).expect("home");
     std::fs::write(
         home.join(".bashrc"),
@@ -316,14 +376,17 @@ fn routing_c4_bash_route_stays_out_of_native_history_file() {
     .expect("bashrc");
 
     let mut config = ShellHostConfig::new("bash-1718-histfile", &work_dir)
-        .with_env("HOME", home.display().to_string());
+        .with_env("HOME", home.display().to_string())
+        // A user's colon-no-op filter must not discard Cosh's replacement
+        // placeholder before the original slash line is committed.
+        .with_env("HISTIGNORE", "\\:*");
     config.slash_via_shell = true;
     let mut rendered = Vec::new();
     let output = run_raw_relay_bash_with_actions(
         &config,
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
-            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::line(&slash_input),
             RawRelayAction::wait(Duration::from_millis(1200)),
             RawRelayAction::line("exit"),
         ],
@@ -334,19 +397,123 @@ fn routing_c4_bash_route_stays_out_of_native_history_file() {
     let rendered_text = String::from_utf8_lossy(&rendered);
     let intercepted = output.events.iter().any(|event| {
         event.kind == ShellEventKind::UserInputIntercepted
-            && event.input.as_deref() == Some("/skills detail xlsx")
+            && event.input.as_deref() == Some(slash_input.as_str())
             && event.component.as_deref() == Some("slash")
     });
     assert!(intercepted, "{rendered_text}");
-    // Rust owns routed input, so Bash must never persist an AI control line.
+    // Bash owns persistence after the Readline guard records the slash line.
     let history = std::fs::read_to_string(home.join(".bash_history")).expect("histfile");
-    assert!(!history.contains("/skills detail xlsx"), "{history}");
+    assert!(history.contains(&slash_input), "{history}");
+    assert!(
+        !expansion_side_effect.exists(),
+        "slash input reached Bash expansion"
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
-fn raw_relay_bash_legacy_slash_switch_cannot_restore_debug_routing() {
+fn raw_relay_bash_guards_each_slash_in_shell_owned_batch() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-batch-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let work_dir = root.join("work");
+    let expansion_side_effect = root.join("batch-slash-expanded");
+    let first = "/skills detail first";
+    let second = format!(
+        "/skills detail $(touch {})",
+        expansion_side_effect.display()
+    );
+
+    let mut config = ShellHostConfig::new("bash-batch-slash-guard", &work_dir);
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(format!("{first}\n{second}\n").into_bytes()),
+            RawRelayAction::wait(Duration::from_millis(1200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("same-read slash batch relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    for input in [first, second.as_str()] {
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("slash")
+            }),
+            "missing slash intercept for {input}: {rendered_text}"
+        );
+    }
+    assert!(
+        !expansion_side_effect.exists(),
+        "batched slash reached Bash expansion"
+    );
+    assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_preserves_same_read_foreground_stdin_bytes() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-foreground-stdin-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let work_dir = root.join("work");
+    let captured = root.join("captured-stdin");
+    let payload = b"stdin-probe\x1b[Dliteral";
+    let command = format!(
+        "sh -c 'IFS= read -r value; printf \"%s\" \"$value\" > \"$1\"' sh {}",
+        shell_arg(&captured)
+    );
+
+    let mut config = ShellHostConfig::new("bash-foreground-stdin", &work_dir);
+    config.slash_via_shell = true;
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    let mut batch = command.into_bytes();
+    batch.push(b'\n');
+    batch.extend_from_slice(payload);
+    batch.push(b'\n');
+    run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(batch),
+            RawRelayAction::wait(Duration::from_millis(1200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("same-read foreground stdin relay");
+
+    let captured_bytes = std::fs::read(&captured).expect("captured foreground stdin");
+    assert_eq!(
+        captured_bytes, payload,
+        "foreground stdin must not receive a Readline guard"
+    );
+    assert!(
+        !captured_bytes
+            .windows(b"\x1b[99~".len())
+            .any(|window| window == b"\x1b[99~"),
+        "foreground stdin contains a Readline guard: {captured_bytes:?}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-switch-off-{}-{}",
         std::process::id(),
@@ -398,7 +565,7 @@ fn raw_relay_bash_legacy_slash_switch_cannot_restore_debug_routing() {
         event.kind == ShellEventKind::CommandStarted
             && event.command.as_deref() == Some("echo prior-shell-cmd")
     });
-    // The compatibility field cannot restore the retired DEBUG-trap path.
+    // The compatibility switch keeps slash controls on the Rust-owned path.
     assert_eq!(intercept_count, 1, "{rendered_text}");
     assert!(recalled_prior_shell_cmd, "{rendered_text}");
 
@@ -445,8 +612,7 @@ fn routing_c4_history_privacy_secret_slash_never_persists() {
             && event.component.as_deref() == Some("slash")
     });
     assert!(intercepted, "{rendered_text}");
-    // The intercept branch scrubs credential-bearing entries before its
-    // return 1, so the routed line must never reach the history file.
+    // The Readline guard recognizes the secret and omits it from history.
     let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
     assert!(!history.contains("api_key"), "{history}");
 
@@ -454,7 +620,7 @@ fn routing_c4_history_privacy_secret_slash_never_persists() {
 }
 
 #[test]
-fn raw_relay_bash_keeps_history_recalled_slash_shell_owned() {
+fn raw_relay_bash_intercepts_history_recalled_slash_with_enter_and_ctrl_o() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-recalled-slash-test-{}-{}",
         std::process::id(),
@@ -482,7 +648,9 @@ fn raw_relay_bash_keeps_history_recalled_slash_shell_owned() {
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::write(b"\x1b[A".to_vec()),
             RawRelayAction::wait(Duration::from_millis(100)),
-            RawRelayAction::write(b"\n".to_vec()),
+            // `operate-and-get-next` accepts the recalled Readline buffer
+            // without carrying CR/LF in the user input batch.
+            RawRelayAction::write(b"\x0f".to_vec()),
             RawRelayAction::wait(Duration::from_millis(300)),
             RawRelayAction::write(b"\x1b[A".to_vec()),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -504,11 +672,9 @@ fn raw_relay_bash_keeps_history_recalled_slash_shell_owned() {
                 && event.component.as_deref() == Some("slash")
         })
         .count();
-    // Readline recall makes the Rust mirror intentionally dirty. Without a
-    // shell DEBUG veto, the fail-safe contract leaves both recalls to Bash.
-    assert_eq!(intercept_count, 0, "{rendered_text}");
+    assert_eq!(intercept_count, 2, "{rendered_text}");
     assert!(
-        rendered_text.contains("bash: /skills: No such file or directory"),
+        !rendered_text.contains("bash: /skills: No such file or directory"),
         "{rendered_text}"
     );
 

@@ -3714,7 +3714,7 @@ fn native_exact_slash_routes_to_shell_when_at_prompt() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
@@ -3746,17 +3746,132 @@ fn native_exact_slash_routes_to_shell_when_at_prompt() {
     assert!(events.contains(&RawInputEvent::CandidateClearLine));
     assert_eq!(
         fs::read(&path).expect("read test output"),
-        b"/mode approval\n"
+        b"/mode approval\x1b[99~\n"
     );
-    // The submission lowers the prompt gate until the next prompt_ready
-    // marker (#1721 D16), so racing follow-up slash bytes fall back to
-    // the Rust intercept path.
+    // The private no-op submission lowers the prompt gate until its bounded
+    // prompt hook commits slash history and emits prompt_ready.
     assert!(!main_prompt_gate.is_at_prompt());
     assert!(matches!(
         *input_mode.lock().expect("input mode"),
         RawInputMode::Passthrough
     ));
     fs::remove_file(path).ok();
+}
+
+#[test]
+fn private_history_submission_uses_private_slash_guard() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    assert_eq!(
+        guarded_bash_submission(true, true, &classifier, &line_submits, b"\x01 \x05\n"),
+        Some(b"\x01 \x05\x1b[100~\n".to_vec())
+    );
+}
+
+#[test]
+fn slash_guard_precedes_ctrl_o_submission() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            &classifier,
+            &line_submits,
+            b"/skills detail xlsx\x0f",
+        ),
+        Some(b"/skills detail xlsx\x1b[99~\x0f".to_vec())
+    );
+}
+
+#[test]
+fn slash_guard_ignores_pasted_newlines() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let paste = b"\x1b[200~/skills detail\nnext line\x1b[201~";
+
+    assert_eq!(
+        guarded_bash_submission(true, false, &classifier, &line_submits, paste),
+        None
+    );
+
+    let mut submitted = paste.to_vec();
+    submitted.push(b'\r');
+    let mut expected = paste.to_vec();
+    expected.extend_from_slice(b"\x1b[99~\r");
+    assert_eq!(
+        guarded_bash_submission(true, false, &classifier, &line_submits, &submitted),
+        Some(expected)
+    );
+}
+
+#[test]
+fn slash_guard_does_not_infer_follow_up_readline_ownership() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            &classifier,
+            &line_submits,
+            b"/mode approval\r\x1b[D/skills detail $(touch should-not-run)\r",
+        ),
+        Some(b"/mode approval\x1b[99~\r\x1b[D/skills detail $(touch should-not-run)\r".to_vec())
+    );
+}
+
+#[test]
+fn bash_slash_guard_skips_clean_ordinary_and_empty_submissions() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let mut state = NativeLineState::default();
+
+    state.observe_shell_bytes(b"echo ordinary");
+    assert!(!bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+    ));
+    state.clear();
+    assert!(!bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+    ));
+}
+
+#[test]
+fn bash_slash_guard_keeps_exact_and_readline_owned_submissions() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let mut state = NativeLineState::default();
+
+    assert!(bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"/help\r",
+    ));
+    state.observe_shell_bytes(b"\x1b[A");
+    assert!(bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+    ));
 }
 
 #[test]
@@ -3849,6 +3964,58 @@ fn native_shell_submission_lowers_gate_before_follow_up_slash() {
     )));
     // Only the shell command reaches the PTY; the slash stays Rust-side.
     assert_eq!(fs::read(&path).expect("read test output"), b"python\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn same_batch_follow_up_slash_stays_batch_owned_and_guarded() {
+    let (path, mut master) = output_file("same-batch-follow-up-slash");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: true,
+    };
+
+    relay_passthrough_input(
+        b"/mode approval\n/skills detail $(touch should-not-run)\n",
+        &mut relay,
+    )
+    .expect("submit guarded slash and queued follow-up slash");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+            | RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason: InterceptReason::Slash,
+                ..
+            } if input == "/skills detail $(touch should-not-run)"
+    )));
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"/mode approval\x1b[99~\n/skills detail $(touch should-not-run)\x1b[99~\n",
+        "the whole shell-owned batch must keep every exact slash guarded"
+    );
     fs::remove_file(path).ok();
 }
 

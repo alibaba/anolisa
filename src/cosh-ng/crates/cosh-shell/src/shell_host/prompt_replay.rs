@@ -172,12 +172,12 @@ impl PromptReplayTracker {
     /// accept-line response. Submissions the DEBUG trap intercepted are
     /// exempt: their only response is the repaint this arm exists to strip.
     ///
-    /// Known limit: custom `.inputrc` bindings to `accept-line` other than
-    /// CR/LF/Ctrl-O are invisible to the submission counter, so a boundary
-    /// or intercept they produce can let this arm over a queued Enter. The
-    /// strip fail-open bounds that mistake to a duplicate prompt paint: the
-    /// Enter's response never opens with the prompt bytes, so it is passed
-    /// through verbatim.
+    /// Known limit: editor-execute functions and custom `.inputrc` submission
+    /// bindings without CR/LF/Ctrl-O are invisible to the submission counter,
+    /// so a boundary or intercept they produce can let this arm over a queued
+    /// Enter. The strip fail-open bounds that mistake to a duplicate prompt
+    /// paint: the Enter's response never opens with the prompt bytes, so it is
+    /// passed through verbatim.
     pub(super) fn arm_for_replay(&mut self, prompt: &[u8]) {
         let current = self.input_generation.current();
         if current != self.last_written || self.outstanding_submits > self.pending_intercepts {

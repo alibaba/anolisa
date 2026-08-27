@@ -41,8 +41,8 @@ impl TempReplayHome {
         }
     }
 
-    /// Seeds bash history so `Up` exercises a Readline-owned command line
-    /// that the raw candidate relay cannot reconstruct safely.
+    /// Seeds bash history so `Up` recalls a slash command through the bounded
+    /// Readline submission guard instead of the raw candidate relay.
     fn seed_bash_history(&self, line: &str) {
         fs::write(
             self.root.join(".bashrc"),
@@ -94,7 +94,11 @@ fn between_marker_and_sentinel<'a>(output: &'a str, marker: &str, sentinel: &str
 }
 
 fn assert_no_prompt_run_on(output: &str, sentinel: &str) {
-    let normalized = strip_ansi_escape(between_panel_and_sentinel(output, sentinel));
+    assert_no_prompt_run_on_between(output, "Skills", sentinel);
+}
+
+fn assert_no_prompt_run_on_between(output: &str, marker: &str, sentinel: &str) {
+    let normalized = strip_ansi_escape(between_marker_and_sentinel(output, marker, sentinel));
     for line in normalized.split(['\r', '\n']) {
         assert!(
             count_occurrences(line, PROMPT.trim_end()) <= 1,
@@ -210,10 +214,9 @@ fn raw_cli_bash_bracketed_paste_empty_enter_within_delay_window_is_not_swallowed
 #[test]
 fn raw_cli_bash_recalled_slash_with_same_chunk_empty_enter_is_not_swallowed() {
     let home = TempReplayHome::new("paste-recall", "set enable-bracketed-paste on\n");
-    // Enhanced v2 deliberately leaves history-recalled lines Shell-owned:
-    // without a global DEBUG trap the raw relay cannot reconstruct Readline's
-    // edited buffer safely. The trailing empty Enter shares the same PTY
-    // write and must still reach Bash after the native command error.
+    // The recalled line reaches Readline itself, so the intercept travels the
+    // bounded submission-guard path; the trailing empty Enter shares the same
+    // PTY write and must still reach Bash.
     home.seed_bash_history("/skills disable xlsx");
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
@@ -237,14 +240,10 @@ fn raw_cli_bash_recalled_slash_with_same_chunk_empty_enter_is_not_swallowed() {
     );
 
     assert!(
-        output.contains("bash: /skills: No such file or directory"),
-        "history-recalled slash did not remain Shell-owned\n{output:?}"
+        !output.contains("bash: /skills"),
+        "recalled slash leaked to bash\n{output:?}"
     );
-    let between = between_marker_and_sentinel(
-        &output,
-        "bash: /skills: No such file or directory",
-        "replay-sentinel-recall",
-    );
+    let between = between_panel_and_sentinel(&output, "replay-sentinel-recall");
     assert!(
         count_occurrences(between, "\u{1b}[?2004l") >= 1,
         "bracketed paste disable of the empty Enter was swallowed\n{output:?}"
@@ -253,14 +252,44 @@ fn raw_cli_bash_recalled_slash_with_same_chunk_empty_enter_is_not_swallowed() {
         between.contains("\r\r\n") || between.contains("\r\n"),
         "empty Enter CRLF after the recalled slash was swallowed\n{output:?}"
     );
-    let normalized = strip_ansi_escape(between);
-    for line in normalized.split(['\r', '\n']) {
-        assert!(
-            count_occurrences(line, PROMPT.trim_end()) <= 1,
-            "two prompts written on one line: {line:?}\n{output:?}"
-        );
-    }
+    assert_no_prompt_run_on(&output, "replay-sentinel-recall");
     assert!(output.contains("replay-sentinel-recall"), "{output}");
+}
+
+#[test]
+fn raw_cli_bash_recalled_ordinary_command_remains_exact_without_prompt_run_on() {
+    let home = TempReplayHome::new("ordinary-recall", "set enable-bracketed-paste on\n");
+    let execution_marker = home.root.join(".ordinary-recall-count");
+    home.seed_bash_history("printf x >> \"$HOME/.ordinary-recall-count\"");
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", home.home.as_str()),
+            ("INPUTRC", home.inputrc.as_str()),
+            ("COSH_SHELL_ISOLATED", "0"),
+        ],
+        vec![
+            (b"\x1b[A".to_vec(), Duration::from_millis(600)),
+            (b"\r".to_vec(), Duration::from_millis(300)),
+            (
+                b"echo replay-sentinel-ordinary-recall\n".to_vec(),
+                Duration::from_millis(600),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert_eq!(
+        fs::read(execution_marker).expect("recalled ordinary command executed"),
+        b"x",
+        "recalled ordinary command must execute exactly once\n{output:?}"
+    );
+    assert_no_prompt_run_on_between(&output, PROMPT, "replay-sentinel-ordinary-recall");
+    assert!(
+        output.contains("replay-sentinel-ordinary-recall"),
+        "{output}"
+    );
 }
 
 #[test]
