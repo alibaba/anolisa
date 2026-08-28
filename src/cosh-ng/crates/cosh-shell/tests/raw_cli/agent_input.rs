@@ -31,6 +31,10 @@ fn raw_cli_routes_slash_bearing_han_prompt_before_shell_execution() {
             output.contains(&format!("Received shell prompt request: {prompt}")),
             "{shell}: {output}"
         );
+        assert!(
+            output.contains(&format!("Agent input: {prompt}")),
+            "{shell}: {output}"
+        );
         assert!(output.contains("after-path-prompt"), "{shell}: {output}");
         assert!(
             !output.contains("No such file or directory")
@@ -65,6 +69,7 @@ fn raw_cli_routes_slash_leading_path_prompt_in_one_input_batch() {
         output.contains(&format!("Received shell prompt request: {prompt}")),
         "{output}"
     );
+    assert!(!output.contains("AI request"), "{output}");
     assert!(!output.contains("No such file or directory"), "{output}");
 }
 
@@ -447,9 +452,9 @@ fn raw_cli_zh_natural_language_intercept_skips_redundant_notice() {
     );
 
     assert!(!output.contains("AI 请求"), "{output}");
-    assert!(!output.contains("正在把输入交给 Agent"), "{output}");
+    assert!(!output.contains("Agent 输入"), "{output}");
     assert!(
-        !output.contains("该输入已在进入 Bash 前被拦截。"),
+        !output.contains("该输入已在 Shell 执行前被拦截。"),
         "{output}"
     );
     assert!(output.contains("正在思考..."), "{output}");

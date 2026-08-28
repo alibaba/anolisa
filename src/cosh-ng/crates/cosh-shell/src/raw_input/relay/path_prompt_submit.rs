@@ -74,9 +74,8 @@ pub(super) fn route_missing_path_submission(
     let sensitive = redact_sensitive_text(&input).1;
     let _ = relay
         .input_events
-        .send(RawInputEvent::UserInterceptWithRouting {
+        .send(RawInputEvent::NativePathPromptIntercept {
             input,
-            reason: InterceptReason::NaturalLanguage,
             cwd,
             sensitive,
         });

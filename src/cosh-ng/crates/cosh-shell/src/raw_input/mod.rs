@@ -77,6 +77,13 @@ pub(crate) enum RawInputEvent {
         cwd: String,
         sensitive: bool,
     },
+    /// A Readline-owned missing-path prompt whose line is cleared before the
+    /// Agent run, so the runtime must acknowledge it on a stable UI surface.
+    NativePathPromptIntercept {
+        input: String,
+        cwd: String,
+        sensitive: bool,
+    },
     /// Delivers a queued control only after all preceding shell submissions
     /// in the same input batch reach their primary prompts.
     UserInterceptAtPrompt {

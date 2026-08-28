@@ -49,6 +49,13 @@ fn natural_language_event(input: &str) -> ShellEvent {
     event
 }
 
+fn path_prompt_event(input: &str) -> ShellEvent {
+    let mut event = natural_language_event(input);
+    event.component = Some("path_prompt".to_string());
+    event.cwd = Some("/repo".to_string());
+    event
+}
+
 #[test]
 fn compact_requires_cosh_core_backend() {
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
@@ -740,6 +747,51 @@ fn natural_language_during_compaction_enqueues_once_then_resumes() {
     poll_background_compaction(&mut state, &mut resume_output, &adapter, false)
         .expect("resume poll");
     assert!(state.agent_run.queued_requests.is_empty());
+}
+
+#[test]
+fn path_prompt_during_compaction_renders_one_request_notice() {
+    let (mut state, _sender) = state_with_childless_compaction();
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let input = "read ./README.md";
+    let events = [path_prompt_event(input)];
+    let mut output = Vec::new();
+
+    render_intercept_agent_guidance(&events, &[], &adapter, &mut state, &mut output, 0)
+        .expect("first submit");
+    render_intercept_agent_guidance(&events, &[], &adapter, &mut state, &mut output, 0)
+        .expect("duplicate submit");
+
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    assert_eq!(
+        rendered.matches(&format!("Agent input: {input}")).count(),
+        1
+    );
+    assert!(rendered.contains("paused"), "{rendered}");
+    assert_eq!(state.agent_run.queued_requests.len(), 1);
+    assert!(state.agent_run.active.is_none());
+}
+
+#[test]
+fn path_prompt_queue_full_notice_follows_request_notice() {
+    let (mut state, _sender) = state_with_childless_compaction();
+    fill_user_queue_to_capacity(&mut state);
+    let adapter = AdapterInstance::CoshCore(CoshCoreAdapter {
+        program: "/must-not-be-started".to_string(),
+        ..CoshCoreAdapter::default()
+    });
+    let input = "read ./README.md";
+    let events = [path_prompt_event(input)];
+    let mut output = Vec::new();
+
+    render_intercept_agent_guidance(&events, &[], &adapter, &mut state, &mut output, 0)
+        .expect("reject full queue");
+
+    let rendered = String::from_utf8(output).expect("UTF-8");
+    let request = rendered.find("Agent input:").expect("request notice");
+    let rejected = rendered.find("Too many").expect("queue-full notice");
+    assert!(request < rejected, "{rendered}");
+    assert!(state.agent_run.active.is_none());
 }
 
 #[test]

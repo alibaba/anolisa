@@ -253,6 +253,22 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     sensitive,
                 )
             }
+            RawInputEvent::NativePathPromptIntercept {
+                input,
+                cwd,
+                sensitive,
+            } => {
+                let session_id = parser.session_id.clone();
+                parser.push_intercept_event_with_routing(
+                    &session_id,
+                    input,
+                    Some(cwd),
+                    "path_prompt",
+                    None,
+                    false,
+                    sensitive,
+                )
+            }
             RawInputEvent::UserInterceptAtPrompt {
                 input,
                 reason,
