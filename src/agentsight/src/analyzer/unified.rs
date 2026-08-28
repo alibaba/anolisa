@@ -523,6 +523,23 @@ impl Analyzer {
                 }
             }
 
+            // Backfill the model name from the request body when the response
+            // does not carry one. The DashScope/Bailian native protocol puts
+            // `model` only on the request (`output`/`usage`/`request_id` is all
+            // the response has), so without this the token database records an
+            // empty model for every native call.
+            if let Some(record) = token_result.as_mut() {
+                if record.model.as_deref().unwrap_or_default().is_empty() {
+                    if let Some(model) = http_record
+                        .request_body
+                        .as_deref()
+                        .and_then(Self::model_from_request_body)
+                    {
+                        record.model = Some(model);
+                    }
+                }
+            }
+
             // Extract audit from HttpRecord (only for SSE responses / LLM calls)
             // Pass token_result so audit record gets populated token counts
             if let Some(audit_record) = self.audit.analyze_http(&http_record, token_result.as_ref())
@@ -543,6 +560,16 @@ impl Analyzer {
         }
 
         results
+    }
+
+    /// Read the top-level `model` field of an LLM request body.
+    fn model_from_request_body(body: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()?
+            .get("model")?
+            .as_str()
+            .filter(|m| !m.is_empty())
+            .map(|m| m.to_string())
     }
 
     /// Extract parsed API message from HTTP request/response bodies

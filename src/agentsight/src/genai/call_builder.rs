@@ -764,6 +764,14 @@ impl GenAIBuilder {
                 }
             }
             msgs
+        } else if messages.is_empty() && Self::is_dashscope_native_path(&http.path) {
+            // Non-streaming DashScope/Bailian native protocol: no typed parser
+            // claims `/aigc/*-generation/generation`, so the `output` envelope
+            // has to be reconstructed from the raw response body.
+            http.response_body
+                .as_ref()
+                .and_then(|body| Self::parse_sse_response_body(body, finish_reason.as_deref()))
+                .unwrap_or(messages)
         } else {
             messages
         };
@@ -907,6 +915,89 @@ mod tests {
         let builder = GenAIBuilder::new();
         let token = TokenRecord::new(1, "x".to_string(), "openai".to_string(), 1, 2);
         assert!(build_call(&builder, &[AnalysisResult::Token(token)]).is_none());
+    }
+
+    /// DashScope native path for reference in the tests below.
+    const DASHSCOPE_TEXT_GEN_PATH: &str = "/api/v1/services/aigc/text-generation/generation";
+
+    /// Non-streaming native calls used to be dropped entirely by the
+    /// `!is_llm && !is_sse` gate, so nothing reached the Dashboard.
+    #[test]
+    fn test_build_llm_call_dashscope_native_non_streaming() {
+        let builder = GenAIBuilder::new();
+        let request_body = serde_json::json!({
+            "model": "qwen-plus",
+            "input": {"messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Count to 3"}
+            ]},
+            "parameters": {"result_format": "message"}
+        })
+        .to_string();
+        // Native responses have no top-level `model`, only output/usage/request_id.
+        let response_body = serde_json::json!({
+            "output": {"choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "1, 2, 3."}
+            }]},
+            "usage": {"input_tokens": 22, "output_tokens": 8, "total_tokens": 30},
+            "request_id": "req-native-1"
+        })
+        .to_string();
+
+        let http = make_http(
+            DASHSCOPE_TEXT_GEN_PATH,
+            Some(request_body),
+            Some(response_body),
+        );
+        let call = build_call(&builder, &[AnalysisResult::Http(http)])
+            .expect("native non-streaming call must build an LLMCall");
+
+        assert_eq!(call.provider, "dashscope");
+        assert_eq!(call.model, "qwen-plus", "model comes from the request body");
+
+        // Request side: `input` is an object, so extract_messages_view must
+        // reach into `input.messages`.
+        assert_eq!(call.request.messages.len(), 2);
+        assert_eq!(call.request.messages[0].role, "system");
+        assert_eq!(call.request.messages[1].role, "user");
+
+        // Response side: non-streaming native has no typed parser, so the
+        // envelope must be reconstructed from the raw body.
+        assert_eq!(call.response.messages.len(), 1);
+        assert!(matches!(
+            &call.response.messages[0].parts[0],
+            MessagePart::Text { content } if content == "1, 2, 3."
+        ));
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("stop")
+        );
+        assert!(!call.is_semantically_empty());
+    }
+
+    /// The token record provider must not leak `anthropic` into the call, and a
+    /// model-less token record must not shadow the request-body model.
+    #[test]
+    fn test_build_llm_call_dashscope_native_provider_beats_token_record() {
+        let builder = GenAIBuilder::new();
+        let request_body =
+            serde_json::json!({"model": "qwen3-vl-plus", "input": {"messages": []}}).to_string();
+        let http = make_http(
+            "/api/v1/services/aigc/multimodal-generation/generation",
+            Some(request_body),
+            None,
+        );
+        // Simulates the pre-fix mislabelling reaching build_llm_call.
+        let token = TokenRecord::new(100, "python3".to_string(), "anthropic".to_string(), 30, 12)
+            .with_model(String::new());
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Token(token)],
+        )
+        .expect("native call builds");
+        assert_eq!(call.provider, "dashscope");
+        assert_eq!(call.model, "qwen3-vl-plus");
     }
 
     #[test]

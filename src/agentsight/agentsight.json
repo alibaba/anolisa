@@ -54,7 +54,7 @@
     "ring_buffer_mb": 32
   },
   "https": [
-    {"rule": ["dashscope.aliyuncs.com"]},
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]},
     {"rule": ["api.openai.com"]}
   ],
   "http": [],

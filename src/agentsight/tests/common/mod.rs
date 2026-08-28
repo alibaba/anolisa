@@ -199,6 +199,158 @@ pub fn make_anthropic_request_bytes(model: &str, user_message: &str) -> Vec<u8> 
     .into_bytes()
 }
 
+/// DashScope/Bailian **native** protocol path for plain-text generation.
+pub const DASHSCOPE_TEXT_GENERATION_PATH: &str = "/api/v1/services/aigc/text-generation/generation";
+
+/// DashScope/Bailian **native** protocol path for multimodal generation.
+pub const DASHSCOPE_MULTIMODAL_GENERATION_PATH: &str =
+    "/api/v1/services/aigc/multimodal-generation/generation";
+
+/// Build a DashScope native-protocol POST request as raw HTTP bytes.
+///
+/// Unlike the OpenAI-compatible mode, the messages array is nested inside an
+/// `input` **object** and sampling knobs live under `parameters`. Streaming is
+/// requested via the `X-DashScope-SSE` header, not a body field.
+pub fn make_dashscope_native_request_bytes(
+    path: &str,
+    model: &str,
+    system_message: &str,
+    user_message: &str,
+    stream: bool,
+) -> Vec<u8> {
+    let body = serde_json::json!({
+        "model": model,
+        "input": {
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ]
+        },
+        "parameters": {"result_format": "message"},
+    });
+    let body_str = serde_json::to_string(&body).unwrap();
+    let sse_header = if stream {
+        "X-DashScope-SSE: enable\r\n"
+    } else {
+        ""
+    };
+    format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: ws-abc123.cn-beijing.maas.aliyuncs.com\r\n\
+         Content-Type: application/json\r\n\
+         {sse_header}\
+         Content-Length: {}\r\n\
+         \r\n\
+         {}",
+        body_str.len(),
+        body_str
+    )
+    .into_bytes()
+}
+
+/// Build a DashScope native-protocol non-streaming JSON response.
+///
+/// Shapes verified against real `dashscope.aliyuncs.com` responses: the answer
+/// sits under `output.choices[]`, there is **no** top-level `model`, and `usage`
+/// uses Anthropic-style `input_tokens`/`output_tokens` plus `total_tokens` and
+/// `prompt_tokens_details.cached_tokens`.
+///
+/// `image_tokens`, when present, is an *itemisation* of `input_tokens` (real
+/// response: `input_tokens_details {image 1249, text 12}` with
+/// `input_tokens 1261`), not an addition — so callers pass the already-total
+/// `input_tokens`.
+pub fn make_dashscope_native_json_response_bytes(
+    request_id: &str,
+    content: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    image_tokens: Option<u32>,
+) -> Vec<u8> {
+    let mut usage = serde_json::json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    });
+    if let Some(image_tokens) = image_tokens {
+        usage["image_tokens"] = serde_json::json!(image_tokens);
+        usage["input_tokens_details"] = serde_json::json!({
+            "image_tokens": image_tokens,
+            "text_tokens": input_tokens.saturating_sub(image_tokens),
+        });
+        usage["output_tokens_details"] = serde_json::json!({"text_tokens": output_tokens});
+    }
+    let message = if image_tokens.is_some() {
+        // Multimodal replies carry content blocks, not a bare string.
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{"text": content}],
+            "reasoning_content": "",
+        })
+    } else {
+        serde_json::json!({"role": "assistant", "content": content})
+    };
+    let body = serde_json::json!({
+        "output": {"choices": [{"finish_reason": "stop", "message": message}]},
+        "usage": usage,
+        "request_id": request_id,
+    });
+    let body_str = serde_json::to_string(&body).unwrap();
+    format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {}",
+        body_str.len(),
+        body_str
+    )
+    .into_bytes()
+}
+
+/// Build a DashScope native-protocol SSE stream as separate chunks.
+///
+/// Framing verified against a real streaming response: `id:` / `event:result` /
+/// `:HTTP_STATUS/200` fields, `data:` with no space after the colon, cumulative
+/// (`incremental_output=false`) content, the **literal string** `"null"` as the
+/// in-progress finish_reason, and **no** `data: [DONE]` terminator.
+pub fn make_dashscope_native_sse_chunks(
+    request_id: &str,
+    content: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> Vec<Vec<u8>> {
+    let mut chunks = vec![b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n".to_vec()];
+    let chars: Vec<char> = content.chars().collect();
+    for (i, _) in chars.iter().enumerate() {
+        let cumulative: String = chars[..=i].iter().collect();
+        let last = i + 1 == chars.len();
+        let out_tok = if last { output_tokens } else { i as u32 + 1 };
+        let payload = serde_json::json!({
+            "output": {"choices": [{
+                "message": {"content": cumulative, "role": "assistant"},
+                "finish_reason": if last { "stop" } else { "null" },
+            }]},
+            "usage": {
+                "total_tokens": input_tokens + out_tok,
+                "output_tokens": out_tok,
+                "input_tokens": input_tokens,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+            "request_id": request_id,
+        });
+        chunks.push(
+            format!(
+                "id:{}\nevent:result\n:HTTP_STATUS/200\ndata:{}\n\n",
+                i + 1,
+                serde_json::to_string(&payload).unwrap()
+            )
+            .into_bytes(),
+        );
+    }
+    chunks
+}
+
 /// Generate a unique temporary directory for test isolation.
 pub fn temp_dir(tag: &str) -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);

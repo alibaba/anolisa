@@ -141,13 +141,27 @@ impl TokenParser {
             }
         }
 
-        // 3. Check for usage object directly (OpenAI and compatible APIs)
+        // 3. DashScope/Bailian native protocol envelope.
+        //
+        // Must precede the generic `usage` branch: the native `usage` field
+        // names are identical to Anthropic's, and real Anthropic-gateway
+        // traffic even ships the same `total_tokens` sibling, so usage shape
+        // alone cannot tell them apart. The envelope can: an `output` *object*
+        // paired with `usage` is unique to the native protocol (the OpenAI
+        // Responses API nests `output` as an array under `response`).
+        if json.get("output").is_some_and(|o| o.is_object()) {
+            if let Some(usage) = json.get("usage") {
+                return extract_usage_object(usage, LLMProvider::DashScope, json);
+            }
+        }
+
+        // 4. Check for usage object directly (OpenAI and compatible APIs)
         if let Some(usage) = json.get("usage") {
             let provider = detect_provider_from_usage(usage);
             return extract_usage_object(usage, provider, json);
         }
 
-        // 4. Responses API: usage nested in response.completed event
+        // 5. Responses API: usage nested in response.completed event
         if json.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
             if let Some(resp) = json.get("response") {
                 if let Some(usage) = resp.get("usage") {
@@ -194,6 +208,118 @@ mod tests {
         });
 
         ParsedSseEvent::new(None, None, None, 0, data.len(), ssl_event)
+    }
+
+    /// DashScope/Bailian native protocol is identified by its **response
+    /// envelope** (`output` object + `request_id`, no top-level `model`), not by
+    /// the shape of `usage` — the native `usage` field names are
+    /// indistinguishable from Anthropic-gateway traffic that also reports
+    /// `total_tokens`.
+    /// Envelope shape taken verbatim from a real non-streaming native response.
+    #[test]
+    fn test_parse_dashscope_native_envelope() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "output": {"choices": [{
+                "message": {"content": "收到了", "role": "assistant"},
+                "finish_reason": "stop"
+            }]},
+            "usage": {"total_tokens": 26, "output_tokens": 1, "input_tokens": 25,
+                      "prompt_tokens_details": {"cached_tokens": 0}},
+            "request_id": "b82b259c-ed1d-95bd-8c0e-4f357868a622"
+        }"#;
+        let usage = parser
+            .parse_data(data)
+            .expect("native envelope must yield usage");
+        assert_eq!(usage.provider, LLMProvider::DashScope);
+        assert_eq!(usage.input_tokens, 25);
+        assert_eq!(usage.output_tokens, 1);
+    }
+
+    /// `result_format: text` puts the answer on `output.text`.
+    #[test]
+    fn test_parse_dashscope_native_envelope_text_format() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "output": {"finish_reason": "stop", "text": "hi"},
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+            "request_id": "req-2"
+        }"#;
+        let usage = parser.parse_data(data).expect("usage");
+        assert_eq!(usage.provider, LLMProvider::DashScope);
+    }
+
+    /// multimodal-generation itemises the input side; `image_tokens` is already
+    /// counted inside `input_tokens` (real values: 1249 image + 12 text = 1261).
+    #[test]
+    fn test_parse_dashscope_native_envelope_multimodal_input_tokens() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "output": {"choices": [{"finish_reason": "stop",
+                "message": {"role": "assistant", "content": [{"text": "cat"}],
+                            "reasoning_content": ""}}]},
+            "usage": {
+                "input_tokens_details": {"image_tokens": 1249, "text_tokens": 12},
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "total_tokens": 1643,
+                "output_tokens": 382,
+                "input_tokens": 1261,
+                "image_tokens": 1249
+            },
+            "request_id": "req-3"
+        }"#;
+        let usage = parser.parse_data(data).expect("usage");
+        assert_eq!(usage.provider, LLMProvider::DashScope);
+        assert_eq!(
+            usage.input_tokens, 1261,
+            "no double counting of image tokens"
+        );
+        assert_eq!(usage.output_tokens, 382);
+        assert_eq!(usage.total_tokens(), 1643, "reconciles with total_tokens");
+    }
+
+    /// Regression guard from **real captured traffic**: Anthropic-protocol
+    /// gateway responses carry `total_tokens` in `usage` but have no `output`
+    /// envelope, so they must stay Anthropic.
+    #[test]
+    fn test_parse_anthropic_gateway_usage_with_total_tokens_stays_anthropic() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {
+                "input_tokens": 1111,
+                "output_tokens": 803,
+                "total_tokens": 26490,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 24576
+            }
+        }"#;
+        let usage = parser.parse_data(data).expect("usage");
+        assert_eq!(usage.provider, LLMProvider::Anthropic);
+        assert_eq!(usage.input_tokens, 1111);
+        assert_eq!(usage.cache_read_input_tokens, Some(24576));
+    }
+
+    /// Same shape without the Anthropic `type` marker (non-streaming gateway
+    /// response) must also stay Anthropic rather than flipping to DashScope.
+    #[test]
+    fn test_parse_bare_anthropic_usage_with_total_tokens_stays_anthropic() {
+        let parser = TokenParser::new();
+        let data = r#"{
+            "id": "msg_01",
+            "model": "claude-opus-5",
+            "usage": {
+                "input_tokens": 977,
+                "output_tokens": 169,
+                "total_tokens": 26746,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 25600
+            }
+        }"#;
+        let usage = parser.parse_data(data).expect("usage");
+        assert_eq!(usage.provider, LLMProvider::Anthropic);
+        assert_eq!(usage.model.as_deref(), Some("claude-opus-5"));
     }
 
     #[test]

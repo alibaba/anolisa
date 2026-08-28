@@ -1746,8 +1746,18 @@ mod tests {
         let (cmdline_rules, https_rules, http_targets) =
             parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
-        // https rules: dashscope.aliyuncs.com + api.openai.com configured by default
-        assert_eq!(https_rules.len(), 2);
+        // https rules configured by default: the DashScope compatible-mode host,
+        // the Bailian native-protocol wildcard (`{WorkspaceId}.{region}.maas.
+        // aliyuncs.com`), and api.openai.com.
+        let patterns: Vec<&str> = https_rules.iter().map(|r| r.pattern.as_str()).collect();
+        assert_eq!(
+            patterns,
+            vec![
+                "dashscope.aliyuncs.com",
+                "*.maas.aliyuncs.com",
+                "api.openai.com"
+            ]
+        );
         assert!(http_targets.is_empty());
     }
 

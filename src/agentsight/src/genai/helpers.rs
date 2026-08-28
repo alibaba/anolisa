@@ -206,6 +206,25 @@ impl PidAgentNameCache for lru::LruCache<u32, String> {
 }
 
 impl GenAIBuilder {
+    /// Path suffixes of the DashScope/Bailian **native** protocol.
+    ///
+    /// Full form: `POST https://{WorkspaceId}.{region}.maas.aliyuncs.com
+    /// /api/v1/services/aigc/{text,multimodal}-generation/generation`.
+    /// Distinct from the OpenAI-compatible mode
+    /// (`/compatible-mode/v1/chat/completions`), which already matches the
+    /// `/v1/chat/completions` pattern.
+    pub(super) const DASHSCOPE_NATIVE_PATHS: [&'static str; 2] = [
+        "/aigc/text-generation/generation",
+        "/aigc/multimodal-generation/generation",
+    ];
+
+    /// Whether the path belongs to the DashScope/Bailian native protocol.
+    pub(super) fn is_dashscope_native_path(path: &str) -> bool {
+        Self::DASHSCOPE_NATIVE_PATHS
+            .iter()
+            .any(|p| path.contains(p))
+    }
+
     /// Check if the path indicates an LLM API call
     pub(super) fn is_llm_api_path(&self, path: &str) -> bool {
         path.contains("/v1/chat/completions")
@@ -215,6 +234,7 @@ impl GenAIBuilder {
             || path.contains("/chat/completions")
             || path.contains("/completions")
             || path.contains("/api/v1/copilot/generate_copilot")
+            || Self::is_dashscope_native_path(path)
     }
 
     /// Check if request body contains SysOM POP API markers
@@ -228,10 +248,12 @@ impl GenAIBuilder {
 
     /// Normalize the messages array from a parsed request body.
     ///
-    /// Supports both formats:
+    /// Supports:
     /// - OpenAI chat completions: top-level `"messages"` array.
     /// - OpenAI Responses API (codex 0.137+ via dashscope `/v1/responses`):
     ///   top-level `"input"` array with sibling `"instructions"` string.
+    /// - DashScope/Bailian native protocol: top-level `"input"` **object**
+    ///   wrapping a `"messages"` array.
     ///
     /// Returns `(messages_vec, instructions_text)` where `instructions_text`
     /// is the system-prompt fallback used when the messages array has no
@@ -240,6 +262,9 @@ impl GenAIBuilder {
     /// - Anthropic Messages API: the top-level `"system"` field (string or
     ///   array of `{"type":"text","text":"..."}` blocks), since Anthropic
     ///   carries the system prompt outside the messages array.
+    ///
+    /// The native protocol needs no fallback: its system prompt lives inside
+    /// `input.messages`.
     pub(super) fn extract_messages_view(
         body: &serde_json::Value,
     ) -> Option<(Vec<serde_json::Value>, Option<String>)> {
@@ -247,12 +272,17 @@ impl GenAIBuilder {
             let system_text = body.get("system").and_then(Self::extract_system_text);
             return Some((arr.clone(), system_text));
         }
-        if let Some(arr) = body.get("input").and_then(|m| m.as_array()) {
-            let instructions = body
-                .get("instructions")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string());
-            return Some((arr.clone(), instructions));
+        if let Some(input) = body.get("input") {
+            if let Some(arr) = input.as_array() {
+                let instructions = body
+                    .get("instructions")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                return Some((arr.clone(), instructions));
+            }
+            if let Some(arr) = input.get("messages").and_then(|m| m.as_array()) {
+                return Some((arr.clone(), None));
+            }
         }
         None
     }
@@ -327,6 +357,8 @@ impl GenAIBuilder {
             Some("openai".to_string())
         } else if path.contains("/api/v1/copilot/generate_copilot") {
             Some("sysom".to_string())
+        } else if Self::is_dashscope_native_path(path) {
+            Some("dashscope".to_string())
         } else {
             None
         }
@@ -805,6 +837,18 @@ mod tests {
         assert!(!builder.is_llm_api_path("/v1/models"));
     }
 
+    /// DashScope/Bailian native protocol endpoints end in `/generation`, which
+    /// matched none of the compatible-mode patterns. Without them the whole
+    /// non-streaming call was dropped at the `build_llm_call` gate.
+    #[test]
+    fn test_is_llm_api_path_dashscope_native() {
+        let builder = GenAIBuilder::new();
+        assert!(builder.is_llm_api_path("/api/v1/services/aigc/text-generation/generation"));
+        assert!(builder.is_llm_api_path("/api/v1/services/aigc/multimodal-generation/generation"));
+        // Other aigc services (image synthesis, embeddings) stay out.
+        assert!(!builder.is_llm_api_path("/api/v1/services/aigc/text2image/image-synthesis"));
+    }
+
     #[test]
     fn test_is_sysom_pop_request() {
         assert!(GenAIBuilder::is_sysom_pop_request(&Some(
@@ -830,6 +874,28 @@ mod tests {
             Some("sysom".to_string())
         );
         assert_eq!(builder.extract_provider_from_path("/unknown"), None);
+    }
+
+    /// Native protocol calls used to fall through to `"unknown"` (streaming) or
+    /// be mislabelled `"anthropic"` via usage-shape detection (token record).
+    #[test]
+    fn test_extract_provider_from_path_dashscope_native() {
+        let builder = GenAIBuilder::new();
+        assert_eq!(
+            builder.extract_provider_from_path("/api/v1/services/aigc/text-generation/generation"),
+            Some("dashscope".to_string())
+        );
+        assert_eq!(
+            builder.extract_provider_from_path(
+                "/api/v1/services/aigc/multimodal-generation/generation"
+            ),
+            Some("dashscope".to_string())
+        );
+        // Compatible mode keeps reporting openai — it speaks the OpenAI schema.
+        assert_eq!(
+            builder.extract_provider_from_path("/compatible-mode/v1/chat/completions"),
+            Some("openai".to_string())
+        );
     }
 
     #[test]
@@ -1460,6 +1526,38 @@ mod tests {
             GenAIBuilder::extract_system_text(&serde_json::Value::Null),
             None
         );
+    }
+
+    /// DashScope/Bailian native protocol wraps the messages array inside an
+    /// `input` **object**, unlike the Responses API where `input` is an array.
+    #[test]
+    fn test_extract_messages_view_dashscope_native_input_object() {
+        let body = serde_json::json!({
+            "model": "qwen-plus",
+            "input": {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hi"}
+                ]
+            },
+            "parameters": {"result_format": "message"}
+        });
+        let (msgs, instructions) = GenAIBuilder::extract_messages_view(&body).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].get("role").and_then(|r| r.as_str()), Some("system"));
+        // Native protocol carries the system prompt inside the messages array,
+        // so no top-level instructions fallback is needed.
+        assert!(instructions.is_none());
+    }
+
+    /// An `input` object without a `messages` array carries no conversation.
+    #[test]
+    fn test_extract_messages_view_dashscope_native_input_object_without_messages() {
+        let body = serde_json::json!({
+            "model": "qwen-plus",
+            "input": {"prompt": "hi"}
+        });
+        assert!(GenAIBuilder::extract_messages_view(&body).is_none());
     }
 
     #[test]

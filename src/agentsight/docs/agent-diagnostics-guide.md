@@ -60,7 +60,7 @@ AgentSight 支持两种 Agent 发现机制：
   "https": [
     {"rule": ["*.openai.com"]},
     {"rule": ["*.anthropic.com"]},
-    {"rule": ["dashscope.aliyuncs.com"]}
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]}
   ]
 }
 ```
@@ -387,7 +387,7 @@ sudo agentsight trace --daemon
   "https": [
     {"rule": ["*.openai.com"]},
     {"rule": ["*.anthropic.com"]},
-    {"rule": ["dashscope.aliyuncs.com"]}
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]}
   ],
   "cmdline": {
     "allow": [
@@ -471,7 +471,12 @@ AgentSight 自动识别并解析以下 LLM API 格式：
 | OpenAI / 兼容 API | OpenAI Chat Completions | 完整 |
 | Anthropic (Claude) | Messages API（含 cache token） | 完整 |
 | Google Gemini | GenerateContent API | 完整 |
-| 通义千问 (Qwen) | DashScope API | 完整 |
+| 通义千问 (Qwen) | DashScope OpenAI 兼容模式（`/compatible-mode/v1/chat/completions`） | 完整 |
+| 百炼 / DashScope 原生 | `/api/v1/services/aigc/text-generation/generation`、`/api/v1/services/aigc/multimodal-generation/generation` | 完整（多模态 `image_tokens` 计入 input） |
+
+> 百炼原生协议是 Dify / LangGraph 中「百炼」类型节点发出的请求格式，与 OpenAI 兼容模式并行存在：
+> 请求把 messages 嵌在 `input` 对象里，响应把结果包在 `output` 里且顶层无 `model`（model 名取自请求体），
+> 流式响应不发 `data: [DONE]`，以 `output.finish_reason` 作为结束标志。
 
 ---
 
