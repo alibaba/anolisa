@@ -66,16 +66,16 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         ],
     );
     let _ = fs::remove_dir_all(&home);
-    let normalized = output.replace('\r', "");
+    let normalized = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-2"), "{output}");
     assert!(!output.contains("auto-approved by provider"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    // Bounded handoff keeps the plaintext command in its owner-only sidecar;
-    // the provider result remains visible without a standalone command echo.
-    assert!(!normalized.contains("\nsudo -V\n"), "{output}");
+    // The provider-native replay stays suppressed, while the approved command
+    // is presented exactly once as the shell-owned command line.
+    assert_eq!(count_occurrences(&normalized, "\nsudo -V\n"), 1, "{output}");
     assert!(
         output.contains("COSH CORE HOST EXECUTED ECHO FINAL"),
         "{output}"

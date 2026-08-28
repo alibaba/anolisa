@@ -5,6 +5,7 @@ mod alt_screen;
 mod command;
 mod event_store;
 mod handoff_claim;
+mod handoff_echo;
 mod marker_sequence;
 mod routing;
 mod slash_guard_echo;
@@ -17,6 +18,7 @@ use event_store::EventStore;
 use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
+use handoff_echo::PendingHandoffEcho;
 use marker_sequence::{find_bytes, osc_prefix_suffix_len, HistoryFileTracker, Marker};
 use slash_guard_echo::PendingSlashGuardEcho;
 
@@ -115,21 +117,6 @@ pub(super) struct OscParser {
     alt_screen: AltScreenTracker,
 }
 
-#[derive(Debug, Clone)]
-struct PendingHandoffEcho {
-    command: Vec<u8>,
-    replacement: Vec<u8>,
-    matched: usize,
-    ansi_after_command: bool,
-}
-
-enum PendingHandoffEchoAction {
-    Continue,
-    PassThrough(u8),
-    Complete(Vec<u8>),
-    Mismatch(Vec<u8>),
-}
-
 impl OscParser {
     /// Shares the main-prompt gate with the raw input relay (#1721 D16).
     pub(crate) fn set_main_prompt_gate(&mut self, gate: crate::raw_input::MainPromptGate) {
@@ -158,6 +145,10 @@ impl OscParser {
         self.pending_command_origin = Some(pending_origin_for_request(request));
         // Fresh staging supersedes any stale expiry signal.
         self.expired_handoff_staging = false;
+    }
+
+    pub(super) fn clear_pending_handoff_origin(&mut self) {
+        self.pending_command_origin = None;
     }
 
     /// Consumes the "an unclaimed handoff expired at a prompt boundary" flag
@@ -240,6 +231,10 @@ impl OscParser {
         {
             return Ok(());
         }
+
+        // A trusted protocol boundary ends the one-shot submission window.
+        // Any incomplete candidate is ordinary terminal output and fails open.
+        self.flush_pending_handoff_echo()?;
 
         let compact_prompt_marker = marker.normalize_compact_prompt();
 
@@ -491,12 +486,13 @@ impl OscParser {
         let pending = std::mem::take(&mut self.pending);
         self.append_passthrough(&pending)?;
         self.flush_pending_slash_guard_echo()?;
+        self.flush_pending_handoff_echo()?;
         self.flush_pending_clean_control()
     }
 
     fn append_passthrough(&mut self, data: &[u8]) -> io::Result<()> {
         let data = PendingSlashGuardEcho::filter(&mut self.pending_slash_guard_echo, data);
-        let data = self.filter_pending_handoff_echo(&data);
+        let data = PendingHandoffEcho::filter(&mut self.pending_handoff_echo, &data);
         if data.is_empty() {
             return Ok(());
         }
@@ -511,68 +507,6 @@ impl OscParser {
     /// alternate screen (fullscreen TUI classification input).
     pub(crate) fn alt_screen_active(&self) -> bool {
         self.alt_screen.active()
-    }
-
-    fn filter_pending_handoff_echo(&mut self, data: &[u8]) -> Vec<u8> {
-        let mut output = Vec::with_capacity(data.len());
-        for byte in data.iter().copied() {
-            let Some(action) = self.pending_handoff_echo_action(byte) else {
-                output.push(byte);
-                continue;
-            };
-            match action {
-                PendingHandoffEchoAction::Continue => {}
-                PendingHandoffEchoAction::PassThrough(byte) => output.push(byte),
-                PendingHandoffEchoAction::Complete(replacement) => {
-                    output.extend_from_slice(&replacement);
-                    self.pending_handoff_echo = None;
-                }
-                PendingHandoffEchoAction::Mismatch(bytes) => {
-                    output.extend_from_slice(&bytes);
-                    self.pending_handoff_echo = None;
-                }
-            }
-        }
-        output
-    }
-
-    fn pending_handoff_echo_action(&mut self, byte: u8) -> Option<PendingHandoffEchoAction> {
-        let echo = self.pending_handoff_echo.as_mut()?;
-        if echo.matched < echo.command.len() {
-            if byte == echo.command[echo.matched] {
-                echo.matched += 1;
-                return Some(PendingHandoffEchoAction::Continue);
-            }
-            if echo.matched == 0 {
-                return Some(PendingHandoffEchoAction::PassThrough(byte));
-            }
-            let mut bytes = echo.command[..echo.matched].to_vec();
-            bytes.push(byte);
-            return Some(PendingHandoffEchoAction::Mismatch(bytes));
-        }
-
-        if byte == b'\r' || byte == b'\n' {
-            let mut replacement = echo.replacement.clone();
-            replacement.push(byte);
-            return Some(PendingHandoffEchoAction::Complete(replacement));
-        }
-        if byte == b'\x1b' {
-            echo.ansi_after_command = true;
-            return Some(PendingHandoffEchoAction::Continue);
-        }
-        if echo.ansi_after_command {
-            if byte == b'[' || byte == b'?' || byte == b';' || byte.is_ascii_digit() {
-                return Some(PendingHandoffEchoAction::Continue);
-            }
-            if (0x40..=0x7e).contains(&byte) {
-                echo.ansi_after_command = false;
-            }
-            return Some(PendingHandoffEchoAction::Continue);
-        }
-
-        let mut bytes = echo.command.clone();
-        bytes.push(byte);
-        Some(PendingHandoffEchoAction::Mismatch(bytes))
     }
 
     fn append_clean(&mut self, data: &[u8]) -> io::Result<()> {

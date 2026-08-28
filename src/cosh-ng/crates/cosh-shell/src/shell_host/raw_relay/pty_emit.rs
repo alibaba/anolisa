@@ -277,13 +277,37 @@ fn emit_to_pty<W: Write>(
         )
     })?;
     pending_terminal_restore.record_intervention_start(terminal_fd);
-    parser.register_pending_handoff_origin(&request);
     // Must land before the shell sees the command: the marker reads both files
     // from the preexec hook that fires between the newline and the command
     // running.
     stage_handoff_files(handoff_request_file, &request)?;
+    if bounded_bash_handoff {
+        // Keep the transport wrapper executable by Bash while presenting only
+        // the approved command on the user's prompt line.
+        let echoed_command = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        // Validation excludes escapes and all controls except a safe tab or
+        // quoted line feed, so replacement cannot alter terminal state.
+        if let Err(err) =
+            parser.arm_pending_handoff_echo(echoed_command, request.command.as_bytes())
+        {
+            clear_handoff_files(handoff_request_file);
+            return Err(err);
+        }
+    }
+    parser.register_pending_handoff_origin(&request);
     if let Err(err) = write_all_pty(master, &bytes) {
         clear_handoff_files(handoff_request_file);
+        parser.clear_pending_handoff_origin();
+        if bounded_bash_handoff {
+            if let Err(flush_err) = parser.flush_pending_handoff_echo() {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "{err}; failed to release pending handoff echo after PTY write error: {flush_err}"
+                    ),
+                ));
+            }
+        }
         return Err(err);
     }
     Ok(())
