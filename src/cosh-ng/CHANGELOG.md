@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.22.2] — 2026-08-28
+
+### Fixed
+- Approved Bash tool commands handed off to the native shell now display the approved command itself instead of the internal wrapper line, including on Bash 4.4 terminals where fragmented redraws previously leaked that wrapper; execution, approval, history, and exit status are unchanged (#2949)
+- Slash commands entered directly, recalled with Up-arrow, or typed on narrow terminals now appear exactly once in the terminal before their result panel again, while the internal guard line stays absent from terminal output, history, and logs; sensitive slash input is no longer expanded into Bash xtrace output (#2955)
+- Natural-language prompts containing file paths that are routed to the Agent remain visible as a request notice even when the model's first response event is a tool call, so the original request no longer disappears from the screen; sensitive input is redacted as a whole field (#2953)
+- An external interrupt signal sent to the shell process no longer leaves the parent terminal in raw mode: terminal settings are restored while the signal exit status is still reported to callers (#2968)
+
 ## [0.22.1] — 2026-08-28
 
 ### Fixed
