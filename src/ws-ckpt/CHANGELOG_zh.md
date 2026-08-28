@@ -2,6 +2,17 @@
 
 [English](CHANGELOG.md)
 
+## 0.4.5
+
+### Added
+
+- 新增中英双语的 sidecar 部署指南 (#2965)
+
+### Fixed
+
+- 修复所有 loop 设备被占用时的间歇性 bootstrap 失败 (#2965)
+- sidecar preStop 的 loop 清理改为仅处理 ws-ckpt 自身的设备 (#2965)
+
 ## 0.4.4
 
 ### Added

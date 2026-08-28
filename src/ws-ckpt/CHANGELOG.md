@@ -2,6 +2,15 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.4.5
+
+### Added
+- Added bilingual (English/Chinese) sidecar deployment guide (#2965)
+
+### Fixed
+- Fixed intermittent bootstrap failure when all loop devices are in use (#2965)
+- Scoped sidecar preStop loop cleanup to ws-ckpt-owned devices only (#2965)
+
 ## 0.4.4
 
 ### Added
