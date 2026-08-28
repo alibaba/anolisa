@@ -177,6 +177,264 @@ fn intercept_marker_without_sensitive_field_defaults_to_not_sensitive() {
 }
 
 #[test]
+fn unterminated_cosh_candidate_resyncs_to_next_marker() {
+    let mut parser = parser_for_test("unterminated-resync");
+    parser.feed(b"before\r\n").expect("feed visible prefix");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"command\":\"INTERNAL_CANDIDATE\"")
+        .expect("feed unterminated candidate");
+    parser
+        .feed(b"\x1b]1337;")
+        .expect("feed fragmented restart prefix");
+    parser
+        .feed(b"COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\"}\x07after\r\n")
+        .expect("feed valid marker after candidate");
+
+    assert_eq!(parser.precmd_count(), 1);
+    assert!(!parser
+        .events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::UserInputIntercepted));
+    assert!(!parser
+        .events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ComponentFailed));
+    assert_eq!(parser.display.resident_slice(), b"before\r\nafter\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"before\r\nafter\r\n");
+}
+
+#[test]
+fn nonzero_scan_resyncs_to_last_of_multiple_prefixes() {
+    let mut parser = parser_for_test("unterminated-multiple-resync");
+    parser
+        .feed(b"\x1b]1337;COSH;stale-candidate-with-a-scanned-tail")
+        .expect("feed initial candidate");
+    parser
+        .feed(b"\x1b]1337;COSH;second-stale\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\"}\x07visible\r\n")
+        .expect("feed multiple restart candidates");
+
+    assert_eq!(parser.precmd_count(), 1);
+    assert_eq!(parser.display.resident_slice(), b"visible\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible\r\n");
+    assert!(!parser
+        .events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::UserInputIntercepted));
+    assert!(!parser
+        .events
+        .iter()
+        .any(|event| event.kind == ShellEventKind::ComponentFailed));
+}
+
+#[test]
+fn oversized_unterminated_cosh_candidate_recovers_without_leaking() {
+    let mut parser = parser_for_test("unterminated-cap");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+
+    parser.feed(&candidate).expect("feed oversized candidate");
+    parser
+        .feed(b"visible-after-cap\r\n")
+        .expect("feed output after candidate cap");
+
+    assert_eq!(parser.display.resident_slice(), b"visible-after-cap\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible-after-cap\r\n");
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn oversized_candidate_preserves_fragmented_restart_prefix() {
+    let mut parser = parser_for_test("unterminated-cap-fragment");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x1b]1337;");
+
+    parser
+        .feed(&candidate)
+        .expect("feed capped prefix fragment");
+    parser
+        .feed(b"COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\"}\x07visible\r\n")
+        .expect("finish valid marker after cap");
+
+    assert_eq!(parser.precmd_count(), 1);
+    assert_eq!(parser.display.resident_slice(), b"visible\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible\r\n");
+}
+
+#[test]
+fn oversized_candidate_drops_stale_prefix_before_fresh_marker() {
+    let mut parser = parser_for_test("unterminated-cap-fresh-marker");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x1b]1337;");
+
+    parser
+        .feed(&candidate)
+        .expect("feed capped prefix fragment");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\"}\x07visible\r\n")
+        .expect("feed fresh marker after capped fragment");
+
+    assert_eq!(parser.precmd_count(), 1);
+    assert_eq!(parser.display.resident_slice(), b"visible\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible\r\n");
+}
+
+#[test]
+fn oversized_candidate_drops_stale_prefix_and_keeps_output() {
+    let mut parser = parser_for_test("unterminated-cap-stale-prefix");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x1b]1337;");
+
+    parser
+        .feed(&candidate)
+        .expect("feed capped prefix fragment");
+    parser
+        .feed(b"visible-after-cap\r\n")
+        .expect("feed output after capped fragment");
+
+    assert_eq!(parser.display.resident_slice(), b"visible-after-cap\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible-after-cap\r\n");
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn oversized_candidate_keeps_tentative_output_after_mismatch() {
+    let mut parser = parser_for_test("unterminated-cap-tentative-output");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x1b]1337;");
+
+    parser
+        .feed(&candidate)
+        .expect("feed capped prefix fragment");
+    parser.feed(b"CO").expect("feed tentative continuation");
+    parser
+        .feed(b"PY_UNIQUE_OUTPUT\r\n")
+        .expect("feed mismatching output");
+
+    assert_eq!(parser.display.resident_slice(), b"COPY_UNIQUE_OUTPUT\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"COPY_UNIQUE_OUTPUT\r\n");
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn flush_keeps_tentative_output_after_oversized_fragment() {
+    let mut parser = parser_for_test("unterminated-cap-tentative-flush");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x1b]1337;");
+
+    parser
+        .feed(&candidate)
+        .expect("feed capped prefix fragment");
+    parser.feed(b"CO").expect("feed tentative continuation");
+    parser.flush_pending().expect("flush tentative output");
+
+    assert_eq!(parser.display.resident_slice(), b"CO");
+    assert_eq!(parser.clean.resident_slice(), b"CO");
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn flush_drops_oversized_candidate_prefix_fragment() {
+    let mut parser = parser_for_test("unterminated-cap-fragment-flush");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x1b]1337;");
+
+    parser
+        .feed(&candidate)
+        .expect("feed capped prefix fragment");
+    parser.flush_pending().expect("flush capped fragment");
+
+    assert!(parser.display.is_empty());
+    assert!(parser.clean.is_empty());
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn oversized_terminated_candidate_preserves_following_output() {
+    let mut parser = parser_for_test("oversized-terminated-remainder");
+    let mut candidate = b"\x1b]1337;COSH;".to_vec();
+    candidate.extend(std::iter::repeat_n(b'x', 64 * 1024));
+    candidate.extend_from_slice(b"\x07visible-after-frame\r\n");
+
+    parser
+        .feed(&candidate)
+        .expect("feed oversized terminated candidate");
+
+    assert_eq!(parser.display.resident_slice(), b"visible-after-frame\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible-after-frame\r\n");
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn byte_fragmented_candidate_scanning_stays_linear() {
+    let mut parser = parser_for_test("unterminated-linear-scan");
+    OscParser::reset_osc_candidate_scan_bytes();
+    parser
+        .feed(b"\x1b]1337;COSH;")
+        .expect("feed candidate prefix");
+    const FRAGMENTS: usize = 4 * 1024;
+    for _ in 0..FRAGMENTS {
+        parser.feed(b"x").expect("feed candidate byte");
+    }
+
+    assert!(
+        OscParser::osc_candidate_scan_bytes() <= FRAGMENTS * 32,
+        "scanned {} bytes for {FRAGMENTS} fragmented bytes",
+        OscParser::osc_candidate_scan_bytes()
+    );
+}
+
+#[test]
+fn flush_drops_unterminated_cosh_candidate_without_leaking() {
+    let mut parser = parser_for_test("unterminated-flush");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"INTERNAL_TOKEN\"")
+        .expect("feed unterminated candidate");
+    parser.flush_pending().expect("flush parser at EOF");
+
+    assert!(parser.display.is_empty());
+    assert!(parser.clean.is_empty());
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn flush_keeps_output_before_mixed_unterminated_cosh_candidate() {
+    let mut parser = parser_for_test("unterminated-mixed-flush");
+    parser
+        .feed(b"visible-before\r\n\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"INTERNAL_TOKEN\"visible-looking-private-tail")
+        .expect("feed visible output and unterminated candidate");
+    parser.flush_pending().expect("flush mixed parser at EOF");
+
+    assert_eq!(parser.display.resident_slice(), b"visible-before\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible-before\r\n");
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn bel_terminated_malformed_cosh_marker_reports_failure_and_recovers() {
+    let mut parser = parser_for_test("malformed-recovery");
+    parser
+        .feed(b"\x1b]1337;COSH;not-json\x07visible\r\n")
+        .expect("feed malformed marker");
+
+    assert_eq!(
+        parser
+            .events
+            .iter()
+            .filter(|event| event.kind == ShellEventKind::ComponentFailed)
+            .count(),
+        1
+    );
+    assert_eq!(parser.display.resident_slice(), b"visible\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"visible\r\n");
+}
+
+#[test]
 fn trusted_history_file_marker_is_private_and_observed() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&observed);

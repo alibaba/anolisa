@@ -19,6 +19,7 @@ use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
 use handoff_echo::PendingHandoffEcho;
+use marker_sequence::resume_abandoned_prefix;
 use marker_sequence::{find_bytes, osc_prefix_suffix_len, HistoryFileTracker, Marker};
 use slash_guard_echo::PendingSlashGuardEcho;
 
@@ -49,7 +50,13 @@ const UNDERLINE_OFF: &[u8] = b"\x1b[24m";
 const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
+const OSC_CANDIDATE_MAX_BYTES: usize = 64 * 1024;
 const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static OSC_CANDIDATE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Why a display cut was recorded, so consumers can tell an intercepted
 /// input (shell has not painted a prompt for it yet) apart from a real
@@ -69,6 +76,9 @@ pub(super) struct OscParser {
     pub(super) display: Transcript,
     marker_token: Option<String>,
     pending: Vec<u8>,
+    /// Leading pending bytes inherited from a discarded private candidate;
+    /// tentative continuation bytes after this boundary remain terminal output.
+    abandoned_prefix_len: usize,
     pending_clean_control: Vec<u8>,
     current: Option<CurrentCommand>,
     command_seq: usize,
@@ -161,6 +171,15 @@ impl OscParser {
         if self.marker_token.is_none() {
             return self.append_passthrough(data);
         }
+        let Some(data) =
+            resume_abandoned_prefix(&mut self.pending, &mut self.abandoned_prefix_len, data)
+        else {
+            return Ok(());
+        };
+        let mut scan_from = self
+            .pending
+            .len()
+            .saturating_sub(OSC_PREFIX.len().saturating_sub(1));
         self.pending.extend_from_slice(data);
         loop {
             let Some(start) = find_bytes(&self.pending, OSC_PREFIX) else {
@@ -178,19 +197,59 @@ impl OscParser {
                 let passthrough = self.pending[..start].to_vec();
                 self.append_passthrough(&passthrough)?;
                 self.pending.drain(..start);
+                scan_from = scan_from.saturating_sub(start);
             }
 
             let payload_start = OSC_PREFIX.len();
-            let Some(end) = self.pending[payload_start..]
-                .iter()
-                .position(|byte| *byte == BEL)
-                .map(|idx| idx + payload_start)
-            else {
+            scan_from = scan_from.max(payload_start).min(self.pending.len());
+            let candidate = &self.pending[scan_from..];
+            let terminator_offset = candidate.iter().position(|byte| *byte == BEL);
+            #[cfg(test)]
+            {
+                let scanned = terminator_offset.map_or(candidate.len(), |idx| idx + 1);
+                OSC_CANDIDATE_SCAN_BYTES
+                    .set(OSC_CANDIDATE_SCAN_BYTES.get().saturating_add(scanned));
+            }
+            let terminator = terminator_offset.map(|idx| idx + scan_from);
+            let restart_before = terminator.unwrap_or(self.pending.len());
+            let restart_candidate = &self.pending[scan_from..restart_before];
+            #[cfg(test)]
+            {
+                OSC_CANDIDATE_SCAN_BYTES.set(
+                    OSC_CANDIDATE_SCAN_BYTES
+                        .get()
+                        .saturating_add(restart_candidate.len()),
+                );
+            }
+            let restart = restart_candidate
+                .windows(OSC_PREFIX.len())
+                .rposition(|window| window == OSC_PREFIX)
+                .map(|idx| idx + scan_from);
+            if let Some(restart) = restart {
+                self.pending.drain(..restart);
+                scan_from = payload_start;
+                continue;
+            }
+
+            let Some(end) = terminator else {
+                if self.pending.len() > OSC_CANDIDATE_MAX_BYTES {
+                    let keep = osc_prefix_suffix_len(&self.pending);
+                    let split_at = self.pending.len() - keep;
+                    let suffix = self.pending.split_off(split_at);
+                    self.pending = suffix;
+                    self.abandoned_prefix_len = self.pending.len();
+                }
                 return Ok(());
             };
+            if end + 1 > OSC_CANDIDATE_MAX_BYTES {
+                self.pending.drain(..=end);
+                scan_from = 0;
+                continue;
+            }
 
             let payload = self.pending[payload_start..end].to_vec();
             self.pending.drain(..=end);
+            scan_from = 0;
             match serde_json::from_slice::<Marker>(&payload) {
                 Ok(marker) => self.handle_marker(marker)?,
                 Err(err) => self.events.push(ShellEvent {
@@ -217,6 +276,16 @@ impl OscParser {
                 }),
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_osc_candidate_scan_bytes() {
+        OSC_CANDIDATE_SCAN_BYTES.set(0);
+    }
+
+    #[cfg(test)]
+    pub(super) fn osc_candidate_scan_bytes() -> usize {
+        OSC_CANDIDATE_SCAN_BYTES.get()
     }
 
     fn handle_marker(&mut self, mut marker: Marker) -> io::Result<()> {
@@ -477,14 +546,6 @@ impl OscParser {
             observer.observe(snapshot);
         }
         Some(generation)
-    }
-
-    pub(super) fn flush_pending(&mut self) -> io::Result<()> {
-        let pending = std::mem::take(&mut self.pending);
-        self.append_passthrough(&pending)?;
-        self.flush_pending_slash_guard_echo()?;
-        self.flush_pending_handoff_echo()?;
-        self.flush_pending_clean_control()
     }
 
     fn append_passthrough(&mut self, data: &[u8]) -> io::Result<()> {

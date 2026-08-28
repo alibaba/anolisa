@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::super::transcript::TranscriptRetention;
+use super::marker_sequence::discard_abandoned_prefix;
 use super::{AltScreenTracker, OscParser, Transcript, VisibleTailTracker};
 use crate::types::SESSION_OUTPUT_REF_MAX_BYTES;
 
@@ -13,6 +14,17 @@ use super::super::osc_output::{
 };
 
 impl OscParser {
+    pub(in super::super) fn flush_pending(&mut self) -> io::Result<()> {
+        let mut pending = std::mem::take(&mut self.pending);
+        discard_abandoned_prefix(&mut pending, &mut self.abandoned_prefix_len);
+        if !pending.starts_with(super::OSC_PREFIX) {
+            self.append_passthrough(&pending)?;
+        }
+        self.flush_pending_slash_guard_echo()?;
+        self.flush_pending_handoff_echo()?;
+        self.flush_pending_clean_control()
+    }
+
     pub(crate) fn new(session_id: String, output_ref_dir: PathBuf, marker_token: String) -> Self {
         let work_dir = output_ref_dir
             .parent()
@@ -85,6 +97,7 @@ impl OscParser {
             )?,
             marker_token,
             pending: Vec::new(),
+            abandoned_prefix_len: 0,
             pending_clean_control: Vec::new(),
             current: None,
             command_seq: 0,

@@ -24,6 +24,38 @@ pub(super) fn osc_prefix_suffix_len(pending: &[u8]) -> usize {
     0
 }
 
+pub(super) fn resume_abandoned_prefix<'a>(
+    pending: &mut Vec<u8>,
+    abandoned_prefix_len: &mut usize,
+    data: &'a [u8],
+) -> Option<&'a [u8]> {
+    if *abandoned_prefix_len == 0 {
+        return Some(data);
+    }
+    let Some(continuation) = super::OSC_PREFIX.strip_prefix(pending.as_slice()) else {
+        discard_abandoned_prefix(pending, abandoned_prefix_len);
+        return Some(data);
+    };
+    if data.starts_with(continuation) {
+        pending.extend_from_slice(continuation);
+        *abandoned_prefix_len = 0;
+        Some(&data[continuation.len()..])
+    } else if continuation.starts_with(data) {
+        pending.extend_from_slice(data);
+        None
+    } else {
+        // Reparse the fresh chunk so abandoning a private fragment cannot
+        // discard tentative continuation bytes that arrived after it.
+        discard_abandoned_prefix(pending, abandoned_prefix_len);
+        Some(data)
+    }
+}
+
+pub(super) fn discard_abandoned_prefix(pending: &mut Vec<u8>, abandoned_prefix_len: &mut usize) {
+    let private_len = std::mem::take(abandoned_prefix_len).min(pending.len());
+    pending.drain(..private_len);
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct Marker {
     #[serde(alias = "e")]
