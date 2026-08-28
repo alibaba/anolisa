@@ -38,6 +38,7 @@ pub struct KernelArgs {
 pub enum KernelCommands {
     /// Install kernel modules and eBPF programs
     Install {
+        /// Request an install preview; currently fails closed without executing
         #[arg(long)]
         dry_run: bool,
     },
@@ -134,6 +135,7 @@ pub enum SecurityCommands {
     Install {
         /// Target: loongshield, seccomp-profiles
         target: String,
+        /// Request an install preview; currently fails closed without executing
         #[arg(long)]
         dry_run: bool,
     },
