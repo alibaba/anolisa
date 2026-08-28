@@ -1080,6 +1080,7 @@ pub fn record_compression(
     .with_entry_metadata(
         request.seam.wire_str(),
         response.content_type.clone(),
+        Some(request.content_origin.wire_str().to_owned()),
         chain_json,
         response.tokenizer_id.clone(),
         outcome.stats.unrecoverable_truncations.map(|n| n as i64),
@@ -1135,6 +1136,7 @@ fn resolve_runtime_data_dir(explicit: Option<&Path>) -> Result<PathBuf, RuntimeE
 mod tests {
     use super::*;
     use tokenless_ccr::{InMemoryStore, StashError};
+    use tokenless_protocol::ContentOrigin;
 
     struct AlwaysFail;
 
@@ -1914,6 +1916,29 @@ mod tests {
         assert_eq!(records[0].seam.as_deref(), Some("post_tool"));
         assert!(records[0].content_type.is_some());
         assert!(records[0].compressor_chain.is_some());
+        // An undeclared origin lands as `unspecified`, not NULL.
+        assert_eq!(records[0].content_origin.as_deref(), Some("unspecified"));
+    }
+
+    #[test]
+    fn record_compression_carries_the_declared_origin_to_the_column() {
+        // `record_compression` is the only writer of `content_origin`; this
+        // pins the wire string end to end, through the column §4.7 will read
+        // to tell a protected-path passthrough from an ordinary no-savings
+        // row. `ApiResponse` because it is off the release gate, so the row
+        // exists to carry the value.
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+
+        let mut request = entry_request(&compressible_api_json(), Seam::PostTool);
+        request.content_origin = ContentOrigin::ApiResponse;
+        let outcome = compress_with_store(&request, &ENTRY_ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        record_compression(&request, &outcome, Some(&recorder), false);
+
+        let records = recorder.records_by_session("session-r", None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].content_origin.as_deref(), Some("api_response"));
     }
 
     #[test]

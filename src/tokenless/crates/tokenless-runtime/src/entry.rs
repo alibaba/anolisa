@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use tokenless_ccr::StashStore;
 use tokenless_protocol::{
-    CompressionRequest, CompressionResponse, Disposition, Reversibility, Seam,
+    CompressionRequest, CompressionResponse, ContentOrigin, Disposition, Reversibility, Seam,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{OperationType, estimate_tokens};
@@ -196,13 +196,6 @@ fn post_tool(
     options: &EntryOptions,
     stash_store: Option<&Arc<dyn StashStore>>,
 ) -> EntryOutcome {
-    if request
-        .tool_name
-        .as_deref()
-        .is_some_and(taxonomy::is_skip_tool)
-    {
-        return EntryOutcome::passthrough(request, None);
-    }
     let Some((normalized, original_value)) = normalize_content(&request.content) else {
         return post_tool_text(request, options, stash_store);
     };
@@ -211,7 +204,7 @@ fn post_tool(
         return EntryOutcome::passthrough(request, None);
     }
 
-    let thresholds = taxonomy::thresholds_for(request.tool_name.as_deref());
+    let thresholds = taxonomy::thresholds_for(request.content_origin, request.tool_name.as_deref());
     let compress_options = CompressOptions {
         truncate_strings_at: Some(thresholds.truncate_strings_at),
         truncate_arrays_at: Some(thresholds.truncate_arrays_at),
@@ -340,9 +333,23 @@ fn decide_post_tool_winner(
     original_value: &serde_json::Value,
     cleanup_candidate: Option<String>,
 ) -> Option<Winner> {
+    // TOON runs outside the pipeline, so the release gate of §4.3 does not
+    // reach it on its own — and `JsonRecords` is protected, which is exactly
+    // the shape TOON encodes. Left alone it would re-encode a `package.json`
+    // read from disk into a format the file does not have, which is the same
+    // desynchronization the gate exists to prevent, arriving by another door.
+    //
+    // On the file-content path TOON may therefore only run on top of a
+    // candidate the pipeline itself produced, which means on a released type.
+    // No released type has a compressor today, so in practice this switches
+    // TOON off for file reads outright; the condition reopens on its own the
+    // day one lands. §9 removes the carve-out for good by moving TOON inside
+    // the JSON compressor, where the gate covers it like any other.
+    let released_by_the_pipeline =
+        request.content_origin != ContentOrigin::FileContent || cleanup_candidate.is_some();
     // TOON is a non-JSON encoding: only hosts whose slot accepts arbitrary
     // text can apply it.
-    let toon = if request.capabilities.replace_with_text {
+    let toon = if request.capabilities.replace_with_text && released_by_the_pipeline {
         let base_text = cleanup_candidate.as_deref().unwrap_or(normalized);
         let base_chars = base_text.chars().count();
         if base_chars >= MIN_TOON_CHARS {
@@ -703,14 +710,144 @@ mod tests {
     }
 
     #[test]
-    fn skip_tools_pass_through_untouched() {
+    fn a_tool_name_no_longer_decides_on_its_own() {
+        // The layer-1 skip list is gone (roadmap §6.3): a request naming a
+        // read tool but declaring no origin is judged by its content like any
+        // other. Adapters still prefilter these before spawning, so this is
+        // not a change any host sees — it is a change to what this API means.
         let outcome = compress_with_store(
             &post_tool_request(&compressible_object(), "Read"),
             &ENABLED,
             None,
         );
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+    }
+
+    /// The same request with an origin declared.
+    fn origin_request(content: &str, tool: &str, origin: ContentOrigin) -> CompressionRequest {
+        let mut request = post_tool_request(content, tool);
+        request.content_origin = origin;
+        request
+    }
+
+    /// A build log committed to this repository, read back the way an agent
+    /// would read any tracked file.
+    const TRACKED_BUILD_LOG: &str =
+        include_str!("../../tokenless-compressors/tests/fixtures/build_logs/cargo_failure.txt");
+
+    #[test]
+    fn a_build_log_read_from_disk_is_not_rewritten() {
+        // `BuildLog` was released until review found it shares the flaw that
+        // keeps `JsonRecords` protected: the detector scores content alone, so
+        // this fixture — or a contributor doc quoting a compiler twice, see
+        // `prose_carrying_two_generic_markers_is_a_known_detection_boundary` —
+        // sits in the bucket beside the output of the build that just ran.
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+
+        let mut file = text_request(TRACKED_BUILD_LOG);
+        file.content_origin = ContentOrigin::FileContent;
+        let file = compress_with_store(&file, &ENABLED, Some(&store));
+        assert_eq!(file.response.disposition, Disposition::Passthrough);
+        assert_eq!(file.response.output, TRACKED_BUILD_LOG);
+        assert!(file.response.compressor_chain.is_empty());
+        assert!(file.response.stash_keys.is_empty());
+        // Protected means full passthrough: nothing was stashed either.
+        assert_eq!(store.len(), 0);
+
+        // The same bytes as command output still compress. Measured on the
+        // released list this replaces: the file path ran `["terminal-cleanup",
+        // "build-log"]`, stripped SGR and folded a run of lines behind a
+        // retrieval marker — a view the file on disk does not have, which the
+        // model's next exact-match edit would be written against.
+        let mut command = text_request(TRACKED_BUILD_LOG);
+        command.content_origin = ContentOrigin::CommandOutput;
+        let command = compress_with_store(&command, &ENABLED, Some(&store));
+        assert_eq!(command.response.disposition, Disposition::Applied);
+        assert_ne!(command.response.output, TRACKED_BUILD_LOG);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn an_authored_json_config_read_from_disk_is_not_rewritten() {
+        // The taxonomy has one bucket for all JSON, so releasing it would hand
+        // the response cleanup a hand-authored `package.json`: it drops null
+        // and empty fields, and the model's next exact-match edit then fails
+        // against a file it believes it read. Measured before this test
+        // existed: `"description"` and `"license"` were both removed.
+        let package_json = serde_json::to_string_pretty(&serde_json::json!({
+            "name": "my-app",
+            "version": "1.0.0",
+            "description": "",
+            "license": null,
+            "keywords": [],
+            "dependencies": (0..40)
+                .map(|i| (format!("dep-{i:02}"), serde_json::json!("^1.0.0")))
+                .collect::<serde_json::Map<_, _>>(),
+        }))
+        .unwrap();
+
+        // A text slot, where the cleanup's removals are final — a structured
+        // slot restores top-level fields on the way out, which hides the
+        // damage for that shape but not for this one. It is also the slot
+        // TOON needs, so the byte-identical assertion below pins the entry's
+        // carve-out too: no pipeline candidate on a file read, no TOON.
+        let mut file = origin_request(&package_json, "Read", ContentOrigin::FileContent);
+        file.capabilities.replace_with_text = true;
+        let outcome = compress_with_store(&file, &ENABLED, None);
         assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert!(outcome.response.compressor_chain.is_empty());
+        assert_eq!(outcome.response.output, package_json);
+
+        // The same bytes as command output: still compressed, and the fields
+        // do go. The gate is about where the content came from, not what it
+        // is — and this is what the file path was about to do.
+        let mut command = origin_request(&package_json, "Bash", ContentOrigin::CommandOutput);
+        command.capabilities.replace_with_text = true;
+        let outcome = compress_with_store(&command, &ENABLED, None);
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert!(!outcome.response.output.contains("description"));
+        assert!(!outcome.response.output.contains("license"));
+    }
+
+    /// Long enough to engage the generic mode, and detected as `PlainText` —
+    /// the release list protects it.
+    fn prose_text() -> String {
+        (0..120)
+            .map(|i| format!("record {i} holding some ordinary content\n"))
+            .collect()
+    }
+
+    #[test]
+    fn protected_content_from_a_file_passes_through_byte_identical() {
+        // The detector cannot tell prose from source code in a language it
+        // does not know, and a rewritten copy of either breaks the model's
+        // next exact-match edit against the file.
+        let prose = prose_text();
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+
+        let mut command = text_request(&prose);
+        command.content_origin = ContentOrigin::CommandOutput;
+        let command = compress_with_store(&command, &ENABLED, Some(&store));
+        assert_eq!(command.response.disposition, Disposition::Applied);
+
+        let mut file = text_request(&prose);
+        file.content_origin = ContentOrigin::FileContent;
+        let before = store.len();
+        let file = compress_with_store(&file, &ENABLED, Some(&store));
+        assert_eq!(file.response.disposition, Disposition::Passthrough);
+        assert_eq!(file.response.output, prose);
+        assert!(file.response.compressor_chain.is_empty());
+        assert!(file.response.stash_keys.is_empty());
+        // Protected means full passthrough: not even the lossless stage ran.
+        assert_eq!(store.len(), before);
+    }
+
+    #[test]
+    fn an_undeclared_origin_never_reaches_the_release_gate() {
+        // The migration's inert default: the same protected content, with no
+        // origin declared, compresses exactly as it did before this change.
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let outcome = compress_with_store(&text_request(&prose_text()), &ENABLED, Some(&store));
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
     }
 
     #[test]

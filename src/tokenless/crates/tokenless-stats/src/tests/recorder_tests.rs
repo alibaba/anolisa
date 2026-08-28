@@ -511,6 +511,7 @@ fn entry_metadata_round_trips() {
         .with_entry_metadata(
             "post_tool",
             Some("api-records".into()),
+            Some("command_output".into()),
             Some(r#"["response-cleanup","toon"]"#.into()),
             "heuristic-v1",
             Some(2),
@@ -519,6 +520,7 @@ fn entry_metadata_round_trips() {
     let got = rec.record_by_id(id).unwrap().unwrap();
     assert_eq!(got.seam.as_deref(), Some("post_tool"));
     assert_eq!(got.content_type.as_deref(), Some("api-records"));
+    assert_eq!(got.content_origin.as_deref(), Some("command_output"));
     assert_eq!(
         got.compressor_chain.as_deref(),
         Some(r#"["response-cleanup","toon"]"#)

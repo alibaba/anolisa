@@ -105,6 +105,50 @@ impl Seam {
     }
 }
 
+/// Where the content came from, as observed by the adapter (roadmap §4.3).
+///
+/// Detection answers what the content *is*; only the caller knows whether an
+/// authoritative copy of it lives somewhere else. Compressing a copy of
+/// stored content desynchronizes the model from that authority — the model
+/// cannot see the divergence, and its next exact-match edit fails against a
+/// string it believes it read. Command output has no such authority to
+/// diverge from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentOrigin {
+    /// No origin declared. The pre-migration path: no origin gate applies,
+    /// and tool-name-based selectors stay in effect.
+    #[default]
+    Unspecified,
+    /// Produced by executing something; no authoritative copy exists
+    /// elsewhere.
+    CommandOutput,
+    /// A copy of stored content whose authority lives elsewhere.
+    FileContent,
+    /// A service or framework result that is neither of the above.
+    ApiResponse,
+}
+
+impl ContentOrigin {
+    /// Whether no origin was declared. Also the serde skip predicate: an
+    /// unspecified origin never reaches the wire.
+    #[must_use]
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, Self::Unspecified)
+    }
+
+    /// The `snake_case` wire name, identical to this enum's serde encoding.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::CommandOutput => "command_output",
+            Self::FileContent => "file_content",
+            Self::ApiResponse => "api_response",
+        }
+    }
+}
+
 /// What the requesting adapter's host can actually do with the result.
 ///
 /// The pipeline intersects compressor candidates with these capabilities
@@ -159,6 +203,12 @@ pub struct CompressionRequest {
     pub tool_name: Option<String>,
     /// Where in the agent loop this content was intercepted.
     pub seam: Seam,
+    /// Where the content came from. Absent on the wire means
+    /// [`ContentOrigin::Unspecified`], and an unspecified origin is left off
+    /// the wire, so an adapter that has not migrated keeps both its current
+    /// behaviour and its current payload.
+    #[serde(default, skip_serializing_if = "ContentOrigin::is_unspecified")]
+    pub content_origin: ContentOrigin,
     /// What the host can do with the result. Missing fields are `false`.
     #[serde(default)]
     pub capabilities: Capabilities,
@@ -176,6 +226,7 @@ impl CompressionRequest {
             tool_use_id: None,
             tool_name: None,
             seam,
+            content_origin: ContentOrigin::Unspecified,
             capabilities: Capabilities::default(),
         }
     }

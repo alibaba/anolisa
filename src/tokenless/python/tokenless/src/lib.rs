@@ -472,6 +472,7 @@ fn record_metadata_json(record: &StatsRecord) -> serde_json::Value {
         "stash_errors": record.stash_errors,
         "stash_size": record.stash_size,
         "content_type": record.content_type,
+        "content_origin": record.content_origin,
         "seam": record.seam,
         "compressor_chain": record.compressor_chain,
         "tokenizer_id": record.tokenizer_id,
@@ -488,4 +489,42 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("TokenlessError", module.py().get_type::<TokenlessError>())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokenless_stats::OperationType;
+
+    /// `show` serializes the record; `list` builds its payload by hand. A
+    /// field added to [`StatsRecord`] therefore reads as `None` through
+    /// `list` until it is added here too — silently, because the Python
+    /// parser uses `.get()`. Compare the shapes rather than any one field.
+    #[test]
+    fn the_list_payload_carries_every_field_show_does() {
+        let record = StatsRecord::new(
+            OperationType::CompressResponse,
+            "cli".into(),
+            100,
+            40,
+            50,
+            20,
+        );
+        let mut shown: Vec<String> = serde_json::to_value(&record)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let mut listed: Vec<String> = record_metadata_json(&record)
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        shown.sort();
+        listed.sort();
+        assert_eq!(listed, shown);
+    }
 }

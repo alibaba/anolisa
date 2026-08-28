@@ -177,6 +177,14 @@ fn wire_format_is_stable() {
         r#"{"protocol_version":1,"content":"c","agent_id":"a","seam":"post_tool","capabilities":{"replace_output":true,"publish_retrieve_tool":false,"replace_with_text":false}}"#
     );
 
+    // A declared origin adds one field; an unspecified one stays off the
+    // wire entirely, which is what keeps unmigrated adapters byte-identical.
+    req.content_origin = ContentOrigin::FileContent;
+    assert_eq!(
+        req.to_json().unwrap(),
+        r#"{"protocol_version":1,"content":"c","agent_id":"a","seam":"post_tool","content_origin":"file_content","capabilities":{"replace_output":true,"publish_retrieve_tool":false,"replace_with_text":false}}"#
+    );
+
     let resp = CompressionResponse {
         protocol_version: PROTOCOL_VERSION,
         output: "o".into(),
@@ -194,6 +202,33 @@ fn wire_format_is_stable() {
         resp.to_json().unwrap(),
         r#"{"protocol_version":1,"output":"o","disposition":"no_savings","content_type":"search_results","compressor_chain":["search"],"reversibility":"unrecoverable","before_tokens":10,"after_tokens":10,"stash_keys":["k"],"tokenizer_id":"heuristic-v1","diagnostic":"d"}"#
     );
+}
+
+#[test]
+fn every_origin_round_trips_and_absence_reads_as_unspecified() {
+    for origin in [
+        ContentOrigin::Unspecified,
+        ContentOrigin::CommandOutput,
+        ContentOrigin::FileContent,
+        ContentOrigin::ApiResponse,
+    ] {
+        let mut req = CompressionRequest::new("c", "a", Seam::PostTool);
+        req.content_origin = origin;
+        let parsed = CompressionRequest::from_json(&req.to_json().unwrap()).unwrap();
+        assert_eq!(parsed.content_origin, origin);
+        // `wire_str` is hand-written beside a serde rename: assert the two
+        // agree, rather than that the enum equals itself.
+        assert_eq!(
+            serde_json::to_value(origin).unwrap(),
+            serde_json::Value::String(origin.wire_str().to_owned())
+        );
+    }
+
+    // The pre-migration payload: no field at all.
+    let legacy = r#"{"protocol_version":1,"content":"c","agent_id":"a","seam":"post_tool"}"#;
+    let parsed = CompressionRequest::from_json(legacy).unwrap();
+    assert_eq!(parsed.content_origin, ContentOrigin::Unspecified);
+    assert!(parsed.content_origin.is_unspecified());
 }
 
 #[test]

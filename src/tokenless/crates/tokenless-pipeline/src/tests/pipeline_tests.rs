@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokenless_ccr::InMemoryStore;
-use tokenless_protocol::{Capabilities, Seam};
+use tokenless_protocol::{Capabilities, ContentOrigin, Seam};
 
 use crate::registry::CostClass;
 
@@ -371,6 +371,56 @@ fn undeclared_capabilities_filter_out_candidates() {
     let response = run(&request, &[&SpaceSquisher], None, &config());
     assert_eq!(response.disposition, Disposition::Passthrough);
     assert_eq!(response.output, SPACEY);
+}
+
+#[test]
+fn file_content_protects_types_off_the_release_list() {
+    // `SPACEY_MULTILINE` is prose — `PlainText`, which the list protects.
+    // The gate runs before routing, so not even a lossless compressor sees
+    // it: protected means full passthrough, and a rewritten copy of a file
+    // breaks the model's next exact-match edit just as a lossy one would.
+    let mut request = request(SPACEY_MULTILINE, FULL);
+    request.content_origin = ContentOrigin::FileContent;
+    let store = InMemoryStore::new();
+    let mut config = config();
+    config.max_tokens = Some(10);
+    let response = run(
+        &request,
+        &[&SpaceSquisher, &TailStasher],
+        Some(&store),
+        &config,
+    );
+    assert_eq!(response.disposition, Disposition::Passthrough);
+    assert_eq!(response.output, SPACEY_MULTILINE);
+    assert_eq!(response.after_tokens, response.before_tokens);
+    assert!(response.compressor_chain.is_empty());
+    assert_eq!(store.len(), 0);
+    // The detected type is still reported: a protected passthrough has to be
+    // distinguishable from a no-savings one when tuning the list (§4.7).
+    assert_eq!(response.content_type.as_deref(), Some("plain_text"));
+
+    // Same content, same compressors, command output: the gate is about
+    // where the content came from, not what it is.
+    request.content_origin = ContentOrigin::CommandOutput;
+    let response = run(
+        &request,
+        &[&SpaceSquisher, &TailStasher],
+        Some(&store),
+        &config,
+    );
+    assert_eq!(response.disposition, Disposition::Applied);
+}
+
+#[test]
+fn an_undeclared_origin_never_reaches_the_release_gate() {
+    // The migration default: protected content still compresses, because no
+    // caller has claimed it came from a file.
+    let request = request(SPACEY_MULTILINE, FULL);
+    assert_eq!(request.content_origin, ContentOrigin::Unspecified);
+    let mut config = config();
+    config.max_tokens = Some(10);
+    let response = run(&request, &[&SpaceSquisher], None, &config);
+    assert_eq!(response.disposition, Disposition::Applied);
 }
 
 #[test]
