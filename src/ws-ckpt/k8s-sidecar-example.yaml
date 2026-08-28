@@ -82,9 +82,18 @@ spec:
           mountPath: /data
         - name: config
           mountPath: /etc/ws-ckpt
-      # Clean orphan loop devices on pod teardown. Dead containers leave
-      # host-scoped loops pointing at phantom paths (container rootfs gone but
-      # loop persists). Without this, the next pod sees a stale btrfs mount.
+      # Clean loop devices on pod teardown. Two rules for two kinds of
+      # leftovers, neither of which may use path existence as the signal:
+      # - This pod's own loop is captured with `losetup -j` BEFORE umount:
+      #   it matches the backing file by (device, inode), which stays
+      #   correct even if another pod later recreates the same path with a
+      #   different inode.
+      # - Historical orphans from dead pods are recognized by the kernel's
+      #   " (deleted)" marker on the backing file (only an unlinked backing
+      #   file carries it, so a live container's loop never matches).
+      # Best-effort by design: if the daemon still holds the mount when
+      # preStop runs, umount/detach fail with EBUSY and the next daemon's
+      # inode-based orphan recovery finishes the cleanup.
       lifecycle:
         preStop:
           exec:
@@ -92,9 +101,16 @@ spec:
               - /bin/sh
               - -c
               - |
+                own_loops=$(losetup -j /var/lib/ws-ckpt/btrfs-data.img 2>/dev/null | cut -d: -f1)
                 umount /opt/ws-ckpt-mount 2>/dev/null || true
+                for dev in $own_loops; do
+                  losetup -d "$dev" 2>/dev/null || true
+                done
                 losetup -ln -O NAME,BACK-FILE | while read dev file; do
-                  [ -e "$file" ] || losetup -d "$dev" 2>/dev/null
+                  case "$file" in
+                    "/var/lib/ws-ckpt/btrfs-data.img (deleted)"|"/data/ws-ckpt/btrfs-data.img (deleted)")
+                      losetup -d "$dev" 2>/dev/null || true ;;
+                  esac
                 done
     - name: app
       image: localhost/ws-ckpt:smoke

@@ -1163,19 +1163,125 @@ async fn check_mount_busy(mount_path: &str) -> Option<String> {
 /// logical blocks larger than the loop's 512 (4Kn NVMe, 4096-sector LUKS2)
 /// fail the block-size check. DIO is a performance optimization, not a
 /// correctness requirement, so those hosts fall back to buffered mode.
+///
+/// The retry loop handles a device-node race: when every registered loop
+/// device is attached (e.g. leftovers from containers that exited without
+/// detaching), `LOOP_CTL_GET_FREE` makes the kernel register a new loop
+/// device, but udev creates its /dev node asynchronously — so the very
+/// losetup that triggered the registration fails with ENOENT. `losetup
+/// --find` reports the device that would be handed out next, so its node can
+/// be created synchronously before retrying.
 async fn attach_loop(img: &str) -> anyhow::Result<String> {
-    let dev = run_command("losetup", &["--find", "--show", img])
-        .await
-        .context("Failed to setup loop device")?;
-    let dev = dev.trim().to_string();
-    if let Err(e) = run_command_checked("losetup", &["--direct-io=on", &dev]).await {
-        warn!(
-            "Could not enable direct-io on {} for {}: {:#}. Continuing in buffered mode; \
-             checkpoint latency will be higher.",
-            dev, img, e
-        );
+    const ATTEMPTS: u32 = 5;
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=ATTEMPTS {
+        match run_command("losetup", &["--find", "--show", img]).await {
+            Ok(dev) => {
+                let dev = dev.trim().to_string();
+                if let Err(e) = run_command_checked("losetup", &["--direct-io=on", &dev]).await {
+                    warn!(
+                        "Could not enable direct-io on {} for {}: {:#}. Continuing in buffered mode; \
+                         checkpoint latency will be higher.",
+                        dev, img, e
+                    );
+                }
+                return Ok(dev);
+            }
+            Err(e) => {
+                warn!(
+                    "losetup attach attempt {}/{} for {} failed: {:#}",
+                    attempt, ATTEMPTS, img, e
+                );
+                last_err = Some(e);
+                if let Ok(free) = run_command("losetup", &["--find"]).await {
+                    ensure_loop_node(free.trim()).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
     }
-    Ok(dev)
+    Err(last_err.unwrap_or_else(|| anyhow::Error::msg("losetup failed with no recorded error")))
+        .context("Failed to setup loop device")
+}
+
+/// Normalize `losetup --find` output to the canonical `/dev/loopN` path.
+///
+/// util-linux >= 2.40 appends " (lost)" when the kernel device exists but
+/// its /dev node is missing — precisely the state the retry path repairs.
+/// Returns None for empty output or anything that is not a loop device.
+fn normalize_free_loop_dev(raw: &str) -> Option<&str> {
+    let path = raw.split_whitespace().next()?;
+    let name = Path::new(path).file_name()?.to_str()?;
+    let index = name.strip_prefix("loop")?;
+    if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(path)
+}
+
+/// Parse the `major:minor` pair exported at `/sys/block/<dev>/dev`.
+///
+/// The device number must come from sysfs, never from the device name: with
+/// `max_part > 0` the loop driver reserves partition minors and assigns the
+/// disk a shifted minor, so `loop1` can be `7:128` rather than `7:1`.
+fn parse_sysfs_dev_numbers(raw: &str) -> Option<(&str, &str)> {
+    let (major, minor) = raw.trim().split_once(':')?;
+    let is_number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if is_number(major) && is_number(minor) {
+        Some((major, minor))
+    } else {
+        None
+    }
+}
+
+/// Arguments for creating a loop device node: block device with the same
+/// restrictive mode udev applies — never world-readable, since the node
+/// exposes the raw workspace image once attached.
+fn loop_node_mknod_args<'a>(node: &'a str, major: &'a str, minor: &'a str) -> [&'a str; 6] {
+    ["-m", "0660", node, "b", major, minor]
+}
+
+/// Create the `/dev/<free_dev>` node if it does not exist yet.
+///
+/// Called with the device `losetup --find` would hand out next: the kernel
+/// already has the device registered (so `/sys/block/<name>/dev` carries the
+/// authoritative device number), only the udev node is missing. The daemon
+/// runs as root; failure is non-fatal because udev may still deliver the
+/// node before the next retry.
+async fn ensure_loop_node(free_dev: &str) {
+    let free_dev = match normalize_free_loop_dev(free_dev) {
+        Some(path) => path,
+        None => return,
+    };
+    if Path::new(free_dev).exists() {
+        return;
+    }
+    let dev_name = match Path::new(free_dev).file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => return,
+    };
+    let dev_str = match tokio::fs::read_to_string(format!("/sys/block/{dev_name}/dev")).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Could not read /sys/block/{}/dev: {}", dev_name, e);
+            return;
+        }
+    };
+    let (major, minor) = match parse_sysfs_dev_numbers(&dev_str) {
+        Some(pair) => pair,
+        None => return,
+    };
+    let args = loop_node_mknod_args(free_dev, major, minor);
+    if let Err(e) = run_command_checked("mknod", &args).await {
+        warn!("Could not create loop device node {}: {:#}", free_dev, e);
+        return;
+    }
+    // Match udev's usual ownership (root:disk) so tools expecting disk-group
+    // access behave the same as with udev-created nodes. Best-effort: the
+    // disk group may be absent in minimal container images.
+    if let Err(e) = run_command_checked("chown", &["root:disk", free_dev]).await {
+        warn!("Could not chown {} to root:disk: {:#}", free_dev, e);
+    }
 }
 
 /// Parse `losetup -j <img>` and return the backing loop device.
@@ -1233,7 +1339,8 @@ fn parse_df_total(output: &str) -> anyhow::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_target_size, derive_img_dir, parse_df_available, parse_df_total, parse_losetup_j,
+        compute_target_size, derive_img_dir, loop_node_mknod_args, normalize_free_loop_dev,
+        parse_df_available, parse_df_total, parse_losetup_j, parse_sysfs_dev_numbers,
         BtrfsLoopBackend,
     };
     use ws_ckpt_common::SNAPSHOTS_DIR;
@@ -1490,5 +1597,56 @@ mod tests {
         let img = dir.path().join("never-created.img");
         let backend = super::BtrfsLoopBackend::new(dir.path().join("mnt"), img.clone());
         assert!(backend.loop_img_state().await.is_none());
+    }
+
+    #[test]
+    fn normalize_free_loop_dev_accepts_plain_name() {
+        assert_eq!(normalize_free_loop_dev("/dev/loop8"), Some("/dev/loop8"));
+        assert_eq!(normalize_free_loop_dev("/dev/loop8\n"), Some("/dev/loop8"));
+    }
+
+    #[test]
+    fn normalize_free_loop_dev_strips_lost_suffix() {
+        // util-linux >= 2.40 appends " (lost)" when the node is missing.
+        assert_eq!(
+            normalize_free_loop_dev("/dev/loop8 (lost)"),
+            Some("/dev/loop8")
+        );
+    }
+
+    #[test]
+    fn normalize_free_loop_dev_rejects_malformed_output() {
+        for raw in [
+            "",
+            "   ",
+            "garbage",
+            "/dev/sda",
+            "/dev/loop",
+            "/dev/loop1p1",
+        ] {
+            assert_eq!(normalize_free_loop_dev(raw), None, "input: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn parse_sysfs_dev_numbers_plain_and_shifted_minor() {
+        assert_eq!(parse_sysfs_dev_numbers("7:8"), Some(("7", "8")));
+        // max_part > 0 shifts the disk minor: loop1 can be 7:128, not 7:1.
+        assert_eq!(parse_sysfs_dev_numbers(" 7:128 \n"), Some(("7", "128")));
+    }
+
+    #[test]
+    fn parse_sysfs_dev_numbers_rejects_malformed_input() {
+        for raw in ["", "7", "7:", ":8", "a:b", "7:8x"] {
+            assert_eq!(parse_sysfs_dev_numbers(raw), None, "input: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn loop_node_mknod_args_keep_restrictive_mode() {
+        assert_eq!(
+            loop_node_mknod_args("/dev/loop8", "7", "128"),
+            ["-m", "0660", "/dev/loop8", "b", "7", "128"]
+        );
     }
 }
