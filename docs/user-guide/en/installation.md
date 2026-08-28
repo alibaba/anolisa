@@ -32,6 +32,21 @@ second component allowlist. In explicit system mode, the script uses `sudo`
 only for the component action; the CLI remains in the current user directory.
 Without `--install-mode`, scope follows the normal ANOLISA euid default.
 
+The script installs the CLI to `~/.local/bin` by default, but the shell runs
+the first `anolisa` found in `PATH`. If an older npm or Homebrew installation
+comes first, the installer reports both paths and versions and exits without
+printing `done`. It never removes another channel's files. Put the standalone
+installation first and refresh the current shell:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+```
+
+Persist that `export` in the profile read by Bash or Zsh. Fish users can run
+`fish_add_path --move "$HOME/.local/bin"`. To remove the older installation instead,
+use its owner: `npm uninstall -g @anolisa/cli` or `brew uninstall anolisa`.
+
 ### Option B: YUM (Alinux)
 
 ```bash

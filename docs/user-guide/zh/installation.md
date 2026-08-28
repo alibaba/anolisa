@@ -31,6 +31,20 @@ CLI 负责，安装脚本不维护第二份组件白名单。显式使用 system
 组件操作调用 `sudo`，CLI 仍安装在当前用户目录。未指定 `--install-mode` 时，
 范围沿用 ANOLISA 的 euid 默认规则。
 
+脚本默认把 CLI 安装到 `~/.local/bin`，但 shell 会运行 `PATH` 中最先出现的
+`anolisa`。如果旧的 npm 或 Homebrew 安装排在前面，安装器会同时报告两个
+路径和版本，并且不会输出 `done`。脚本不会删除其他渠道的文件。可以把独立
+安装目录放到最前面，再刷新当前 shell 的命令缓存。
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+```
+
+请把这条 `export` 写入 Bash 或 Zsh 实际读取的配置文件。fish 用户可以执行
+`fish_add_path --move "$HOME/.local/bin"`。如果选择移除旧安装，请通过对应渠道执行
+`npm uninstall -g @anolisa/cli` 或 `brew uninstall anolisa`。
+
 ### 方式 B YUM（Alinux）
 
 ```bash

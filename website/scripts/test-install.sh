@@ -7,14 +7,41 @@ INSTALLER="${SCRIPT_DIR}/../static/install.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/anolisa-installer-test.XXXXXX")"
 FAKE_BIN="${TEST_ROOT}/bin"
 TEST_CLI_VERSION="0.0.0-test"
+OLD_CLI_VERSION="0.0.0-old"
 REAL_TAR="$(command -v tar)"
+TOOL_DIR="${TEST_ROOT}/tools"
+REQUIRED_TOOLS="
+  awk bash cat chmod dirname env grep gzip install ln mkdir mv readlink rm sed
+  sh tar tr
+"
+SYSTEM_PATH="$TOOL_DIR"
+BASE_PATH="${FAKE_BIN}:${SYSTEM_PATH}"
+LAST_STATUS=0
 
 cleanup() {
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
 
-mkdir -p "$FAKE_BIN"
+fail() {
+  echo "installer test failed: $*" >&2
+  exit 1
+}
+
+mkdir -p "$FAKE_BIN" "$TOOL_DIR"
+for tool in $REQUIRED_TOOLS; do
+  found="$(command -v "$tool" 2>/dev/null)" ||
+    fail "test tool '$tool' is unavailable on this host"
+  ln -s "$found" "${TOOL_DIR}/${tool}"
+done
+if command -v sha256sum >/dev/null 2>&1; then
+  ln -s "$(command -v sha256sum)" "${TOOL_DIR}/sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  ln -s "$(command -v shasum)" "${TOOL_DIR}/shasum"
+else
+  fail "neither sha256sum nor shasum is available on this host"
+fi
+ln -s "$(command -v mktemp)" "${TOOL_DIR}/mktemp"
 
 cat >"${FAKE_BIN}/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -93,26 +120,83 @@ EOF
 chmod +x "${FAKE_BIN}/curl" "${FAKE_BIN}/uname" "${FAKE_BIN}/id" \
   "${FAKE_BIN}/sudo"
 
-run_case() {
-  local name="$1"
-  local expected="$2"
+make_cli() {
+  local path="$1" version="$2"
+  mkdir -p "$(dirname "$path")"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+echo "anolisa ${version}"
+EOF
+  chmod +x "$path"
+}
+
+make_npm_cli() {
+  local prefix="$1" version="$2"
+  local real_bin="${prefix}/lib/node_modules/@anolisa/cli/bin"
+  mkdir -p "$real_bin" "${prefix}/bin"
+  make_cli "${real_bin}/anolisa" "$version"
+  ln -s "${real_bin}/anolisa" "${prefix}/bin/anolisa"
+}
+
+show_output() {
+  local case_root="${TEST_ROOT}/$1"
+  sed "s|^|[$1 stdout] |" "${case_root}/stdout" >&2 ||:
+  sed "s|^|[$1 stderr] |" "${case_root}/stderr" >&2 ||:
+}
+
+assert_contains() {
+  local file="$1" needle="$2" name="$3"
+  if ! grep -Fq -- "$needle" "$file"; then
+    echo "case '$name' output does not contain '$needle'" >&2
+    show_output "$name"
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local file="$1" needle="$2" name="$3"
+  if grep -Fq -- "$needle" "$file"; then
+    echo "case '$name' output unexpectedly contains '$needle'" >&2
+    show_output "$name"
+    exit 1
+  fi
+}
+
+run_install_case() {
+  local name="$1" case_path="$2"
   shift 2
 
   local case_root="${TEST_ROOT}/${name}"
   local install_dir="${case_root}/install"
-  local command_log="${case_root}/commands.log"
   mkdir -p "$case_root"
-
-  PATH="${FAKE_BIN}:${PATH}" \
+  LAST_STATUS=0
+  PATH="$case_path" \
     ANOLISA_INSTALL_DIR="$install_dir" \
-    ANOLISA_TEST_LOG="$command_log" \
+    ANOLISA_TEST_LOG="${case_root}/commands.log" \
     ANOLISA_TEST_SUDO_LOG="${case_root}/sudo.log" \
     ANOLISA_TEST_TAMPER_LOG="${case_root}/tampered.log" \
     ANOLISA_TEST_SHA_FILE="${case_root}/artifact.sha256" \
     ANOLISA_TEST_TAR="$REAL_TAR" \
     ANOLISA_TEST_VERSION="$TEST_CLI_VERSION" \
     ANOLISA_VERSION="$TEST_CLI_VERSION" \
-    bash -s -- "$@" <"$INSTALLER" >"${case_root}/stdout" 2>"${case_root}/stderr"
+    bash -s -- "$@" <"$INSTALLER" >"${case_root}/stdout" \
+      2>"${case_root}/stderr" || LAST_STATUS=$?
+}
+
+run_case() {
+  local name="$1"
+  local expected="$2"
+  shift 2
+
+  local case_root="${TEST_ROOT}/${name}"
+  local command_log="${case_root}/commands.log"
+  run_install_case "$name" "$BASE_PATH" "$@"
+
+  if [ "$LAST_STATUS" -ne 0 ]; then
+    echo "case '$name' exited with status $LAST_STATUS" >&2
+    show_output "$name"
+    exit 1
+  fi
 
   local actual=""
   if [ -f "$command_log" ]; then
@@ -152,6 +236,137 @@ run_case uninstall-component \
   "--install-mode system uninstall cosh-ng" \
   --uninstall --component cosh-ng --install-mode system
 
+assert_shadow_reported() {
+  local name="$1" active_path="$2" active_version="$3"
+  local case_root="${TEST_ROOT}/${name}"
+  local installed="${case_root}/install/anolisa"
+
+  if [ "$LAST_STATUS" -eq 0 ]; then
+    echo "case '$name' reported success while the CLI was shadowed" >&2
+    show_output "$name"
+    exit 1
+  fi
+  assert_contains "${case_root}/stderr" \
+    "installed: ${installed} (anolisa ${TEST_CLI_VERSION})" "$name"
+  assert_contains "${case_root}/stderr" \
+    "active:    ${active_path} (anolisa ${active_version})" "$name"
+  assert_contains "${case_root}/stderr" \
+    "export PATH=\"${installed%/*}:\$PATH\"" "$name"
+  assert_not_contains "${case_root}/stdout" "done" "$name"
+}
+
+fresh_shell_path() {
+  env -i HOME="$TEST_ROOT" PATH="$1" bash -c \
+    'hash -r 2>/dev/null ||:; command -v anolisa'
+}
+
+fresh_shell_version() {
+  env -i HOME="$TEST_ROOT" PATH="$1" \
+    ANOLISA_TEST_VERSION="$TEST_CLI_VERSION" bash -c 'anolisa --version'
+}
+
+NPM_OLD="${TEST_ROOT}/npm-old"
+HOMEBREW_OLD="${TEST_ROOT}/homebrew-old"
+make_npm_cli "$NPM_OLD" "$OLD_CLI_VERSION"
+make_cli "${HOMEBREW_OLD}/Cellar/anolisa/${OLD_CLI_VERSION}/bin/anolisa" \
+  "$OLD_CLI_VERSION"
+mkdir -p "${HOMEBREW_OLD}/bin"
+ln -s "${HOMEBREW_OLD}/Cellar/anolisa/${OLD_CLI_VERSION}/bin/anolisa" \
+  "${HOMEBREW_OLD}/bin/anolisa"
+
+name=shadowed-by-npm
+run_install_case "$name" \
+  "${FAKE_BIN}:${NPM_OLD}/bin:${TEST_ROOT}/${name}/install:${SYSTEM_PATH}"
+assert_shadow_reported "$name" "${NPM_OLD}/bin/anolisa" "$OLD_CLI_VERSION"
+assert_contains "${TEST_ROOT}/${name}/stderr" \
+  "npm uninstall -g @anolisa/cli" "$name"
+if [ "$(PATH="${NPM_OLD}/bin:${SYSTEM_PATH}" anolisa --version)" != \
+     "anolisa ${OLD_CLI_VERSION}" ]; then
+  fail "npm-owned CLI was modified"
+fi
+
+name=shadowed-by-homebrew
+run_install_case "$name" \
+  "${FAKE_BIN}:${HOMEBREW_OLD}/bin:${TEST_ROOT}/${name}/install:${SYSTEM_PATH}"
+assert_shadow_reported "$name" "${HOMEBREW_OLD}/bin/anolisa" \
+  "$OLD_CLI_VERSION"
+assert_contains "${TEST_ROOT}/${name}/stderr" "brew uninstall anolisa" "$name"
+
+name=shadowed-with-noisy-version
+noisy_cli="${TEST_ROOT}/${name}/old/anolisa"
+make_cli "$noisy_cli" \
+  "$OLD_CLI_VERSION"$'\033[31m\033[0m\r\t\b\a\177\nUNEXPECTED_VERSION_TAIL'
+run_install_case "$name" \
+  "${FAKE_BIN}:${noisy_cli%/*}:${TEST_ROOT}/${name}/install:${SYSTEM_PATH}"
+assert_shadow_reported "$name" "$noisy_cli" "$OLD_CLI_VERSION"
+grep -Fxq "    active:    ${noisy_cli} (anolisa ${OLD_CLI_VERSION})" \
+  "${TEST_ROOT}/${name}/stderr" || fail "version report contains control bytes"
+assert_not_contains "${TEST_ROOT}/${name}/stderr" "UNEXPECTED_VERSION_TAIL" "$name"
+
+name=install-dir-first
+install_dir="${TEST_ROOT}/${name}/install"
+run_install_case "$name" \
+  "${FAKE_BIN}:${install_dir}:${NPM_OLD}/bin:${SYSTEM_PATH}"
+if [ "$LAST_STATUS" -ne 0 ]; then
+  echo "case '$name' rejected the active standalone CLI" >&2
+  show_output "$name"
+  exit 1
+fi
+assert_contains "${TEST_ROOT}/${name}/stdout" "done" "$name"
+if [ "$(fresh_shell_path "${FAKE_BIN}:${install_dir}:${NPM_OLD}/bin:${SYSTEM_PATH}")" != \
+     "${install_dir}/anolisa" ]; then
+  fail "fresh shell did not resolve the standalone CLI"
+fi
+if [ "$(fresh_shell_version "${FAKE_BIN}:${install_dir}:${NPM_OLD}/bin:${SYSTEM_PATH}")" != \
+     "anolisa ${TEST_CLI_VERSION}" ]; then
+  fail "fresh shell did not run the installed version"
+fi
+if [ "$(fresh_shell_path "${FAKE_BIN}:${NPM_OLD}/bin:${install_dir}:${SYSTEM_PATH}")" != \
+     "${NPM_OLD}/bin/anolisa" ]; then
+  fail "fresh shell did not resolve the shadowing CLI"
+fi
+
+name=reinstall-active
+active_install="${TEST_ROOT}/${name}/install"
+run_install_case "$name" "${FAKE_BIN}:${active_install}:${SYSTEM_PATH}"
+[ "$LAST_STATUS" -eq 0 ] || fail "initial standalone install failed"
+run_install_case "$name" "${FAKE_BIN}:${active_install}:${SYSTEM_PATH}"
+[ "$LAST_STATUS" -eq 0 ] || fail "reinstall reported a false conflict"
+
+name=install-dir-missing-from-path
+run_install_case "$name" "${FAKE_BIN}:${SYSTEM_PATH}"
+if [ "$LAST_STATUS" -ne 0 ]; then
+  echo "case '$name' failed without a competing CLI" >&2
+  show_output "$name"
+  exit 1
+fi
+assert_contains "${TEST_ROOT}/${name}/stderr" "is not in your PATH" "$name"
+assert_contains "${TEST_ROOT}/${name}/stdout" "done" "$name"
+
+name=same-directory-two-names
+real_install="${TEST_ROOT}/${name}/real-install"
+mkdir -p "$real_install"
+ln -s "$real_install" "${TEST_ROOT}/${name}/install"
+run_install_case "$name" "${FAKE_BIN}:${real_install}:${SYSTEM_PATH}"
+if [ "$LAST_STATUS" -ne 0 ]; then
+  echo "case '$name' reported a false conflict for a symlinked directory" >&2
+  show_output "$name"
+  exit 1
+fi
+
+name=same-directory-different-case
+install_dir="${TEST_ROOT}/${name}/install"
+mkdir -p "$install_dir"
+if [ -d "${TEST_ROOT}/${name}/INSTALL" ]; then
+  run_install_case "$name" \
+    "${FAKE_BIN}:${TEST_ROOT}/${name}/INSTALL:${SYSTEM_PATH}"
+  [ "$LAST_STATUS" -eq 0 ] || fail "case-only path difference reported a conflict"
+  assert_contains "${TEST_ROOT}/${name}/stdout" "done" "$name"
+  assert_not_contains "${TEST_ROOT}/${name}/stderr" "shadowed" "$name"
+else
+  echo "skipping case-only path test on a case-sensitive filesystem"
+fi
+
 expect_rejected() {
   local name="$1"
   local expected_error="$2"
@@ -159,7 +374,7 @@ expect_rejected() {
 
   local case_root="${TEST_ROOT}/${name}"
   mkdir -p "$case_root"
-  if PATH="${FAKE_BIN}:${PATH}" \
+  if PATH="$BASE_PATH" \
     ANOLISA_INSTALL_DIR="${case_root}/install" \
     ANOLISA_TEST_LOG="${case_root}/commands.log" \
     ANOLISA_TEST_SUDO_LOG="${case_root}/sudo.log" \

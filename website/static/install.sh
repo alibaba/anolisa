@@ -431,6 +431,74 @@ run_component_action() {
   esac
 }
 
+# Resolve symlinks and symlinked directories without relying on GNU readlink.
+canonical_path() {
+  local path="$1" link dir hops=0
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  case "$path" in /*) ;; *) path="${PWD}/$path" ;; esac
+
+  while [ -L "$path" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 20 ] || return 1
+    link="$(readlink "$path")" || return 1
+    case "$link" in
+      /*) path="$link" ;;
+      *) path="${path%/*}/$link" ;;
+    esac
+  done
+
+  dir="$(cd "${path%/*}" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "$dir" "${path##*/}"
+}
+
+# Fail prominently when PATH still selects a CLI owned by another channel.
+check_active_cli() {
+  local installed_path="$1" installed_version="$2"
+  local active_path active_real installed_real active_version
+
+  active_path="$(
+    { hash -r 2>/dev/null ||:; command -v anolisa; } 2>/dev/null
+  )" || active_path=""
+  [ -n "$active_path" ] || return 0
+  # File identity also covers case-insensitive paths and hard links.
+  [ "$installed_path" -ef "$active_path" ] && return 0
+
+  active_real="$(canonical_path "$active_path")" || active_real="$active_path"
+  installed_real="$(canonical_path "$installed_path")" ||
+    installed_real="$installed_path"
+  [ "$active_real" != "$installed_real" ] || return 0
+
+  if ! active_version="$("$active_path" --version </dev/null 2>&1)"; then
+    active_version="<failed to run>"
+  fi
+  # Keep foreign CLI output on one line without terminal control sequences.
+  active_version="${active_version%%$'\n'*}"
+  active_version="$(printf '%s' "$active_version" |
+    LC_ALL=C sed $'s/\033\\[[0-?]*[ -/]*[@-~]//g' | LC_ALL=C tr -d '[:cntrl:]')"
+  active_version="${active_version:-unknown}"
+
+  {
+    warn "PATH resolves anolisa to a different installation"
+    printf '    installed: %s (%s)\n' "$installed_path" "$installed_version"
+    printf '    active:    %s (%s)\n' "$active_path" "$active_version"
+    printf '    put the new install first, then refresh the shell lookup:\n'
+    printf '      export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+    printf '      hash -r\n'
+    case "$active_real" in
+      */node_modules/@anolisa/cli/*)
+        printf '    or remove the npm-owned CLI yourself:\n'
+        printf '      npm uninstall -g @anolisa/cli\n'
+        ;;
+      */Cellar/anolisa/*)
+        printf '    or remove the Homebrew-owned CLI yourself:\n'
+        printf '      brew uninstall anolisa\n'
+        ;;
+    esac
+    printf 'error: the newly installed anolisa is shadowed\n'
+  } >&2
+  return 1
+}
+
 main() {
   parse_args "$@"
   check_component_action_prerequisites
@@ -511,6 +579,8 @@ main() {
 
   log "$installed_version"
   [ -z "$COMPONENT" ] || run_component_action
+
+  check_active_cli "$INSTALL_DIR/anolisa" "$installed_version"
   log "done"
 }
 
