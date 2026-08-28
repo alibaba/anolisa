@@ -1,8 +1,55 @@
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use nix::libc;
+
+static SIGNAL_OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
+static SIGNAL_OUTPUT_IS_TTY: AtomicBool = AtomicBool::new(false);
+static SIGNAL_RECOVERY_ARMED: AtomicBool = AtomicBool::new(false);
+
+const MODIFY_OTHER_KEYS_DISABLE: &[u8] = b"\x1b[>4;0m";
+
+fn arm_signal_recovery(output_fd: i32) {
+    SIGNAL_OUTPUT_FD.store(output_fd, Ordering::Relaxed);
+    SIGNAL_OUTPUT_IS_TTY.store(unsafe { libc::isatty(output_fd) == 1 }, Ordering::Relaxed);
+    SIGNAL_RECOVERY_ARMED.store(true, Ordering::Release);
+}
+
+fn disarm_signal_recovery() {
+    SIGNAL_RECOVERY_ARMED.store(false, Ordering::Release);
+    SIGNAL_OUTPUT_FD.store(-1, Ordering::Relaxed);
+    SIGNAL_OUTPUT_IS_TTY.store(false, Ordering::Relaxed);
+}
+
+pub(crate) fn restore_raw_mode_signal_state() {
+    if !SIGNAL_RECOVERY_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let output_fd = SIGNAL_OUTPUT_FD.load(Ordering::Relaxed);
+    if output_fd < 0 {
+        return;
+    }
+    unsafe {
+        let output_flags = libc::fcntl(output_fd, libc::F_GETFL);
+        if output_flags < 0 {
+            return;
+        }
+        let write_flags = if SIGNAL_OUTPUT_IS_TTY.load(Ordering::Relaxed) {
+            output_flags & !libc::O_NONBLOCK
+        } else {
+            output_flags | libc::O_NONBLOCK
+        };
+        libc::fcntl(output_fd, libc::F_SETFL, write_flags);
+        libc::write(
+            output_fd,
+            MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+            MODIFY_OTHER_KEYS_DISABLE.len(),
+        );
+        libc::fcntl(output_fd, libc::F_SETFL, output_flags);
+    }
+}
 
 /// Re-open stdout on a fresh, blocking file description when needed.
 ///
@@ -59,6 +106,7 @@ pub(super) struct RawModeGuard {
     original_termios: Option<libc::termios>,
     original_flags: i32,
     active: bool,
+    recovery_armed: bool,
 }
 
 impl RawModeGuard {
@@ -78,6 +126,7 @@ impl RawModeGuard {
             original_termios,
             original_flags,
             active: true,
+            recovery_armed: false,
         }
     }
 
@@ -90,8 +139,6 @@ impl RawModeGuard {
     /// the relay's ordered stdout path; this guard owns the withdrawal and
     /// writes it to the same stdout path so the tty never keeps the mode
     /// after exit.
-    const MODIFY_OTHER_KEYS_DISABLE: &'static [u8] = b"\x1b[>4;0m";
-
     pub(super) fn activate_stdin() -> io::Result<Option<Self>> {
         Self::activate_fd_with_output(0, libc::STDOUT_FILENO)
     }
@@ -136,12 +183,18 @@ impl RawModeGuard {
             None
         };
 
+        let recovery_armed = fd == libc::STDIN_FILENO && original_termios.is_some();
+        if recovery_armed {
+            arm_signal_recovery(output_fd);
+        }
+
         Ok(Some(Self {
             fd,
             output_fd,
             original_termios,
             original_flags,
             active: true,
+            recovery_armed,
         }))
     }
 }
@@ -170,8 +223,8 @@ impl Drop for RawModeGuard {
                     unsafe {
                         libc::write(
                             self.fd,
-                            Self::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
-                            Self::MODIFY_OTHER_KEYS_DISABLE.len(),
+                            MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+                            MODIFY_OTHER_KEYS_DISABLE.len(),
                         );
                     }
                 } else {
@@ -202,8 +255,8 @@ impl Drop for RawModeGuard {
                             libc::fcntl(self.output_fd, libc::F_SETFL, write_flags);
                             libc::write(
                                 self.output_fd,
-                                Self::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
-                                Self::MODIFY_OTHER_KEYS_DISABLE.len(),
+                                MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+                                MODIFY_OTHER_KEYS_DISABLE.len(),
                             );
                             libc::fcntl(self.output_fd, libc::F_SETFL, flags);
                         }
@@ -217,6 +270,9 @@ impl Drop for RawModeGuard {
             // O_NONBLOCK.
             unsafe {
                 libc::fcntl(self.fd, libc::F_SETFL, self.original_flags);
+            }
+            if self.recovery_armed {
+                disarm_signal_recovery();
             }
         }
     }

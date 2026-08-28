@@ -141,13 +141,6 @@ fn main() {
         std::process::exit(diagnostics::bundle::run_cli(&args[2..]));
     }
 
-    runtime::terminal::install_terminal_recovery();
-
-    // Initialize structured logging (file output to ~/.copilot-shell/logs/)
-    let cosh_config = config::load_config();
-    runtime::logging::init_logging(&cosh_config.log_level);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
-
     let has_subcommand = matches!(
         args.get(1).map(String::as_str),
         Some(
@@ -167,6 +160,16 @@ fn main() {
         if let Some(status) = passthrough_non_interactive(&args) {
             std::process::exit(status);
         }
+    }
+
+    runtime::terminal::install_terminal_recovery();
+
+    // Initialize structured logging (file output to ~/.copilot-shell/logs/)
+    let cosh_config = config::load_config();
+    runtime::logging::init_logging(&cosh_config.log_level);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
+
+    if !has_subcommand {
         // The classifier admitted the TUI: only cosh-owned/login tokens on a
         // terminal reach this point.
         let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[1..]);

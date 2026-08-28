@@ -24,7 +24,7 @@ use super::prompt_presentation::PromptPresentation;
 use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
 mod interactive;
-mod raw_mode_guard;
+pub(super) mod raw_mode_guard;
 mod wake;
 
 pub use interactive::{

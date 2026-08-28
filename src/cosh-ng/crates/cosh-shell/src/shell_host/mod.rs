@@ -27,6 +27,7 @@ pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};
 pub(crate) use model::{HintCardRenderer, ShellEventView};
 pub use model::{ScriptedInput, ShellHostConfig, ShellHostOutput, ShellIntegration};
 pub(crate) use raw_relay::interactive_sentinel::InputWaitStatus;
+pub(crate) use raw_runner::raw_mode_guard::restore_raw_mode_signal_state;
 pub use raw_runner::{
     run_raw_interactive_bash, run_raw_interactive_bash_with_observer,
     run_raw_interactive_bash_with_output_control, run_raw_interactive_zsh_with_output_control,
