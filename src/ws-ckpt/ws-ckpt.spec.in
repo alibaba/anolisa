@@ -138,6 +138,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.5-1
+- Fixed intermittent bootstrap failure when all loop devices are in use
+- Scoped sidecar preStop loop cleanup to ws-ckpt-owned devices only
+- Added bilingual sidecar deployment guide
+
 * Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.4-1
 - Added guarded checkpoint protocol with identity-fenced snapshot creation and crash-verifiable state
 - Fixed interrupted rollback state lost on daemon restart, ambiguous candidates preserved instead of deleted
