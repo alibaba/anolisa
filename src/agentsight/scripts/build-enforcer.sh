@@ -51,6 +51,22 @@ LOCK_FILE="$SOURCE_DIR.agentsight.lock"
 exec 9>"$LOCK_FILE"
 flock 9
 
+# Reuse the cached source only if it can be reset to the pinned revision.
+# A cached shallow clone whose objects were advanced to a newer upstream tip
+# (CI cache reuse) cannot re-fetch the older pinned SHA in place -- the server
+# rejects it with "upload-pack: not our ref". In that case discard the cache
+# and perform a fresh shallow clone, which fetches the pinned SHA cleanly.
+if [ -d "$SOURCE_DIR/.git" ]; then
+    if git -C "$SOURCE_DIR" checkout -q --detach "$ACTPLANE_REVISION" 2>/dev/null; then
+        # Drop any leftover applied patches / untracked files from a prior run
+        # so the attestation starts from a pristine pinned tree.
+        git -C "$SOURCE_DIR" reset -q --hard "$ACTPLANE_REVISION"
+        git -C "$SOURCE_DIR" clean -qfd
+    else
+        rm -rf "$SOURCE_DIR"
+    fi
+fi
+
 if [ ! -d "$SOURCE_DIR/.git" ]; then
     INCOMPLETE_DIR="$SOURCE_DIR.incomplete.$$"
     trap 'rm -rf "$INCOMPLETE_DIR"' EXIT HUP INT TERM

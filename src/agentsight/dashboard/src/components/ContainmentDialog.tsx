@@ -319,7 +319,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                 <div>
                   <dt className="text-xs font-medium text-gray-500">{t('cont.plan.field.effect')}</dt>
                   <dd className="mt-1 text-sm font-medium text-gray-900">
-                    {t('cont.plan.effect.actplaneDeny')}
+                    {t('cont.plan.effect.kernelDeny')}
                   </dd>
                 </div>
                 <div>
