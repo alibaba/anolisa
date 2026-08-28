@@ -54,7 +54,9 @@ use crate::resolution::{
 };
 use crate::response::CliError;
 
-use super::application::{InstallApplicationOutcome, InstallChange, InstallSubject};
+use super::application::{
+    ApplicationFailure, InstallApplicationOutcome, InstallChange, InstallSubject,
+};
 use super::owned_ops::{
     RawInstallOps, ValidatedInstall, installed_version_label, validate_component_conflict,
     validate_owned_install,
@@ -631,7 +633,7 @@ pub(super) fn execute_planned(
     is_root: bool,
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
-) -> Result<InstallApplicationOutcome, CliError> {
+) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     let PlannedComponent {
         command,
         mut component,
@@ -1247,7 +1249,7 @@ fn install_applied(
     command: &str,
     reporter: &mut dyn ProgressReporter,
     apply: InstallApply<'_>,
-) -> Result<InstallApplicationOutcome, CliError> {
+) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     if let InstallApply::Delegated {
         repo_config,
         index_base_override,
@@ -1261,7 +1263,8 @@ fn install_applied(
                 command: command.to_string(),
                 reason: "installing an RPM-backed component runs dnf and requires root".to_string(),
                 hint: Some(format!("sudo anolisa install {target}")),
-            });
+            }
+            .into());
         }
     }
 
@@ -1328,8 +1331,13 @@ fn install_applied(
                 let note = ops.retained_packages_note();
                 (result, note)
             };
-            let outcome = result
-                .map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    let error = owned_error_to_cli(err, target, scope, command, &retained_note);
+                    return Err(ApplicationFailure::from_journal(error, &journal));
+                }
+            };
             warnings.extend(outcome.warnings);
             let mut subject = InstallSubject {
                 component: target.to_string(),
@@ -1371,7 +1379,7 @@ fn install_applied(
                     &pin.resolved_arch,
                 );
             }
-            let outcome = {
+            let execution = {
                 let mut sink = StoreRecordSink::new(&mut store, state_path, context);
                 execute_delegated_steps(
                     &locked_steps,
@@ -1381,13 +1389,19 @@ fn install_applied(
                     &mut journal,
                     now,
                 )
-            }
-            .map_err(|err| CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
-                ),
-            })?;
+            };
+            let outcome = match execution {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    let error = CliError::Runtime {
+                        command: command.to_string(),
+                        reason: format!(
+                            "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
+                        ),
+                    };
+                    return Err(ApplicationFailure::from_journal(error, &journal));
+                }
+            };
             let mut subject = InstallSubject {
                 component: target.to_string(),
                 package: Some(package.to_string()),

@@ -41,6 +41,7 @@ use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json, render_json_with_status};
 
+use super::application::UpdateBatchOutcome;
 use super::{
     AdapterAction, AdapterRevisionSnapshot, COMMAND, PlannedComponentUpdate, PlannedUpdateRoute,
     adapter_actions_after_update, adapter_revision_snapshot, append_update_log,
@@ -51,7 +52,7 @@ use super::{
 mod application;
 use application::{
     BatchApplicationOutcome, BatchEffectOutcome, BatchMemberOutcome, BatchMemberStatus,
-    BatchOutputEvent, MemberApplicationOutcome, batch_status, failed_item,
+    BatchOutputEvent, MemberApplicationOutcome, batch_status, failed_item, partial_item,
 };
 
 const BATCH_COMMAND: &str = "update all";
@@ -151,7 +152,7 @@ fn render_application_outcome(
     let failed = outcome
         .items
         .iter()
-        .filter(|item| item.status == BatchMemberStatus::Failed)
+        .filter(|item| item.status.is_unsuccessful())
         .count();
     debug_assert_eq!(outcome.has_failures(), failed > 0);
     let items = outcome
@@ -342,13 +343,13 @@ fn execute_merged_updates(
         }
     };
     let mut degrade = |name: &str| {
-        let outcome = super::application::run(
+        let outcome = super::application::run_for_batch(
             super::application::ApplicationRequest {
                 component: name,
                 intent: ExecutionIntent::Apply,
             },
             &suppressed_ctx,
-        )?;
+        );
         Ok(application::member_application_outcome(outcome))
     };
     execute_merged_updates_with_deps(
@@ -531,7 +532,7 @@ fn execute_merged_updates_with_deps(
             for (item, mut journal) in active {
                 let target = item.planned.target.clone();
                 if let Err(err) = journal.mark_done(0) {
-                    items.push(failed_item(
+                    items.push(partial_item(
                         &item.name,
                         format!(
                             "update of '{target}' failed: the merged native transaction committed but its journal could not be updated: {err}; run `anolisa repair {target}` to reconcile"
@@ -612,7 +613,7 @@ fn execute_merged_updates_with_deps(
                             completion_failure.as_deref(),
                         );
                         if let Some(reason) = completion_failure {
-                            items.push(failed_item(
+                            items.push(partial_item(
                                 &item.name,
                                 format!(
                                     "the update of '{target}' committed, but {reason}; run `anolisa repair {target}` to reconcile"
@@ -647,7 +648,7 @@ fn execute_merged_updates_with_deps(
                             adapter_actions,
                         });
                     }
-                    Err(err) => items.push(failed_item(
+                    Err(err) => items.push(partial_item(
                         &item.name,
                         format!(
                             "update of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
@@ -660,7 +661,7 @@ fn execute_merged_updates_with_deps(
             // history reads the same as the members' journals.
             let any_member_failed = items[members_start..]
                 .iter()
-                .any(|item| item.status == BatchMemberStatus::Failed);
+                .any(|item| item.status.is_unsuccessful());
             if let Some(parent) = store
                 .operations
                 .iter_mut()
@@ -708,7 +709,7 @@ fn execute_merged_updates_with_deps(
                     Err(err) => Some(format!("could not be re-observed in the rpmdb: {err}")),
                 };
                 let journal_outcome = if let Some(uncertain_reason) = uncertain_reason {
-                    items.push(failed_item(
+                    items.push(partial_item(
                         &item.name,
                         format!(
                             "merged native transaction failed and '{}' {uncertain_reason}: {reason}; run `anolisa repair {target}` to reconcile",
@@ -747,14 +748,15 @@ fn execute_merged_updates_with_deps(
                             output(BatchOutputEvent::Warning(warning));
                         }
                         let item = match outcome.outcome {
-                            Ok(member) => BatchMemberOutcome {
+                            UpdateBatchOutcome::Completed(member) => BatchMemberOutcome {
                                 component: name.clone(),
                                 status: batch_status(member, ExecutionIntent::Apply),
                                 reason: None,
                                 plan: None,
                                 adapter_actions: outcome.adapter_actions,
                             },
-                            Err(err) => failed_item(&name, err.reason().to_string()),
+                            UpdateBatchOutcome::Partial { reason } => partial_item(&name, reason),
+                            UpdateBatchOutcome::Failed { reason } => failed_item(&name, reason),
                         };
                         items.push(item);
                     }
@@ -785,7 +787,7 @@ mod tests {
 
     use super::super::UpdateOutcome;
     use super::super::tests::{
-        ctx, load_store, pkg_info, raw_manifest_with_adapter, rpm_object,
+        FakeRpm, ctx, load_store, pkg_info, raw_manifest_with_adapter, rpm_object,
         seed_package_contract_and_stale_snapshot,
     };
     use crate::context::InstallMode;
@@ -965,10 +967,81 @@ mod tests {
 
     fn applied_member(outcome: UpdateOutcome) -> MemberApplicationOutcome {
         MemberApplicationOutcome {
-            outcome: Ok(outcome),
+            outcome: UpdateBatchOutcome::Completed(outcome),
             warnings: Vec::new(),
             adapter_actions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn merged_degrade_preserves_partial_application_failure() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        managed_pair(&c);
+        let merged_host = FakeHost::new(
+            &[
+                (
+                    "copilot-shell",
+                    pkg_info("copilot-shell", "1.0.0", Some("1.al4"), "x86_64"),
+                ),
+                (
+                    "agent-sec-core",
+                    pkg_info("agent-sec-core", "1.0.0", Some("1.al4"), "x86_64"),
+                ),
+            ],
+            true,
+        );
+        let retry_host = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al4"), "x86_64")),
+        )
+        .post_update_missing();
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
+            if name != "cosh" {
+                return Ok(applied_member(UpdateOutcome::AlreadyCurrent));
+            }
+            let outcome = super::super::application::run_with_dependencies_classified(
+                super::super::application::ApplicationRequest {
+                    component: name,
+                    intent: ExecutionIntent::Apply,
+                },
+                &c,
+                &retry_host,
+                &retry_host,
+                true,
+            );
+            Ok(application::member_application_outcome(outcome))
+        };
+        let mut output = |_: BatchOutputEvent| {};
+
+        let items = execute_merged_updates_with_deps(
+            vec![
+                u5_item("cosh", "copilot-shell", "1.0.0-1.al4"),
+                u5_item("sec-core", "agent-sec-core", "1.0.0-1.al4"),
+            ],
+            &c,
+            &merged_host,
+            &merged_host,
+            true,
+            &mut degrade,
+            &mut output,
+        )
+        .items;
+
+        let cosh = find(&items, "cosh");
+        assert_eq!(cosh.status, BatchMemberStatus::Partial);
+        assert!(
+            cosh.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("repair")),
+            "degraded application failure must retain repair guidance: {:?}",
+            cosh.reason
+        );
+        assert_eq!(
+            retry_host.update_call_count(),
+            1,
+            "the retry transaction ran"
+        );
     }
 
     #[test]
@@ -1221,7 +1294,7 @@ mod tests {
         .items;
 
         let cosh_item = find(&items, "cosh");
-        assert_eq!(cosh_item.status, BatchMemberStatus::Failed);
+        assert_eq!(cosh_item.status, BatchMemberStatus::Partial);
         let reason = cosh_item.reason.as_deref().expect("failure reason");
         assert!(
             reason.contains("committed") && reason.contains("repair"),
@@ -1438,7 +1511,7 @@ mod tests {
         // Forward-only for the moved member: no retry, repair reconciles.
         assert_eq!(degraded.borrow().as_slice(), ["sec-core"]);
         let cosh = find(&items, "cosh");
-        assert_eq!(cosh.status, BatchMemberStatus::Failed);
+        assert_eq!(cosh.status, BatchMemberStatus::Partial);
         let reason = cosh.reason.as_deref().unwrap();
         assert!(reason.contains("changed in the rpmdb"), "got: {reason}");
         assert!(reason.contains("anolisa repair cosh"), "got: {reason}");
@@ -1505,7 +1578,7 @@ mod tests {
             "an indeterminate rpmdb state must not trigger a second update"
         );
         let cosh = find(&items, "cosh");
-        assert_eq!(cosh.status, BatchMemberStatus::Failed);
+        assert_eq!(cosh.status, BatchMemberStatus::Partial);
         assert!(
             cosh.reason
                 .as_deref()

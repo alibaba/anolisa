@@ -33,7 +33,9 @@ pub(super) enum BatchMemberStatus {
     Planned,
     /// Existing state already covers the requested install.
     AlreadyInstalled,
-    /// Planning or execution failed for this member.
+    /// Effects occurred or cannot be excluded, so repair is required.
+    Partial,
+    /// The member failed without a known partial state.
     Failed,
     /// Fail-fast prevented this member from being attempted.
     Skipped,
@@ -46,9 +48,14 @@ impl BatchMemberStatus {
             Self::Installed => "installed",
             Self::Planned => "planned",
             Self::AlreadyInstalled => "already-installed",
-            Self::Failed => "failed",
+            Self::Partial | Self::Failed => "failed",
             Self::Skipped => "skipped",
         }
+    }
+
+    /// Returns whether this member makes the aggregate batch unsuccessful.
+    pub(super) fn is_unsuccessful(self) -> bool {
+        matches!(self, Self::Partial | Self::Failed)
     }
 }
 
@@ -88,18 +95,26 @@ pub(super) struct BatchEffectOutcome {
     pub(super) items: Vec<BatchMemberOutcome>,
 }
 
+/// Batch-facing classification of a single-component application result.
+pub(super) enum InstallBatchOutcome {
+    /// The member completed or required no change.
+    Completed(InstallOutcome),
+    /// Effects occurred or cannot be excluded, so repair is required.
+    Partial { reason: String },
+    /// The member failed without a known partial state.
+    Failed { reason: String },
+}
+
 /// Per-member fallback result returned to merged transaction orchestration.
 pub(super) struct MemberApplicationOutcome {
-    pub(super) outcome: InstallOutcome,
+    pub(super) outcome: InstallBatchOutcome,
     pub(super) warnings: Vec<String>,
 }
 
 impl BatchApplicationOutcome {
     /// Returns whether any member failed.
     pub(super) fn has_failures(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.status == BatchMemberStatus::Failed)
+        self.items.iter().any(|item| item.status.is_unsuccessful())
     }
 
     /// Returns whether this batch was prepared without applying effects.
@@ -219,7 +234,7 @@ pub(super) fn run(
             let any_failed = effect
                 .items
                 .iter()
-                .any(|item| item.status == BatchMemberStatus::Failed);
+                .any(|item| item.status.is_unsuccessful());
             for item in effect.items {
                 results.insert(item.component.clone(), item);
             }
@@ -243,7 +258,7 @@ pub(super) fn run(
             component: name.clone(),
         });
         let per_args = per_component_args(name, request.args);
-        let member = install_application::run_with_planned_components(
+        let member = member_application_outcome(install_application::run_with_planned_components(
             install_application::InstallRequest {
                 component: name,
                 args: &per_args,
@@ -251,33 +266,23 @@ pub(super) fn run(
             },
             &suppressed_ctx,
             &planned_components,
-        );
-        match member {
-            Ok(outcome) => {
-                for warning in outcome.warnings() {
-                    output(BatchOutputEvent::Warning(warning.clone()));
-                }
-                let legacy = outcome.batch_outcome();
-                if preview && legacy == InstallOutcome::Installed {
-                    planned_components.insert(name.clone());
-                }
-                results.insert(
-                    name.clone(),
-                    BatchMemberOutcome {
-                        component: name.clone(),
-                        status: batch_status(legacy, request.intent),
-                        reason: None,
-                        plan: None,
-                    },
-                );
-            }
-            Err(error) => {
-                results.insert(name.clone(), failed_item(name, error.reason().to_string()));
-                if request.args.fail_fast {
-                    fail_fast_tripped = true;
-                }
-            }
+        ));
+        for warning in member.warnings {
+            output(BatchOutputEvent::Warning(warning));
         }
+        if preview
+            && matches!(
+                member.outcome,
+                InstallBatchOutcome::Completed(InstallOutcome::Installed)
+            )
+        {
+            planned_components.insert(name.clone());
+        }
+        let item = project_member_application(name, request.intent, member.outcome);
+        if request.args.fail_fast && item.status.is_unsuccessful() {
+            fail_fast_tripped = true;
+        }
+        results.insert(name.clone(), item);
     }
 
     let items = names
@@ -300,10 +305,62 @@ pub(super) fn run(
     })
 }
 
+pub(super) fn member_application_outcome(
+    result: Result<
+        install_application::InstallApplicationOutcome,
+        install_application::ApplicationFailure,
+    >,
+) -> MemberApplicationOutcome {
+    match result {
+        Ok(outcome) => MemberApplicationOutcome {
+            outcome: InstallBatchOutcome::Completed(outcome.batch_outcome()),
+            warnings: outcome.warnings().to_vec(),
+        },
+        Err(install_application::ApplicationFailure::Partial(error)) => MemberApplicationOutcome {
+            outcome: InstallBatchOutcome::Partial {
+                reason: error.reason(),
+            },
+            warnings: Vec::new(),
+        },
+        Err(install_application::ApplicationFailure::Failed(error)) => MemberApplicationOutcome {
+            outcome: InstallBatchOutcome::Failed {
+                reason: error.reason(),
+            },
+            warnings: Vec::new(),
+        },
+    }
+}
+
+pub(super) fn project_member_application(
+    name: &str,
+    intent: ExecutionIntent,
+    outcome: InstallBatchOutcome,
+) -> BatchMemberOutcome {
+    match outcome {
+        InstallBatchOutcome::Completed(outcome) => BatchMemberOutcome {
+            component: name.to_string(),
+            status: batch_status(outcome, intent),
+            reason: None,
+            plan: None,
+        },
+        InstallBatchOutcome::Partial { reason } => partial_item(name, reason),
+        InstallBatchOutcome::Failed { reason } => failed_item(name, reason),
+    }
+}
+
 pub(super) fn failed_item(name: &str, reason: String) -> BatchMemberOutcome {
     BatchMemberOutcome {
         component: name.to_string(),
         status: BatchMemberStatus::Failed,
+        reason: Some(reason),
+        plan: None,
+    }
+}
+
+pub(super) fn partial_item(name: &str, reason: String) -> BatchMemberOutcome {
+    BatchMemberOutcome {
+        component: name.to_string(),
+        status: BatchMemberStatus::Partial,
         reason: Some(reason),
         plan: None,
     }
@@ -341,13 +398,26 @@ mod tests {
 
     #[test]
     fn aggregate_failure_is_typed() {
-        let outcome = BatchApplicationOutcome {
-            intent: ExecutionIntent::Apply,
-            merged_transaction: None,
-            items: vec![failed_item("cosh", "failed".to_string())],
-        };
+        for item in [
+            partial_item("cosh", "partial".to_string()),
+            failed_item("cosh", "failed".to_string()),
+        ] {
+            let outcome = BatchApplicationOutcome {
+                intent: ExecutionIntent::Apply,
+                merged_transaction: None,
+                items: vec![item],
+            };
 
-        assert!(outcome.has_failures());
-        assert!(!outcome.is_preview());
+            assert!(outcome.has_failures());
+            assert!(!outcome.is_preview());
+        }
+    }
+
+    #[test]
+    fn partial_and_failed_keep_the_legacy_wire_label() {
+        assert_eq!(BatchMemberStatus::Partial.as_str(), "failed");
+        assert_eq!(BatchMemberStatus::Failed.as_str(), "failed");
+        assert!(BatchMemberStatus::Partial.is_unsuccessful());
+        assert!(BatchMemberStatus::Failed.is_unsuccessful());
     }
 }

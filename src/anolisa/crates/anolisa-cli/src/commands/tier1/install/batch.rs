@@ -54,9 +54,12 @@ use super::{
 };
 
 mod application;
+#[cfg(test)]
+use application::InstallBatchOutcome;
 use application::{
     BatchApplicationOutcome, BatchEffectOutcome, BatchMemberOutcome, BatchMemberStatus,
-    BatchOutputEvent, MemberApplicationOutcome, failed_item,
+    BatchOutputEvent, MemberApplicationOutcome, failed_item, member_application_outcome,
+    partial_item, project_member_application,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -155,7 +158,7 @@ fn render_application_outcome(
     let failed = outcome
         .items
         .iter()
-        .filter(|item| item.status == BatchMemberStatus::Failed)
+        .filter(|item| item.status.is_unsuccessful())
         .count();
     let skipped = outcome
         .items
@@ -351,18 +354,16 @@ fn execute_merged_group(
     };
     let mut degrade = |name: &str| {
         let per_args = per_component_args(name, args);
-        let outcome = super::application::run(
+        let outcome = super::application::run_with_planned_components(
             super::application::InstallRequest {
                 component: name,
                 args: &per_args,
                 intent: ExecutionIntent::Apply,
             },
             &suppressed_ctx,
-        )?;
-        Ok(MemberApplicationOutcome {
-            outcome: outcome.batch_outcome(),
-            warnings: outcome.warnings().to_vec(),
-        })
+            &std::collections::HashSet::new(),
+        );
+        Ok(member_application_outcome(outcome))
     };
     execute_merged_group_with_deps(
         group,
@@ -547,7 +548,7 @@ fn execute_merged_group_with_deps(
             for (item, mut journal) in active {
                 let target = item.planned.component.clone();
                 if let Err(err) = journal.mark_done(0) {
-                    items.push(failed_item(
+                    items.push(partial_item(
                         &item.name,
                         format!(
                             "install of '{target}' failed: the merged native transaction committed but its journal could not be updated: {err}; run `anolisa repair {target}` to reconcile"
@@ -607,7 +608,7 @@ fn execute_merged_group_with_deps(
                             plan: None,
                         });
                     }
-                    Err(err) => items.push(failed_item(
+                    Err(err) => items.push(partial_item(
                         &item.name,
                         format!(
                             "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
@@ -620,7 +621,7 @@ fn execute_merged_group_with_deps(
             // reads the same as the members' journals.
             let any_member_failed = items[members_start..]
                 .iter()
-                .any(|item| item.status == BatchMemberStatus::Failed);
+                .any(|item| item.status.is_unsuccessful());
             store.operations.push(OperationRecord {
                 id: batch_operation_id,
                 command: BATCH_COMMAND.to_string(),
@@ -654,7 +655,7 @@ fn execute_merged_group_with_deps(
                         TransactionOutcomeStatus::Failed
                     }
                     _ => {
-                        items.push(failed_item(
+                        items.push(partial_item(
                             &item.name,
                             format!(
                                 "merged native transaction failed after '{}' reached the rpmdb: {reason}; run `anolisa repair {target}` to reconcile",
@@ -700,15 +701,15 @@ fn execute_merged_group_with_deps(
                         for warning in outcome.warnings {
                             output(BatchOutputEvent::Warning(warning));
                         }
-                        items.push(BatchMemberOutcome {
-                            component: name,
-                            status: application::batch_status(
-                                outcome.outcome,
-                                ExecutionIntent::Apply,
-                            ),
-                            reason: None,
-                            plan: None,
-                        });
+                        let item = project_member_application(
+                            &name,
+                            ExecutionIntent::Apply,
+                            outcome.outcome,
+                        );
+                        if args.fail_fast && item.status.is_unsuccessful() {
+                            fail_fast_tripped = true;
+                        }
+                        items.push(item);
                     }
                     Err(err) => {
                         items.push(failed_item(&name, err.reason().to_string()));
@@ -804,10 +805,13 @@ mod tests {
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
+    use super::super::RpmdbProbe;
     use super::super::tests::{
-        FakeInstaller, FakeQuery, load_store, pkg_info, system_ctx_with_configured_rpm_repo,
+        FakeInstaller, FakeQuery, args, linux_env, load_store, pkg_info,
+        system_ctx_with_configured_rpm_repo,
     };
     use super::super::types::InstallOutcome;
+    use crate::progress::NoopReporter;
 
     const NOW: &str = "2026-07-17T00:00:00Z";
 
@@ -972,9 +976,52 @@ mod tests {
 
     fn applied_member() -> MemberApplicationOutcome {
         MemberApplicationOutcome {
-            outcome: InstallOutcome::Installed,
+            outcome: InstallBatchOutcome::Completed(InstallOutcome::Installed),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn single_member_batch_preserves_partial_application_failure() {
+        let (_tmp, c) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&c);
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .failing_state_save(layout.state_dir.join("installed.toml"));
+        let mut install_args = args("copilot-shell");
+        install_args.backend = Some("rpm".to_string());
+        let mut reporter = NoopReporter;
+
+        let result = super::super::application::run_with_dependencies_classified(
+            super::super::application::InstallRequest {
+                component: "copilot-shell",
+                args: &install_args,
+                intent: ExecutionIntent::Apply,
+            },
+            &c,
+            &linux_env(),
+            &RpmdbProbe::absent(),
+            &fake,
+            &fake,
+            true,
+            &std::collections::HashSet::new(),
+            &mut reporter,
+        );
+        let member = member_application_outcome(result);
+        let item =
+            project_member_application("copilot-shell", ExecutionIntent::Apply, member.outcome);
+
+        assert_eq!(item.status, BatchMemberStatus::Partial);
+        assert!(
+            item.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("repair")),
+            "post-transaction record failure must retain repair guidance: {:?}",
+            item.reason
+        );
+        assert_eq!(fake.install_calls.get(), 1, "the native transaction ran");
     }
 
     #[test]
@@ -1268,7 +1315,7 @@ mod tests {
         // Forward-only for the landed member: no retry, repair reconciles.
         assert_eq!(degraded.borrow().as_slice(), ["b"]);
         let a = item_status(&items, "a");
-        assert_eq!(a.status, BatchMemberStatus::Failed);
+        assert_eq!(a.status, BatchMemberStatus::Partial);
         let reason = a.reason.as_deref().unwrap();
         assert!(reason.contains("reached the rpmdb"), "got: {reason}");
         assert!(reason.contains("anolisa repair a"), "got: {reason}");

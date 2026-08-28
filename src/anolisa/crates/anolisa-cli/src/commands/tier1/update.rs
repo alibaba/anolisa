@@ -1140,7 +1140,20 @@ fn render_application_outcome(
     for warning in application_outcome.warnings() {
         eprintln!("warning: {warning}");
     }
-    let batch_outcome = application_outcome.batch_outcome()?;
+    let batch_outcome = match application_outcome.batch_outcome() {
+        application::UpdateBatchOutcome::Completed(outcome) => outcome,
+        application::UpdateBatchOutcome::Partial { reason }
+        | application::UpdateBatchOutcome::Failed { reason } => {
+            let application::ApplicationOutcome::Applied { command, .. } = &application_outcome
+            else {
+                unreachable!("only applied updates have a terminal failure")
+            };
+            return Err(CliError::Runtime {
+                command: command.clone(),
+                reason,
+            });
+        }
+    };
     match application_outcome {
         application::ApplicationOutcome::NoOp { subject } => {
             render_result(
@@ -2195,7 +2208,7 @@ pub(crate) mod tests {
     /// `installed` mutates: a successful [`update`](PackageTransaction::update)
     /// applies `upgrade_to`, modelling rpmdb advancing after dnf runs — so the
     /// pre-update query and the post-update refresh return different EVRs.
-    struct FakeRpm {
+    pub(super) struct FakeRpm {
         package: String,
         installed: RefCell<Option<PackageInfo>>,
         /// PackageInfo the rpmdb holds after a successful update; `None` keeps
@@ -2217,7 +2230,7 @@ pub(crate) mod tests {
     }
 
     impl FakeRpm {
-        fn new(package: &str, installed: Option<PackageInfo>) -> Self {
+        pub(super) fn new(package: &str, installed: Option<PackageInfo>) -> Self {
             Self {
                 package: package.to_string(),
                 installed: RefCell::new(installed),
@@ -2242,9 +2255,13 @@ pub(crate) mod tests {
             self.multi_version = true;
             self
         }
-        fn post_update_missing(mut self) -> Self {
+        pub(super) fn post_update_missing(mut self) -> Self {
             self.post_update_missing = true;
             self
+        }
+
+        pub(super) fn update_call_count(&self) -> usize {
+            self.update_calls.get()
         }
         fn with_on_update(mut self, hook: Box<dyn Fn()>) -> Self {
             self.on_update = Some(hook);
@@ -4063,7 +4080,8 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             "update foo",
         )
         .err()
-        .expect("a drifted snapshot must abort under the lock");
+        .expect("a drifted snapshot must abort under the lock")
+        .into_cli_error();
         assert_eq!(err.code(), "EXECUTION_FAILED");
         assert!(
             err.reason().contains("while this update was resolving"),

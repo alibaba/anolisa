@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use anolisa_core::execution::{CommandOutcome, ExecutionIntent, PreparedExecution};
+use anolisa_core::executor::PHASE_NATIVE_TXN;
 use anolisa_core::planner::{NoOpReason, Plan, Step};
+use anolisa_core::{Transaction, TransactionOutcomeStatus, TransactionStepStatus};
 use anolisa_platform::pkg_query::PackageQuery;
 use anolisa_platform::pkg_transaction::PackageTransaction;
 use anolisa_platform::privilege;
@@ -73,6 +75,42 @@ pub(super) enum InstallApplicationOutcome {
     },
 }
 
+/// Terminal application failure retained for batch classification.
+#[derive(Debug)]
+pub(super) enum ApplicationFailure {
+    /// Effects occurred or cannot be excluded, so repair is required.
+    Partial(CliError),
+    /// The application failed without a known partial state.
+    Failed(CliError),
+}
+
+impl ApplicationFailure {
+    /// Classify an execution failure from its in-memory journal evidence.
+    pub(super) fn from_journal(error: CliError, journal: &Transaction) -> Self {
+        let native_transaction_committed = journal.steps.iter().any(|step| {
+            step.phase == PHASE_NATIVE_TXN && step.status == TransactionStepStatus::Done
+        });
+        if journal.status == TransactionOutcomeStatus::Partial || native_transaction_committed {
+            Self::Partial(error)
+        } else {
+            Self::Failed(error)
+        }
+    }
+
+    /// Restore the existing single-command error projection.
+    pub(super) fn into_cli_error(self) -> CliError {
+        match self {
+            Self::Partial(error) | Self::Failed(error) => error,
+        }
+    }
+}
+
+impl From<CliError> for ApplicationFailure {
+    fn from(error: CliError) -> Self {
+        Self::Failed(error)
+    }
+}
+
 impl InstallApplicationOutcome {
     /// Collapse the typed result to the legacy batch-member classification.
     pub(super) fn batch_outcome(&self) -> InstallOutcome {
@@ -99,6 +137,7 @@ pub(super) fn run(
     ctx: &CliContext,
 ) -> Result<InstallApplicationOutcome, CliError> {
     run_with_planned_components(request, ctx, &HashSet::new())
+        .map_err(ApplicationFailure::into_cli_error)
 }
 
 /// Run one batch member without moving batch-level orchestration into this layer.
@@ -106,7 +145,7 @@ pub(super) fn run_with_planned_components(
     request: InstallRequest<'_>,
     ctx: &CliContext,
     planned_components: &HashSet<String>,
-) -> Result<InstallApplicationOutcome, CliError> {
+) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     let mut activity = Activity::start(
         progress::feedback_for_stderr(ctx.json, ctx.quiet),
         &format!("Preparing to install {}...", request.component),
@@ -114,7 +153,7 @@ pub(super) fn run_with_planned_components(
     let (query, txn) = host_backends(request.component, request.args, ctx)?;
     let env = anolisa_env::EnvService::detect();
     let rpmdb = RpmdbProbe::for_host(&env);
-    run_with_dependencies(
+    run_with_dependencies_classified(
         request,
         ctx,
         &env,
@@ -131,6 +170,7 @@ pub(super) fn run_with_planned_components(
 // Tests vary every boundary independently; keeping the parameters explicit
 // makes the application contract visible instead of hiding it in a test bag.
 #[expect(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn run_with_dependencies(
     request: InstallRequest<'_>,
     ctx: &CliContext,
@@ -142,6 +182,33 @@ pub(super) fn run_with_dependencies(
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallApplicationOutcome, CliError> {
+    run_with_dependencies_classified(
+        request,
+        ctx,
+        env,
+        rpmdb,
+        query,
+        txn,
+        is_root,
+        planned_components,
+        reporter,
+    )
+    .map_err(ApplicationFailure::into_cli_error)
+}
+
+/// Run the application protocol while preserving its terminal classification.
+#[expect(clippy::too_many_arguments)]
+pub(super) fn run_with_dependencies_classified(
+    request: InstallRequest<'_>,
+    ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+    planned_components: &HashSet<String>,
+    reporter: &mut dyn ProgressReporter,
+) -> Result<InstallApplicationOutcome, ApplicationFailure> {
     let planned = plan_component(request.component, request.args, ctx, env, rpmdb, query, txn)?;
     let prepared = prepare_plan(&planned.plan, request.intent);
     debug_assert!(matches!(

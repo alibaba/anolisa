@@ -6,7 +6,7 @@ use anolisa_core::domain::{InstallationScope, NativePm, OwnedArtifact, ProviderB
 use anolisa_core::execution::{
     CommandOutcome, CommandOutcomeStatus, ExecutionIntent, PreparedExecution,
 };
-use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
+use anolisa_core::executor::{DelegatedExecutionTarget, PHASE_NATIVE_TXN, execute_delegated_steps};
 use anolisa_core::facts::JournalEvidence;
 use anolisa_core::lock::InstallLock;
 use anolisa_core::owned_executor::execute_owned_steps;
@@ -15,6 +15,7 @@ use anolisa_core::providers::DelegatedProvider;
 use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
+use anolisa_core::{Transaction, TransactionOutcomeStatus, TransactionStepStatus};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::PackageQuery;
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -59,6 +60,53 @@ pub(super) enum UpdateChange {
     NativePackageUpdated,
 }
 
+/// Batch-facing classification of a single-component update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UpdateBatchOutcome {
+    /// The update completed or no change was required.
+    Completed(super::UpdateOutcome),
+    /// Effects occurred or cannot be excluded, so repair is required.
+    Partial { reason: String },
+    /// The update failed without a known partial state.
+    Failed { reason: String },
+}
+
+/// Terminal application failure retained for batch classification.
+#[derive(Debug)]
+pub(super) enum ApplicationFailure {
+    /// Effects occurred or cannot be excluded, so repair is required.
+    Partial(CliError),
+    /// The application failed without a known partial state.
+    Failed(CliError),
+}
+
+impl ApplicationFailure {
+    /// Classify an execution failure from its in-memory journal evidence.
+    fn from_journal(error: CliError, journal: &Transaction) -> Self {
+        let native_transaction_committed = journal.steps.iter().any(|step| {
+            step.phase == PHASE_NATIVE_TXN && step.status == TransactionStepStatus::Done
+        });
+        if journal.status == TransactionOutcomeStatus::Partial || native_transaction_committed {
+            Self::Partial(error)
+        } else {
+            Self::Failed(error)
+        }
+    }
+
+    /// Restore the existing single-command error projection.
+    pub(super) fn into_cli_error(self) -> CliError {
+        match self {
+            Self::Partial(error) | Self::Failed(error) => error,
+        }
+    }
+}
+
+impl From<CliError> for ApplicationFailure {
+    fn from(error: CliError) -> Self {
+        Self::Failed(error)
+    }
+}
+
 /// Typed application result consumed by the command renderer.
 pub(super) enum ApplicationOutcome {
     /// The owned record already points at the latest resolved artifact.
@@ -79,33 +127,32 @@ pub(super) enum ApplicationOutcome {
 }
 
 impl ApplicationOutcome {
-    /// Collapse the typed result to the legacy batch-member classification.
-    pub(super) fn batch_outcome(&self) -> Result<super::UpdateOutcome, CliError> {
+    /// Project the result to the batch-member terminal classification.
+    pub(super) fn batch_outcome(&self) -> UpdateBatchOutcome {
         match self {
-            Self::NoOp { .. } => Ok(super::UpdateOutcome::AlreadyCurrent),
-            Self::Preview { .. } => Ok(super::UpdateOutcome::Updated),
+            Self::NoOp { .. } => {
+                UpdateBatchOutcome::Completed(super::UpdateOutcome::AlreadyCurrent)
+            }
+            Self::Preview { .. } => UpdateBatchOutcome::Completed(super::UpdateOutcome::Updated),
             Self::Applied {
-                command,
-                subject,
-                outcome,
-                ..
+                subject, outcome, ..
             } => match outcome.status() {
-                CommandOutcomeStatus::Completed => Ok(if outcome.changes().is_empty() {
-                    super::UpdateOutcome::AlreadyCurrent
-                } else {
-                    super::UpdateOutcome::Updated
-                }),
-                CommandOutcomeStatus::Partial { reason } => Err(CliError::Runtime {
-                    command: command.clone(),
+                CommandOutcomeStatus::Completed => {
+                    UpdateBatchOutcome::Completed(if outcome.changes().is_empty() {
+                        super::UpdateOutcome::AlreadyCurrent
+                    } else {
+                        super::UpdateOutcome::Updated
+                    })
+                }
+                CommandOutcomeStatus::Partial { reason } => UpdateBatchOutcome::Partial {
                     reason: format!(
                         "the update of '{}' committed, but {reason}; run `anolisa repair {}` to reconcile",
                         subject.component, subject.component
                     ),
-                }),
-                CommandOutcomeStatus::Failed { reason } => Err(CliError::Runtime {
-                    command: command.clone(),
+                },
+                CommandOutcomeStatus::Failed { reason } => UpdateBatchOutcome::Failed {
                     reason: reason.clone(),
-                }),
+                },
             },
         }
     }
@@ -139,6 +186,15 @@ pub(super) fn run(
     run_with_dependencies(request, ctx, &query, &txn, privilege::is_root())
 }
 
+/// Run one batch member while preserving its terminal classification.
+pub(super) fn run_for_batch(
+    request: ApplicationRequest<'_>,
+    ctx: &CliContext,
+) -> Result<ApplicationOutcome, ApplicationFailure> {
+    let (query, txn) = update_backends(request.component, ctx)?;
+    run_with_dependencies_classified(request, ctx, &query, &txn, privilege::is_root())
+}
+
 /// Run the single-component application protocol with explicit host boundaries.
 pub(super) fn run_with_dependencies(
     request: ApplicationRequest<'_>,
@@ -147,6 +203,18 @@ pub(super) fn run_with_dependencies(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> Result<ApplicationOutcome, CliError> {
+    run_with_dependencies_classified(request, ctx, query, txn, is_root)
+        .map_err(ApplicationFailure::into_cli_error)
+}
+
+/// Run the application protocol while preserving its terminal classification.
+pub(super) fn run_with_dependencies_classified(
+    request: ApplicationRequest<'_>,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+) -> Result<ApplicationOutcome, ApplicationFailure> {
     let planned = plan_component_update(request.component, ctx, query, txn)?;
     let prepared = request.intent.prepare(planned.plan.clone());
     execute_planned_update(planned, prepared, ctx, query, txn, is_root)
@@ -159,7 +227,7 @@ fn execute_planned_update(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-) -> Result<ApplicationOutcome, CliError> {
+) -> Result<ApplicationOutcome, ApplicationFailure> {
     let PlannedComponentUpdate {
         command,
         target,
@@ -275,7 +343,7 @@ fn apply_delegated(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-) -> Result<ApplicationOutcome, CliError> {
+) -> Result<ApplicationOutcome, ApplicationFailure> {
     // Native transactions require root. Refuse before acquiring the lock so
     // the user sees the CLI policy instead of dnf's mid-transaction error.
     if !is_root {
@@ -285,7 +353,8 @@ fn apply_delegated(
                 "updating system RPM '{}' requires root privileges; re-run with sudo: `sudo anolisa update {target}`",
                 native_package.as_deref().unwrap_or(target)
             ),
-        });
+        }
+        .into());
     }
 
     let provider = DelegatedProvider::new(query, txn);
@@ -304,7 +373,8 @@ fn apply_delegated(
             reason: format!(
                 "component '{target}' changed while this update was planning; nothing was changed — re-run `anolisa update {target}`"
             ),
-        });
+        }
+        .into());
     }
     // The lock-time snapshot is the execution authority. It prevents a
     // pre-lock package or journal observation from authorizing stale steps.
@@ -355,7 +425,7 @@ fn apply_delegated(
         }),
         owned_artifact: None,
     };
-    let execution = {
+    let execution_result = {
         let mut sink = StoreRecordSink::new(&mut store, state_path, context);
         execute_delegated_steps(
             &steps,
@@ -365,22 +435,28 @@ fn apply_delegated(
             &mut journal,
             now,
         )
-    }
-    .map_err(|err| match err {
-        anolisa_core::executor::ExecutionError::TransactionFailed {
-            source:
-                anolisa_core::providers::ProviderError::Transaction(
-                    PackageTransactionError::CommandMissing { command: bin },
-                ),
-            ..
-        } => tooling_missing_err(command, &bin, target),
-        other => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "update of '{target}' failed: {other}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
-            ),
-        },
-    })?;
+    };
+    let execution = match execution_result {
+        Ok(execution) => execution,
+        Err(err) => {
+            let error = match err {
+                anolisa_core::executor::ExecutionError::TransactionFailed {
+                    source:
+                        anolisa_core::providers::ProviderError::Transaction(
+                            PackageTransactionError::CommandMissing { command: bin },
+                        ),
+                    ..
+                } => tooling_missing_err(command, &bin, target),
+                other => CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "update of '{target}' failed: {other}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
+                    ),
+                },
+            };
+            return Err(ApplicationFailure::from_journal(error, &journal));
+        }
+    };
 
     let completion_failure = complete_delegated_update(
         layout,
@@ -462,7 +538,7 @@ pub(super) fn apply_owned(
     resolution: RawResolution,
     prior: OwnedArtifact,
     command: &str,
-) -> Result<ApplicationOutcome, CliError> {
+) -> Result<ApplicationOutcome, ApplicationFailure> {
     // A user prefix may be writable without root; permission failures belong
     // to the exact owned-executor step so compensation remains honest.
     let resolve_warnings = resolution.warnings.clone();
@@ -497,7 +573,8 @@ pub(super) fn apply_owned(
                     "component '{target}' changed from {} to {} while this update was resolving; nothing was changed — re-run `anolisa update {target}`",
                     prior.version, artifact.version
                 ),
-            });
+            }
+            .into());
         }
         _ => {
             return Err(CliError::Runtime {
@@ -505,7 +582,8 @@ pub(super) fn apply_owned(
                 reason: format!(
                     "component '{target}' is no longer an owned installation; nothing was changed — re-run `anolisa update {target}`"
                 ),
-            });
+            }
+            .into());
         }
     };
     let prior_adapter_revisions = adapter_revision_snapshot(ctx, layout, target);
@@ -514,7 +592,7 @@ pub(super) fn apply_owned(
     let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
     let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
-    let execution = {
+    let execution_result = {
         let mut ops = RawReplayOps::new(
             ctx,
             layout,
@@ -534,8 +612,14 @@ pub(super) fn apply_owned(
             ops.discard_backups();
         }
         result
-    }
-    .map_err(|err| owned_error_to_cli(err, target, scope, command))?;
+    };
+    let execution = match execution_result {
+        Ok(execution) => execution,
+        Err(err) => {
+            let error = owned_error_to_cli(err, target, scope, command);
+            return Err(ApplicationFailure::from_journal(error, &journal));
+        }
+    };
 
     // The record commit is authoritative; operation history remains
     // best-effort bookkeeping, matching delegated completion.
@@ -655,8 +739,8 @@ mod tests {
         );
 
         assert_eq!(
-            outcome.batch_outcome().expect("completed update"),
-            super::super::UpdateOutcome::Updated
+            outcome.batch_outcome(),
+            UpdateBatchOutcome::Completed(super::super::UpdateOutcome::Updated)
         );
         assert_eq!(outcome.warnings(), ["service state needs verification"]);
     }
@@ -670,15 +754,11 @@ mod tests {
             vec!["service state needs verification".to_string()],
         );
 
-        let err = outcome
-            .batch_outcome()
-            .expect_err("partial update must use the error path");
-
-        assert_eq!(err.code(), "EXECUTION_FAILED");
-        assert_eq!(err.exit_code(), 1);
         assert_eq!(
-            err.reason(),
-            "the update of 'cosh' committed, but manifest reconciliation did not complete; run `anolisa repair cosh` to reconcile"
+            outcome.batch_outcome(),
+            UpdateBatchOutcome::Partial {
+                reason: "the update of 'cosh' committed, but manifest reconciliation did not complete; run `anolisa repair cosh` to reconcile".to_string()
+            }
         );
         assert_eq!(outcome.warnings(), ["service state needs verification"]);
     }
@@ -692,12 +772,11 @@ mod tests {
             vec!["service state needs verification".to_string()],
         );
 
-        let err = outcome
-            .batch_outcome()
-            .expect_err("failed update must use the error path");
-
-        assert_eq!(err.code(), "EXECUTION_FAILED");
-        assert_eq!(err.exit_code(), 1);
-        assert_eq!(err.reason(), "native package transaction failed");
+        assert_eq!(
+            outcome.batch_outcome(),
+            UpdateBatchOutcome::Failed {
+                reason: "native package transaction failed".to_string()
+            }
+        );
     }
 }
