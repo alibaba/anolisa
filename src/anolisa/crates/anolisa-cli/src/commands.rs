@@ -202,7 +202,7 @@ fn render_grouped_help(cap: &[(String, String)], mgmt: &[(String, String)]) -> S
 /// `args` struct.
 pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     let policy = command_policy(&cli.command);
-    validate_global_args(&cli, ctx, policy)?;
+    validate_command_args(&cli, ctx, policy)?;
     match cli.command {
         Commands::Component(cmd) => match cmd {
             ComponentCommands::List(args) => tier1::list::handle(args, ctx),
@@ -279,24 +279,42 @@ impl CommandPolicy {
     }
 }
 
-fn validate_global_args(
+fn validate_command_args(
     cli: &Cli,
     ctx: &CliContext,
     policy: CommandPolicy,
 ) -> Result<(), CliError> {
-    validate_global_args_with_euid(
+    validate_command_args_with_euid(
         ctx,
         policy,
         anolisa_platform::privilege::effective_uid(),
         cli.install_mode.is_some(),
+        ctx.dry_run || command_local_dry_run(&cli.command),
     )
 }
 
+#[cfg(test)]
 fn validate_global_args_with_euid(
     ctx: &CliContext,
     policy: CommandPolicy,
     effective_uid: u32,
     install_mode_explicit: bool,
+) -> Result<(), CliError> {
+    validate_command_args_with_euid(
+        ctx,
+        policy,
+        effective_uid,
+        install_mode_explicit,
+        ctx.dry_run,
+    )
+}
+
+fn validate_command_args_with_euid(
+    ctx: &CliContext,
+    policy: CommandPolicy,
+    effective_uid: u32,
+    install_mode_explicit: bool,
+    dry_run_requested: bool,
 ) -> Result<(), CliError> {
     if let Some(prefix) = &ctx.prefix
         && !is_safe_absolute_path(prefix)
@@ -322,7 +340,7 @@ fn validate_global_args_with_euid(
         _ => {}
     }
 
-    if ctx.dry_run
+    if dry_run_requested
         && policy
             .scope
             .dry_run_policy()
@@ -334,13 +352,13 @@ fn validate_global_args_with_euid(
     match policy.scope {
         CommandScope::ReadOnly => {}
         CommandScope::ModeScopedMutation { dry_run } => {
-            let dry_run_preview = ctx.dry_run && dry_run.waives_root();
+            let dry_run_preview = dry_run_requested && dry_run.waives_root();
             if ctx.install_mode == InstallMode::System && effective_uid != 0 && !dry_run_preview {
                 return Err(system_permission_error(ctx, policy.label, true));
             }
         }
         CommandScope::SystemOnlyMutation { dry_run } => {
-            let dry_run_preview = ctx.dry_run && dry_run.waives_root();
+            let dry_run_preview = dry_run_requested && dry_run.waives_root();
             if effective_uid != 0 && !dry_run_preview {
                 return Err(system_permission_error(ctx, policy.label, false));
             }
@@ -353,6 +371,31 @@ fn validate_global_args_with_euid(
     }
 
     Ok(())
+}
+
+fn command_local_dry_run(command: &Commands) -> bool {
+    let Commands::Management(ManagementCommands::Osbase(args)) = command else {
+        return false;
+    };
+
+    match &args.command {
+        osbase::OsbaseCommands::Kernel(kernel) => match &kernel.command {
+            osbase::KernelCommands::Install { dry_run } => *dry_run,
+            osbase::KernelCommands::Remove | osbase::KernelCommands::Status => false,
+        },
+        osbase::OsbaseCommands::Sandbox(sandbox) => match &sandbox.command {
+            osbase::SandboxCommands::Install { dry_run, .. }
+            | osbase::SandboxCommands::Uninstall { dry_run, .. }
+            | osbase::SandboxCommands::Remove { dry_run, .. } => *dry_run,
+            osbase::SandboxCommands::List { .. } | osbase::SandboxCommands::Status { .. } => false,
+        },
+        osbase::OsbaseCommands::Security(security) => match &security.command {
+            osbase::SecurityCommands::Install { dry_run, .. } => *dry_run,
+            osbase::SecurityCommands::Remove { .. } | osbase::SecurityCommands::Status { .. } => {
+                false
+            }
+        },
+    }
 }
 
 pub(crate) fn unsupported_dry_run_error(command: &str) -> CliError {
@@ -476,9 +519,15 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ManagementCommands::Bug(_) => CommandPolicy::new("bug", CommandScope::ReadOnly),
             ManagementCommands::Osbase(args) => {
                 let label = match &args.command {
+                    osbase::OsbaseCommands::Kernel(osbase::KernelArgs {
+                        command: osbase::KernelCommands::Install { .. },
+                    }) => "osbase kernel install",
                     osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
                         command: osbase::SandboxCommands::Remove { .. },
                     }) => "osbase sandbox remove",
+                    osbase::OsbaseCommands::Security(osbase::SecurityArgs {
+                        command: osbase::SecurityCommands::Install { .. },
+                    }) => "osbase security install",
                     _ => "osbase",
                 };
                 CommandPolicy::new(label, osbase_command_scope(args))
@@ -616,6 +665,92 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    #[test]
+    fn command_local_dry_run_covers_every_local_osbase_flag() {
+        let commands: &[&[&str]] = &[
+            &["anolisa", "osbase", "kernel", "install"],
+            &["anolisa", "osbase", "sandbox", "install", "gvisor"],
+            &["anolisa", "osbase", "sandbox", "uninstall", "gvisor"],
+            &["anolisa", "osbase", "sandbox", "remove", "gvisor"],
+            &["anolisa", "osbase", "security", "install", "loongshield"],
+        ];
+
+        for arguments in commands {
+            let cli = Cli::try_parse_from(*arguments).expect("command without local dry-run");
+            assert!(!command_local_dry_run(&cli.command));
+
+            let mut with_dry_run = arguments.to_vec();
+            with_dry_run.push("--dry-run");
+            let cli = Cli::try_parse_from(with_dry_run).expect("command with local dry-run");
+            assert!(command_local_dry_run(&cli.command));
+        }
+
+        let cli = Cli::try_parse_from(["anolisa", "osbase", "kernel", "status"])
+            .expect("read-only command");
+        assert!(!command_local_dry_run(&cli.command));
+    }
+
+    #[test]
+    fn unsupported_osbase_install_dry_runs_match_for_local_global_root_and_non_root() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "osbase kernel install",
+                &["anolisa", "osbase", "kernel", "install", "--dry-run"],
+            ),
+            (
+                "osbase kernel install",
+                &["anolisa", "--dry-run", "osbase", "kernel", "install"],
+            ),
+            (
+                "osbase security install",
+                &[
+                    "anolisa",
+                    "osbase",
+                    "security",
+                    "install",
+                    "loongshield",
+                    "--dry-run",
+                ],
+            ),
+            (
+                "osbase security install",
+                &[
+                    "anolisa",
+                    "--dry-run",
+                    "osbase",
+                    "security",
+                    "install",
+                    "loongshield",
+                ],
+            ),
+        ];
+
+        for (label, arguments) in cases {
+            let cli = Cli::try_parse_from(*arguments).expect("valid dry-run command");
+            let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+            ctx.dry_run = cli.dry_run;
+            let dry_run_requested = ctx.dry_run || command_local_dry_run(&cli.command);
+
+            for effective_uid in [0, 1000] {
+                let err = validate_command_args_with_euid(
+                    &ctx,
+                    command_policy(&cli.command),
+                    effective_uid,
+                    true,
+                    dry_run_requested,
+                )
+                .expect_err("unsupported local and global dry-run must fail closed");
+
+                assert_eq!(err.code(), "INVALID_ARGUMENT");
+                assert_eq!(err.command(), *label);
+                assert_eq!(
+                    err.reason(),
+                    format!("command '{label}' does not support --dry-run; no action was taken")
+                );
+            }
+        }
     }
 
     #[test]
