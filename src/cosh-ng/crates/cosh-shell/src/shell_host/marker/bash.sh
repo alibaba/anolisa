@@ -411,6 +411,11 @@ _cosh_is_slash_control_candidate() {
   return 1
 }
 _cosh_guard_slash_submission() {
+  local restore_xtrace=0
+  if [[ $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   local input="$READLINE_LINE"
   if [[ "${1:-false}" == true && "$input" == ' '* ]]; then
     input="${input# }"
@@ -421,14 +426,11 @@ _cosh_guard_slash_submission() {
   done
   local first_word="${command_word_source%%[[:space:]]*}"
   if ! _cosh_assistance_enabled || ! _cosh_is_slash_control_candidate "$first_word"; then
+    (( restore_xtrace == 1 )) && set -x
     return 0
   fi
 
-  local sensitive=false restore_xtrace=0
-  if [[ $- == *x* ]]; then
-    restore_xtrace=1
-    set +x
-  fi
+  local sensitive=false
   if _cosh_command_has_secret "$input"; then
     sensitive=true
   fi

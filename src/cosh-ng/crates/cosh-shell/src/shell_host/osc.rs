@@ -243,12 +243,9 @@ impl OscParser {
 
         let compact_prompt_marker = marker.normalize_compact_prompt();
 
-        if marker.event == "slash_guard" {
-            self.flush_pending_slash_guard_echo()?;
-            self.pending_slash_guard_echo = Some(PendingSlashGuardEcho::new());
+        if self.handle_slash_guard_marker(&marker)? {
             return Ok(());
         }
-        self.flush_pending_slash_guard_echo()?;
 
         if marker.has_trusted_history_context(&self.session_id, compact_prompt_marker) {
             self.history_file_tracker

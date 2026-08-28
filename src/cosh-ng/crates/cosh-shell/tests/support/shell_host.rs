@@ -41,6 +41,143 @@ pub(crate) fn assert_no_osc_marker(output: &[u8]) {
         .any(|window| window == b"\x1b]1337;COSH;"));
 }
 
+/// Models observed ASCII bytes and controls, not Unicode cell widths or graphemes.
+pub(crate) fn render_terminal_screen(output: &[u8], width: usize, height: usize) -> Vec<String> {
+    assert!(width > 0, "terminal width must be non-zero");
+    assert!(height > 0, "terminal height must be non-zero");
+    let mut rows = vec![Vec::<u8>::new(); height];
+    let (mut row, mut column, mut index) = (0usize, 0usize, 0usize);
+    let mut saved_cursor = None;
+
+    while index < output.len() {
+        match output[index] {
+            b'\r' => {
+                column = 0;
+                index += 1;
+            }
+            b'\n' => {
+                terminal_line_feed(&mut rows, &mut row);
+                column = 0;
+                index += 1;
+            }
+            b'\x08' => {
+                column = column.saturating_sub(1);
+                index += 1;
+            }
+            b'\t' => {
+                column = (((column / 8) + 1) * 8).min(width - 1);
+                index += 1;
+            }
+            b'\x1b' if output.get(index + 1) == Some(&b']') => {
+                index += 2;
+                while index < output.len() {
+                    if output[index] == b'\x07' {
+                        index += 1;
+                        break;
+                    }
+                    if output[index] == b'\x1b' && output.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'\x1b' if output.get(index + 1) == Some(&b'[') => {
+                let params_start = index + 2;
+                index = params_start;
+                while index < output.len() && !(0x40..=0x7e).contains(&output[index]) {
+                    index += 1;
+                }
+                if index == output.len() {
+                    break;
+                }
+                let final_byte = output[index];
+                let params = &output[params_start..index];
+                let first = terminal_csi_param(params, 0, 1);
+                match final_byte {
+                    b'A' => row = row.saturating_sub(first),
+                    b'B' => row = (row + first).min(height - 1),
+                    b'C' => column = (column + first).min(width - 1),
+                    b'D' => column = column.saturating_sub(first),
+                    b'G' => column = first.saturating_sub(1).min(width - 1),
+                    b'H' | b'f' => {
+                        row = terminal_csi_param(params, 0, 1)
+                            .saturating_sub(1)
+                            .min(height - 1);
+                        column = terminal_csi_param(params, 1, 1).saturating_sub(1);
+                        column = column.min(width - 1);
+                    }
+                    b'K' => {
+                        let mode = terminal_csi_param(params, 0, 0);
+                        match mode {
+                            1 => {
+                                let end = column.saturating_add(1).min(rows[row].len());
+                                rows[row][..end].fill(b' ');
+                            }
+                            2 => rows[row].clear(),
+                            _ => rows[row].truncate(column),
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            b'\x1b' if output.get(index + 1) == Some(&b'7') => {
+                saved_cursor = Some((row, column));
+                index += 2;
+            }
+            b'\x1b' if output.get(index + 1) == Some(&b'8') => {
+                if let Some((saved_row, saved_column)) = saved_cursor {
+                    row = saved_row;
+                    column = saved_column;
+                }
+                index += 2;
+            }
+            b'\x1b' => index += usize::from(index + 1 < output.len()) + 1,
+            byte if byte >= b' ' => {
+                if column == width {
+                    terminal_line_feed(&mut rows, &mut row);
+                    column = 0;
+                }
+                if rows[row].len() <= column {
+                    rows[row].resize(column + 1, b' ');
+                }
+                rows[row][column] = byte;
+                column += 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    rows.into_iter()
+        .map(|mut row| {
+            while row.last() == Some(&b' ') {
+                row.pop();
+            }
+            String::from_utf8_lossy(&row).into_owned()
+        })
+        .collect()
+}
+
+fn terminal_line_feed(rows: &mut [Vec<u8>], row: &mut usize) {
+    if *row + 1 < rows.len() {
+        *row += 1;
+    } else {
+        rows.rotate_left(1);
+        rows.last_mut().expect("non-empty terminal").clear();
+    }
+}
+
+fn terminal_csi_param(params: &[u8], index: usize, default: usize) -> usize {
+    params
+        .split(|byte| *byte == b';')
+        .nth(index)
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| value.trim_start_matches('?').parse().ok())
+        .unwrap_or(default)
+}
+
 pub(crate) fn assert_clean_shell_output_ref(block: &CommandBlock, expected: &str) {
     let output_ref = block
         .output

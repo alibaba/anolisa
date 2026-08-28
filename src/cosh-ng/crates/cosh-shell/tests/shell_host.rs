@@ -31,8 +31,8 @@ mod support_shell_host;
 use support_shell_host::{
     assert_clean_shell_output_ref, assert_fullscreen_terminal_modes_balanced, assert_no_osc_marker,
     assert_no_synthetic_terminal_restore_after_interrupt, ledger_from_output,
-    ledger_output_refs_text, make_executable, shell_arg, stty_flag_probe, unique_suffix,
-    DelayedInput,
+    ledger_output_refs_text, make_executable, render_terminal_screen, shell_arg, stty_flag_probe,
+    unique_suffix, DelayedInput,
 };
 
 fn bash_supports_command_not_found_handler() -> bool {

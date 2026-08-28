@@ -383,25 +383,83 @@ fn slash_guard_echo_requires_an_authenticated_one_shot_arm() {
         .feed(SENTINEL_LINE)
         .expect("feed sentinel after wrong-session arm");
     assert_eq!(wrong_session.display.resident_slice(), SENTINEL_LINE);
+
+    let mut wrong_reason = parser_for_test("slash-guard-wrong-reason");
+    wrong_reason
+        .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07guard$ case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
+        .expect("feed trusted arm");
+    wrong_reason
+        .feed(b"\x1b]1337;COSH;{\"e\":\"intercept\",\"t\":\"test-marker-token\",\"command\":\"/mode\",\"reason\":\"natural_language\"}\x07")
+        .expect("feed wrong intercept kind");
+    assert_eq!(wrong_reason.display.resident_slice(), b"guard$ \r\n");
 }
 
 #[test]
 fn slash_guard_echo_keeps_the_original_line_exactly_once() {
     let mut parser = parser_for_test("slash-guard-display");
-    parser.feed(b"guard$ /mode").expect("feed original line");
     parser
-        .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07<builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
+        .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07guard$ case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
         .expect("feed guarded redisplay");
+    assert!(parser.display.is_empty());
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"intercept\",\"t\":\"test-marker-token\",\"command\":\"/mode\",\"reason\":\"slash\"}\x07")
+        .expect("resolve guarded redisplay");
     assert_eq!(parser.display.resident_slice(), b"guard$ /mode\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"guard$ \r\n");
+}
+
+#[test]
+fn slash_guard_echo_does_not_duplicate_an_already_painted_direct_line() {
+    let mut parser = parser_for_test("slash-guard-direct-display");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"precmd\",\"t\":\"test-marker-token\",\"status\":0}\x07guard$ /mode\r\n\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07guard$ case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
+        .expect("feed direct line and guarded redisplay");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"intercept\",\"t\":\"test-marker-token\",\"command\":\"/mode\",\"reason\":\"slash\"}\x07")
+        .expect("resolve direct slash input");
+
+    assert_eq!(
+        parser.display.resident_slice(),
+        b"guard$ /mode\r\nguard$ \r\n"
+    );
+    assert_eq!(
+        parser.clean.resident_slice(),
+        b"guard$ /mode\r\nguard$ \r\n"
+    );
+}
+
+#[test]
+fn slash_guard_echo_restores_tabbed_input_only_to_display() {
+    let mut parser = parser_for_test("slash-guard-tabbed-display");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07guard$ case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
+        .expect("feed tabbed guard redraw");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"intercept\",\"t\":\"test-marker-token\",\"command\":\"/mode\\targ\",\"reason\":\"slash\"}\x07")
+        .expect("resolve tabbed slash input");
+
+    assert_eq!(parser.display.resident_slice(), b"guard$ /mode\targ\r\n");
+    assert_eq!(parser.clean.resident_slice(), b"guard$ \r\n");
 }
 
 #[test]
 fn slash_guard_echo_preserves_complete_background_lines() {
     let mut parser = parser_for_test("slash-guard-background");
     parser
-        .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07background\r\n<builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
+        .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07background\r\nguard$ case $- in *x*) builtin set +x; builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\nAFTER\r\n")
         .expect("feed background output before guarded redisplay");
-    assert_eq!(parser.display.resident_slice(), b"background\r\n\r\n");
+    assert_eq!(parser.display.resident_slice(), b"background\r\n");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"intercept\",\"t\":\"test-marker-token\",\"command\":\"/mode\",\"reason\":\"slash\"}\x07")
+        .expect("resolve background ordering");
+    assert_eq!(
+        parser.display.resident_slice(),
+        b"background\r\nguard$ /mode\r\nAFTER\r\n"
+    );
+    assert_eq!(
+        parser.clean.resident_slice(),
+        b"background\r\nguard$ \r\nAFTER\r\n"
+    );
     assert!(!parser
         .display
         .resident_slice()
@@ -415,10 +473,19 @@ fn slash_guard_echo_preserves_carriage_return_partial_output_in_both_streams() {
     parser
         .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07BEFORE\rBACKGROUND_PARTIAL<builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
         .expect("feed CR partial output before horizontally scrolled guard");
+    assert!(parser.display.is_empty());
+    parser
+        .feed(b"\x1b]1337;COSH;{\"e\":\"intercept\",\"t\":\"test-marker-token\",\"command\":\"/mode\",\"reason\":\"slash\"}\x07")
+        .expect("resolve CR partial output");
     assert_eq!(
         parser.display.resident_slice(),
-        b"BEFORE\rBACKGROUND_PARTIAL\r\n"
+        b"BEFORE\rBACKGROUND_PARTIAL/mode\r\n"
     );
+    assert!(!parser
+        .clean
+        .resident_slice()
+        .windows(b"/mode".len())
+        .any(|window| window == b"/mode"));
     assert!(parser
         .clean
         .resident_slice()
@@ -438,7 +505,7 @@ fn authenticated_slash_guard_echo_handles_fragmentation_and_fails_open() {
     parser
         .feed(b"__cosh_slash_guard__; builtin set -x ;; *) : ;; esac    \x08\x08\r\nfollowing")
         .expect("finish shadow echo");
-    assert_eq!(parser.display.resident_slice(), b"\r\n");
+    assert!(parser.display.is_empty());
     parser
         .feed(b"\x1b]1337;COSH;{\"event\":\"prompt_ready\",\"token\":\"test-marker-token\",\"session_id\":\"slash-guard-fragmented\"}\x07")
         .expect("flush following output at lifecycle boundary");
@@ -457,6 +524,10 @@ fn authenticated_slash_guard_echo_handles_fragmentation_and_fails_open() {
     nested
         .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07partial\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07<builtin true __cosh_slash_guard__; builtin set -x ;; *) : ;; esac\r\n")
         .expect("feed nested arm");
+    assert_eq!(nested.display.resident_slice(), b"partial");
+    nested
+        .feed(b"\x1b]1337;COSH;{\"e\":\"prompt_ready\",\"t\":\"test-marker-token\"}\x07")
+        .expect("flush nested arm without intercept");
     assert_eq!(nested.display.resident_slice(), b"partial\r\n");
 
     let mut capped = parser_for_test("slash-guard-cap");
