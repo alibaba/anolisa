@@ -43,6 +43,7 @@ SUBCOMMANDS:
 FLAGS:
         --daemon              Run as daemon in background (Linux only)
         --enable-filewatch    Enable file watch probe (monitors .jsonl file opens from traced processes)
+        --no-ebpf             Skip eBPF probes and collect trajectories only (Linux only)
     -v, --verbose             Enable verbose/debug output
 
 OPTIONS:
@@ -57,10 +58,34 @@ sudo agentsight trace
 
 # 后台运行并指定规则文件
 sudo agentsight trace --daemon -c /etc/agentsight/config.json
+
+# 无特权环境：仅采集轨迹，无需 root 与 CAP_BPF
+agentsight trace --no-ebpf
 ```
 
 > 同时跑两个 tracer 会争抢同一批 uprobe，数据也会变得难以解释。启动前台 tracer 前请先停掉
 > `agentsight.service`。
+
+### 无特权运行（`--no-ebpf`）
+
+加载探针需要 root 或 `CAP_BPF`/`CAP_PERFMON`。没有这些权限时，`trace` 会在探针初始化阶段停下并
+报出 `Failed to create probes`。`--no-ebpf` 跳过探针，仅运行纯用户态的轨迹采集器：扫描本地 Agent
+会话文件（Claude Code、Qoder、QoderWork、Codex），转换为 ATIF v1.7 并存入 `trajectories.db`，供
+`serve` 展示。
+
+此模式**不提供**的能力：Token 计量、审计事件、中断检测以及进程与 TLS 流量监控均来自探针，因此
+`agentsight token`、`audit`、`metrics`、`interruption` 查不到新数据。
+
+两个需要注意的行为：
+
+- 即使 `features.trajectory_collection.enabled` 为 `false`，该参数也会强制启用轨迹采集，因为它是此
+  模式下唯一的数据来源。`scan_interval_secs` 和 `scan_dirs` 仍从配置文件读取。
+- `trajectories.db` 在共享数据目录可写时写入该目录，否则写入 `$HOME/.local/share/agentsight/`。
+  启动时会打印实际路径和对应的 `serve --db` 命令；发生回退时需把该路径传给 `serve`。回退目录与
+  数据库按仅属主权限（`0700`/`0600`）创建，因为轨迹内含完整对话内容。
+
+默认扫描根目录是 `/root` 和 `/home/*`。若 home 目录不在这两处（例如容器使用 `/app`），需显式配置
+`features.trajectory_collection.scan_dirs` 指向会话目录。
 
 ## agentsight serve
 

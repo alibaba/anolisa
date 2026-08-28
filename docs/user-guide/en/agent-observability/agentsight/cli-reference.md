@@ -44,6 +44,7 @@ Loads the eBPF probes, discovers Agent processes, and writes captured events to 
 FLAGS:
         --daemon              Run as daemon in background (Linux only)
         --enable-filewatch    Enable file watch probe (monitors .jsonl file opens from traced processes)
+        --no-ebpf             Skip eBPF probes and collect trajectories only (Linux only)
     -v, --verbose             Enable verbose/debug output
 
 OPTIONS:
@@ -58,10 +59,40 @@ sudo agentsight trace
 
 # background with a custom rule file
 sudo agentsight trace --daemon -c /etc/agentsight/config.json
+
+# unprivileged host: trajectory collection only, no root and no CAP_BPF needed
+agentsight trace --no-ebpf
 ```
 
 > Running two tracers at the same time makes both compete for the same uprobes and produces
 > confusing data. Stop `agentsight.service` before starting a foreground tracer.
+
+### Running without privileges (`--no-ebpf`)
+
+Loading the probes requires root or `CAP_BPF`/`CAP_PERFMON`. Without them `trace` stops at probe
+setup and reports `Failed to create probes`. `--no-ebpf` skips the probes and runs only the
+trajectory collector, which is pure user-space: it scans local Agent session files (Claude Code,
+Qoder, QoderWork, Codex), converts them to ATIF v1.7, and stores them in `trajectories.db` for
+`serve` to display.
+
+What this mode does **not** provide: token metering, audit events, interruption detection, and
+process or TLS traffic monitoring all come from the probes, so `agentsight token`, `audit`,
+`metrics`, and `interruption` report no new data.
+
+Two behaviours to keep in mind:
+
+- The flag implies trajectory collection even when `features.trajectory_collection.enabled` is
+  `false`, because it is the only remaining data source. `scan_interval_secs` and `scan_dirs` are
+  still read from the configuration file.
+- `trajectories.db` goes to the shared data directory when it is writable, otherwise to
+  `$HOME/.local/share/agentsight/`. Startup prints the resolved path together with the matching
+  `serve --db` command; pass that path to `serve` when the fallback is used. The fallback directory
+  and database are created owner-only (`0700`/`0600`), because trajectories embed full conversation
+  content.
+
+The default scan roots are `/root` and `/home/*`. If the home directory lies elsewhere (a container
+using `/app`, for example), set `features.trajectory_collection.scan_dirs` to the session
+directories explicitly.
 
 ## agentsight serve
 

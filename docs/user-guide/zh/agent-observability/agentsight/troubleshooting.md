@@ -17,7 +17,8 @@ journalctl -u agentsight.service -n 50 --no-pager      # 它在抱怨什么？
 ## 完全没有数据
 
 **1. tracer 不是以 root 运行。** 非特权用户挂载 eBPF 会静默失败，表现就是「没有任何事件」。请用
-`sudo agentsight trace`，或者直接用安装包的服务。
+`sudo agentsight trace`，或者直接用安装包的服务。若环境根本无法提供特权，`agentsight trace --no-ebpf`
+仍然可以采集轨迹（参见 [CLI 参考](cli-reference.md)）；但 Token、审计、中断数据仍然不可用。
 
 **2. 内核没有 BTF。** `ls /sys/kernel/btf/vmlinux` 必须成功。否则 CO-RE 探针无法加载，
 `journalctl` 里会有探针加载失败的报错。

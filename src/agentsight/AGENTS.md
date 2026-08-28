@@ -166,7 +166,7 @@ OpenAI Responses API 的 `response.completed` 事件可能跨多个 TLS record�
 
 | 命令 | 入口 | 功能 |
 |------|------|------|
-| `agentsight trace` | `src/bin/cli/trace.rs` | eBPF 追踪（需 root） |
+| `agentsight trace` | `src/bin/cli/trace.rs` | eBPF 追踪（需 root）；`--no-ebpf` 仅跑轨迹采集，无需特权 |
 | `agentsight serve` | `src/bin/cli/serve.rs` | API + Dashboard 服务器 |
 | `agentsight token` | `src/bin/cli/token.rs` | 查询 Token 消耗 |
 | `agentsight audit` | `src/bin/cli/audit.rs` | 查询审计事件 |
@@ -354,7 +354,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 - Lead with "zero-instrumentation eBPF observability" — the user installs AgentSight and gets full tracing without touching their Agent code. This is the single most important differentiator.
 
 ### Gotchas to Warn About
-- root/CAP_BPF is required for `agentsight trace` — users who forget get silent "no events" behavior. Every usage section must note this.
+- root/CAP_BPF is required for `agentsight trace` — users who forget get silent "no events" behavior. Every usage section must note this. `--no-ebpf` is the unprivileged fallback and runs the trajectory collector alone; never present it as a substitute for eBPF-derived data (token metering, audit, interruption detection).
 - Config file semantics: user-provided `config.json` **replaces** the built-in defaults entirely (no merge). Users who partially customize lose Agent discovery rules for unmentioned Agents.
 
 ### Content Decisions

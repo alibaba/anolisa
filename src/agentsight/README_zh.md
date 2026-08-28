@@ -80,11 +80,16 @@ agentsight/
 
 **Linux**：完整 eBPF 追踪（probes → parser → aggregator → storage）。若 `features.trajectory_collection.enabled` 开启，同时运行轨迹采集器。
 
+**Linux 无特权环境**：`--no-ebpf` 跳过探针，仅运行轨迹采集器，使无特权沙箱与容器同样可以采集轨迹。该参数会强制启用轨迹采集，不受 `features.trajectory_collection.enabled` 影响，因为此模式下它是唯一的数据来源。依赖 eBPF 的数据 —— Token 计量、审计事件、中断检测 —— 在此模式下不可用。
+
 **macOS**：仅轨迹采集 — 扫描本地 JSONL 会话文件（Claude Code、Qoder、Codex、Cursor），转换为 ATIF v1.7 格式，存入 `trajectories.db`。无 eBPF。
 
 ```bash
 # 前台模式
 sudo agentsight trace
+
+# 仅轨迹采集 — 无需 root，无需 CAP_BPF
+agentsight trace --no-ebpf
 
 # 守护进程模式，配合 SLS 导出
 sudo agentsight trace --daemon \
@@ -92,6 +97,8 @@ sudo agentsight trace --daemon \
   --sls-project <project> \
   --sls-logstore <logstore>
 ```
+
+> 使用 `--no-ebpf` 时，`trajectories.db` 在共享数据目录可写时写入该目录，否则写入 `$HOME/.local/share/agentsight/`。启动输出会打印实际路径和对应的 `serve --db` 命令。
 
 ### `agentsight token`
 

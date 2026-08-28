@@ -17,7 +17,10 @@ journalctl -u agentsight.service -n 50 --no-pager      # what does it complain a
 ## No data at all
 
 **1. The tracer is not running as root.** eBPF attachment fails silently for an unprivileged user
-and you simply see no events. Run `sudo agentsight trace`, or use the packaged service.
+and you simply see no events. Run `sudo agentsight trace`, or use the packaged service. If the
+environment cannot grant privileges at all, `agentsight trace --no-ebpf` still collects trajectories
+(see [CLI reference](cli-reference.md#running-without-privileges---no-ebpf)); token, audit, and
+interruption data remain unavailable.
 
 **2. The kernel has no BTF.** `ls /sys/kernel/btf/vmlinux` must succeed. Without it the CO-RE probes
 cannot load; `journalctl` shows a probe load error.
