@@ -2,6 +2,17 @@
 
 [中文版](CHANGELOG_zh.md)
 
+## 0.4.4
+
+### Added
+- Added guarded checkpoint protocol with identity-fenced snapshot creation, checkpoint state stays verifiable across crashes
+
+### Fixed
+- Fixed interrupted rollback state lost on daemon restart, ambiguous candidates are now preserved instead of deleted
+- Fixed `config --global` to verify the daemon actually loaded the written config file (#2813)
+- Fixed sidecar deployment guide missing the `/etc/ws-ckpt` shared volume required for global config (#2813)
+- Fixed error hints to cover containerized deployments and the daemon's mount namespace (#2807, #2814)
+
 ## 0.4.3
 
 ### Added

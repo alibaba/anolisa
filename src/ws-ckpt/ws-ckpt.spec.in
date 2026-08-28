@@ -138,6 +138,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.4-1
+- Added guarded checkpoint protocol with identity-fenced snapshot creation and crash-verifiable state
+- Fixed interrupted rollback state lost on daemon restart, ambiguous candidates preserved instead of deleted
+- Fixed config --global to verify the daemon actually loaded the written config file
+- Fixed sidecar deployment example to share /etc/ws-ckpt so global config reaches the daemon
+- Fixed error hints for containerized deployments and daemon mount-namespace visibility
+
 * Wed Aug 19 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.3-1
 - Added k8s sidecar containerized deployment support
 - Fixed daemon memory leak under sustained checkpoint workloads (OOM)

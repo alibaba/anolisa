@@ -30,6 +30,7 @@ TOML_CONTRACTS = (
     ("src/skillfs/Cargo.toml", "src/skillfs/component.toml"),
     ("src/tokenless/Cargo.toml", "src/anolisa/manifests/components/tokenless/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/component.toml"),
+    ("src/ws-ckpt/src/Cargo.toml", "src/anolisa/manifests/components/ws-ckpt/component.toml"),
 )
 VERSION_TEMPLATES = (
     ("src/agent-memory/Cargo.toml", "src/agent-memory/.anolisa/component.toml.in"),
