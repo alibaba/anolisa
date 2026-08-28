@@ -3800,8 +3800,25 @@ fn private_history_submission_uses_private_slash_guard() {
     let classifier = InputClassifier::default();
     let line_submits = LineSubmitCounter::default();
     assert_eq!(
-        guarded_bash_submission(true, true, &classifier, &line_submits, b"\x01 \x05\n"),
+        guarded_bash_submission(
+            true,
+            true,
+            false,
+            &classifier,
+            &line_submits,
+            b"\x01 \x05\n",
+        ),
         Some(b"\x01 \x05\x1b[100~\n".to_vec())
+    );
+}
+
+#[test]
+fn recoverable_history_submission_uses_distinct_guard() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    assert_eq!(
+        guarded_bash_submission(true, true, true, &classifier, &line_submits, b"\x01 \x05\n",),
+        Some(b"\x01 \x05\x1b[101~\n".to_vec())
     );
 }
 
@@ -3813,6 +3830,7 @@ fn slash_guard_precedes_ctrl_o_submission() {
     assert_eq!(
         guarded_bash_submission(
             true,
+            false,
             false,
             &classifier,
             &line_submits,
@@ -3829,7 +3847,7 @@ fn slash_guard_ignores_pasted_newlines() {
     let paste = b"\x1b[200~/skills detail\nnext line\x1b[201~";
 
     assert_eq!(
-        guarded_bash_submission(true, false, &classifier, &line_submits, paste),
+        guarded_bash_submission(true, false, false, &classifier, &line_submits, paste),
         None
     );
 
@@ -3838,7 +3856,7 @@ fn slash_guard_ignores_pasted_newlines() {
     let mut expected = paste.to_vec();
     expected.extend_from_slice(b"\x1b[99~\r");
     assert_eq!(
-        guarded_bash_submission(true, false, &classifier, &line_submits, &submitted),
+        guarded_bash_submission(true, false, false, &classifier, &line_submits, &submitted,),
         Some(expected)
     );
 }
@@ -3851,6 +3869,7 @@ fn slash_guard_does_not_infer_follow_up_readline_ownership() {
     assert_eq!(
         guarded_bash_submission(
             true,
+            false,
             false,
             &classifier,
             &line_submits,
@@ -3868,6 +3887,7 @@ fn slash_guard_stops_after_ordinary_shell_submission() {
     assert_eq!(
         guarded_bash_submission(
             true,
+            false,
             false,
             &classifier,
             &line_submits,
@@ -3891,6 +3911,7 @@ fn slash_guard_does_not_trust_blank_bytes_with_dirty_mirror() {
     assert_eq!(
         guarded_bash_submission(
             true,
+            false,
             false,
             &classifier,
             &line_submits,

@@ -5,10 +5,83 @@ use super::super::generation::LineSubmitCounter;
 
 const BASH_SLASH_SUBMISSION_GUARD: &[u8] = b"\x1b[99~";
 const BASH_PRIVATE_SLASH_SUBMISSION_GUARD: &[u8] = b"\x1b[100~";
+const BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD: &[u8] = b"\x1b[101~";
+
+pub(super) struct PrivateHistorySubmission {
+    pub(super) bytes: Vec<u8>,
+    pub(super) recoverable: bool,
+}
+
+pub(super) fn history_private_submission(
+    bash_readline_history_privacy: bool,
+    state: &NativeLineState,
+    line_submits: &LineSubmitCounter,
+    at_prompt: bool,
+    bytes: &[u8],
+) -> Option<PrivateHistorySubmission> {
+    if !bash_readline_history_privacy || !at_prompt {
+        return None;
+    }
+    let submit = line_submits.first_submission(bytes)?;
+    let (private, recoverable) = match state.clean_visible_line() {
+        Some(prior) => {
+            let mut command = Vec::with_capacity(prior.len() + submit);
+            command.extend_from_slice(prior);
+            command.extend_from_slice(&bytes[..submit]);
+            let command = std::str::from_utf8(&command).ok()?;
+            (crate::evidence::redact_sensitive_text(command).1, false)
+        }
+        // Readline cursor movement, completion, or a multiline paste makes
+        // the mirror unable to prove the final accepted line is non-secret.
+        // Exclude that submission unless the shell-side widget later proves
+        // the accepted line is safe and provider-bound.
+        None => (
+            state.history_mirror_requires_fail_closed(),
+            state.history_mirror_requires_fail_closed(),
+        ),
+    };
+    if !private {
+        return None;
+    }
+
+    // Enhanced Bash enables `HISTCONTROL=ignorespace`. Insert a leading
+    // blank through Readline immediately before accepting the line.
+    let mut private = Vec::with_capacity(bytes.len() + 3);
+    private.extend_from_slice(&bytes[..submit]);
+    private.extend_from_slice(b"\x01 \x05");
+    private.extend_from_slice(&bytes[submit..]);
+    Some(PrivateHistorySubmission {
+        bytes: private,
+        recoverable,
+    })
+}
+
+pub(super) fn bash_submission_has_leading_whitespace(
+    enabled: bool,
+    at_prompt: bool,
+    state: &NativeLineState,
+    line_submits: &LineSubmitCounter,
+    bytes: &[u8],
+) -> bool {
+    if !enabled || !at_prompt {
+        return false;
+    }
+    let Some(submit) = line_submits.first_submission(bytes) else {
+        return false;
+    };
+    let mut submitted = state.clone();
+    submitted.observe_shell_bytes(&bytes[..submit]);
+    submitted.clean_visible_line().is_some_and(|line| {
+        line.first()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+            && line.iter().any(|byte| !byte.is_ascii_whitespace())
+    })
+}
 
 pub(super) fn guarded_bash_submission(
     required: bool,
     history_private: bool,
+    history_recoverable: bool,
     input_classifier: &InputClassifier,
     line_submits: &LineSubmitCounter,
     bytes: &[u8],
@@ -35,7 +108,9 @@ pub(super) fn guarded_bash_submission(
             exact_slash
         };
         if needs_guard {
-            let guard = if index == 0 && history_private {
+            let guard = if index == 0 && history_recoverable {
+                BASH_RECOVERABLE_HISTORY_SUBMISSION_GUARD
+            } else if index == 0 && history_private {
                 BASH_PRIVATE_SLASH_SUBMISSION_GUARD
             } else {
                 BASH_SLASH_SUBMISSION_GUARD

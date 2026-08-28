@@ -86,6 +86,10 @@ _COSH_ATTEMPT_SENSITIVE=0
 _COSH_ATTEMPT_UNSAFE=0
 _COSH_ATTEMPT_EXPANSION_DRIFT=0
 _COSH_ATTEMPT_SUBSHELL=
+unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
+  _COSH_PENDING_RECOVERY_HISTORY_INPUT 2>/dev/null || true
+rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.recovery-history-confirmed" \
+  2>/dev/null || true
 _COSH_WRAPPER_ID="${COSH_SESSION_ID}:${_COSH_MARKER_TOKEN}"
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
@@ -232,6 +236,10 @@ _cosh_remember_preexec_history_no() {
   printf '%s\n' "$history_no" > "$state_file" 2>/dev/null || true
 }
 _cosh_command_has_secret() {
+  local jwt_pattern='(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}([^A-Za-z0-9_]|$)'
+  if [[ "$1" =~ $jwt_pattern ]]; then
+    return 0
+  fi
   local lower
   lower="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   case "$lower" in
@@ -248,8 +256,26 @@ _cosh_command_has_secret() {
       return 0
       ;;
   esac
+  # Keep recovered-history privacy aligned with Rust's canonical assignment detector.
+  local canonical_assignment_key
+  canonical_assignment_key='(alibaba[_-]?cloud[_-]?access[_-]?key[_-]?id|'
+  canonical_assignment_key+='aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|'
+  canonical_assignment_key+='aws[_-]?secret[_-]?access[_-]?key|access[_-]?key[_-]?secret|'
+  canonical_assignment_key+='dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|'
+  canonical_assignment_key+='client[_-]?secret|security[_-]?token|refresh[_-]?token|'
+  canonical_assignment_key+='access[_-]?token|github[_-]?token|id[_-]?token|'
+  canonical_assignment_key+='password|passphrase|passwd|api[_-]?key|apikey|token|secret|'
+  canonical_assignment_key+='cookie|set[_-]?cookie)'
+  local canonical_assignment_pattern="(^|[^a-z0-9_-])['\"]?${canonical_assignment_key}['\"]?[[:space:]]*(=|:)[[:space:]]*[^[:space:]]"
+  if [[ "$lower" =~ $canonical_assignment_pattern ]]; then
+    return 0
+  fi
   local key
   for key in password passwd passphrase token access_token access-token refresh_token refresh-token id_token id-token secret client_secret client-secret api_key api-key apikey access_key_id access-key-id access_key_secret access-key-secret security_token security-token authorization cookie set-cookie; do
+    local assignment_pattern="(^|[^a-z0-9_-])['\"]?${key}['\"]?[[:space:]]*(=|:)[[:space:]]*[^[:space:]]"
+    if [[ "$lower" =~ $assignment_pattern ]]; then
+      return 0
+    fi
     case "$lower" in
       *"$key="*|*"$key:"*|*"--$key "*|*"--$key="*)
         return 0
@@ -420,11 +446,27 @@ _cosh_guard_slash_submission() {
   if [[ "${1:-false}" == true && "$input" == ' '* ]]; then
     input="${input# }"
   fi
-  local command_word_source="$input"
-  while [[ "$command_word_source" == ' '* || "$command_word_source" == $'\t'* ]]; do
-    command_word_source="${command_word_source#?}"
+  local classification_input="$input"
+  while [[ "$classification_input" == ' '* || "$classification_input" == $'\t'* ]]; do
+    classification_input="${classification_input#?}"
   done
-  local first_word="${command_word_source%%[[:space:]]*}"
+  if [[ -n "$classification_input"
+     && ( "${1:-false}" == true || "$classification_input" != "$input" ) ]]; then
+    _COSH_PENDING_RECOVERY_INPUT="$input"
+    _COSH_PENDING_RECOVERY_CLASSIFICATION="$classification_input"
+  fi
+  if [[ "${1:-false}" == true ]]; then
+    unset _COSH_PENDING_RECOVERY_HISTORY_INPUT 2>/dev/null || true
+    rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.recovery-history-confirmed" \
+      2>/dev/null || true
+    if [[ "${2:-false}" == true
+       && -n "$classification_input" && "$classification_input" == "$input" ]]; then
+      if ! _cosh_command_has_secret "$input"; then
+        _COSH_PENDING_RECOVERY_HISTORY_INPUT="$input"
+      fi
+    fi
+  fi
+  local first_word="${classification_input%%[[:space:]]*}"
   if ! _cosh_assistance_enabled || ! _cosh_is_slash_control_candidate "$first_word"; then
     (( restore_xtrace == 1 )) && set -x
     return 0
@@ -447,6 +489,9 @@ _cosh_guard_slash_submission() {
 }
 _cosh_guard_private_slash_submission() {
   _cosh_guard_slash_submission true
+}
+_cosh_guard_recoverable_history_submission() {
+  _cosh_guard_slash_submission true true
 }
 _cosh_commit_pending_slash() {
   if [[ -z "${_COSH_PENDING_SLASH_INPUT+x}" ]]; then
@@ -474,6 +519,39 @@ _cosh_commit_pending_slash() {
     _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
   fi
   _cosh_emit_intercept_marker "$input" "slash" false "$sensitive" > /dev/tty
+}
+_cosh_commit_pending_recovery_history() {
+  local input="${_COSH_PENDING_RECOVERY_HISTORY_INPUT-}"
+  local state_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.recovery-history-confirmed"
+  local confirmed=0
+  [[ -f "$state_file" ]] && confirmed=1
+  rm -f -- "$state_file" 2>/dev/null || true
+  unset _COSH_PENDING_RECOVERY_HISTORY_INPUT 2>/dev/null || true
+  [[ "$confirmed" == 1 && -n "$input" && -o history ]] || return 0
+  case "$input" in
+    ' '*|$'\t'*) return 0 ;;
+  esac
+  _cosh_command_has_secret "$input" && return 0
+
+  local history_entry history_no history_command
+  history_entry="$(_cosh_history_entry)"
+  history_no="$(_cosh_history_no "$history_entry")"
+  history_command="$(_cosh_history_command_from_entry "$history_entry")"
+  if [[ "$history_command" != "$input" ]]; then
+    builtin history -s "$input" 2>/dev/null || return 0
+    history_entry="$(_cosh_history_entry)"
+    history_no="$(_cosh_history_no "$history_entry")"
+  fi
+  _cosh_remember_preexec_history_no "$history_no"
+}
+_cosh_confirm_pending_recovery_history() {
+  local input="$1"
+  [[ -n "${_COSH_PENDING_RECOVERY_HISTORY_INPUT+x}"
+     && "$_COSH_PENDING_RECOVERY_HISTORY_INPUT" == "$input" ]] || return 0
+  local state_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.recovery-history-confirmed"
+  local state_dir="${state_file%/*}"
+  [[ "$state_dir" != "$state_file" && -d "$state_dir" ]] || return 0
+  printf '1\n' > "$state_file" 2>/dev/null || true
 }
 _COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '
 # Transport-only prefix for agent handoffs whose implicit pagers are disabled.
@@ -749,17 +827,29 @@ _cosh_command_not_found_handle() {
   local command="$1"
   shift || true
   if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
-    local history_entry history_command first_word
-    history_entry="$(_cosh_history_entry)"
-    history_command="$(_cosh_history_command_from_entry "$history_entry")"
-    first_word="${history_command%%[[:space:]]*}"
+    local history_entry history_command classification_command first_word
+    if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
+      history_command="$_COSH_PENDING_RECOVERY_INPUT"
+      classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$history_command}"
+      unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
+        2>/dev/null || true
+    else
+      history_entry="$(_cosh_history_entry)"
+      history_command="$(_cosh_history_command_from_entry "$history_entry")"
+      classification_command="$history_command"
+    fi
+    first_word="${classification_command%%[[:space:]]*}"
     if [[ -n "$history_command" ]] \
-       && ! _cosh_has_leading_alias "$history_command" \
-       && _cosh_literal_first_word_matches "$history_command" "$first_word" "$command"; then
+       && ! _cosh_has_leading_alias "$classification_command" \
+       && _cosh_literal_first_word_matches "$classification_command" "$first_word" "$command"; then
       _cosh_begin_attempt "$history_command" "$first_word" 0
     fi
   fi
   local original="${_COSH_ATTEMPT_INPUT:-}"
+  local classification_original="$original"
+  while [[ "$classification_original" == ' '* || "$classification_original" == $'\t'* ]]; do
+    classification_original="${classification_original#?}"
+  done
   if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
@@ -791,8 +881,8 @@ _cosh_command_not_found_handle() {
     return $?
   fi
   if [[ -z "$original" ]] \
-     || ! _cosh_literal_first_word_matches "$original" "${_COSH_ATTEMPT_TOKEN:-}" "$command" \
-     || ! _cosh_arguments_have_no_unquoted_expansion "$original"; then
+     || ! _cosh_literal_first_word_matches "$classification_original" "${_COSH_ATTEMPT_TOKEN:-}" "$command" \
+     || ! _cosh_arguments_have_no_unquoted_expansion "$classification_original"; then
     _cosh_delegate_bash_command_not_found "$command" "$@"
     return $?
   fi
@@ -804,13 +894,14 @@ _cosh_command_not_found_handle() {
   local sensitive=false
   [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
   local reason
-  if reason="$(_cosh_should_intercept_unknown "$command" "$original" "$(($# + 1))")"; then
+  if reason="$(_cosh_should_intercept_unknown "$command" "$classification_original" "$(($# + 1))")"; then
     _cosh_emit_intercept_marker "$original" "$reason" false "$sensitive"
     return 0
   fi
   local intent
-  intent="$(_cosh_classify_missing "$original" "$command")"
+  intent="$(_cosh_classify_missing "$classification_original" "$command")"
   if [[ "$intent" == "natural_language" ]] && _cosh_ai_enabled; then
+    _cosh_confirm_pending_recovery_history "$original"
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
       _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
       _cosh_delegate_bash_command_not_found "$command" "$@"
@@ -926,6 +1017,7 @@ _cosh_compact_alias_expanded() {
 
 _cosh_bounded_preexec_marker() {
   local history_entry history_no command first_word argc=1 display_command sensitive=false
+  local classification_command pending_recovery=false
   if [[ -n "${_COSH_PENDING_SLASH_INPUT+x}" ]]; then
     printf '\r\033[K' > /dev/tty
     return 0
@@ -933,11 +1025,18 @@ _cosh_bounded_preexec_marker() {
   history_entry="$(_cosh_history_entry)"
   history_no="$(_cosh_history_no "$history_entry")"
   command="$(_cosh_history_command_from_entry "$history_entry")"
+  classification_command="$command"
+  if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
+    command="$_COSH_PENDING_RECOVERY_INPUT"
+    classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$command}"
+    pending_recovery=true
+  fi
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}" && -f "$COSH_HANDOFF_REQUEST_FILE" ]]; then
     return 0
   fi
-  if [[ -z "$history_no" || -z "$command"
-     || "$history_no" == "$(_cosh_last_preexec_history_no)" ]]; then
+  if [[ "$pending_recovery" != true
+     && ( -z "$history_no" || -z "$command"
+     || "$history_no" == "$(_cosh_last_preexec_history_no)" ) ]]; then
     # PS0 still proves a top-level execution boundary when Bash deliberately
     # omitted the accepted line from history. Keep the ledger complete but do
     # not guess command text from a stale entry or route it to Agent.
@@ -945,9 +1044,11 @@ _cosh_bounded_preexec_marker() {
     _cosh_emit_marker "preexec" "<redacted untracked command>" 0 false
     return 0
   fi
-  _cosh_remember_preexec_history_no "$history_no"
-  first_word="${command%%[[:space:]]*}"
-  [[ "$command" == *[[:space:]]* ]] && argc=2
+  if [[ "$pending_recovery" != true ]]; then
+    _cosh_remember_preexec_history_no "$history_no"
+  fi
+  first_word="${classification_command%%[[:space:]]*}"
+  [[ "$classification_command" == *[[:space:]]* ]] && argc=2
 
   # PS0 is observation-only and cannot suppress execution. Missing commands
   # route through command_not_found_handle; ordinary slash controls stay in
@@ -956,14 +1057,14 @@ _cosh_bounded_preexec_marker() {
   # observed command boundary.
   local reason
   if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" != 1 ]] \
-     && reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+     && reason="$(_cosh_should_intercept_unknown "$first_word" "$classification_command" "$argc")"; then
     if [[ "$reason" != slash ]]; then
       return 0
     fi
   fi
   if ! builtin type -t -- "$first_word" >/dev/null 2>&1; then
     local intent
-    intent="$(_cosh_classify_missing "$command" "$first_word")"
+    intent="$(_cosh_classify_missing "$classification_command" "$first_word")"
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" != 1 \
        && "$intent" == natural_language ]] && _cosh_ai_enabled; then
       return 0
@@ -978,7 +1079,11 @@ _cosh_bounded_preexec_marker() {
   if [[ "$sensitive" == true ]]; then
     display_command="<redacted sensitive command>"
   fi
-  _COSH_ATTEMPT_GENERATION="$history_no"
+  if [[ "$pending_recovery" == true ]]; then
+    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+  else
+    _COSH_ATTEMPT_GENERATION="$history_no"
+  fi
   _cosh_emit_marker "preexec" "$display_command" 0 false
 }
 _cosh_bounded_prompt_marker() {
@@ -988,6 +1093,7 @@ _cosh_bounded_prompt_marker() {
 _cosh_precmd_marker() {
   local status="${1:-$?}"
   _cosh_apply_internal_recovery
+  _cosh_commit_pending_recovery_history
   _cosh_commit_pending_slash
   _cosh_scrub_sensitive_native_history
   _cosh_replace_handoff_history
@@ -999,6 +1105,8 @@ _cosh_precmd_marker() {
   fi
   _cosh_restore_handoff_pager_policy
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+  unset _COSH_PENDING_RECOVERY_INPUT _COSH_PENDING_RECOVERY_CLASSIFICATION \
+    _COSH_PENDING_RECOVERY_HISTORY_INPUT 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
   # The precmd marker still carries the handoff token (#2142): it closes the
   # same command the preexec claimed. Cleared right after so the following
@@ -1052,6 +1160,7 @@ _cosh_precmd_marker() {
   for _cosh_keymap in emacs-standard emacs-meta vi-insert vi-command; do
     bind -m "$_cosh_keymap" -x '"\e[99~":_cosh_guard_slash_submission' 2>/dev/null || true
     bind -m "$_cosh_keymap" -x '"\e[100~":_cosh_guard_private_slash_submission' 2>/dev/null || true
+    bind -m "$_cosh_keymap" -x '"\e[101~":_cosh_guard_recoverable_history_submission' 2>/dev/null || true
   done
   unset _cosh_keymap
   IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true

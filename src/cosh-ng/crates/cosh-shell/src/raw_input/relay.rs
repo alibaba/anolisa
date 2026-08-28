@@ -7,7 +7,8 @@ use crate::input::{InputClassifier, InterceptReason};
 use super::event_parser::{
     candidate_inline_hint, native_candidate_allows_soft_newline,
     native_candidate_should_return_to_shell, redact_extension_setting_value,
-    starts_native_intercept_candidate, CandidateLineBuffer, NativeLineState, BRACKETED_PASTE_START,
+    starts_native_intercept_candidate, CandidateLineBuffer, NativeLineState, BRACKETED_PASTE_END,
+    BRACKETED_PASTE_START,
 };
 use super::event_sender::RawInputEventSink;
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
@@ -350,7 +351,9 @@ fn relay_native_passthrough(
         .concat();
         relay.line_buffer.soft_newline_enabled = native_candidate_allows_soft_newline(&combined);
         relay.line_buffer.push(bytes);
-        if native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer) {
+        if !relay.line_buffer.in_paste()
+            && native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer)
+        {
             return flush_candidate_line_to_shell(relay, emit_activity, pending_shell_submits);
         }
         // Control bytes such as Tab must reach readline without first changing
@@ -392,7 +395,7 @@ fn relay_native_passthrough(
         PromptLineSoftNewline::Stripped(stripped) => stripped.as_slice(),
         _ => bytes,
     };
-    let private_history_bytes = history_private_submission(
+    let private_history = history_private_submission(
         relay
             .input_classifier
             .bash_readline_history_privacy_enabled(),
@@ -408,6 +411,12 @@ fn relay_native_passthrough(
         relay.native_line_state,
         relay.line_submits,
         bytes,
+    ) || bash_submission_has_leading_whitespace(
+        relay.input_classifier.bash_slash_submission_guard_enabled(),
+        relay.main_prompt_gate.is_at_prompt(),
+        relay.native_line_state,
+        relay.line_submits,
+        bytes,
     );
     send_raw_input_events(bytes, relay.input_events);
     observe_native_line(relay.native_line_state, bytes, relay.input_events);
@@ -415,10 +424,16 @@ fn relay_native_passthrough(
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
     relay.exit_tracker.observe_shell_bytes(bytes);
-    let pty_bytes = private_history_bytes.as_deref().unwrap_or(bytes);
+    let pty_bytes = private_history
+        .as_ref()
+        .map(|submission| submission.bytes.as_slice())
+        .unwrap_or(bytes);
     let guarded_bytes = guarded_bash_submission(
-        guard_submission,
-        private_history_bytes.is_some(),
+        guard_submission || private_history.is_some(),
+        private_history.is_some(),
+        private_history
+            .as_ref()
+            .is_some_and(|submission| submission.recoverable),
         relay.input_classifier,
         relay.line_submits,
         pty_bytes,
@@ -434,52 +449,13 @@ fn relay_native_passthrough(
     Ok(false)
 }
 
-fn history_private_submission(
-    bash_readline_history_privacy: bool,
-    state: &NativeLineState,
-    line_submits: &LineSubmitCounter,
-    at_prompt: bool,
-    bytes: &[u8],
-) -> Option<Vec<u8>> {
-    if !bash_readline_history_privacy || !at_prompt {
-        return None;
-    }
-    let submit = line_submits.first_submission(bytes)?;
-    let private = match state.clean_visible_line() {
-        Some(prior) => {
-            let mut command = Vec::with_capacity(prior.len() + submit);
-            command.extend_from_slice(prior);
-            command.extend_from_slice(&bytes[..submit]);
-            let command = std::str::from_utf8(&command).ok()?;
-            crate::evidence::redact_sensitive_text(command).1
-        }
-        // Readline cursor movement, completion, or a multiline paste makes
-        // the mirror unable to prove the final accepted line is non-secret.
-        // Exclude that one submission from history rather than persisting an
-        // input Cosh can no longer inspect safely.
-        None => state.history_mirror_requires_fail_closed(),
-    };
-    if !private {
-        return None;
-    }
-
-    // Enhanced Bash enables `HISTCONTROL=ignorespace`. Insert a leading
-    // blank through Readline immediately before accepting the line, keeping
-    // the executed command byte-equivalent while excluding credentials from
-    // native history without a parent-shell post-command hook.
-    let mut private = Vec::with_capacity(bytes.len() + 3);
-    private.extend_from_slice(&bytes[..submit]);
-    private.extend_from_slice(b"\x01 \x05");
-    private.extend_from_slice(&bytes[submit..]);
-    Some(private)
-}
-
 fn flush_candidate_line_to_shell(
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
     pending_shell_submits: usize,
 ) -> io::Result<bool> {
     let saw_paste = relay.line_buffer.saw_paste();
+    let paste_closed_at = relay.line_buffer.paste_closed_at();
     if !saw_paste {
         let candidate = {
             let bytes = relay.line_buffer.bytes.as_slice();
@@ -514,13 +490,14 @@ fn flush_candidate_line_to_shell(
     }
     let mut bytes = relay.line_buffer.take();
     if saw_paste {
-        // The draft absorbed a bracketed paste: replay the wrapper so bash's
-        // readline treats the bytes as pasted data instead of executing any
-        // embedded newlines immediately (#1721).
+        // Replay only paste payload; bytes after the closer are Readline input (#1721).
+        let closed_at = paste_closed_at.unwrap_or(bytes.len()).min(bytes.len());
+        let after_paste = bytes.split_off(closed_at);
         let mut wrapped = Vec::with_capacity(bytes.len() + 12);
-        wrapped.extend_from_slice(b"\x1b[200~");
+        wrapped.extend_from_slice(BRACKETED_PASTE_START);
         wrapped.extend_from_slice(&bytes);
-        wrapped.extend_from_slice(b"\x1b[201~");
+        wrapped.extend_from_slice(BRACKETED_PASTE_END);
+        wrapped.extend_from_slice(&after_paste);
         bytes = wrapped;
     }
     submit_line_bytes_to_shell(
@@ -553,15 +530,22 @@ fn submit_line_bytes_to_shell(
     // paints another prompt before this function returns.
     bytes.extend_from_slice(&remainder);
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-    let guard_submission = matches!(ownership, ShellBatchOwnership::ReadlineSafe)
-        && bash_submission_needs_guard(
+    let readline_safe = matches!(ownership, ShellBatchOwnership::ReadlineSafe);
+    let guard_submission = readline_safe
+        && (bash_submission_needs_guard(
             relay.input_classifier.bash_slash_submission_guard_enabled(),
             relay.main_prompt_gate.is_at_prompt(),
             relay.input_classifier,
             relay.native_line_state,
             relay.line_submits,
             &bytes,
-        );
+        ) || bash_submission_has_leading_whitespace(
+            relay.input_classifier.bash_slash_submission_guard_enabled(),
+            relay.main_prompt_gate.is_at_prompt(),
+            relay.native_line_state,
+            relay.line_submits,
+            &bytes,
+        ));
     send_raw_input_events(&bytes, relay.input_events);
     observe_native_line(relay.native_line_state, &bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
@@ -572,6 +556,7 @@ fn submit_line_bytes_to_shell(
         .then(|| {
             guarded_bash_submission(
                 guard_submission,
+                false,
                 false,
                 relay.input_classifier,
                 relay.line_submits,
@@ -648,7 +633,10 @@ mod candidate;
 mod exit_tracker;
 mod path_prompt_submit;
 mod soft_newline_upgrade;
-use bash_submission_guard::{bash_submission_needs_guard, guarded_bash_submission};
+use bash_submission_guard::{
+    bash_submission_has_leading_whitespace, bash_submission_needs_guard, guarded_bash_submission,
+    history_private_submission,
+};
 pub(super) use exit_tracker::ExplicitExitTracker;
 use soft_newline_upgrade::{handle_prompt_line_soft_newline, PromptLineSoftNewline};
 
