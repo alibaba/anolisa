@@ -107,6 +107,85 @@ fn handler_errors_use_human_labels_without_exposing_machine_codes() {
     assert_eq!(Some("INVALID_ARGUMENT"), envelope["error"]["code"].as_str());
 }
 
+#[test]
+fn sandbox_remove_local_and_global_dry_run_fail_closed_in_human_output() {
+    let help = run(&["osbase", "sandbox", "remove", "--help"]);
+    assert_eq!(Some(0), help.status.code());
+    assert!(
+        String::from_utf8_lossy(&help.stdout)
+            .contains("Request a removal preview; currently fails closed without executing")
+    );
+
+    let invocations: &[&[&str]] = &[
+        &[
+            "--no-color",
+            "osbase",
+            "sandbox",
+            "remove",
+            "gvisor",
+            "--dry-run",
+        ],
+        &[
+            "--no-color",
+            "--dry-run",
+            "osbase",
+            "sandbox",
+            "remove",
+            "gvisor",
+        ],
+    ];
+
+    for arguments in invocations {
+        let output = run(arguments);
+
+        assert_eq!(Some(2), output.status.code());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            "error: command 'osbase sandbox remove' does not support --dry-run; no action was taken\n",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn sandbox_remove_local_and_global_dry_run_share_the_json_error() {
+    let invocations: &[&[&str]] = &[
+        &[
+            "--json",
+            "osbase",
+            "sandbox",
+            "remove",
+            "gvisor",
+            "--dry-run",
+        ],
+        &[
+            "--json",
+            "--dry-run",
+            "osbase",
+            "sandbox",
+            "remove",
+            "gvisor",
+        ],
+    ];
+
+    for arguments in invocations {
+        let output = run(arguments);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("error output must remain valid JSON");
+
+        assert_eq!(Some(2), output.status.code());
+        assert!(output.stderr.is_empty());
+        assert_eq!(Some(false), envelope["ok"].as_bool());
+        assert_eq!(Some(1), envelope["schema_version"].as_u64());
+        assert_eq!(Some("osbase sandbox remove"), envelope["command"].as_str());
+        assert_eq!(Some("INVALID_ARGUMENT"), envelope["error"]["code"].as_str());
+        assert_eq!(
+            Some("command 'osbase sandbox remove' does not support --dry-run; no action was taken"),
+            envelope["error"]["reason"].as_str()
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn help_reports_stdout_failure_when_output_device_is_full() {

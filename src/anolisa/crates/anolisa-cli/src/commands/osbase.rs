@@ -97,7 +97,7 @@ pub enum SandboxCommands {
         #[arg(long)]
         purge: bool,
 
-        /// Print removal plan without executing
+        /// Request a removal preview; currently fails closed without executing
         #[arg(long)]
         dry_run: bool,
     },
@@ -199,7 +199,15 @@ fn sandbox_request(command: SandboxCommands, global_dry_run: bool) -> SandboxReq
             scenario,
             intent: execution_intent(dry_run || global_dry_run),
         },
-        SandboxCommands::Remove { target, purge, .. } => SandboxRequest::Remove { target, purge },
+        SandboxCommands::Remove {
+            target,
+            purge,
+            dry_run,
+        } => SandboxRequest::Remove {
+            target,
+            purge,
+            intent: execution_intent(dry_run || global_dry_run),
+        },
         SandboxCommands::List { .. } => unreachable!(),
         SandboxCommands::Status { target, .. } => SandboxRequest::Status { target },
     }
@@ -325,6 +333,32 @@ mod tests {
                     assert_eq!(intent, expected_intent);
                 }
                 _ => panic!("uninstall command must map to an uninstall request"),
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_remove_combines_global_and_local_dry_run() {
+        for (global_dry_run, local_dry_run, expected_intent) in [
+            (false, false, ExecutionIntent::Apply),
+            (false, true, ExecutionIntent::Plan),
+            (true, false, ExecutionIntent::Plan),
+            (true, true, ExecutionIntent::Plan),
+        ] {
+            let request = sandbox_request(
+                SandboxCommands::Remove {
+                    target: "gvisor".to_string(),
+                    purge: true,
+                    dry_run: local_dry_run,
+                },
+                global_dry_run,
+            );
+
+            match request {
+                SandboxRequest::Remove { intent, .. } => {
+                    assert_eq!(intent, expected_intent);
+                }
+                _ => panic!("remove command must map to a remove request"),
             }
         }
     }

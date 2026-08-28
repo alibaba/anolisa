@@ -328,13 +328,7 @@ fn validate_global_args_with_euid(
             .dry_run_policy()
             .is_some_and(|dry_run| !dry_run.is_supported())
     {
-        return Err(CliError::InvalidArgument {
-            command: policy.label.to_string(),
-            reason: format!(
-                "command '{}' does not support --dry-run; no action was taken",
-                policy.label
-            ),
-        });
+        return Err(unsupported_dry_run_error(policy.label));
     }
 
     match policy.scope {
@@ -359,6 +353,13 @@ fn validate_global_args_with_euid(
     }
 
     Ok(())
+}
+
+pub(crate) fn unsupported_dry_run_error(command: &str) -> CliError {
+    CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!("command '{command}' does not support --dry-run; no action was taken"),
+    }
 }
 
 fn root_user_mode_error(command: &str) -> CliError {
@@ -474,7 +475,13 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ManagementCommands::Env(_) => CommandPolicy::new("env", CommandScope::ReadOnly),
             ManagementCommands::Bug(_) => CommandPolicy::new("bug", CommandScope::ReadOnly),
             ManagementCommands::Osbase(args) => {
-                CommandPolicy::new("osbase", osbase_command_scope(args))
+                let label = match &args.command {
+                    osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
+                        command: osbase::SandboxCommands::Remove { .. },
+                    }) => "osbase sandbox remove",
+                    _ => "osbase",
+                };
+                CommandPolicy::new(label, osbase_command_scope(args))
             }
             ManagementCommands::System(args) => {
                 CommandPolicy::new("system", system_command_scope(args))

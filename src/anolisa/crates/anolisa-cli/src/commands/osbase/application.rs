@@ -11,6 +11,7 @@ use anolisa_core::system_helper::HelperRequest;
 use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
 use anolisa_platform::privilege;
 
+use crate::commands::unsupported_dry_run_error;
 use crate::helper_client::{HelperClient, HelperClientError, HelperOperationOutcome};
 use crate::response::CliError;
 
@@ -28,8 +29,12 @@ pub(super) enum SandboxRequest {
         scenario: String,
         intent: ExecutionIntent,
     },
-    /// Remove one sandbox scenario through the helper.
-    Remove { target: String, purge: bool },
+    /// Remove one sandbox scenario through the helper or reject its preview.
+    Remove {
+        target: String,
+        purge: bool,
+        intent: ExecutionIntent,
+    },
     /// Query sandbox status through the helper.
     Status { target: Option<String> },
 }
@@ -112,6 +117,16 @@ fn run_with_dependencies<F>(
 where
     F: FnOnce() -> Result<HelperClient, HelperClientError>,
 {
+    if matches!(
+        &request,
+        SandboxRequest::Remove {
+            intent: ExecutionIntent::Plan,
+            ..
+        }
+    ) {
+        return Err(unsupported_dry_run_error("osbase sandbox remove"));
+    }
+
     match preflight_with(connect, is_root)? {
         ExecutionMode::ViaHelper(mut client) => execute_via_helper(request, &mut client, output),
         ExecutionMode::Direct => execute_direct(request, direct),
@@ -155,7 +170,7 @@ fn execute_via_helper(
                 "osbase sandbox uninstall",
             )
         }
-        SandboxRequest::Remove { target, purge } => (
+        SandboxRequest::Remove { target, purge, .. } => (
             HelperRequest::OsbaseRemove {
                 scenario: target,
                 purge,
@@ -317,7 +332,7 @@ fn map_osbase_error(error: OsbaseInstallError, action: &str, target: &str) -> Cl
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::io;
     use std::path::PathBuf;
@@ -458,6 +473,42 @@ mod tests {
     }
 
     #[test]
+    fn remove_preview_rejects_before_connection_for_root_and_non_root() {
+        for is_root in [false, true] {
+            let connected = Cell::new(false);
+            let direct = FakeDirectExecutor::default();
+            let mut events = Vec::new();
+            let error = run_with_dependencies(
+                SandboxRequest::Remove {
+                    target: "gvisor".to_string(),
+                    purge: true,
+                    intent: ExecutionIntent::Plan,
+                },
+                || {
+                    connected.set(true);
+                    Err(connect_error())
+                },
+                is_root,
+                &direct,
+                &mut |event| events.push(event),
+            )
+            .expect_err("remove preview must fail closed");
+
+            assert!(!connected.get(), "preview must not connect to the helper");
+            assert!(events.is_empty());
+            assert!(direct.install_requests.borrow().is_empty());
+            assert!(direct.uninstall_requests.borrow().is_empty());
+            assert_eq!(error.command(), "osbase sandbox remove");
+            assert_eq!(error.code(), "INVALID_ARGUMENT");
+            assert_eq!(error.exit_code(), 2);
+            assert_eq!(
+                error.reason(),
+                "command 'osbase sandbox remove' does not support --dry-run; no action was taken"
+            );
+        }
+    }
+
+    #[test]
     fn helper_install_preserves_request_and_scenario_event() {
         let (client, sent) = client_with_responses(vec![
             HelperResponse::HandshakeOk {
@@ -547,6 +598,7 @@ mod tests {
                 SandboxRequest::Remove {
                     target: "gvisor".to_string(),
                     purge: true,
+                    intent: ExecutionIntent::Apply,
                 },
                 HelperRequest::OsbaseRemove {
                     scenario: "gvisor".to_string(),
@@ -804,6 +856,7 @@ mod tests {
             SandboxRequest::Remove {
                 target: "runc".to_string(),
                 purge: false,
+                intent: ExecutionIntent::Apply,
             },
             SandboxRequest::Status { target: None },
         ] {
@@ -812,5 +865,19 @@ mod tests {
                     .expect_err("direct operation remains unavailable");
             assert!(matches!(error, CliError::NotImplemented { .. }));
         }
+
+        let error = run_with_dependencies(
+            SandboxRequest::Remove {
+                target: "runc".to_string(),
+                purge: false,
+                intent: ExecutionIntent::Apply,
+            },
+            || Err(connect_error()),
+            false,
+            &direct,
+            &mut |_| {},
+        )
+        .expect_err("non-root remove requires the helper");
+        assert!(matches!(error, CliError::PermissionDenied { .. }));
     }
 }
