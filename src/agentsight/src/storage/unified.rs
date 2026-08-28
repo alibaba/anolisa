@@ -347,13 +347,11 @@ impl Storage {
                 consumption_deleted,
             );
 
-            // Reclaim free pages after bulk deletes. VACUUM writes through
-            // the WAL, so a TRUNCATE checkpoint is needed for the file to
-            // actually shrink. Both are best-effort: freed pages are reusable
-            // by future inserts even when they fail.
-            if let Err(e) = self.audit_store.vacuum() {
-                log::warn!("VACUUM after age-based purge failed: {e}");
-            }
+            // Flush and truncate the WAL so freed pages become visible.
+            // Never VACUUM here: rebuilding the file would push its pages
+            // through the page cache, which counts against the service's
+            // cgroup memory limit and can OOM-kill the process on large
+            // databases (#2888). Freed pages are reused by future inserts.
             if let Err(e) = self.audit_store.checkpoint() {
                 log::warn!("WAL checkpoint after age-based purge failed: {e}");
             }
@@ -369,15 +367,16 @@ impl Storage {
     /// file, so checking the main file alone would under-report.
     ///
     /// Work is organized in rounds: each round deletes a fraction of every
-    /// table's oldest rows, then runs one VACUUM + checkpoint before
-    /// re-measuring. VACUUM rewrites the whole file, so it must not run per
-    /// batch — bounding it per round keeps a multi-GB cleanup tractable.
+    /// table's oldest rows (bigger bites when far over the limit), then runs
+    /// one truncating WAL checkpoint before re-measuring the logical size.
     ///
-    /// Rounds continue until the size is within the limit. A round that does
-    /// not shrink the file is not necessarily a failure (deleting small rows
-    /// may free no page), so the bite doubles while the file stands still;
-    /// the purge stops early only when VACUUM/checkpoint itself keeps failing
-    /// or after 20 rounds, both reported as errors.
+    /// Rounds continue until the logical size (physical minus freelist) is
+    /// within the limit. Deleting rows never shrinks the physical file —
+    /// freed pages stay on the freelist and are reused by future inserts, so
+    /// the file stops growing once the logical size fits. This path never
+    /// runs VACUUM: on a cgroup memory-capped service the full-file rebuild
+    /// can push the page cache over the limit and OOM-kill the process
+    /// (#2888).
     ///
     /// Called automatically by `store()` during purge checks and by
     /// `with_sqlite_config()` on startup.
@@ -388,13 +387,13 @@ impl Storage {
 
         let mut round = 0u32;
         let mut reclaim_failures = 0u32;
-        // Rows and bytes can decouple (B-tree page sharing): deleting many
-        // small rows may free no page at all, so a non-shrinking round is
-        // normal and triggers a bigger bite next round instead of a stall.
+        // A round whose checkpoint fails leaves the WAL unflushed, so the
+        // logical size cannot drop; double the bite while the measured size
+        // stands still instead of treating one flat round as a stall.
         let mut pct_boost = 1.0f64;
 
         loop {
-            let size = self.total_db_size();
+            let size = self.effective_db_size();
             if size <= self.max_db_size_bytes {
                 break;
             }
@@ -443,20 +442,28 @@ impl Storage {
                 break; // Nothing left to delete
             }
 
-            // VACUUM first, then checkpoint: in WAL mode VACUUM writes the
-            // rebuilt database through the WAL, so the file only shrinks once
-            // a TRUNCATE checkpoint flushes it back. Failures are the real
-            // stall signal (e.g. disk full): deleting further rows would
-            // destroy data without freeing space, so stop after repeated
-            // failures and escalate.
+            // Flush and truncate the WAL so freed pages become visible in
+            // the logical size. A checkpoint failure is the real stall signal
+            // (e.g. disk full); never VACUUM here — the full-file rebuild
+            // would push its pages through the page cache, which counts
+            // against the service's cgroup memory limit (#2888).
             let mut reclaim_ok = true;
-            if let Err(e) = self.audit_store.vacuum() {
-                log::warn!("VACUUM during size-based purge failed: {e}");
-                reclaim_ok = false;
-            }
-            if let Err(e) = self.audit_store.checkpoint() {
-                log::warn!("WAL checkpoint during size-based purge failed: {e}");
-                reclaim_ok = false;
+            match self.audit_store.checkpoint_busy() {
+                Ok(true) => {
+                    // Another connection holds a read snapshot: the statement
+                    // succeeds but the WAL is NOT truncated. Keep deleting and
+                    // the WAL keeps growing, so treat it as a failed reclaim.
+                    log::warn!(
+                        "WAL checkpoint during size-based purge was busy; \
+                         the WAL could not be truncated"
+                    );
+                    reclaim_ok = false;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!("WAL checkpoint during size-based purge failed: {e}");
+                    reclaim_ok = false;
+                }
             }
             if reclaim_ok {
                 reclaim_failures = 0;
@@ -465,7 +472,7 @@ impl Storage {
                 if reclaim_failures >= 3 {
                     log::error!(
                         "Size-based purge suspended after {reclaim_failures} failed \
-                         VACUUM/checkpoint rounds at {size} bytes (limit {}). Freed \
+                         WAL checkpoint rounds at {size} bytes (limit {}). Freed \
                          pages remain reusable by future inserts; free disk space or \
                          remove the database to enforce the cap.",
                         self.max_db_size_bytes
@@ -474,7 +481,7 @@ impl Storage {
                 }
             }
 
-            let new_size = self.total_db_size();
+            let new_size = self.effective_db_size();
             log::info!(
                 "Size-based purge round {round}: deleted {round_deleted} rows, \
                  database now {new_size} bytes (limit {})",
@@ -484,14 +491,30 @@ impl Storage {
             if new_size < size {
                 pct_boost = 1.0;
             } else {
-                // Deletion made no dent in the file (page sharing). Double the
-                // bite so subsequent rounds reach the rows that dominate the
-                // file instead of stalling on small-row deletions.
+                // The logical size did not drop (unflushed WAL after a failed
+                // checkpoint). Double the bite so subsequent rounds reach the
+                // rows that dominate the file faster.
                 pct_boost = (pct_boost * 2.0).min(9.0);
             }
         }
 
         Ok(())
+    }
+
+    /// Logical data size: [`Self::total_db_size`] minus freelist pages.
+    ///
+    /// Deletes grow the freelist instead of shrinking the file, so purge
+    /// convergence must be measured on the logical size.
+    ///
+    /// Conservative approximation: WAL pages are pending versions of
+    /// main-file pages (double-counted on the physical side) while the
+    /// freelist only covers main-file pages, so any estimation error is in
+    /// the over-estimating direction — the purge may trim a little further
+    /// than strictly needed, never less. The in-loop checkpoint truncates
+    /// the WAL, so the overlap is transient anyway.
+    fn effective_db_size(&self) -> u64 {
+        self.total_db_size()
+            .saturating_sub(self.audit_store.freelist_bytes().unwrap_or(0))
     }
 
     /// Total on-disk size of the database: main file + `-wal` + `-shm`.
@@ -728,10 +751,17 @@ mod tests {
 
         storage.purge_oversized().unwrap();
 
+        // Convergence is on logical size: the physical file keeps its peak
+        // size (freed pages stay on the freelist, #2888), but the deleted
+        // rows must be gone and the logical size must fit.
         assert!(
-            storage.total_db_size() <= limit_mb * 1024 * 1024,
-            "database must be within the size limit after purge, got {} bytes",
-            storage.total_db_size()
+            storage.token_store.count() < 300,
+            "purge must delete rows when oversized"
+        );
+        let effective = storage.effective_db_size();
+        assert!(
+            effective <= limit_mb * 1024 * 1024,
+            "logical size must be within the limit after purge, got {effective} bytes"
         );
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
@@ -768,9 +798,11 @@ mod tests {
         let remaining = storage.token_store.count();
         assert!(remaining > 0, "purge must not wipe the table (#2870)");
         assert!(remaining < 110, "oversized db must be trimmed");
+        let effective = storage.effective_db_size();
         assert!(
-            storage.total_db_size() <= limit_mb * 1024 * 1024,
-            "must converge below the limit"
+            effective <= limit_mb * 1024 * 1024,
+            "logical size must converge below the limit (#2888: the physical \
+             file keeps its peak): {effective} bytes"
         );
 
         // Oldest-first trimming removes low timestamps, so the newest seeded
@@ -789,10 +821,9 @@ mod tests {
     }
 
     /// When the file is dominated by a few large NEW rows and the oldest rows
-    /// are tiny, deleting the oldest fraction frees no page (B-tree page
-    /// sharing). Treating a non-shrinking round as a stall exits with the cap
-    /// still exceeded; the purge must keep trimming until it reaches the rows
-    /// that dominate the file.
+    /// are tiny, deleting the oldest fraction moves few bytes. The purge must
+    /// still keep trimming (the logical size drops with every deletion) until
+    /// it converges, rather than stalling on the small-row rounds.
     #[test]
     fn test_purge_oversized_skewed_row_sizes_still_converges() {
         let dir = unique_base_dir("skewed");
@@ -814,8 +845,8 @@ mod tests {
                 .unwrap();
         }
         storage.checkpoint().unwrap();
-        // Compact once up front so the first purge round's VACUUM cannot hide
-        // behind rebuild gains instead of actual deletions.
+        // Compact once up front so the physical baseline is deterministic
+        // (purge itself never VACUUMs anymore, #2888).
         storage.audit_store.vacuum().unwrap();
         let size_before = storage.total_db_size();
         assert!(
@@ -825,10 +856,11 @@ mod tests {
 
         storage.purge_oversized().unwrap();
 
+        let effective = storage.effective_db_size();
         assert!(
-            storage.total_db_size() <= limit_mb * 1024 * 1024,
-            "must converge below the limit even when early rounds free nothing, got {}",
-            storage.total_db_size()
+            effective <= limit_mb * 1024 * 1024,
+            "logical size must converge below the limit even when early rounds \
+             free little, got {effective} bytes"
         );
         let conn = rusqlite::Connection::open(dir.join("agentsight.db")).unwrap();
         let max_ts: u64 = conn
@@ -840,6 +872,46 @@ mod tests {
         drop(conn);
 
         drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When another connection holds a read snapshot, the truncating WAL
+    /// checkpoint reports busy without an SQL error and the WAL stays intact.
+    /// The purge must stop instead of deleting round after round against a
+    /// size that can never converge (only the WAL keeps growing) — under the
+    /// pre-fix behavior the loop kept deleting until the tables were empty.
+    #[test]
+    fn test_purge_oversized_stops_when_wal_checkpoint_busy() {
+        let dir = unique_base_dir("busy_ckpt");
+        let limit_mb = 1u64;
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+        for i in 0..300u64 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(i, 10 * 1024))
+                .unwrap();
+        }
+        storage.checkpoint().unwrap();
+        drop(storage);
+
+        // Hold a read snapshot on a separate connection: this blocks
+        // `PRAGMA wal_checkpoint(TRUNCATE)` from completing (busy).
+        let reader = rusqlite::Connection::open(dir.join("agentsight.db")).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM token_records;")
+            .unwrap();
+
+        // Reopen with the limit enabled; the startup purge runs against the
+        // busy checkpoint.
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+        let remaining = storage.token_store.count();
+        assert!(
+            remaining >= 100,
+            "purge must stop early while the WAL cannot be truncated, \
+             only a few rounds may delete (got {remaining}/300)"
+        );
+        drop(storage);
+        drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -863,9 +935,10 @@ mod tests {
 
         // Reopening with a limit must trigger the startup cleanup.
         let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+        let effective = storage.effective_db_size();
         assert!(
-            storage.total_db_size() <= limit_mb * 1024 * 1024,
-            "startup cleanup must bring the database within the limit"
+            effective <= limit_mb * 1024 * 1024,
+            "startup cleanup must bring the logical size within the limit: {effective}"
         );
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);

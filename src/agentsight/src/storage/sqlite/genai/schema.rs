@@ -231,6 +231,37 @@ impl GenAISqliteStore {
         total
     }
 
+    /// Logical data size: physical size minus freelist pages.
+    ///
+    /// Purge convergence is measured on this: deleting rows does not shrink
+    /// the file without VACUUM — freed pages go to the freelist and are
+    /// reused by future inserts, so the physical file stabilizes at its
+    /// historical peak while the logical size reflects live data.
+    pub(super) fn effective_db_size(&self) -> u64 {
+        let physical = self.get_total_db_size();
+        let free_bytes = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let freelist: i64 = match conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Fall back to the physical size (conservative: the prune
+                    // loop may over-delete by the freelist amount) — but make
+                    // the degraded measurement visible.
+                    log::warn!(
+                        "freelist_count query failed; logical size falls back \
+                         to physical size: {e}"
+                    );
+                    0
+                }
+            };
+            let page_size: i64 = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .unwrap_or(4096);
+            (freelist.max(0) * page_size.max(0)) as u64
+        };
+        physical.saturating_sub(free_bytes)
+    }
+
     /// Check database size and prune if approaching limit.
     ///
     /// Uses adaptive pruning: the fraction of records deleted per iteration
@@ -238,15 +269,26 @@ impl GenAISqliteStore {
     /// severely oversized database is brought back under control quickly
     /// instead of inching down 5% at a time.
     ///
-    /// VACUUM failures (e.g. insufficient temporary disk space) are
-    /// tolerated — deleted records leave free pages that SQLite reuses for
-    /// future inserts, preventing further file growth even when VACUUM cannot
-    /// shrink the file.
+    /// The loop never runs VACUUM: rebuilding the whole file would push its
+    /// pages through the page cache, which counts against the service's
+    /// cgroup memory limit and can OOM-kill the process on large databases
+    /// (#2888). Deleting rows + a truncating WAL checkpoint is enough — the
+    /// freelist is reused by future inserts, so the physical file stops
+    /// growing once the logical size fits.
     pub(super) fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut current_size = self.get_total_db_size();
+        let physical_size = self.get_total_db_size();
         let threshold = get_prune_threshold();
 
+        // Trigger on physical size (disk safety is physical), converge on
+        // logical size (deletes only shrink the logical size via freelist).
+        if physical_size < threshold {
+            return Ok(());
+        }
+
+        let mut current_size = self.effective_db_size();
         if current_size < threshold {
+            // Physically large but mostly freelist: future writes reuse free
+            // pages, no rows need to be deleted.
             return Ok(());
         }
 
@@ -276,12 +318,6 @@ impl GenAISqliteStore {
 
         const MAX_ITERATIONS: u32 = 20;
         let mut iterations = 0u32;
-        let mut last_size = current_size;
-        // Consecutive iterations where file size did not decrease — signals
-        // that VACUUM is failing (e.g. disk full). Once this hits the limit
-        // we stop: the freed pages will be reused by future inserts, so the
-        // file will not grow further even without VACUUM.
-        let mut size_stuck_count = 0u32;
 
         while current_size >= threshold && iterations < MAX_ITERATIONS {
             iterations += 1;
@@ -291,41 +327,27 @@ impl GenAISqliteStore {
                 break;
             }
 
-            // VACUUM may fail when disk space is tight; continue regardless.
-            if let Err(e) = self.checkpoint() {
-                log::warn!("VACUUM/checkpoint failed on iteration {iterations}: {e}");
+            // Flush and truncate the WAL so freed pages are visible and the
+            // WAL does not grow unbounded. Never VACUUM here (#2888). A busy
+            // checkpoint (another connection holds a read snapshot) leaves the
+            // WAL intact — stop pruning: further deletes would keep appending
+            // WAL frames and never converge.
+            match self.wal_checkpoint() {
+                Ok(true) => {
+                    log::warn!(
+                        "WAL checkpoint busy on iteration {iterations}; \
+                         stopping prune (the WAL could not be truncated)"
+                    );
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!("WAL checkpoint failed on iteration {iterations}: {e}");
+                }
             }
 
-            let new_size = self.get_total_db_size();
-            if new_size < last_size {
-                size_stuck_count = 0;
-            } else {
-                size_stuck_count += 1;
-            }
-            last_size = new_size;
+            let new_size = self.effective_db_size();
             current_size = new_size;
-
-            // If the file hasn't shrunk for several iterations, VACUUM is
-            // likely failing. Stop — deleted pages are now free and will be
-            // reused, preventing further growth. Escalate with the remaining
-            // record count so operators can judge how much prunable data is
-            // left behind.
-            if size_stuck_count >= 3 {
-                let remaining: i64 = {
-                    let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-                    conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))
-                        .unwrap_or(-1)
-                };
-                log::error!(
-                    "GenAI prune stalled: file is {}MB (threshold {}MB) with {remaining} \
-                     records remaining after {iterations} iterations. VACUUM is likely \
-                     failing (e.g. disk full) — manual intervention required \
-                     (free disk space or remove the database).",
-                    current_size / 1024 / 1024,
-                    threshold / 1024 / 1024,
-                );
-                break;
-            }
 
             if current_size >= threshold {
                 log::info!(
@@ -401,36 +423,20 @@ impl GenAISqliteStore {
         Ok(())
     }
 
-    /// Execute WAL checkpoint and VACUUM to reclaim disk space
-    ///
-    /// 1. VACUUM: rebuild database to compact data
-    /// 2. Checkpoint: flush and truncate WAL file
-    ///
-    /// Note: VACUUM in WAL mode creates a new db file, so we need to
-    /// re-enable WAL and checkpoint after VACUUM.
-    pub(super) fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-
-        // VACUUM rebuilds the database (works better before checkpoint in WAL mode)
-        conn.execute_batch("VACUUM;")?;
-
-        // Re-enable WAL mode (VACUUM may reset it)
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-
-        // Checkpoint with TRUNCATE to shrink WAL file
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-
-        Ok(())
-    }
-
     /// Flush WAL frames to the main database and truncate the WAL file.
     ///
     /// Call during graceful shutdown to clean up `-wal` / `-shm` files —
     /// mirrors the sibling stores (token, http, audit) which do this via
     /// `connection::wal_checkpoint` in their own `checkpoint()` methods.
-    pub fn wal_checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
+    ///
+    /// Returns `Ok(true)` when the checkpoint was blocked by another
+    /// connection's read snapshot (busy): the statement succeeds but the WAL
+    /// is NOT truncated. Purge loops must stop deleting in that case — the
+    /// WAL stays in the size measurement while deletes keep appending frames,
+    /// so the loop never converges (#2888).
+    pub fn wal_checkpoint(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(())
+        let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok(busy != 0)
     }
 }

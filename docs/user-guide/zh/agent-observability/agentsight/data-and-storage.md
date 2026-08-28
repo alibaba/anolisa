@@ -36,6 +36,12 @@ tracer 自身始终写入默认目录。
 | `genai_events.db` | 默认 200 MB；达到上限的 90% 开始清理，每轮删除最旧的 5% 记录 | 在服务环境里设置 `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` |
 | `interruption_events.db` | 30 天 + 100 MB | `features.interruption_detection.retention_days` / `max_db_size_mb` |
 
+上限按逻辑容量计（物理文件大小减去空闲页），清理按最旧优先收敛到阈值内。清理后
+物理文件不会自动缩小：释放的页进入空闲页表并被后续写入复用，文件大小稳定在
+历史峰值。如需向文件系统归还磁盘空间，在低峰期手动执行
+`sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'`（VACUUM 会重建整个文件，
+建议先停止服务，避免 cgroup 内存限制下触发 OOM）。
+
 给安装包服务调高 GenAI 上限：
 
 ```bash
