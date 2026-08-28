@@ -58,6 +58,39 @@ fn erase_native_columns<W: Write>(output: &mut W, columns: usize) -> io::Result<
     Ok(())
 }
 
+pub(super) fn write_no_wrap_overlay<W, F>(output: &mut W, body: F) -> io::Result<()>
+where
+    W: Write,
+    F: FnOnce(&mut W) -> io::Result<()>,
+{
+    let save_result = output.write_all(SAVE_CURSOR.as_bytes());
+    let cursor_saved = save_result.is_ok();
+    let render_result = save_result.and_then(|()| {
+        output.write_all(b"\x1b[?7l")?;
+        body(output)
+    });
+
+    // Keep cleanup independent: a recoverable body failure must not strand
+    // the outer terminal in dim/no-wrap mode or at the overlay cursor.
+    let mut cleanup_error = None;
+    for sequence in [b"\x1b[0m".as_slice(), b"\x1b[?7h"] {
+        if let Err(error) = output.write_all(sequence) {
+            cleanup_error.get_or_insert(error);
+        }
+    }
+    if cursor_saved {
+        if let Err(error) = output.write_all(RESTORE_CURSOR.as_bytes()) {
+            cleanup_error.get_or_insert(error);
+        }
+    }
+
+    match render_result {
+        // Preserve the initiating failure even if best-effort cleanup fails.
+        Err(error) => Err(error),
+        Ok(()) => cleanup_error.map_or(Ok(()), Err),
+    }
+}
+
 // The inline hint must never trigger terminal auto-wrap: a wrapped tail
 // lands on the next screen line where the erase-to-EOL of the following
 // redraw/commit cannot reach it, leaving residue behind. The native
@@ -65,10 +98,7 @@ fn erase_native_columns<W: Write>(output: &mut W, columns: usize) -> io::Result<
 // possible; instead auto-wrap (DECAWM) is disabled around the write and
 // the terminal clips the hint at the right edge itself.
 fn write_inline_hint<W: Write>(output: &mut W, hint: &str) -> io::Result<()> {
-    write!(
-        output,
-        "{SAVE_CURSOR}\x1b[?7l\x1b[2m {hint}\x1b[0m\x1b[?7h{RESTORE_CURSOR}"
-    )
+    write_no_wrap_overlay(output, |output| write!(output, "\x1b[2m {hint}"))
 }
 
 pub(super) fn drain_raw_input_events<W: Write>(
