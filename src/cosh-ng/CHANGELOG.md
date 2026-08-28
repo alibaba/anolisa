@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.22.1] — 2026-08-28
+
+### Fixed
+- The internal `builtin true __cosh_slash_guard__` sentinel line no longer appears in the terminal after an exact slash command in native Bash, including with verbose echo (`set -v`) enabled; slash routing, command execution, and history recall behave as before (#2943)
+- Input that arrives pasted or piped in one batch together with a running command is no longer misrouted: slash-looking lines inside such a batch are delivered to the shell byte-for-byte instead of being intercepted as slash commands, keeping scripted pipelines intact (#2938)
+- Command tracking and working-directory reporting keep working in directories whose names contain control characters, instead of dropping shell events (#2938)
+- Headless one-shot runs with a prompt argument no longer hang for hours when an approval request goes unanswered: the request times out after 30 seconds and the run exits with a clear timeout error and a non-zero exit code (#2941)
+
 ## [0.22.0] — 2026-08-27
 
 ### Added
