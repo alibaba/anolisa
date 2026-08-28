@@ -46,6 +46,37 @@ fn raw_cli_routes_slash_bearing_han_prompt_before_shell_execution() {
 }
 
 #[test]
+fn raw_cli_redacts_cjk_adjacent_secret_in_path_prompt_notice() {
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+    let prompt = format!("打开./nonexistent-cosh-2913，token是{secret}的内容");
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains("Received shell prompt request:"),
+        "{output}"
+    );
+    assert!(output.contains("Agent input: <redacted>"), "{output}");
+    assert!(
+        !output.contains(&format!("Agent input: {prompt}")),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_routes_slash_leading_path_prompt_in_one_input_batch() {
     let prompt = "/nonexistent-cosh-2913/SKILL.md 帮我读一下";
     let mut submission = prompt.as_bytes().to_vec();

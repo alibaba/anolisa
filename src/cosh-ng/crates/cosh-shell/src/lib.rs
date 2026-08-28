@@ -13,6 +13,9 @@ mod evidence;
 #[allow(dead_code, unused_imports)]
 #[path = "hooks/public.rs"]
 mod hooks;
+#[cfg(test)]
+#[path = "evidence/redaction_boundary_tests.rs"]
+mod redaction_boundary_tests;
 
 #[cfg(test)]
 #[path = "ui/card_kind_tests.rs"]

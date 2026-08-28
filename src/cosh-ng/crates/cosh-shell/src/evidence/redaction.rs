@@ -166,7 +166,7 @@ fn authorization_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
-            r"(?i)(?P<prefix>\bauthorization\s*(?::|=)\s*)(?P<scheme>bearer|basic|token)?\s*(?P<value>[^\s,;&]+)",
+            r"(?i)(?P<prefix>(?-u:\b)authorization\s*(?::|=)\s*)(?P<scheme>bearer|basic|token)?\s*(?P<value>[^\s,;&]+)",
         )
         .unwrap_or_else(|_| unreachable!("static authorization pattern must compile"))
     })
@@ -176,7 +176,7 @@ fn bearer_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?i)(?P<prefix>\bbearer\s+)[A-Za-z0-9._~+/=-]+")
+        Regex::new(r"(?i)(?P<prefix>(?-u:\b)bearer\s+)[A-Za-z0-9._~+/=-]+")
             .unwrap_or_else(|_| unreachable!("static bearer pattern must compile"))
     })
 }
@@ -185,7 +185,7 @@ fn url_password_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@/\s]+@")
+        Regex::new(r"(?i)(?P<prefix>(?-u:\b)[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@/\s]+@")
             .unwrap_or_else(|_| unreachable!("static URL password pattern must compile"))
     })
 }
@@ -251,7 +251,7 @@ fn github_token_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+        Regex::new(r"(?-u:\b)(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static GitHub token pattern must compile"))
     })
 }
@@ -261,7 +261,7 @@ fn opaque_token_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
-            r"\b(?:sk-[A-Za-z0-9_-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|(?i:xox.)-[A-Za-z0-9-]{10,})\b",
+            r"(?-u:\b)(?:sk-[A-Za-z0-9_-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|(?i:xox.)-[A-Za-z0-9-]{10,})(?-u:\b)",
         )
         .unwrap_or_else(|_| unreachable!("static opaque token pattern must compile"))
     })
@@ -271,7 +271,7 @@ fn jwt_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+        Regex::new(r"(?-u:\b)eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static JWT pattern must compile"))
     })
 }
@@ -280,7 +280,7 @@ fn aws_access_key_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\b(?P<prefix>AKIA|ASIA)[A-Z0-9]{16}\b")
+        Regex::new(r"(?-u:\b)(?P<prefix>AKIA|ASIA)[A-Z0-9]{16}(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static AWS access key pattern must compile"))
     })
 }
@@ -289,7 +289,7 @@ fn alibaba_access_key_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\bLTAI[A-Za-z0-9]{12,32}\b")
+        Regex::new(r"(?-u:\b)LTAI[A-Za-z0-9]{12,32}(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static Alibaba access key pattern must compile"))
     })
 }
