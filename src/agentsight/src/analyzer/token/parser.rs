@@ -273,6 +273,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_anthropic_message_delta_output_only() {
+        // Official Anthropic message_delta carries only output_tokens; the
+        // parser must still surface it (input defaults to 0) so the caller can
+        // merge it with message_start rather than dropping the event.
+        let parser = TokenParser::new();
+        let data = r#"{
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 42}
+        }"#;
+
+        let event = create_test_event(data);
+        let usage = parser
+            .parse_event(&event)
+            .expect("output-only should parse");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 42);
+        assert_eq!(usage.provider, LLMProvider::Anthropic);
+    }
+
+    #[test]
     fn test_parse_openai_sse_streaming() {
         let parser = TokenParser::new();
         let data = r#"{"choices":[],"object":"chat.completion.chunk","usage":{"prompt_tokens":61744,"completion_tokens":61,"total_tokens":61805},"created":1773640825,"model":"qwen3.5-plus","id":"chatcmpl-816f7538-0ac9-98c4-8259-9bade0c2cde7"}"#;

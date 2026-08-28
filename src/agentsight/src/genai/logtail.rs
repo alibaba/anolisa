@@ -42,6 +42,8 @@ const DEFAULT_PATH_KEEP_FIELDS: &[&str] = &[
     "gen_ai.request.model",
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
+    "gen_ai.usage.cache_creation.input_tokens",
+    "gen_ai.usage.cache_read.input_tokens",
     "agentsight.agent.name",
     "agentsight.http.domain",
     "agent.skill.name",
@@ -333,7 +335,14 @@ impl LogtailExporter {
         }
 
         // 部署检查：目标文件不存在（iLogtail 未部署）则跳过，不自动创建。
+        // 首次跳过打一条 warn，避免"启用了却无数据"时无迹可查（后续静默）。
         if self.require_path_exists && !target_path.exists() {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                log::warn!(
+                    "SLS default-path export skipped: target file {target_path:?} does not exist (iLogtail not deployed?); create it to enable uploads"
+                );
+            });
             return;
         }
 

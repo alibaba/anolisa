@@ -28,8 +28,8 @@ use crate::tokenizer::get_global_tokenizer;
 
 use super::result::{MessageTokenCount, OutputTokenCount, TokenConsumptionBreakdown};
 use super::{
-    AnalysisResult, AuditAnalyzer, HttpRecord, MessageParser, ParsedApiMessage, TokenParser,
-    TokenRecord, TokenUsage,
+    AnalysisResult, AuditAnalyzer, HttpRecord, LLMProvider, MessageParser, ParsedApiMessage,
+    TokenParser, TokenRecord, TokenUsage,
 };
 
 /// Token count result for request messages
@@ -637,7 +637,16 @@ impl Analyzer {
             .map(AnalysisResult::Message)
     }
 
-    /// Extract token usage from SSE events (reverse search, first match wins)
+    /// Extract token usage from SSE events by merging field-by-field.
+    ///
+    /// Anthropic (and Anthropic-compatible proxies) split token usage across
+    /// events: `message_start` carries `input_tokens` plus the cache counters,
+    /// while the terminal `message_delta` carries only `output_tokens`. Some
+    /// proxies additionally emit a zero-placeholder `message_start` or drop it
+    /// entirely. Picking a single event therefore yields a bogus zero total, so
+    /// we merge every parseable event, taking the max of each cumulative
+    /// counter. OpenAI/Gemini pack all fields into one event, so the merge is a
+    /// no-op for them.
     fn extract_token_from_sse(
         &self,
         sse_events: &[ParsedSseEvent],
@@ -645,40 +654,42 @@ impl Analyzer {
         pid: u32,
         comm: &str,
     ) -> Option<TokenRecord> {
-        let usage = sse_events
+        let mut usage = sse_events
             .iter()
-            .rev()
-            .find_map(|e| self.token.parse_event(e))
-            .or_else(|| {
-                // Fallback: OpenAI Responses API embeds usage in a final
-                // `response.completed` event whose `data:` field routinely
-                // exceeds a single TLS record. The aggregator buffers the
-                // raw continuation bytes; re-parse them with the legacy
-                // SSEParser (which concatenates multi-line data fields)
-                // and walk events in reverse so the canonical usage event
-                // wins. If reassembled events still don't yield usage,
-                // fall back to a partial-scan over the raw buffer text.
-                let extra = continuation_bytes?;
+            .filter_map(|e| self.token.parse_event(e))
+            .fold(None, Self::merge_usage);
+
+        if usage.is_none() {
+            // Fallback: OpenAI Responses API embeds usage in a final
+            // `response.completed` event whose `data:` field routinely
+            // exceeds a single TLS record. The aggregator buffers the
+            // raw continuation bytes; re-parse them with the legacy
+            // SSEParser (which concatenates multi-line data fields)
+            // and merge all events. If reassembled events still don't
+            // yield usage, fall back to a partial-scan over the raw
+            // buffer text.
+            if let Some(extra) = continuation_bytes {
                 let text = String::from_utf8_lossy(extra);
                 let reassembled = SSEParser::parse_stream(&text);
-                let from_events = reassembled
+                usage = reassembled
                     .events
                     .iter()
-                    .rev()
-                    .find_map(|e| self.token.parse_data(&e.data));
-                if from_events.is_some() {
-                    return from_events;
+                    .filter_map(|e| self.token.parse_data(&e.data))
+                    .fold(None, Self::merge_usage);
+                if usage.is_none() {
+                    usage = self.token.parse_data(&text);
+                    if usage.is_none() {
+                        log::debug!(
+                            "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
+                            extra.len(),
+                            reassembled.events.len(),
+                        );
+                    }
                 }
-                let from_scan = self.token.parse_data(&text);
-                if from_scan.is_none() {
-                    log::debug!(
-                        "[extract_token_from_sse] continuation buffer scan miss: len={} reassembled_events={}",
-                        extra.len(),
-                        reassembled.events.len(),
-                    );
-                }
-                from_scan
-            })?;
+            }
+        }
+
+        let usage = usage?;
 
         let record = TokenRecord::new(
             pid,
@@ -701,6 +712,43 @@ impl Analyzer {
         }
 
         Some(record)
+    }
+
+    /// Merge two token-usage snapshots from the same SSE stream.
+    ///
+    /// All counters are cumulative within a stream, so the max resolves the
+    /// split-across-events case (message_start input/cache vs message_delta
+    /// output) and tolerates zero-placeholder events without ever regressing a
+    /// larger value. Model and provider are taken from the first event that
+    /// carries them.
+    fn merge_usage(acc: Option<TokenUsage>, next: TokenUsage) -> Option<TokenUsage> {
+        let Some(mut cur) = acc else {
+            return Some(next);
+        };
+        cur.input_tokens = cur.input_tokens.max(next.input_tokens);
+        cur.output_tokens = cur.output_tokens.max(next.output_tokens);
+        cur.cache_creation_input_tokens = Self::max_opt(
+            cur.cache_creation_input_tokens,
+            next.cache_creation_input_tokens,
+        );
+        cur.cache_read_input_tokens =
+            Self::max_opt(cur.cache_read_input_tokens, next.cache_read_input_tokens);
+        if cur.model.is_none() {
+            cur.model = next.model;
+        }
+        if cur.provider == LLMProvider::Unknown {
+            cur.provider = next.provider;
+        }
+        Some(cur)
+    }
+
+    /// Max of two optional counters, preserving a value when only one is set.
+    fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+        match (a, b) {
+            (Some(x), Some(y)) => Some(x.max(y)),
+            (x, None) => x,
+            (None, y) => y,
+        }
     }
 
     fn extract_token_from_json_body(
@@ -1889,6 +1937,66 @@ data:{"usage":{"input_tokens":57,"output_tokens":3}}"#;
         let continuation = b"event: response.completed\ndata: {\"id\":\"resp_001\"}\n\n";
         let result = analyzer.extract_token_from_sse(&events, Some(continuation), 1234, "test");
         assert!(result.is_none(), "should return None when no usage found");
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_anthropic_official_merges_start_and_delta() {
+        // Dialect A: message_start carries input + cache, terminal message_delta
+        // carries only output_tokens. The merge must combine both instead of
+        // picking one event (which would drop output or drop input+cache).
+        let analyzer = Analyzer::new();
+        let events = vec![
+            create_test_event(
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1234,\"cache_creation_input_tokens\":5678,\"cache_read_input_tokens\":90,\"output_tokens\":1}}}",
+            ),
+            create_test_event(
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}",
+            ),
+        ];
+        let record = analyzer
+            .extract_token_from_sse(&events, None, 1234, "test")
+            .expect("should merge start + delta");
+        assert_eq!(record.input_tokens, 1234);
+        assert_eq!(record.output_tokens, 42);
+        assert_eq!(record.cache_creation_tokens, Some(5678));
+        assert_eq!(record.cache_read_tokens, Some(90));
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_anthropic_no_message_start() {
+        // Dialect B: proxy strips message_start entirely; only message_delta
+        // (output-only) survives. Must still yield output_tokens rather than
+        // being dropped by a mandatory input_tokens requirement.
+        let analyzer = Analyzer::new();
+        let events = vec![create_test_event(
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}",
+        )];
+        let record = analyzer
+            .extract_token_from_sse(&events, None, 1234, "test")
+            .expect("output-only delta should still produce a record");
+        assert_eq!(record.input_tokens, 0);
+        assert_eq!(record.output_tokens, 42);
+    }
+
+    #[test]
+    fn test_extract_token_from_sse_anthropic_zero_placeholder_start() {
+        // Dialect C: proxy sends a zero-placeholder message_start followed by
+        // the real output in message_delta. The zero start must not mask the
+        // delta's output_tokens.
+        let analyzer = Analyzer::new();
+        let events = vec![
+            create_test_event(
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}",
+            ),
+            create_test_event(
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}",
+            ),
+        ];
+        let record = analyzer
+            .extract_token_from_sse(&events, None, 1234, "test")
+            .expect("zero placeholder must not mask delta output");
+        assert_eq!(record.input_tokens, 0);
+        assert_eq!(record.output_tokens, 42);
     }
 
     #[test]

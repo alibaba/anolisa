@@ -132,12 +132,16 @@ pub fn extract_usage_object(
             (input, output)
         }
         LLMProvider::Anthropic => {
-            let input = usage.get("input_tokens").and_then(|v| v.as_u64())?;
-            let output = usage
-                .get("output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            (input, output)
+            // Anthropic splits usage across events: message_start carries
+            // input_tokens (+cache), while the terminal message_delta carries
+            // only output_tokens. Accept either so the caller can merge them;
+            // requiring input_tokens here would drop the output-only delta.
+            let input = usage.get("input_tokens").and_then(|v| v.as_u64());
+            let output = usage.get("output_tokens").and_then(|v| v.as_u64());
+            if input.is_none() && output.is_none() {
+                return None;
+            }
+            (input.unwrap_or(0), output.unwrap_or(0))
         }
         LLMProvider::Gemini => {
             let input = usage.get("prompt_token_count").and_then(|v| v.as_u64())?;
