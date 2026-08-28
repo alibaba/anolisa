@@ -75,6 +75,10 @@ for binding in (
         raise SystemExit(f"Maturin reproducible build is missing: {binding}")
 if 'TOKENLESS_CARGO_MANIFEST="$COMPONENT_ROOT/python/tokenless/Cargo.toml"' not in build:
     raise SystemExit("Maturin Cargo shim does not bind the expected manifest")
+if 'TOKENLESS_CROSS_PROJECT_ROOT="$COMPONENT_ROOT"' not in build:
+    raise SystemExit("Maturin Cargo shim does not bind the Cross project root")
+if 'TOKENLESS_CARGO_OUTPUT_REWRITER="$ACTION_DIR/rewrite-cross-cargo-output.py"' not in build:
+    raise SystemExit("Maturin Cargo shim does not bind the output rewriter")
 PY
 
 python3 - "$REPO_ROOT/.github/actions/package-source/action.yaml" <<'PY'
@@ -369,6 +373,9 @@ SHIM_RUSTFLAGS_LOG="$TEMPORARY/cargo-shim-rustflags.log"
 SHIM_COMPONENT="$TEMPORARY/shim-component"
 install -d -m 0755 "$SHIM_COMPONENT"
 touch "$SHIM_COMPONENT/Cargo.toml"
+SHIM_BIN="$SHIM_COMPONENT/target/maturin-cargo-shim"
+install -d -m 0755 "$SHIM_BIN"
+ln -s "$ACTION_DIR/cargo-shim.sh" "$SHIM_BIN/cargo"
 # shellcheck disable=SC2016  # Expand shim arguments and log paths in the fakes.
 printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -382,6 +389,7 @@ printf '%s\n' \
     'printf " <%s>" "$@" >> "$SHIM_LOG"' \
     'printf "\n" >> "$SHIM_LOG"' \
     'printf "%s\n" "${CARGO_ENCODED_RUSTFLAGS:-}" >> "$SHIM_RUSTFLAGS_LOG"' \
+    'printf "%s\n" '\''{"reason":"compiler-artifact","package_id":"path+file:///project#tokenless-python@0.7.14","filenames":["/target/x86_64-unknown-linux-gnu/python-release/libanolisa_tokenless.so"],"manifest_path":"/project/Cargo.toml"}'\''' \
     > "$FAKE_BIN/cross-profile"
 chmod 0755 "$FAKE_BIN/host-cargo" "$FAKE_BIN/cross-profile"
 SHIM_ENV=(
@@ -390,24 +398,34 @@ SHIM_ENV=(
     TOKENLESS_CROSS_PROFILE=gnu2.17-x86_64
     TOKENLESS_RUST_TARGET=x86_64-unknown-linux-gnu
     TOKENLESS_CARGO_MANIFEST="$SHIM_COMPONENT/Cargo.toml"
+    TOKENLESS_CROSS_PROJECT_ROOT="$SHIM_COMPONENT"
+    TOKENLESS_CARGO_OUTPUT_REWRITER="$ACTION_DIR/rewrite-cross-cargo-output.py"
     CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=/source=/workspace
     SHIM_LOG="$SHIM_LOG"
     SHIM_RUSTFLAGS_LOG="$SHIM_RUSTFLAGS_LOG"
 )
-env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" metadata --locked
+env "${SHIM_ENV[@]}" "$SHIM_BIN/cargo" metadata --locked
+SHIM_OUTPUT="$TEMPORARY/cargo-shim-output.json"
 (
     cd "$SHIM_COMPONENT"
-    env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+    env "${SHIM_ENV[@]}" "$SHIM_BIN/cargo" rustc \
         --target x86_64-unknown-linux-gnu \
         --manifest-path "$SHIM_COMPONENT/Cargo.toml" \
-        --profile python-release
+        --profile python-release > "$SHIM_OUTPUT"
 )
 grep -Fxq 'cargo <metadata> <--locked>' "$SHIM_LOG"
 grep -Fxq \
     'cross <gnu2.17-x86_64> <rustc> <--manifest-path> <Cargo.toml> <--profile> <python-release>' \
     "$SHIM_LOG"
 grep -Fxq -- '--remap-path-prefix=/source=/workspace' "$SHIM_RUSTFLAGS_LOG"
-if env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+grep -Fq \
+    "\"package_id\":\"path+file://$SHIM_COMPONENT#tokenless-python@0.7.14\"" \
+    "$SHIM_OUTPUT"
+grep -Fq \
+    "\"filenames\":[\"$SHIM_COMPONENT/target/x86_64-unknown-linux-gnu/python-release/libanolisa_tokenless.so\"]" \
+    "$SHIM_OUTPUT"
+grep -Fq "\"manifest_path\":\"$SHIM_COMPONENT/Cargo.toml\"" "$SHIM_OUTPUT"
+if env "${SHIM_ENV[@]}" "$SHIM_BIN/cargo" rustc \
     --target "x86_64-unknown-linux-gnu;\$(touch ${MARKER})" \
     >"$TEMPORARY/shim-target.log" 2>&1; then
     printf 'ERROR: mismatched Cargo shim target was accepted\n' >&2
@@ -419,7 +437,7 @@ fi
 }
 if (
     cd "$SHIM_COMPONENT"
-    env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+    env "${SHIM_ENV[@]}" "$SHIM_BIN/cargo" rustc \
         --target x86_64-unknown-linux-gnu \
         --manifest-path "$TEMPORARY/other/Cargo.toml"
 ) >"$TEMPORARY/shim-manifest.log" 2>&1; then

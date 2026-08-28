@@ -12,6 +12,8 @@ CROSS_PROFILE_SCRIPT="${TOKENLESS_CROSS_PROFILE_SCRIPT:?TOKENLESS_CROSS_PROFILE_
 PROFILE="${TOKENLESS_CROSS_PROFILE:?TOKENLESS_CROSS_PROFILE is required}"
 EXPECTED_TARGET="${TOKENLESS_RUST_TARGET:?TOKENLESS_RUST_TARGET is required}"
 EXPECTED_MANIFEST="${TOKENLESS_CARGO_MANIFEST:?TOKENLESS_CARGO_MANIFEST is required}"
+PROJECT_ROOT="${TOKENLESS_CROSS_PROJECT_ROOT:?TOKENLESS_CROSS_PROJECT_ROOT is required}"
+OUTPUT_REWRITER="${TOKENLESS_CARGO_OUTPUT_REWRITER:?TOKENLESS_CARGO_OUTPUT_REWRITER is required}"
 
 case "$PROFILE/$EXPECTED_TARGET" in
     gnu2.17-x86_64/x86_64-unknown-linux-gnu | \
@@ -22,6 +24,8 @@ esac
 [ -x "$HOST_CARGO" ] || die "host Cargo is not executable: $HOST_CARGO"
 [ -x "$CROSS_PROFILE_SCRIPT" ] || \
     die "Cross profile script is not executable: $CROSS_PROFILE_SCRIPT"
+[ -d "$PROJECT_ROOT" ] || die "Cross project root is not a directory: $PROJECT_ROOT"
+[ -f "$OUTPUT_REWRITER" ] || die "Cargo output rewriter is not a file: $OUTPUT_REWRITER"
 
 case "${1:-}" in
     metadata | locate-project | --version | -V)
@@ -69,7 +73,8 @@ case "${1:-}" in
                     ;;
             esac
         done
-        exec "$CROSS_PROFILE_SCRIPT" "$PROFILE" "$command_name" "${arguments[@]}"
+        "$CROSS_PROFILE_SCRIPT" "$PROFILE" "$command_name" "${arguments[@]}" | \
+            python3 "$OUTPUT_REWRITER" "$PROJECT_ROOT"
         ;;
     *)
         die "unsupported Maturin Cargo command: ${1:-<empty>}"
