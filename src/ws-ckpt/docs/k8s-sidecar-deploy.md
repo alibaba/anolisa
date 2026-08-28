@@ -127,13 +127,51 @@ lifecycle:
         - /bin/sh
         - -c
         - |
+          own_loops=$(losetup -j /var/lib/ws-ckpt/btrfs-data.img 2>/dev/null | cut -d: -f1)
           umount /opt/ws-ckpt-mount 2>/dev/null || true
+          for dev in $own_loops; do
+            losetup -d "$dev" 2>/dev/null || true
+          done
           losetup -ln -O NAME,BACK-FILE | while read dev file; do
-            [ -e "$file" ] || losetup -d "$dev" 2>/dev/null
+            case "$file" in
+              "/var/lib/ws-ckpt/btrfs-data.img (deleted)"|"/data/ws-ckpt/btrfs-data.img (deleted)")
+                losetup -d "$dev" 2>/dev/null || true ;;
+            esac
           done
 ```
 
+两条规则对应两类遗留，且都**不能用路径存在性（`-e`）作为判断依据**：
+
+- 本 Pod 自己的 loop 在 umount **之前**用 `losetup -j` 捕获——它按 backing 文件的**（设备, inode）**匹配。路径字符串相同不代表是同一个文件：旧 Pod 的 loop 可能仍挂着已删除的旧 inode，而新 Pod 已在同一路径创建了另一个文件，用 `-e` 检查会把两者混淆；
+- 历史孤儿按内核显式追加的 ` (deleted)` 后缀识别：只有 backing 文件已被 unlink 的 loop 才带该后缀，运行中容器的设备不会命中；`/data/ws-ckpt` 为旧版本遗留镜像路径，一并覆盖。
+
+若 preStop 运行时 daemon 仍持有挂载，umount/detach 会以 EBUSY 失败——这是预期内的最好努力，下次启动的孤儿恢复（同样按 inode 匹配）会兜底。
+
 对于 preStop 无法执行的异常场景（OOMKill、节点故障）：daemon 下次启动时 `try_exists` 检测到 orphan loop 设备（backing file 已不存在），跳过陈尸挂载走冷路径重新 bootstrap。此场景下旧挂载中的数据不可恢复 — 持久化 `ws-state` volume 是防止此情况发生的根本保障。
+
+裸 `docker run`（没有 preStop）每次容器退出都会遗留一个 attached loop 设备，反复运行会持续累积，建议：
+
+- 给 `/var/lib/ws-ckpt` 挂持久卷。镜像文件跨运行保留后，下次启动的孤儿恢复能按 inode 匹配到上次遗留并自动 detach，不再累积，状态也得以保留；
+- 清理存量遗留前先确认没有 ws-ckpt 容器在运行。只处理 ws-ckpt 两个镜像路径（默认 `/var/lib/ws-ckpt`、旧版本遗留 `/data/ws-ckpt`，daemon 与卸载流程对两者均保留支持）的悬空设备，**不要对全部 loop 设备做扫描**——宿主机上其他服务的 loop 设备同样可能存在悬空 backing 路径，全量扫描会误杀：
+
+```bash
+sudo sh <<'CLEANUP'
+losetup -ln -O NAME,BACK-FILE | while read dev file; do
+    clean=${file%" (deleted)"}
+    case "$clean" in
+        /var/lib/ws-ckpt/btrfs-data.img|/data/ws-ckpt/btrfs-data.img) ;;
+        *) continue ;;
+    esac
+    # "(deleted)" = backing inode 已随容器删除；文件不存在 = 陈旧 attach。
+    # 宿主机级（systemd）部署的镜像文件真实存在，自动跳过。
+    if [ "$file" != "$clean" ] || [ ! -e "$clean" ]; then
+        losetup -d "$dev"
+    fi
+done
+CLEANUP
+```
+
+  `losetup -d` 需要 root，故整段以 `sudo` 运行；detach 失败原样报错，不做重定向静默。
 
 ## 冒烟验证
 
