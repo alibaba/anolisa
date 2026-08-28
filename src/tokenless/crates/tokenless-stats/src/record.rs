@@ -131,6 +131,17 @@ pub struct StatsRecord {
     /// `None` for legacy paths and seams without a detector (before_model).
     #[serde(default)]
     pub content_type: Option<String>,
+    /// Origin declared by the adapter (protocol `content_origin` wire
+    /// string). `None` outside the unified entry point.
+    ///
+    /// Roadmap §4.7 wants this to separate a protected-path passthrough from
+    /// an ordinary no-savings outcome when tuning the release list. It cannot
+    /// do that yet: `record_compression` returns before writing any row when
+    /// `after_tokens >= before_tokens`, so neither outcome is recorded at
+    /// all. This column is what those rows will carry once a recording policy
+    /// emits them.
+    #[serde(default)]
+    pub content_origin: Option<String>,
     /// Protocol seam wire string (`before_model`, `pre_tool`, `post_tool`,
     /// `proxy`). `None` for rows written outside the unified entry point.
     #[serde(default)]
@@ -180,6 +191,7 @@ impl StatsRecord {
             stash_errors: None,
             stash_size: None,
             content_type: None,
+            content_origin: None,
             seam: None,
             compressor_chain: None,
             tokenizer_id: None,
@@ -260,12 +272,14 @@ impl StatsRecord {
         mut self,
         seam: impl Into<String>,
         content_type: Option<String>,
+        content_origin: Option<String>,
         compressor_chain: Option<String>,
         tokenizer_id: impl Into<String>,
         unrecoverable_truncations: Option<i64>,
     ) -> Self {
         self.seam = Some(seam.into());
         self.content_type = content_type;
+        self.content_origin = content_origin;
         self.compressor_chain = compressor_chain;
         self.tokenizer_id = Some(tokenizer_id.into());
         self.unrecoverable_truncations = unrecoverable_truncations;

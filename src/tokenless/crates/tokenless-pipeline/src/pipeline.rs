@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use tokenless_ccr::{StashError, StashStore, StashWrite, marker_for};
 use tokenless_protocol::{
-    CompressionRequest, CompressionResponse, DIAGNOSTIC_MAX_BYTES, Disposition, PROTOCOL_VERSION,
-    Reversibility, TOKENIZER_ID,
+    CompressionRequest, CompressionResponse, ContentOrigin, DIAGNOSTIC_MAX_BYTES, Disposition,
+    PROTOCOL_VERSION, Reversibility, TOKENIZER_ID,
 };
 use tokenless_stats::estimate_tokens;
 
@@ -137,6 +137,12 @@ pub fn run(
     let before_tokens = tokens(&request.content);
     let content_type = detect(&request.content);
 
+    if request.content_origin == ContentOrigin::FileContent && !released_from_a_file(content_type) {
+        let mut response = CompressionResponse::passthrough(request, before_tokens);
+        response.content_type = Some(content_type.wire_str().to_owned());
+        return response;
+    }
+
     let mut lossless: Vec<&dyn Compressor> = Vec::new();
     let mut lossy: Vec<&dyn Compressor> = Vec::new();
     let mut truncation: Vec<&dyn Compressor> = Vec::new();
@@ -202,6 +208,54 @@ pub fn run(
         return arb.rejected(Disposition::Timeout);
     }
     arb.judge(config)
+}
+
+/// The release list of roadmap §4.3: content types safe to compress when the
+/// authoritative copy lives elsewhere.
+///
+/// It names data that is generated rather than authored, and that no agent
+/// patches byte by byte. Gating on "is this `SourceCode`" instead would be a
+/// block list, and would fail exactly where the detector is weakest — code in
+/// a language it does not recognize falls through to `PlainText`. Naming what
+/// may be removed keeps a detection failure on the protected side.
+///
+/// Membership does not follow from a compressor existing for a type:
+/// `SourceCode` and `PlainText` stay protected here even once their
+/// compressors land, because those serve the command-output path.
+///
+/// `JsonRecords` is deliberately absent, though it is the one type whose
+/// compressor is already shipping. The taxonomy has a single bucket for all
+/// JSON, so it cannot tell a generated record dump from a hand-authored
+/// `package.json` — and the response cleanup drops null and empty fields,
+/// which silently rewrites the second kind. Releasing the bucket would
+/// therefore break exactly the edit this gate protects. It is restored the
+/// day the taxonomy separates generated records from authored configuration
+/// (roadmap §4.3); until then the same read stays protected, at the cost of
+/// savings rather than of correctness.
+///
+/// `BuildLog` is absent for the same reason, found one review later. Its
+/// detector scores content alone — any two of two dozen markers — so a log
+/// committed as a test fixture, or a contributor doc that quotes a compiler
+/// twice, lands in the bucket beside the output of the build that just ran
+/// (`prose_carrying_two_generic_markers_is_a_known_detection_boundary` pins
+/// that tolerance). The chain then strips SGR and folds runs of lines into a
+/// retrieval marker. Being retrievable does not rescue it: the model writes
+/// its next edit against the view it was shown, and that view carries markers
+/// the file does not.
+///
+/// Both absences leave the list with no type whose compressor ships today.
+/// That is where the gate is meant to rest, not an oversight — it defaults to
+/// protecting a read, and a type joins only once its bucket can be shown to
+/// hold generated data alone.
+fn released_from_a_file(content_type: ContentType) -> bool {
+    matches!(
+        content_type,
+        ContentType::SearchResults
+            | ContentType::StackTrace
+            | ContentType::Diff
+            | ContentType::Html
+            | ContentType::Tabular
+    )
 }
 
 /// Normalized token count under the protocol's `heuristic-v1` counter.

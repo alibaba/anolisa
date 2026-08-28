@@ -173,6 +173,9 @@ pub struct SlsRecord {
     #[serde(rename = "tokenless.compression.content_type")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[serde(rename = "tokenless.compression.content_origin")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_origin: Option<String>,
     #[serde(rename = "tokenless.compression.seam")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seam: Option<String>,
@@ -206,6 +209,7 @@ impl From<&StatsRecord> for SlsRecord {
             chars_saved_percent: r.chars_percent(),
             tokens_saved_percent: r.tokens_percent(),
             content_type: r.content_type.clone(),
+            content_origin: r.content_origin.clone(),
             seam: r.seam.clone(),
             compressor_chain: r.compressor_chain.clone(),
             tokenizer_id: r.tokenizer_id.clone(),
@@ -372,6 +376,7 @@ mod tests {
         let r = make_record().with_entry_metadata(
             "post_tool",
             Some("api-records".to_string()),
+            Some("file_content".to_string()),
             Some(r#"["response-cleanup"]"#.to_string()),
             "heuristic-v1",
             Some(1),
@@ -381,6 +386,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&sls).unwrap()).unwrap();
         assert_eq!(json["tokenless.compression.seam"], "post_tool");
         assert_eq!(json["tokenless.compression.content_type"], "api-records");
+        assert_eq!(json["tokenless.compression.content_origin"], "file_content");
         assert_eq!(
             json["tokenless.compression.compressor_chain"],
             r#"["response-cleanup"]"#

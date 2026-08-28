@@ -334,10 +334,12 @@ def main() -> None:
         can_replace = False
         replace_with_text = True
 
-    # 11. Spawn-avoidance prefilters. The entry point re-checks all three
-    # authoritatively; skipping here just saves the exec. SKIP_TOOLS reads
-    # the same tool_categories.json the entry point embeds, so content
-    # retrieval — the hottest PostToolUse traffic — never pays a spawn.
+    # 11. Prefilters. Two of them only save the exec; SKIP_TOOLS does more
+    # than that now. The entry point no longer keeps a tool list of its own
+    # (roadmap §6.3), so until this hook declares a content origin per tool
+    # (item 10) this check is the only thing keeping content retrieval — the
+    # hottest PostToolUse traffic — away from the compressor. It is
+    # load-bearing, not an optimization: do not drop it as one.
     if not can_replace:
         _emit_attribution_or_skip(env_attribution)
     if tool_name in SKIP_TOOLS:

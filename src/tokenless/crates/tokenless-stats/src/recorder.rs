@@ -152,6 +152,7 @@ impl StatsRecorder {
             ("stash_errors", "INTEGER"),
             ("stash_size", "INTEGER"),
             ("content_type", "TEXT"),
+            ("content_origin", "TEXT"),
             ("seam", "TEXT"),
             ("compressor_chain", "TEXT"),
             ("tokenizer_id", "TEXT"),
@@ -207,9 +208,9 @@ impl StatsRecorder {
                 before_text, after_text,
                 before_output, after_output, mode,
                 stash_writes, stash_errors, stash_size,
-                content_type, seam, compressor_chain, tokenizer_id,
+                content_type, content_origin, seam, compressor_chain, tokenizer_id,
                 unrecoverable_truncations
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 record.timestamp.to_rfc3339(),
                 record.operation.as_str(),
@@ -230,6 +231,7 @@ impl StatsRecorder {
                 record.stash_errors,
                 record.stash_size,
                 record.content_type,
+                record.content_origin,
                 record.seam,
                 record.compressor_chain,
                 record.tokenizer_id,
@@ -254,7 +256,7 @@ impl StatsRecorder {
         "session_id, tool_use_id, before_chars, before_tokens, ",
         "after_chars, after_tokens, before_text, after_text, ",
         "before_output, after_output, mode, stash_writes, ",
-        "stash_errors, stash_size, content_type, seam, ",
+        "stash_errors, stash_size, content_type, content_origin, seam, ",
         "compressor_chain, tokenizer_id, unrecoverable_truncations"
     );
 
@@ -401,7 +403,8 @@ impl StatsRecorder {
                 NULL AS before_output, NULL AS after_output,
                 ordered.mode, ordered.stash_writes, ordered.stash_errors,
                 ordered.stash_size,
-                NULL AS content_type, NULL AS seam, NULL AS compressor_chain,
+                NULL AS content_type, NULL AS content_origin,
+                NULL AS seam, NULL AS compressor_chain,
                 NULL AS tokenizer_id, NULL AS unrecoverable_truncations,
                 CASE
                     WHEN ordered.tool_use_id IS NOT NULL
@@ -443,9 +446,11 @@ impl StatsRecorder {
             rusqlite::params![session_id, Self::DEFAULT_LIMIT as i64],
             |row| {
                 let record = Self::row_to_record(row)?;
-                // linked_to_previous sits right after the SELECT_COLS span —
-                // its index is the SELECT_COLS column count.
-                let linked_to_previous = row.get::<_, i64>(24)? != 0;
+                // linked_to_previous is the last column, right after the
+                // SELECT_COLS span. Asking the row for its width keeps this
+                // index from drifting the next time a column is added.
+                let last = row.as_ref().column_count() - 1;
+                let linked_to_previous = row.get::<_, i64>(last)? != 0;
                 Ok((record, linked_to_previous))
             },
         )?;
@@ -612,10 +617,11 @@ impl StatsRecorder {
             stash_errors: row.get(17)?,
             stash_size: row.get(18)?,
             content_type: row.get(19)?,
-            seam: row.get(20)?,
-            compressor_chain: row.get(21)?,
-            tokenizer_id: row.get(22)?,
-            unrecoverable_truncations: row.get(23)?,
+            content_origin: row.get(20)?,
+            seam: row.get(21)?,
+            compressor_chain: row.get(22)?,
+            tokenizer_id: row.get(23)?,
+            unrecoverable_truncations: row.get(24)?,
         })
     }
 }

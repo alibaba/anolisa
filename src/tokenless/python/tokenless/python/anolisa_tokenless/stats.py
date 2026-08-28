@@ -127,6 +127,7 @@ class StatsRecord:
     stash_errors: int | None
     stash_size: int | None
     content_type: str | None
+    content_origin: str | None
     seam: str | None
     compressor_chain: str | None
     tokenizer_id: str | None
@@ -500,6 +501,7 @@ def _parse_record(value: Mapping[str, Any]) -> StatsRecord:
         stash_errors=value["stash_errors"],
         stash_size=value["stash_size"],
         content_type=value.get("content_type"),
+        content_origin=value.get("content_origin"),
         seam=value.get("seam"),
         compressor_chain=value.get("compressor_chain"),
         tokenizer_id=value.get("tokenizer_id"),
