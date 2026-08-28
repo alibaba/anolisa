@@ -206,6 +206,7 @@ PYTHON_RTK_DIR="$COMPONENT_ROOT/python/tokenless/python/anolisa_tokenless/_bin"
     TOKENLESS_CROSS_PROFILE_SCRIPT="$COMMON_DIR/cross-profile.sh" \
     TOKENLESS_CROSS_PROFILE="$PROFILE" \
     TOKENLESS_RUST_TARGET="$RUST_TARGET" \
+    TOKENLESS_CARGO_MANIFEST="$COMPONENT_ROOT/python/tokenless/Cargo.toml" \
         python3 "$COMMON_DIR/reproducible-build.py" \
             --source-root "$COMPONENT_ROOT" \
             --source-date-epoch "$SOURCE_DATE_EPOCH" \

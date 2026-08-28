@@ -73,6 +73,8 @@ for binding in (
 ):
     if binding not in wrapped_command:
         raise SystemExit(f"Maturin reproducible build is missing: {binding}")
+if 'TOKENLESS_CARGO_MANIFEST="$COMPONENT_ROOT/python/tokenless/Cargo.toml"' not in build:
+    raise SystemExit("Maturin Cargo shim does not bind the expected manifest")
 PY
 
 python3 - "$REPO_ROOT/.github/actions/package-source/action.yaml" <<'PY'
@@ -364,6 +366,9 @@ fi
 
 SHIM_LOG="$TEMPORARY/cargo-shim.log"
 SHIM_RUSTFLAGS_LOG="$TEMPORARY/cargo-shim-rustflags.log"
+SHIM_COMPONENT="$TEMPORARY/shim-component"
+install -d -m 0755 "$SHIM_COMPONENT"
+touch "$SHIM_COMPONENT/Cargo.toml"
 # shellcheck disable=SC2016  # Expand shim arguments and log paths in the fakes.
 printf '%s\n' \
     '#!/usr/bin/env bash' \
@@ -384,16 +389,22 @@ SHIM_ENV=(
     TOKENLESS_CROSS_PROFILE_SCRIPT="$FAKE_BIN/cross-profile"
     TOKENLESS_CROSS_PROFILE=gnu2.17-x86_64
     TOKENLESS_RUST_TARGET=x86_64-unknown-linux-gnu
+    TOKENLESS_CARGO_MANIFEST="$SHIM_COMPONENT/Cargo.toml"
     CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=/source=/workspace
     SHIM_LOG="$SHIM_LOG"
     SHIM_RUSTFLAGS_LOG="$SHIM_RUSTFLAGS_LOG"
 )
 env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" metadata --locked
-env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
-    --target x86_64-unknown-linux-gnu --profile python-release
+(
+    cd "$SHIM_COMPONENT"
+    env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+        --target x86_64-unknown-linux-gnu \
+        --manifest-path "$SHIM_COMPONENT/Cargo.toml" \
+        --profile python-release
+)
 grep -Fxq 'cargo <metadata> <--locked>' "$SHIM_LOG"
 grep -Fxq \
-    'cross <gnu2.17-x86_64> <rustc> <--profile> <python-release>' \
+    'cross <gnu2.17-x86_64> <rustc> <--manifest-path> <Cargo.toml> <--profile> <python-release>' \
     "$SHIM_LOG"
 grep -Fxq -- '--remap-path-prefix=/source=/workspace' "$SHIM_RUSTFLAGS_LOG"
 if env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
@@ -406,6 +417,15 @@ fi
     printf 'ERROR: Cargo shim target executed a command\n' >&2
     exit 1
 }
+if (
+    cd "$SHIM_COMPONENT"
+    env "${SHIM_ENV[@]}" "$ACTION_DIR/cargo-shim.sh" rustc \
+        --target x86_64-unknown-linux-gnu \
+        --manifest-path "$TEMPORARY/other/Cargo.toml"
+) >"$TEMPORARY/shim-manifest.log" 2>&1; then
+    printf 'ERROR: unexpected Cargo shim manifest path was accepted\n' >&2
+    exit 1
+fi
 
 python3 "$ACTION_DIR/test_verify_wheels.py"
 
