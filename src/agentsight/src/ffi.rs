@@ -1862,6 +1862,7 @@ mod tests {
             PolicyDecision {
                 policy_id: "credential-exfiltration".to_string(),
                 policy_revision: 3,
+                rule_id: None,
                 source_event_id: Uuid::nil(),
                 sink_event_id: Uuid::nil(),
                 mode: PolicyMode::Audit,

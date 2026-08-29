@@ -75,6 +75,8 @@ impl ContainmentEnforcer for FakeEnforcer {
                         binding_id: request.binding_id,
                         agent_id: request.agent_id,
                         session_id: request.session_id,
+                        conversation_id: request.conversation_id,
+                        tool_call_id: request.tool_call_id,
                         root_pid: request.root_pid,
                         process_start_time: request.process_start_time,
                         policy_id: request.policy.policy_id,
@@ -764,6 +766,8 @@ fn source_binding(binding_id: Uuid) -> Binding {
             binding_id,
             agent_id: "hermes-test".into(),
             session_id: Some("session-1".into()),
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 999_999,
             process_start_time: 42,
             policy_id: "credential-exfiltration".into(),
@@ -787,6 +791,7 @@ fn source_policy() -> CredentialExfiltrationPolicy {
         taint_ttl_secs: 300,
         destination_scope: DestinationScope::PublicIpv4,
         mode: PolicyMode::Audit,
+        classification: None,
     }
 }
 

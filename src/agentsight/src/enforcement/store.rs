@@ -687,6 +687,8 @@ mod tests {
                 binding_id: Uuid::new_v4(),
                 agent_id: "transition-agent".into(),
                 session_id: Some("transition-session".into()),
+                conversation_id: None,
+                tool_call_id: None,
                 root_pid: 42,
                 process_start_time: 99,
                 policy_id: "transition-policy".into(),
@@ -710,6 +712,7 @@ mod tests {
             taint_ttl_secs: ttl_secs,
             destination_scope: DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         }
     }
 
@@ -718,6 +721,8 @@ mod tests {
             binding_id,
             agent_id: "transition-agent".into(),
             session_id: Some("transition-session".into()),
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 99,
             policy: credential_policy(ttl_secs),

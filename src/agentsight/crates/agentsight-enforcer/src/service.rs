@@ -734,6 +734,8 @@ mod tests {
             binding_id: Uuid::new_v4(),
             agent_id: "fixture-agent".into(),
             session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 99,
             policy: CredentialExfiltrationPolicy {
@@ -745,6 +747,7 @@ mod tests {
                 taint_ttl_secs: 900,
                 destination_scope: DestinationScope::PublicIpv4,
                 mode: PolicyMode::Audit,
+                classification: None,
             },
         }
     }
@@ -754,6 +757,8 @@ mod tests {
             binding_id: Uuid::new_v4(),
             agent_id: "fixture-agent".into(),
             session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 99,
             policy_id: "fixture-audit".into(),

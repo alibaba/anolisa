@@ -433,6 +433,8 @@ fn binding(
             binding_id,
             agent_id: "hermes-test".into(),
             session_id: Some("session-1".into()),
+            conversation_id: None,
+            tool_call_id: None,
             root_pid,
             process_start_time,
             policy_id: "credential-exfiltration".into(),
@@ -474,6 +476,7 @@ fn credential_policy(
         taint_ttl_secs,
         destination_scope: DestinationScope::PublicIpv4,
         mode,
+        classification: None,
     }
 }
 

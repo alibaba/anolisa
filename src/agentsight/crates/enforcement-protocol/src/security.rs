@@ -12,6 +12,9 @@ use crate::Effect;
 /// Maximum number of patterns accepted in one policy list.
 pub const MAX_POLICY_PATTERNS: usize = 1_024;
 
+/// AgentLoop risk type supported by the first system-policy capability.
+pub const SENSITIVE_DATA_OUTBOUND_RISK_TYPE: &str = "sensitive_data_outbound_exposure";
+
 /// One immutable security fact, state transition, or policy decision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityEvent {
@@ -131,6 +134,9 @@ pub struct TaintTransition {
     pub policy_id: String,
     /// Immutable numeric policy revision.
     pub policy_revision: u64,
+    /// Product rule identifier when supplied by the policy owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     /// Stable taint label name.
     pub label: String,
     /// Label lifecycle operation.
@@ -184,6 +190,17 @@ pub enum DestinationScope {
     /// Reserved for capability negotiation; the pinned runtime does not
     /// collect IPv6 connect events and therefore rejects this scope.
     PublicIp,
+}
+
+/// Product-owned classification preserved through AgentSight execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductPolicyClassification {
+    /// Stable rule identifier within one immutable policy revision.
+    pub rule_id: String,
+    /// AgentLoop risk type; AgentSight only validates supported capabilities.
+    pub risk_type: String,
+    /// AgentLoop risk subtype used as the minimized source resource class.
+    pub risk_subtype: String,
 }
 
 /// Classifies one destination under the supported `public_ipv4` scope.
@@ -271,6 +288,9 @@ pub struct PolicyDecision {
     pub policy_id: String,
     /// Immutable numeric policy revision.
     pub policy_revision: u64,
+    /// Product rule identifier when supplied by the policy owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     /// File event that introduced the sensitive label.
     pub source_event_id: Uuid,
     /// Network event that triggered evaluation.
@@ -327,6 +347,9 @@ pub struct CredentialExfiltrationPolicy {
     pub destination_scope: DestinationScope,
     /// Progressive rollout mode.
     pub mode: PolicyMode,
+    /// Optional product classification; absent values retain legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<ProductPolicyClassification>,
 }
 
 impl CredentialExfiltrationPolicy {
@@ -364,8 +387,33 @@ impl CredentialExfiltrationPolicy {
         if self.destination_scope != DestinationScope::PublicIpv4 {
             return Err(PolicyValidationError::UnsupportedDestinationScope);
         }
+        if let Some(classification) = &self.classification {
+            if classification.rule_id.trim().is_empty() {
+                return Err(PolicyValidationError::EmptyProductRuleId);
+            }
+            if !is_stable_product_identifier(&classification.rule_id) {
+                return Err(PolicyValidationError::InvalidProductRuleId);
+            }
+            if classification.risk_type != SENSITIVE_DATA_OUTBOUND_RISK_TYPE {
+                return Err(PolicyValidationError::UnsupportedProductRiskType);
+            }
+            if !classification.risk_subtype.starts_with("secret.")
+                || classification.risk_subtype.len() == "secret.".len()
+                || !is_stable_product_identifier(&classification.risk_subtype)
+            {
+                return Err(PolicyValidationError::UnsupportedProductRiskSubtype);
+            }
+        }
         Ok(())
     }
+}
+
+fn is_stable_product_identifier(value: &str) -> bool {
+    value.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '-' | '_' | '.')
+    })
 }
 
 /// Product-policy validation failure.
@@ -398,6 +446,18 @@ pub enum PolicyValidationError {
     /// IPv6 connect events are absent from the pinned runtime.
     #[error("destination scope is unsupported; expected public_ipv4")]
     UnsupportedDestinationScope,
+    /// Product rule IDs cannot be empty when classification is supplied.
+    #[error("product rule ID must not be empty")]
+    EmptyProductRuleId,
+    /// Product rule IDs use stable lowercase identifier characters.
+    #[error("product rule ID contains unsupported characters")]
+    InvalidProductRuleId,
+    /// The initial compiler only accepts the outbound-exposure risk type.
+    #[error("product risk type is unsupported by this capability")]
+    UnsupportedProductRiskType,
+    /// The initial compiler only accepts stable `secret.*` subtypes.
+    #[error("product risk subtype is unsupported by this capability")]
+    UnsupportedProductRiskSubtype,
 }
 
 fn unix_epoch_ns() -> u64 {
@@ -442,7 +502,86 @@ mod tests {
             taint_ttl_secs: 300,
             destination_scope: DestinationScope::PublicIpv4,
             mode: PolicyMode::Enforce,
+            classification: None,
         }
+    }
+
+    fn agentloop_classification() -> ProductPolicyClassification {
+        ProductPolicyClassification {
+            rule_id: "cloud-credential-to-public-network".into(),
+            risk_type: "sensitive_data_outbound_exposure".into(),
+            risk_subtype: "secret.cloud_access_key".into(),
+        }
+    }
+
+    #[test]
+    fn credential_policy_round_trip_preserves_agentloop_classification() {
+        let mut policy = fixture_policy();
+        policy.classification = Some(agentloop_classification());
+
+        let json = serde_json::to_string(&policy).expect("fixture should serialize");
+        let decoded: CredentialExfiltrationPolicy =
+            serde_json::from_str(&json).expect("fixture should deserialize");
+
+        assert_eq!(decoded, policy);
+    }
+
+    #[test]
+    fn credential_policy_defaults_missing_classification_to_legacy() {
+        let json = r#"{
+            "policy_id":"credential-exfiltration",
+            "revision":3,
+            "source_patterns":["~/.ssh/*"],
+            "trusted_endpoints":[],
+            "taint_label":"CREDENTIAL",
+            "taint_ttl_secs":300,
+            "destination_scope":"public_ipv4",
+            "mode":"audit"
+        }"#;
+
+        let decoded: CredentialExfiltrationPolicy =
+            serde_json::from_str(json).expect("legacy policy should deserialize");
+
+        assert_eq!(decoded.classification, None);
+    }
+
+    #[test]
+    fn credential_policy_rejects_empty_product_rule_id() {
+        let mut policy = fixture_policy();
+        let mut classification = agentloop_classification();
+        classification.rule_id = "  ".into();
+        policy.classification = Some(classification);
+
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyValidationError::EmptyProductRuleId)
+        );
+    }
+
+    #[test]
+    fn credential_policy_rejects_unsupported_product_risk_type() {
+        let mut policy = fixture_policy();
+        let mut classification = agentloop_classification();
+        classification.risk_type = "prompt_injection".into();
+        policy.classification = Some(classification);
+
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyValidationError::UnsupportedProductRiskType)
+        );
+    }
+
+    #[test]
+    fn credential_policy_rejects_non_secret_product_subtype() {
+        let mut policy = fixture_policy();
+        let mut classification = agentloop_classification();
+        classification.risk_subtype = "pii.email".into();
+        policy.classification = Some(classification);
+
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyValidationError::UnsupportedProductRiskSubtype)
+        );
     }
 
     #[test]
@@ -452,6 +591,7 @@ mod tests {
             PolicyDecision {
                 policy_id: "credential-exfiltration".into(),
                 policy_revision: 3,
+                rule_id: Some("cloud-credential-to-public-network".into()),
                 source_event_id: Uuid::new_v4(),
                 sink_event_id: Uuid::new_v4(),
                 mode: PolicyMode::Enforce,
@@ -544,6 +684,7 @@ mod tests {
             PolicyDecision {
                 policy_id: "credential-exfiltration".into(),
                 policy_revision: 3,
+                rule_id: None,
                 source_event_id: Uuid::new_v4(),
                 sink_event_id: Uuid::new_v4(),
                 mode: PolicyMode::Audit,

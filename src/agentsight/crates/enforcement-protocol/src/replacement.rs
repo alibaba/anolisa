@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationScope, PolicyMode, PolicyValidationError,
+    DestinationScope, PolicyMode, PolicyValidationError, ProductPolicyClassification,
 };
 
 const CREDENTIAL_POLICY_SNAPSHOT_VERSION: u32 = 1;
@@ -38,6 +38,7 @@ struct StrictCredentialPolicy {
     taint_ttl_secs: u64,
     destination_scope: DestinationScope,
     mode: PolicyMode,
+    classification: Option<ProductPolicyClassification>,
 }
 
 impl<'de> Deserialize<'de> for CredentialPolicySnapshot {
@@ -57,6 +58,7 @@ impl<'de> Deserialize<'de> for CredentialPolicySnapshot {
                 taint_ttl_secs: wire.policy.taint_ttl_secs,
                 destination_scope: wire.policy.destination_scope,
                 mode: wire.policy.mode,
+                classification: wire.policy.classification,
             },
         })
     }
@@ -259,6 +261,8 @@ impl ReplacePolicy {
                     binding_id: source.binding_id,
                     agent_id: current.agent_id.clone(),
                     session_id: current.session_id.clone(),
+                    conversation_id: current.conversation_id.clone(),
+                    tool_call_id: current.tool_call_id.clone(),
                     root_pid: current.root_pid,
                     process_start_time: current.process_start_time,
                     policy: snapshot.policy.clone(),
@@ -268,6 +272,8 @@ impl ReplacePolicy {
                 let mut request = source.clone();
                 request.agent_id = current.agent_id.clone();
                 request.session_id = current.session_id.clone();
+                request.conversation_id = current.conversation_id.clone();
+                request.tool_call_id = current.tool_call_id.clone();
                 request.root_pid = current.root_pid;
                 request.process_start_time = current.process_start_time;
                 ReplacementPolicy::Generic(request)

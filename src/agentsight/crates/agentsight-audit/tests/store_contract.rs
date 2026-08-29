@@ -97,6 +97,7 @@ fn fixture_policy_decision(occurred_at_ns: u64, blocked: bool) -> SecurityEvent 
     event.kind = SecurityEventKind::PolicyDecision(PolicyDecision {
         policy_id: "credential-exfiltration".into(),
         policy_revision: 3,
+        rule_id: None,
         source_event_id: Uuid::new_v4(),
         sink_event_id: Uuid::new_v4(),
         mode: PolicyMode::Enforce,
@@ -131,6 +132,7 @@ fn fixture_taint_transition(occurred_at_ns: u64) -> SecurityEvent {
     event.kind = SecurityEventKind::TaintTransition(TaintTransition {
         policy_id: "credential-exfiltration".into(),
         policy_revision: 3,
+        rule_id: None,
         label: "CREDENTIAL".into(),
         transition: TaintTransitionKind::Add,
         source_pid: 4242,

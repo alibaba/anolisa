@@ -23,6 +23,8 @@ fn fixture_apply_policy() -> ApplyPolicy {
         binding_id: Uuid::new_v4(),
         agent_id: "test-agent".into(),
         session_id: Some("session-1".into()),
+        conversation_id: None,
+        tool_call_id: None,
         root_pid: 4242,
         process_start_time: 99,
         policy_id: "test-policy".into(),
@@ -336,6 +338,8 @@ fn security_disconnect_records_failed_and_queued_frames() {
         binding_id: Uuid::new_v4(),
         agent_id: "security-disconnect".into(),
         session_id: Some("session-1".into()),
+        conversation_id: None,
+        tool_call_id: None,
         root_pid: 4242,
         process_start_time: 99,
         policy: CredentialExfiltrationPolicy {
@@ -347,6 +351,7 @@ fn security_disconnect_records_failed_and_queued_frames() {
             taint_ttl_secs: 300,
             destination_scope: DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         },
     };
     fixture

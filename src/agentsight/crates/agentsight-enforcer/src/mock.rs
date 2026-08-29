@@ -142,6 +142,17 @@ impl MockBackend {
             .ok_or(BackendError::MissingBinding(binding_id))?;
         let revision = binding.request.policy_revision.parse().unwrap_or(1);
         let product_policy = self.credential_policies().get(&binding_id).cloned();
+        let product_rule_id = product_policy
+            .as_ref()
+            .and_then(|policy| policy.classification.as_ref())
+            .map(|classification| classification.rule_id.clone());
+        let resource_class = product_policy
+            .as_ref()
+            .and_then(|policy| policy.classification.as_ref())
+            .map_or_else(
+                || "credential".to_string(),
+                |classification| classification.risk_subtype.clone(),
+            );
         let mode = product_policy.as_ref().map_or_else(
             || mock_policy_mode(&binding.request.policy_dsl),
             |policy| policy.mode,
@@ -173,10 +184,12 @@ impl MockBackend {
                     policy_revision: revision,
                     operation: "read".into(),
                     path: redact_home_path(source_path),
-                    resource_class: "credential".into(),
+                    resource_class: resource_class.clone(),
                     succeeded: true,
                     errno: None,
-                    rule_id: Some("credential-source".into()),
+                    rule_id: product_rule_id
+                        .clone()
+                        .or_else(|| Some("credential-source".into())),
                 }),
             },
             SecurityEvent {
@@ -187,6 +200,7 @@ impl MockBackend {
                 kind: SecurityEventKind::TaintTransition(TaintTransition {
                     policy_id: binding.request.policy_id.clone(),
                     policy_revision: revision,
+                    rule_id: product_rule_id.clone(),
                     label: "credential".into(),
                     transition: TaintTransitionKind::Add,
                     source_pid: binding.request.root_pid,
@@ -210,7 +224,9 @@ impl MockBackend {
                     protocol: "tcp".into(),
                     succeeded: mode != PolicyMode::Enforce,
                     errno: (mode == PolicyMode::Enforce).then_some(libc::EPERM),
-                    rule_id: Some("credential-public-sink".into()),
+                    rule_id: product_rule_id
+                        .clone()
+                        .or_else(|| Some("credential-public-sink".into())),
                 }),
             },
             SecurityEvent {
@@ -221,6 +237,7 @@ impl MockBackend {
                 kind: SecurityEventKind::PolicyDecision(PolicyDecision {
                     policy_id: binding.request.policy_id,
                     policy_revision: revision,
+                    rule_id: product_rule_id,
                     source_event_id,
                     sink_event_id,
                     mode,
@@ -430,8 +447,15 @@ fn mock_credential_request(
             request.policy.taint_label, source
         ));
     }
+    let rule_id = request
+        .policy
+        .classification
+        .as_ref()
+        .map_or("agentsight-credential-exfiltration", |classification| {
+            classification.rule_id.as_str()
+        });
     policy_dsl.push_str(&format!(
-        "rule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if {}\n",
+        "rule {rule_id}:\n  {action} connect endpoint \"*\" if {}\n",
         request.policy.taint_label,
     ));
     let policy = request.policy;
@@ -440,6 +464,8 @@ fn mock_credential_request(
             binding_id: request.binding_id,
             agent_id: request.agent_id,
             session_id: request.session_id,
+            conversation_id: request.conversation_id,
+            tool_call_id: request.tool_call_id,
             root_pid: request.root_pid,
             process_start_time: request.process_start_time,
             policy_id: policy.policy_id.clone(),
@@ -457,8 +483,8 @@ fn event_identity(binding: &Binding) -> EventIdentity {
         agent_id: binding.request.agent_id.clone(),
         agent_name: Some("mock-agent".into()),
         session_id: binding.request.session_id.clone(),
-        conversation_id: None,
-        tool_call_id: None,
+        conversation_id: binding.request.conversation_id.clone(),
+        tool_call_id: binding.request.tool_call_id.clone(),
         pid: binding.request.root_pid,
         process_start_time: binding.request.process_start_time,
         ppid: None,
@@ -526,6 +552,8 @@ mod tests {
             binding_id: Uuid::new_v4(),
             agent_id: "mock-health-test".into(),
             session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 99,
             policy_id: "policy".into(),
@@ -660,12 +688,15 @@ mod tests {
             taint_ttl_secs: 900,
             destination_scope: agentsight_enforcement_protocol::DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         };
         let source = backend
             .apply_credential_policy(ApplyCredentialPolicy {
                 binding_id: source_request.binding_id,
                 agent_id: source_request.agent_id.clone(),
                 session_id: source_request.session_id.clone(),
+                conversation_id: source_request.conversation_id.clone(),
+                tool_call_id: source_request.tool_call_id.clone(),
                 root_pid: source_request.root_pid,
                 process_start_time: source_request.process_start_time,
                 policy: source_policy.clone(),
@@ -713,11 +744,14 @@ mod tests {
             taint_ttl_secs: 300,
             destination_scope: agentsight_enforcement_protocol::DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         };
         let source_apply = ApplyCredentialPolicy {
             binding_id: source_request.binding_id,
             agent_id: source_request.agent_id.clone(),
             session_id: source_request.session_id.clone(),
+            conversation_id: source_request.conversation_id.clone(),
+            tool_call_id: source_request.tool_call_id.clone(),
             root_pid: source_request.root_pid,
             process_start_time: source_request.process_start_time,
             policy: source_policy.clone(),
@@ -731,6 +765,8 @@ mod tests {
             binding_id: Uuid::new_v4(),
             agent_id: source.request.agent_id.clone(),
             session_id: source.request.session_id.clone(),
+            conversation_id: source.request.conversation_id.clone(),
+            tool_call_id: source.request.tool_call_id.clone(),
             root_pid: source.request.root_pid,
             process_start_time: source.request.process_start_time,
             policy: target_policy,

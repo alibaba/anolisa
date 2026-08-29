@@ -607,6 +607,8 @@ fn credential_apply_request(
             binding_id: request.binding_id,
             agent_id: request.agent_id,
             session_id: request.session_id,
+            conversation_id: request.conversation_id,
+            tool_call_id: request.tool_call_id,
             root_pid: request.root_pid,
             process_start_time: request.process_start_time,
             policy_id: policy.policy_id.clone(),
@@ -719,7 +721,15 @@ pub fn compile_credential_exfiltration_policy(
             policy.taint_label, source
         ));
     }
-    dsl.push_str("rule agentsight-credential-exfiltration:\n  ");
+    let rule_id = policy
+        .classification
+        .as_ref()
+        .map_or("agentsight-credential-exfiltration", |classification| {
+            classification.rule_id.as_str()
+        });
+    dsl.push_str("rule ");
+    dsl.push_str(rule_id);
+    dsl.push_str(":\n  ");
     dsl.push_str("notify");
     dsl.push_str(" connect endpoint \"*\" if ");
     dsl.push_str(&policy.taint_label);
@@ -827,11 +837,20 @@ fn convert_security_events_at(
                 active.binding.request.policy_revision
             ))
         })?;
-    let rule_id = active
-        .rule_names
-        .get(raw.rule_id as usize)
-        .cloned()
-        .or_else(|| Some(raw.rule_id.to_string()));
+    let rule_id = policy.classification.as_ref().map_or_else(
+        || {
+            active
+                .rule_names
+                .get(raw.rule_id as usize)
+                .cloned()
+                .or_else(|| Some(raw.rule_id.to_string()))
+        },
+        |classification| Some(classification.rule_id.clone()),
+    );
+    let resource_class = policy.classification.as_ref().map_or_else(
+        || "credential".to_string(),
+        |classification| classification.risk_subtype.clone(),
+    );
     let reason = active
         .reasons
         .get(raw.rule_id as usize)
@@ -863,7 +882,7 @@ fn convert_security_events_at(
                 policy_revision,
                 operation: operation_name(provenance.op).into(),
                 path: source_path,
-                resource_class: "credential".into(),
+                resource_class,
                 succeeded: true,
                 errno: None,
                 rule_id: rule_id.clone(),
@@ -877,6 +896,7 @@ fn convert_security_events_at(
             kind: SecurityEventKind::TaintTransition(TaintTransition {
                 policy_id: policy_id.clone(),
                 policy_revision,
+                rule_id: rule_id.clone(),
                 label: taint_label.into(),
                 transition: if provenance.pid == raw.pid {
                     TaintTransitionKind::Add
@@ -916,6 +936,7 @@ fn convert_security_events_at(
             kind: SecurityEventKind::PolicyDecision(PolicyDecision {
                 policy_id,
                 policy_revision,
+                rule_id,
                 source_event_id,
                 sink_event_id,
                 mode: policy.mode,
@@ -949,8 +970,8 @@ fn event_identity(
         agent_id: active.binding.request.agent_id.clone(),
         agent_name: None,
         session_id: active.binding.request.session_id.clone(),
-        conversation_id: None,
-        tool_call_id: None,
+        conversation_id: active.binding.request.conversation_id.clone(),
+        tool_call_id: active.binding.request.tool_call_id.clone(),
         pid,
         process_start_time,
         ppid,
@@ -1101,7 +1122,7 @@ mod tests {
 
     use agentsight_enforcement_protocol::{
         ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationScope, Effect,
-        PolicyMode, SecurityEventKind, ViolationEvent,
+        PolicyMode, ProductPolicyClassification, SecurityEventKind, ViolationEvent,
     };
     use ebpf_ifc_engine::{Provenance, Violation};
     use uuid::Uuid;
@@ -1117,6 +1138,8 @@ mod tests {
                     binding_id: Uuid::new_v4(),
                     agent_id: "agent-1".into(),
                     session_id: Some("session-1".into()),
+                    conversation_id: Some("conversation-1".into()),
+                    tool_call_id: Some("tool-call-1".into()),
                     root_pid: 42,
                     process_start_time: 98765,
                     policy_id: "policy-1".into(),
@@ -1166,6 +1189,15 @@ mod tests {
             taint_ttl_secs: 900,
             destination_scope: DestinationScope::PublicIpv4,
             mode: PolicyMode::Enforce,
+            classification: None,
+        }
+    }
+
+    fn agentloop_classification() -> ProductPolicyClassification {
+        ProductPolicyClassification {
+            rule_id: "cloud-credential-to-public-network".into(),
+            risk_type: "sensitive_data_outbound_exposure".into(),
+            risk_subtype: "secret.cloud_access_key".into(),
         }
     }
 
@@ -1211,6 +1243,7 @@ mod tests {
 
         let dsl = compile_credential_exfiltration_policy(&policy)
             .expect("checked-in policy fixture should compile");
+        assert!(dsl.contains("rule cloud-credential-to-public-network:"));
         assert!(dsl.contains("notify connect endpoint"));
     }
 
@@ -1240,8 +1273,10 @@ mod tests {
         active.binding.request.policy_revision = "3".into();
         let policy = active
             .credential_policy
-            .clone()
+            .as_mut()
             .expect("fixture credential policy should exist");
+        policy.classification = Some(agentloop_classification());
+        let policy = policy.clone();
         let events = convert_security_events_at(
             raw,
             &active,
@@ -1256,18 +1291,34 @@ mod tests {
             panic!("first evidence must be a file action");
         };
         assert_eq!(source.path, "~/.ssh/id_rsa");
+        assert_eq!(source.resource_class, "secret.cloud_access_key");
+        assert_eq!(
+            source.rule_id.as_deref(),
+            Some("cloud-credential-to-public-network")
+        );
         let SecurityEventKind::TaintTransition(taint) = &events[1].kind else {
             panic!("second evidence must be a taint transition");
         };
         assert_eq!(taint.label, "CREDENTIAL");
-        assert!(matches!(
-            events[2].kind,
-            SecurityEventKind::NetworkAction(_)
-        ));
+        assert_eq!(
+            taint.rule_id.as_deref(),
+            Some("cloud-credential-to-public-network")
+        );
+        let SecurityEventKind::NetworkAction(sink) = &events[2].kind else {
+            panic!("third evidence must be a network action");
+        };
+        assert_eq!(
+            sink.rule_id.as_deref(),
+            Some("cloud-credential-to-public-network")
+        );
         let SecurityEventKind::PolicyDecision(decision) = &events[3].kind else {
             panic!("last evidence must be a policy decision");
         };
         assert!(decision.blocked);
+        assert_eq!(
+            decision.rule_id.as_deref(),
+            Some("cloud-credential-to-public-network")
+        );
         assert_eq!(decision.errno, Some(libc::EPERM));
         assert_eq!(decision.source_event_id, events[0].event_id);
         assert_eq!(decision.sink_event_id, events[2].event_id);

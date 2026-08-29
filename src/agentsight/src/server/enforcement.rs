@@ -8,7 +8,7 @@ use std::sync::Arc;
 use actix_web::{HttpResponse, delete, get, post, web};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationScope, HealthStatus, PolicyMode,
+    DestinationScope, HealthStatus, PolicyMode, ProductPolicyClassification,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -33,6 +33,8 @@ const FILE_POLICY_REVISION: &str = "agentsight-file-open-v1";
 pub(super) struct FileBindingRequest {
     agent_id: String,
     session_id: Option<String>,
+    conversation_id: Option<String>,
+    tool_call_id: Option<String>,
     root_pid: i32,
     path: PathBuf,
 }
@@ -42,13 +44,24 @@ pub(super) struct FileBindingRequest {
 pub(super) struct CredentialBindingRequest {
     agent_id: String,
     session_id: Option<String>,
+    conversation_id: Option<String>,
+    tool_call_id: Option<String>,
     root_pid: i32,
     source_path: PathBuf,
     trusted_endpoint: Option<String>,
     revision: u64,
     mode: PolicyMode,
     taint_ttl_secs: Option<u64>,
+    #[serde(default = "default_destination_scope")]
     destination_scope: DestinationScope,
+    #[serde(default)]
+    policy_id: Option<String>,
+    #[serde(default)]
+    classification: Option<ProductPolicyClassification>,
+}
+
+fn default_destination_scope() -> DestinationScope {
+    DestinationScope::PublicIpv4
 }
 
 /// Returns privileged backend readiness.
@@ -316,6 +329,8 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
             .session_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        conversation_id: normalize_optional_identity(request.conversation_id, "conversation_id")?,
+        tool_call_id: normalize_optional_identity(request.tool_call_id, "tool_call_id")?,
         root_pid: request.root_pid,
         process_start_time,
         policy_id: format!("agentsight-file-open:{binding_id}"),
@@ -347,7 +362,13 @@ fn build_credential_binding(
         .into_iter()
         .collect();
     let policy = CredentialExfiltrationPolicy {
-        policy_id: "agentsight-credential-exfiltration".into(),
+        policy_id: request
+            .policy_id
+            .and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            })
+            .unwrap_or_else(|| "agentsight-credential-exfiltration".into()),
         revision: request.revision,
         source_patterns: vec![source_path],
         trusted_endpoints,
@@ -355,6 +376,7 @@ fn build_credential_binding(
         taint_ttl_secs: request.taint_ttl_secs.unwrap_or(900),
         destination_scope: request.destination_scope,
         mode: request.mode,
+        classification: request.classification,
     };
     policy.validate().map_err(|error| error.to_string())?;
     Ok(ApplyCredentialPolicy {
@@ -364,10 +386,25 @@ fn build_credential_binding(
             .session_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        conversation_id: normalize_optional_identity(request.conversation_id, "conversation_id")?,
+        tool_call_id: normalize_optional_identity(request.tool_call_id, "tool_call_id")?,
         root_pid: request.root_pid,
         process_start_time,
         policy,
     })
+}
+
+fn normalize_optional_identity(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let value = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if value.as_ref().is_some_and(|value| value.len() > 256) {
+        return Err(format!("{field} must contain at most 256 bytes"));
+    }
+    Ok(value)
 }
 
 fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
@@ -519,6 +556,8 @@ mod tests {
         let binding = build_file_binding(FileBindingRequest {
             agent_id: " qoder ".into(),
             session_id: Some(" session-1 ".into()),
+            conversation_id: Some(" conversation-1 ".into()),
+            tool_call_id: Some(" tool-call-1 ".into()),
             root_pid: child.id() as i32,
             path: path.clone(),
         })
@@ -526,6 +565,8 @@ mod tests {
 
         assert_eq!(binding.agent_id, "qoder");
         assert_eq!(binding.session_id.as_deref(), Some("session-1"));
+        assert_eq!(binding.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(binding.tool_call_id.as_deref(), Some("tool-call-1"));
         assert_eq!(binding.root_pid, child.id() as i32);
         assert!(binding.process_start_time > 0);
         assert_eq!(binding.policy_revision, "agentsight-file-open-v1");
@@ -555,6 +596,8 @@ mod tests {
         let binding = build_credential_binding(CredentialBindingRequest {
             agent_id: " qoder ".into(),
             session_id: Some(" session-1 ".into()),
+            conversation_id: Some(" conversation-1 ".into()),
+            tool_call_id: Some(" tool-call-1 ".into()),
             root_pid: child.id() as i32,
             source_path: path.clone(),
             trusted_endpoint: Some(" 10.0.0.8 ".into()),
@@ -562,13 +605,33 @@ mod tests {
             mode: PolicyMode::Audit,
             taint_ttl_secs: None,
             destination_scope: DestinationScope::PublicIpv4,
+            policy_id: Some(" agentloop-sensitive-data-outbound ".into()),
+            classification: Some(ProductPolicyClassification {
+                rule_id: "cloud-credential-to-public-network".into(),
+                risk_type: "sensitive_data_outbound_exposure".into(),
+                risk_subtype: "secret.cloud_access_key".into(),
+            }),
         })
         .expect("valid credential policy should build");
 
         assert_eq!(binding.agent_id, "qoder");
         assert_eq!(binding.session_id.as_deref(), Some("session-1"));
+        assert_eq!(binding.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(binding.tool_call_id.as_deref(), Some("tool-call-1"));
         assert_eq!(binding.policy.mode, PolicyMode::Audit);
+        assert_eq!(
+            binding.policy.policy_id,
+            "agentloop-sensitive-data-outbound"
+        );
         assert_eq!(binding.policy.revision, 3);
+        assert_eq!(
+            binding.policy.classification,
+            Some(ProductPolicyClassification {
+                rule_id: "cloud-credential-to-public-network".into(),
+                risk_type: "sensitive_data_outbound_exposure".into(),
+                risk_subtype: "secret.cloud_access_key".into(),
+            })
+        );
         assert_eq!(binding.policy.taint_label, "CREDENTIAL");
         assert_eq!(binding.policy.taint_ttl_secs, 900);
         assert_eq!(
@@ -587,12 +650,70 @@ mod tests {
     }
 
     #[test]
+    fn credential_binding_request_defaults_missing_product_metadata() {
+        let request: CredentialBindingRequest = serde_json::from_value(json!({
+            "agent_id": "legacy-agent",
+            "root_pid": 42,
+            "source_path": "/tmp/legacy-credential",
+            "revision": 3,
+            "mode": "audit"
+        }))
+        .expect("legacy request should deserialize");
+
+        assert_eq!(request.destination_scope, DestinationScope::PublicIpv4);
+        assert_eq!(request.policy_id, None);
+        assert_eq!(request.classification, None);
+    }
+
+    #[test]
+    fn credential_binding_request_defaults_blank_policy_id() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("fixture process should start");
+        let path = std::env::temp_dir().join(format!(
+            "agentsight-credential-binding-blank-policy-{}",
+            std::process::id()
+        ));
+        fs::write(&path, b"credential").expect("fixture file should be created");
+
+        let result = build_credential_binding(CredentialBindingRequest {
+            agent_id: "legacy-agent".into(),
+            root_pid: child.id() as i32,
+            session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
+            source_path: path.clone(),
+            trusted_endpoint: None,
+            revision: 3,
+            mode: PolicyMode::Audit,
+            taint_ttl_secs: None,
+            destination_scope: DestinationScope::PublicIpv4,
+            policy_id: Some("   ".into()),
+            classification: None,
+        });
+
+        child.kill().expect("fixture process should stop");
+        child.wait().expect("fixture process should exit");
+        fs::remove_file(path).expect("fixture file should be removed");
+
+        let binding = result.expect("blank policy id should use the legacy default");
+
+        assert_eq!(
+            binding.policy.policy_id,
+            "agentsight-credential-exfiltration"
+        );
+    }
+
+    #[test]
     fn rejects_unsafe_file_binding_inputs() {
         let directory = std::env::temp_dir();
         assert!(
             build_file_binding(FileBindingRequest {
                 agent_id: "".into(),
                 session_id: None,
+                conversation_id: None,
+                tool_call_id: None,
                 root_pid: 1,
                 path: directory,
             })
@@ -612,6 +733,8 @@ mod tests {
             build_file_binding(FileBindingRequest {
                 agent_id: "qoder".into(),
                 session_id: None,
+                conversation_id: None,
+                tool_call_id: None,
                 root_pid: std::process::id() as i32,
                 path: path.clone(),
             })
@@ -660,6 +783,8 @@ mod tests {
                 build_file_binding(FileBindingRequest {
                     agent_id: "qoder".into(),
                     session_id: None,
+                    conversation_id: None,
+                    tool_call_id: None,
                     root_pid: child.id() as i32,
                     path: path.clone(),
                 })
@@ -800,6 +925,8 @@ mod tests {
             binding_id: Uuid::new_v4(),
             agent_id: "agent-1".into(),
             session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 7,
             policy_id: "policy-1".into(),

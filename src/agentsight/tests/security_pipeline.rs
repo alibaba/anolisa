@@ -22,6 +22,8 @@ fn audit_request(binding_id: Uuid) -> ApplyPolicy {
         binding_id,
         agent_id: "hermes-test".into(),
         session_id: Some("session-1".into()),
+        conversation_id: None,
+        tool_call_id: None,
         root_pid: 4242,
         process_start_time: 99,
         policy_id: "credential-exfiltration".into(),
@@ -36,6 +38,8 @@ fn credential_request(binding_id: Uuid, mode: PolicyMode) -> ApplyCredentialPoli
         binding_id,
         agent_id: "hermes-test".into(),
         session_id: Some("session-1".into()),
+        conversation_id: None,
+        tool_call_id: None,
         root_pid: 4242,
         process_start_time: 99,
         policy: CredentialExfiltrationPolicy {
@@ -47,6 +51,7 @@ fn credential_request(binding_id: Uuid, mode: PolicyMode) -> ApplyCredentialPoli
             taint_ttl_secs: 900,
             destination_scope: DestinationScope::PublicIpv4,
             mode,
+            classification: None,
         },
     }
 }
