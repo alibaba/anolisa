@@ -162,6 +162,7 @@ legacy_adopt = true
 name = "ktuner"
 display_name = "Kernel Tuner"
 summary = "Deterministic kernel-tuning engine for ANOLISA agents"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "rpm"
