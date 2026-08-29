@@ -107,6 +107,33 @@ ANOLISA 的容器入口脚本（`docker/docker-entrypoint.sh`）已经按这个�
 
 Dashboard 端口建议只在集群内可达，通过 Service 或端口转发访问，而不是把 7396 直接暴露到公网。
 
+## Kubernetes DaemonSet（节点级）
+
+DaemonSet 让每个节点各跑一个 AgentSight Pod，观测该节点上的所有 Agent 进程——上面的 Sidecar
+形态只看单个 Pod，本形态看整台机器。清单位于 `src/agentsight/packaging/k8s/daemonset.yaml`；
+用 `src/agentsight/packaging/docker/Dockerfile` 构建镜像并推送到你的镜像仓库后，相应修改清单中
+的 `image:` 字段。
+
+工作原理：`hostPID: true` 使 Pod 进入宿主 PID 命名空间，探针在宿主范围挂载（uprobe 按 inode
+注册，其他 Pod 里的 Agent 二进制同样覆盖），而 PID 归属保持正确——AgentSight 按观察者命名空间
+上报 PID。
+
+```bash
+kubectl apply -f src/agentsight/packaging/k8s/daemonset.yaml
+kubectl -n agentsight rollout status ds/agentsight
+kubectl -n agentsight port-forward ds/agentsight 7396:7396   # 然后打开 http://localhost:7396
+```
+
+清单申请了 `BPF` + `PERFMON` + `SYS_PTRACE` 权能（最后一个用于读取其他 uid 进程的
+`/proc/<pid>/maps`——目标进程一旦转为 non-dumpable，缺它会被静默跳过），只读挂载宿主
+`/sys/kernel/btf`，数据持久化到 hostPath `/var/log/sysak`；资源限制与安装包的 systemd unit
+对齐（300m CPU / 350Mi 内存）。它不访问 Kubernetes API，因此无需 RBAC。Pod 内只运行 trace 与
+serve 两个 worker（`agentsight-start`），因此该形态下 Risk Enforcement 页面无数据。如需覆盖
+`config.json`，先用随包默认配置创建 `agentsight-config` ConfigMap，再解开清单中标注的注释块。
+
+免 hostPID 形态（改为 bind 挂载宿主 procfs）计划在 procfs-root 工作落地后提供，目前尚不可
+用——在此之前请保持 `hostPID: true`。
+
 ## macOS
 
 macOS 构建不含 eBPF，只有两个命令：

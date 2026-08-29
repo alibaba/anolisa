@@ -328,6 +328,14 @@ The unit runs as root with `UMask=0077`, so its data under
 Dashboard access commands that read service-owned data. Stop the unit before
 starting a foreground tracer.
 
+### Kubernetes DaemonSet
+
+For node-wide collection in Kubernetes, use the DaemonSet manifest and runtime
+image under `src/agentsight/packaging/` (`k8s/daemonset.yaml` and
+`docker/Dockerfile`). See the
+[deployment guide](../../docs/user-guide/en/agent-observability/agentsight/deployment.md#kubernetes-daemonset-node-wide)
+for prerequisites and verification.
+
 ### Build from Source
 
 ```bash

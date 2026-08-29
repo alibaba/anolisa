@@ -314,6 +314,13 @@ sudo systemctl status agentsight.service
 `/var/log/sysak/.agentsight` 中的数据仅 root 可读。查询服务数据或读取
 Dashboard 访问信息时需要使用 `sudo`。启动前台 tracer 前也要先停止该单元。
 
+### Kubernetes DaemonSet
+
+如需在 Kubernetes 中进行节点级采集，使用 `src/agentsight/packaging/` 下的
+DaemonSet 清单与运行时镜像（`k8s/daemonset.yaml` 与 `docker/Dockerfile`）。
+前置条件与验证步骤见
+[部署指南](../../docs/user-guide/zh/agent-observability/agentsight/deployment.md#kubernetes-daemonset节点级)。
+
 ### 从源码构建
 
 ```bash

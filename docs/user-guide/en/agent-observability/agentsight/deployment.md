@@ -112,6 +112,36 @@ For a Kubernetes sidecar, the same three things matter:
 Keep the Dashboard port inside the cluster and reach it through a Service or port-forward rather
 than exposing 7396 publicly.
 
+## Kubernetes DaemonSet (node-wide)
+
+A DaemonSet gives you one AgentSight pod per node observing every Agent process on that node —
+the sidecar form above watches one pod, this form watches the whole machine. The manifest lives at
+`src/agentsight/packaging/k8s/daemonset.yaml`; build the image with
+`src/agentsight/packaging/docker/Dockerfile`, push it to your registry, and set the `image:` field
+accordingly.
+
+How it works: `hostPID: true` places the pod in the host PID namespace and the probes attach
+host-wide (uprobes register by inode, so Agent binaries inside other pods are covered), while PID
+attribution stays correct because AgentSight reports PIDs in the observer namespace.
+
+```bash
+kubectl apply -f src/agentsight/packaging/k8s/daemonset.yaml
+kubectl -n agentsight rollout status ds/agentsight
+kubectl -n agentsight port-forward ds/agentsight 7396:7396   # then open http://localhost:7396
+```
+
+The manifest requests `BPF` + `PERFMON` + `SYS_PTRACE` capabilities (the last one is needed to
+read `/proc/<pid>/maps` of another uid's process once it is non-dumpable; without it such Agents
+are silently skipped), mounts host `/sys/kernel/btf` read-only, and persists data to hostPath
+`/var/log/sysak`; resource limits mirror the packaged systemd unit (300m CPU / 350Mi memory). It
+talks to no Kubernetes API, so no RBAC is needed. The pod runs only the trace and serve workers
+(`agentsight-start`), so the Risk Enforcement page has no data in this form. To override
+`config.json`, create the `agentsight-config` ConfigMap from the shipped default and uncomment the
+marked blocks in the manifest.
+
+A hostPID-free form (bind-mounting the host procfs instead) is planned once the procfs-root work
+lands; it is not available yet — keep `hostPID: true` until then.
+
 ## macOS
 
 macOS builds contain no eBPF. Two commands exist:
