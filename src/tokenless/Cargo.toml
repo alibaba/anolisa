@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/tokenless-ccr",
     "crates/tokenless-protocol",
-    "crates/tokenless-pipeline",
     "crates/tokenless-compressors",
     "crates/tokenless-schema",
     "crates/tokenless-runtime",
@@ -14,7 +13,6 @@ members = [
 default-members = [
     "crates/tokenless-ccr",
     "crates/tokenless-protocol",
-    "crates/tokenless-pipeline",
     "crates/tokenless-compressors",
     "crates/tokenless-schema",
     "crates/tokenless-runtime",

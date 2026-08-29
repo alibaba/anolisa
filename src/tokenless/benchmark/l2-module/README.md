@@ -24,7 +24,7 @@ in the same round.
 
 | Side | Basis |
 |---|---|
-| tokenless (json/code) | **in-process**: `Instant` around the `ResponseCompressor` call |
+| tokenless (json/code) | **in-process**: `Instant` around the `JsonCompressor` call |
 | tokenless (command/grep/diff) | **wrapped-minus-raw wall clock**: rtk-wrapped run minus raw run (includes rtk process startup) |
 | headroom | **worker-internal**: `perf_counter` around `router.compress` inside the worker (pipe/JSON framing excluded) |
 

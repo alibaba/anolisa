@@ -71,6 +71,7 @@ impl Drop for TempStatsDb {
 }
 
 struct TempDataDir {
+    _temp_dir: tempfile::TempDir,
     root: std::path::PathBuf,
     data_dir: std::path::PathBuf,
 }
@@ -78,27 +79,25 @@ struct TempDataDir {
 impl TempDataDir {
     fn new() -> Option<Self> {
         let home = get_home_dir();
-        let unique = format!(
-            "tokenless-external-data-dir-integration-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_nanos()
-        );
-        let root = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&root).ok()?;
+        let temp_dir = tempfile::Builder::new()
+            .prefix("tokenless-external-data-dir-integration-")
+            .tempdir()
+            .ok()?;
+        let root = temp_dir.path().to_path_buf();
         if !home.is_empty()
             && root
                 .canonicalize()
                 .ok()?
                 .starts_with(std::path::Path::new(&home).canonicalize().ok()?)
         {
-            std::fs::remove_dir_all(&root).ok();
             return None;
         }
         let data_dir = root.join("databases");
-        Some(Self { root, data_dir })
+        Some(Self {
+            _temp_dir: temp_dir,
+            root,
+            data_dir,
+        })
     }
 
     fn command(&self) -> Command {
@@ -108,12 +107,6 @@ impl TempDataDir {
             .env_remove("TOKENLESS_STATS_DB")
             .env_remove("TOKENLESS_STASH_DB");
         command
-    }
-}
-
-impl Drop for TempDataDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.root).ok();
     }
 }
 
@@ -151,7 +144,11 @@ fn data_dir_env_routes_stats_and_stash_databases() {
         .output()
         .unwrap();
     assert!(!stash_output.status.success());
-    assert!(fixture.data_dir.join("stash.db").is_file());
+    assert!(
+        fixture.data_dir.join("stash.db").is_file(),
+        "retrieve stderr: {}",
+        String::from_utf8_lossy(&stash_output.stderr)
+    );
 }
 
 #[test]
@@ -1894,7 +1891,7 @@ fn compress_dry_run_emits_the_original_and_measures() {
 }
 
 #[test]
-fn compress_build_log_text_and_retrieve_round_trips() {
+fn compress_build_log_text_is_phase_one_passthrough() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
@@ -1921,48 +1918,20 @@ fn compress_build_log_text_and_retrieve_round_trips() {
         String::from_utf8_lossy(&output.stderr)
     );
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "applied");
-    assert_eq!(
-        response["compressor_chain"],
-        serde_json::json!(["build-log"])
-    );
-    assert_eq!(response["reversibility"], "retrievable");
-    let emitted = response["output"].as_str().unwrap();
-    assert!(
-        emitted.contains("error[E0308]"),
-        "the Signal line must survive"
-    );
-    let marker_start = emitted
-        .find("<<tokenless:")
-        .expect("the omitted gap should emit a stash marker");
-    let marker_end = marker_start + emitted[marker_start..].find(">>").unwrap() + 2;
-    let marker = &emitted[marker_start..marker_end];
-
-    let retrieved = fixture
-        .command()
-        .args(["retrieve", marker])
-        .output()
-        .unwrap();
-    assert!(
-        retrieved.status.success(),
-        "retrieve failed: {}",
-        String::from_utf8_lossy(&retrieved.stderr)
-    );
-    let payload = String::from_utf8(retrieved.stdout).unwrap();
-    assert!(
-        content.contains(&payload),
-        "the stashed gap must be a byte-exact slice of the original log"
-    );
+    assert_eq!(response["disposition"], "passthrough");
+    assert_eq!(response["output"].as_str().unwrap(), content);
+    assert_eq!(response["compressor_chain"], serde_json::json!([]));
+    assert_eq!(response["stash_keys"], serde_json::json!([]));
 }
 
 #[test]
-fn build_log_artifacts_attribute_to_the_stash_writer_not_the_chain_head() {
+fn build_log_passthrough_records_no_compression_artifacts() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
-    // ANSI makes terminal-cleanup a real step, so the chain has two entries
-    // and the attribution assertion is not trivially the chain head.
+    // The retained terminal and build-log engines are deliberately not
+    // connected to the phase-one PostTool pipeline.
     let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
     lines.extend((0..70).map(|i| format!("\u{1b}[1;32m   Compiling\u{1b}[0m pkg{i:03} v0.1.{i}")));
     lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
@@ -1985,24 +1954,22 @@ fn build_log_artifacts_attribute_to_the_stash_writer_not_the_chain_head() {
         String::from_utf8_lossy(&output.stderr)
     );
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "applied");
-    assert_eq!(
-        response["compressor_chain"],
-        serde_json::json!(["terminal-cleanup", "build-log"])
-    );
-    assert!(!response["stash_keys"].as_array().unwrap().is_empty());
+    assert_eq!(response["disposition"], "passthrough");
+    assert_eq!(response["output"].as_str().unwrap(), content);
+    assert_eq!(response["compressor_chain"], serde_json::json!([]));
+    assert_eq!(response["stash_keys"], serde_json::json!([]));
 
-    // The stash writer owns its artifacts; a refactor that reverts attribution
-    // to the chain head would record "terminal-cleanup" here.
     let conn = rusqlite::Connection::open(fixture.data_dir.join("stats.db")).unwrap();
-    let owners: Vec<String> = conn
-        .prepare("SELECT DISTINCT compressor_id FROM compression_artifacts")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+    let records: usize = conn
+        .query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(owners, ["build-log"]);
+    let artifacts: usize = conn
+        .query_row("SELECT COUNT(*) FROM compression_artifacts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(records, 0);
+    assert_eq!(artifacts, 0);
 }
 
 #[test]

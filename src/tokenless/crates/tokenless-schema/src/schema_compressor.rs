@@ -3,9 +3,7 @@ use serde_json::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use tokenless_ccr::{StashStore, StashWrite};
-
-use crate::response_compressor::{stash_suffix, stash_suffix_char_len};
+use tokenless_ccr::{StashStore, StashWrite, truncation_suffix, truncation_suffix_char_len};
 
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
@@ -31,7 +29,7 @@ pub struct SchemaCompressor {
     /// stashed (verbatim original, including markdown) and a
     /// `<<tokenless:KEY>>` marker is appended so the LLM can retrieve the
     /// full original. When `None`, truncation is lossy — the pre-stash
-    /// behavior. Mirrors `ResponseCompressor::stash_store`.
+    /// behavior.
     stash_store: Option<Arc<dyn StashStore>>,
     /// Unique stash rows created this session, plus refreshes of keys this
     /// session did not create. CLI `compress-schema --batch` calls
@@ -59,11 +57,11 @@ impl Default for SchemaCompressor {
             drop_markdown: true,
             // Bound recursion to keep deeply-nested or pathological schemas
             // (e.g. attacker-crafted ~1000-level JSON) from blowing the stack.
-            // Schemas tolerate more depth than runtime responses because
+            // Schemas tolerate substantial depth because
             // OpenAPI/JSON-Schema definitions legitimately stack anyOf /
-            // oneOf / allOf branches several layers deep — 8 (the
-            // ResponseCompressor default) would truncate real-world tool
-            // descriptions. 32 keeps a wide safety margin below the
+            // oneOf / allOf branches several layers deep; a shallow
+            // content-compression limit would truncate real-world
+            // tool descriptions. 32 keeps a wide safety margin below the
             // ~1024-frame default stack while leaving real schemas intact.
             max_depth: 32,
             stash_store: None,
@@ -186,9 +184,7 @@ impl SchemaCompressor {
     /// Use after deciding to **keep** compressed output from this session
     /// (markers were emitted) and starting a new independent
     /// compress/rollback cycle on the same `SchemaCompressor`. Does not
-    /// touch the store. [`ResponseCompressor`](crate::ResponseCompressor)
-    /// does not need this: it resets pending keys at the start of each
-    /// `compress()`.
+    /// touch the store.
     pub fn clear_stash_session(&self) {
         self.stash_keys_created.borrow_mut().clear();
         self.stash_writes.set(0);
@@ -236,8 +232,8 @@ impl SchemaCompressor {
     /// (JSON Schema format, used by copilot-shell's `DeclarativeTool`); the
     /// OpenAI wrapper and bare schema use `parameters`. Both are compressed.
     ///
-    /// Unlike [`ResponseCompressor`](crate::ResponseCompressor), this does
-    /// not reset stash session state. Pending rollback keys accumulate until
+    /// This does not reset stash session state. Pending rollback keys
+    /// accumulate until
     /// [`rollback_stash_writes`](Self::rollback_stash_writes) or
     /// [`clear_stash_session`](Self::clear_stash_session).
     pub fn compress(&self, tool: &Value) -> Value {
@@ -347,9 +343,8 @@ impl SchemaCompressor {
         // Stack-overflow guard for pathological schemas. Beyond max_depth we
         // stop descending — the deepest nodes keep their original shape, which
         // is acceptable since this path is best-effort token reduction.
-        // Use `>` (not `>=`) so the threshold matches response_compressor.rs
-        // semantics: a node at depth==max_depth is still processed, only its
-        // grandchildren (depth+1 > max_depth) are skipped.
+        // Use `>` (not `>=`): a node at depth==max_depth is still processed,
+        // only its grandchildren (depth+1 > max_depth) are skipped.
         if depth > self.max_depth {
             return;
         }
@@ -452,9 +447,9 @@ impl SchemaCompressor {
         // the final string still fits `max_len`. Fit is checked before any
         // stash call so a too-small `max_len` cannot orphan a stash entry
         // whose marker never reaches the LLM.
-        let stash_active = self.stash_store.is_some() && max_len > stash_suffix_char_len();
+        let stash_active = self.stash_store.is_some() && max_len > truncation_suffix_char_len();
         let effective_max = if stash_active {
-            max_len - stash_suffix_char_len()
+            max_len - truncation_suffix_char_len()
         } else {
             max_len
         };
@@ -467,9 +462,7 @@ impl SchemaCompressor {
         }
 
         // Truncation will happen. Stash the ORIGINAL desc (verbatim, with
-        // markdown) so retrieval yields the unredacted original — matching
-        // ResponseCompressor's "retrieval yields the original content
-        // verbatim" contract.
+        // markdown) so retrieval yields the unredacted original verbatim.
         let stash_key = if stash_active {
             match self.stash_store.as_ref() {
                 Some(store) => match store.stash(desc) {
@@ -517,7 +510,7 @@ impl SchemaCompressor {
         };
 
         match stash_key {
-            Some(key) => format!("{}{}", truncated, stash_suffix(&key)),
+            Some(key) => format!("{}{}", truncated, truncation_suffix(&key)),
             None => truncated,
         }
     }

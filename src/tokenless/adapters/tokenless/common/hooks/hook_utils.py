@@ -196,7 +196,7 @@ SHELL_TOOLS: set[str] = set(_tool_categories.get("layer_2_shell", {}).get("tools
 # is missing or the file failed to load.
 
 # Layer 2 thresholds: moderate truncation for shell/exec output.
-# Restores old ResponseCompressor defaults for shell commands (git log, ls,
+# Restores the old JSON compression defaults for shell commands (git log, ls,
 # cat, etc.) where truncation is acceptable.
 # 64K strings: 95% of real shell output (git diff ~63K, git log ~34K) preserved.
 # 128 arrays: 95% of result sets (test results, audit reports) preserved.

@@ -138,7 +138,7 @@ impl Category {
 
     /// Whether both sides receive byte-identical input for this category.
     ///
-    /// tokenless' `ResponseCompressor` only accepts JSON values, so a non-JSON
+    /// tokenless' `JsonCompressor` only accepts JSON text, so a non-JSON
     /// static payload must be wrapped in a `{"content": ...}` envelope before it
     /// reaches the engine, while headroom receives the raw text. That makes the
     /// two sides' "before" bytes — and therefore their compressor behaviour —

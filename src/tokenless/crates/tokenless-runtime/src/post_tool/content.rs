@@ -1,4 +1,4 @@
-//! Content taxonomy and deterministic detection (roadmap §4.2).
+//! Bounded content detection for PostTool domain dispatch.
 //!
 //! Detection is a pure function of the content with bounded work: only the
 //! first [`MAX_SCAN_BYTES`] bytes / [`MAX_SCAN_LINES`] lines are inspected
@@ -7,8 +7,8 @@
 //! selected compressor, not in a detector that runs on every input. When no
 //! cheap signal is decisive the detector prefers the more general class, and
 //! ultimately [`ContentType::PlainText`] or [`ContentType::Unknown`]; the
-//! pipeline routes those to passthrough until a conservative fallback
-//! compressor exists.
+//! Runtime routes unsupported domains to passthrough until their compressor
+//! is deliberately connected.
 
 mod build_log;
 mod diff;
@@ -26,7 +26,7 @@ mod tabular;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentType {
     /// JSON documents, typically arrays of records or nested objects.
-    JsonRecords,
+    Json,
     /// grep/ripgrep-style `path:line[:col]:text` match listings.
     SearchResults,
     /// Compiler, package-manager, or test-runner terminal output.
@@ -52,7 +52,9 @@ impl ContentType {
     #[must_use]
     pub fn wire_str(self) -> &'static str {
         match self {
-            Self::JsonRecords => "json_records",
+            // Protocol v1 keeps its historical wire value until the v2
+            // operation-specific response replaces this compatibility map.
+            Self::Json => "json_records",
             Self::SearchResults => "search_results",
             Self::BuildLog => "build_log",
             Self::StackTrace => "stack_trace",
@@ -96,7 +98,7 @@ pub fn detect(content: &str) -> ContentType {
     // compressor is the authority — it parses, and non-record JSON passes
     // through there.
     if json::is_json_like(content) {
-        return ContentType::JsonRecords;
+        return ContentType::Json;
     }
     if html::is_html_document(scan) {
         return ContentType::Html;

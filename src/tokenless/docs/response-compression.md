@@ -2,13 +2,13 @@
 
 ## 一、功能概述
 
-Response 压缩由核心 Rust 库 `ResponseCompressor`（`crates/tokenless-schema/src/response_compressor.rs`）实现，通过递归遍历 JSON 值，应用 **7 条压缩规则** 来缩减 LLM 工具调用结果的 token 消耗。实测节省率因内容而异：`web_fetch` 类内容可达 **~78%**，结构化 API 返回约 **~26%**。
+第一阶段的 PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并把 JSON 内容静态派发给 `JsonCompressor`（`crates/tokenless-compressors/src/json.rs`）。压缩器解析 JSON、递归应用以下规则，并在宿主允许文本替换时选择更小的 Compact JSON 或 TOON 表示。非 JSON 内容当前统一透传；Terminal Cleanup 与 Build Log 引擎仍保留，但尚未接入 Pipeline。
 
 ## 二、7 条压缩规则
 
 | # | 规则 | 判断条件 | 处理方式 | 默认阈值 |
 |---|------|---------|---------|---------|
-| R1 | **字符串截断** | 字符串字节长度 > 4096 | 在 UTF-8 安全边界截断，追加 `… (truncated)` | 4096 字节 |
+| R1 | **字符串截断** | Unicode 字符数 > 4096 | 在 Unicode 字符边界截断，追加截断标记 | 4096 字符 |
 | R2 | **数组截断** | 数组元素 > 32 | 保留前 32 个 + 末尾 8 个（`array_tail_preserve`），head 与 tail 之间插入 `<... N more items truncated, not stashed>`；head+tail 覆盖全部元素时不截断 | 32 + 8 个 |
 | R3 | **字段删除** | key 匹配黑名单 | 整个字段移除（不递归进入） | 7 个字段 |
 | R4 | **null 移除** | 值为 `null` | 从对象/数组中删除 | 启用 |
@@ -57,39 +57,30 @@ execFileSync("tokenless", ["compress-response"], { input: JSON, timeout: 3s })
 
 **RTK 跳过逻辑**：当 RTK 启用且可用时，`exec` 工具的结果已经过 RTK 优化，不再二次压缩。
 
-### 路径 2：copilot-shell hook（`PostToolUse` 事件）— 含 TOON 流水线
+### 路径 2：共享 PostTool hook（Protocol v1）
 
 ```
 工具执行完成
    ↓
-copilot-shell 触发 PostToolUse 事件，stdin 传入 JSON
+Adapter 触发 PostTool 事件，stdin 传入框架 Envelope
    ↓
-提取 tool_response 字段
+Hook 转换为 `CompressionRequest`
    ↓
-检查：长度 < 200 字节 → 跳过（太短不值得压缩）
+调用一次 `tokenless compress`
    ↓
-检查：是否为内容检索工具（Read/Glob/list_directory 等）→ 跳过
+Runtime 执行门禁、内容检测和静态派发
    ↓
-检查：是否为 skill 文件（YAML 头标记）→ 跳过
+JSON → `JsonCompressor`；非 JSON → Passthrough
    ↓
-Step 1：echo "$TOOL_RESPONSE" | tokenless compress-response（零截断语义清理）
+Runtime 执行一次字符/Token 仲裁和一次 Stash Commit/Rollback
    ↓
-Step 2：echo "$COMPRESSED" | tokenless compress-toon（无损 TOON 编码）
-   ↓
-两步均采用 fail-open 策略，任何一步失败都透传上一步结果
-   ↓
-返回 { suppressOutput: true, hookSpecificOutput: { additionalContext: compressed } }
+Hook 按宿主 Capability 应用 `CompressionResponse`
 ```
 
-**流水线说明**：copilot-shell 的 PostToolUse hook 中实现了一个**两阶段链式压缩流水线**：
-
-1. **第一阶段 — 响应压缩（3-layer 分流）**：
-   - Layer 1 — 内容检索工具（Read/Glob/Grep）：跳过全部压缩，保留完整性
-   - Layer 2 — Shell/exec 工具（Bash/Shell）：适度截断阈值（64K 字符/128 数组/8 深度），95% 真实 shell 输出完整保留，仅对极端输出截断
-   - Layer 3 — API/结构化工具（其他所有）：零截断阈值（1M 字符/64K 数组/max_depth=32），仅做语义清理（R3/R4/R5），从不截断有意义的内容
-2. **第二阶段 — TOON 编码（无损）**：将第一阶段输出的 JSON 通过 `toon_format::encode_default()` 编码为紧凑的二进制 TOON 格式，消除 JSON 语法开销（引号、逗号、冒号、花括号）。
-
-两个阶段各自独立，任一步骤失败都不影响原始结果的透传（fail-open）。
+**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
+`ContentType::Json -> JsonCompressor`；清理、截断、Structured Slot 恢复、Compact JSON 与
+可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
+任何可选压缩失败都返回原始内容（fail-open）。
 
 **TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。
 
@@ -283,16 +274,15 @@ curl -s https://api.example.com/data | tokenless compress-response
 
 ## 六、默认配置汇总
 
-| 参数 | 默认值 | Builder 方法 |
+| `JsonCompressionConfig` 字段 | 默认值 | 含义 |
 |------|-------|-------------|
-| `truncate_strings_at` | 4096 | `with_truncate_strings_at(len)` |
-| `truncate_arrays_at` | 32 | `with_truncate_arrays_at(len)` |
-| `array_tail_preserve` | 8 | `with_array_tail_preserve(n)`（0 = 仅保留 head） |
-| `drop_nulls` | true | `with_drop_nulls(bool)` |
-| `drop_empty_fields` | true | `with_drop_empty_fields(bool)` |
-| `max_depth` | 8 | `with_max_depth(depth)` |
-| `add_truncation_marker` | true | `with_add_truncation_marker(bool)` |
-| `drop_fields` | 7 个（见上文） | `add_drop_field(field)` |
+| `truncate_strings_at` | 4096 | 最大 Unicode 字符数 |
+| `truncate_arrays_at` | 32 | 保留的 head 元素数 |
+| `array_tail_preserve` | 8 | 保留的 tail 元素数；0 表示仅保留 head |
+| `drop_nulls` | true | 移除 null 值 |
+| `drop_empty_fields` | true | 移除空字符串、数组和对象 |
+| `max_depth` | 8 | 最大递归深度 |
+| `add_truncation_marker` | true | 为截断内容生成有界标记 |
 
 ## 七、Fail-Open 设计
 
@@ -306,9 +296,10 @@ curl -s https://api.example.com/data | tokenless compress-response
 
 | 用途 | 文件路径 |
 |------|--------|
-| 核心压缩算法（ResponseCompressor） | `crates/tokenless-schema/src/response_compressor.rs` |
+| JSON 领域压缩器（JsonCompressor） | `crates/tokenless-compressors/src/json.rs` |
+| PostTool Pipeline 与最终仲裁 | `crates/tokenless-runtime/src/post_tool/` |
 | Schema 压缩器（SchemaCompressor） | `crates/tokenless-schema/src/schema_compressor.rs` |
-| 公开 API | `crates/tokenless-schema/src/lib.rs` |
+| 内容压缩公开 API | `crates/tokenless-compressors/src/lib.rs` |
 | CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
 | 环境检查 | `crates/tokenless-cli/src/env_check.rs` |
 | 统计记录器（SQLite WAL） | `crates/tokenless-stats/src/recorder.rs` |
@@ -321,7 +312,8 @@ curl -s https://api.example.com/data | tokenless compress-response
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
 | Codex 响应诊断 Hook | `adapters/tokenless/codex/scripts/response-diagnostics` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
-| 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
+| JSON 压缩测试 | `crates/tokenless-compressors/src/tests/json_tests.rs` |
+| PostTool 集成测试 | `crates/tokenless-runtime/src/entry.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |
 | 全量测试套件 | `tests/run-all-tests.sh` |
 

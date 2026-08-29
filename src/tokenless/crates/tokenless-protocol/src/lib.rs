@@ -32,11 +32,11 @@
 //!
 //! # Token counter identity
 //!
-//! All token counts in protocol v1 use the counter recorded in
-//! [`TOKENIZER_ID`]. The choice is the measured §5.1 decision (see the note
-//! in `docs/roadmap/evolution-roadmap.md`): the character-class heuristic
-//! `heuristic-v1`, not a provider tokenizer. Counts are normalized tokens for
-//! arbitration and attribution, not billing estimates.
+//! Token counts use the counter named by each response's `tokenizer_id`.
+//! Normal processing uses [`TOKENIZER_ID`], the character-class heuristic
+//! `heuristic-v1`. Inputs rejected before a text scan use
+//! [`BYTE_ESTIMATOR_ID`]. Counts are normalized tokens for arbitration and
+//! attribution, not billing estimates.
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,58 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// ID; rows and responses produced under different IDs must never be merged
 /// into one series without an explicit per-counter breakdown.
 pub const TOKENIZER_ID: &str = "heuristic-v1";
+
+/// Identity of the byte-length fallback used when an input is rejected before
+/// the character-class counter can scan it.
+pub const BYTE_ESTIMATOR_ID: &str = "byte-length-v1";
+
+/// Estimates normalized tokens using the counter identified by
+/// [`TOKENIZER_ID`]. CJK characters count as one token each; all other
+/// characters count as approximately one token per four characters.
+#[must_use]
+pub fn estimate_tokens(text: &str) -> usize {
+    let mut cjk = 0usize;
+    let mut other = 0usize;
+    for character in text.chars() {
+        if is_cjk(character) {
+            cjk += 1;
+        } else {
+            other += 1;
+        }
+    }
+    cjk + other.div_ceil(4)
+}
+
+/// Estimates normalized tokens using the fallback identified by
+/// [`BYTE_ESTIMATOR_ID`].
+#[must_use]
+pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
+    bytes.div_ceil(4)
+}
+
+/// Counts Unicode scalar values in `text`.
+#[must_use]
+pub fn count_chars(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(character,
+        '\u{4E00}'..='\u{9FFF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{20000}'..='\u{2A6DF}'
+        | '\u{2A700}'..='\u{2B73F}'
+        | '\u{2B740}'..='\u{2B81F}'
+        | '\u{2B820}'..='\u{2CEAF}'
+        | '\u{2CEB0}'..='\u{2EBEF}'
+        | '\u{30000}'..='\u{3134F}'
+        | '\u{3100}'..='\u{312F}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{3040}'..='\u{309F}'
+        | '\u{30A0}'..='\u{30FF}'
+    )
+}
 
 /// Upper bound, in bytes, for [`CompressionResponse::diagnostic`]. Writers
 /// truncate to this limit on a char boundary before emitting, so a failing
@@ -357,11 +409,10 @@ pub struct CompressionResponse {
     /// leak keys (roadmap §4.6).
     #[serde(default)]
     pub stash_keys: Vec<String>,
-    /// Identity of the counter behind both token counts. Writers set
-    /// [`TOKENIZER_ID`]. A payload missing the field reads as
-    /// [`TOKENIZER_ID`] too: the heuristic estimator is the only counter
-    /// that ever shipped before the field existed, so the default is the
-    /// factual legacy identity rather than an ambiguous empty string.
+    /// Identity of the counter behind both token counts. A payload missing
+    /// the field reads as [`TOKENIZER_ID`]: the character-class heuristic is
+    /// the only counter that shipped before the field existed, so the default
+    /// is the factual legacy identity rather than an ambiguous empty string.
     #[serde(default = "default_tokenizer_id")]
     pub tokenizer_id: String,
     /// Bounded diagnostic accompanying [`Disposition::Error`]: at most

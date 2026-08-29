@@ -14,6 +14,7 @@ thiserror.workspace = true
 dirs.workspace = true
 libc.workspace = true
 similar.workspace = true
+tokenless-protocol = { path = "../tokenless-protocol" }
 
 [dev-dependencies]
 tempfile.workspace = true

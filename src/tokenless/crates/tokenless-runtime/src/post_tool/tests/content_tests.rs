@@ -3,14 +3,14 @@
 // stays a build log; a diff full of error lines stays a diff).
 
 #[test]
-fn detects_json_records() {
+fn detects_json() {
     assert_eq!(
         detect(r#"[{"id": 1, "state": "open"}, {"id": 2, "state": "closed"}]"#),
-        ContentType::JsonRecords
+        ContentType::Json
     );
     assert_eq!(
         detect("{\n  \"items\": [1, 2, 3],\n  \"total\": 3\n}"),
-        ContentType::JsonRecords
+        ContentType::Json
     );
 }
 
@@ -175,13 +175,13 @@ fn large_json_beyond_the_scan_window_stays_json() {
         big.push_str("  {\"id\": 1, \"state\": \"open\"},\n");
     }
     big.push_str("  {\"id\": 2}\n]");
-    assert_eq!(detect(&big), ContentType::JsonRecords);
+    assert_eq!(detect(&big), ContentType::Json);
 }
 
 #[test]
 fn whitespace_padding_beyond_the_tail_window_is_not_json() {
     let padded = format!("{{\"k\": 1}}{}", " ".repeat(MAX_SCAN_BYTES + 1));
-    assert_ne!(detect(&padded), ContentType::JsonRecords);
+    assert_ne!(detect(&padded), ContentType::Json);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn detection_is_deterministic_and_bounded() {
 #[test]
 fn wire_values_are_stable_and_unique() {
     let all = [
-        (ContentType::JsonRecords, "json_records"),
+        (ContentType::Json, "json_records"),
         (ContentType::SearchResults, "search_results"),
         (ContentType::BuildLog, "build_log"),
         (ContentType::StackTrace, "stack_trace"),

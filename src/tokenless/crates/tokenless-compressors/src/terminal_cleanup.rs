@@ -1,8 +1,7 @@
 //! Lossless terminal-output cleanup: ANSI colour and style codes.
 //!
-//! "Lossless" here means information-preserving, matching
-//! [`Stage::Lossless`](tokenless_pipeline::Stage): nothing task-relevant is
-//! removed. SGR sequences (`ESC [ … m`) are the only thing this stage strips,
+//! "Lossless" here means information-preserving: nothing task-relevant is
+//! removed. SGR sequences (`ESC [ … m`) are the only thing this engine strips,
 //! because colour and style are the only part of a terminal capture that is
 //! provably non-semantic — the same bytes read identically without them.
 //!

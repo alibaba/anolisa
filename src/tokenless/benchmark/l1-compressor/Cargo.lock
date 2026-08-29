@@ -679,6 +679,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tokenless-ccr",
+ "tokenless-compressors",
  "tokenless-schema",
  "toon-format",
 ]
@@ -689,6 +690,26 @@ version = "0.7.14"
 dependencies = [
  "blake3",
  "rusqlite",
+ "thiserror",
+]
+
+[[package]]
+name = "tokenless-compressors"
+version = "0.7.14"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tokenless-ccr",
+ "tokenless-protocol",
+ "toon-format",
+]
+
+[[package]]
+name = "tokenless-protocol"
+version = "0.7.14"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

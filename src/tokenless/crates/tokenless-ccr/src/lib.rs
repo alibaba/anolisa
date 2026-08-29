@@ -30,5 +30,6 @@ pub use backends::sqlite::SqliteStore;
 pub use key::compute_key;
 pub use marker::{
     MARKER_PREFIX, MARKER_SUFFIX, extract_hash, is_valid_hash, marker_for, parse_marker,
+    truncation_suffix, truncation_suffix_char_len,
 };
 pub use store::{StashError, StashStore, StashWrite};

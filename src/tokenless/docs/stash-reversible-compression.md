@@ -12,7 +12,7 @@ called **stash** to avoid the proprietary abbreviation.
 
 ## How it works
 
-1. **Compress**: `ResponseCompressor` truncates oversized arrays (default:
+1. **Compress**: `JsonCompressor` truncates oversized arrays (default:
    keep the first 32 and the last 8 items). The dropped middle items are
    serialized to JSON and `stash.stash(payload)` stores them, returning a
    24-hex BLAKE3 key plus a store-wide, monotonically increasing ownership
@@ -31,13 +31,17 @@ enables it.
 
 ## No-savings rollback
 
-If compressed output is discarded (CLI no-savings fallback), call
-`rollback_stash_writes()` so markers that never reached the LLM do not leave
-orphan stash rows. Pending rollback is a `HashMap<key, generation>`: a key
-created in this session is recorded, and a later in-session refresh of that
-same payload updates the generation **only when the store reports an unbroken
-ownership chain** (`previous_generation` equals the token this session last
-recorded). A refresh of a key this session never created stays off the list.
+`JsonCompressor` returns every tentative `StashWrite` in `JsonOutcome`.
+`PostToolPipeline` records them in one per-invocation ledger, performs the
+single final character/token arbitration, then commits only keys referenced by
+the accepted output or rolls the ledger back. Markers that never reach the LLM
+therefore do not leave orphan stash rows.
+
+The ledger tracks each content-addressed key and generation. A key created in
+this invocation is owned by the ledger; a later refresh updates that ownership
+only when the store reports an unbroken chain (`previous_generation` equals
+the generation last recorded by this invocation). A refresh of a key the
+invocation never created stays off the rollback list.
 
 That chain check is required because content-addressed keys are shared across
 processes. If compressor A creates P, compressor B refreshes P and emits a
@@ -46,14 +50,12 @@ no-savings rollback delete the row B's marker still needs. A mismatch drops
 the key from the pending list instead; rollback of the stale create-time
 token is a CAS no-op.
 
-`stash_writes` counts unique keys created this session, plus refreshes of
-keys this session did not create. An in-session refresh does not increment
-again, so after a successful rollback the counter matches remaining live
-rows from that session.
+Runtime artifact metrics count live writes after the final commit or rollback,
+not mutable compressor-side state.
 
 Session scope differs by compressor:
 
-- `ResponseCompressor` resets pending keys at the start of each `compress()`.
+- PostTool JSON compression uses a fresh Runtime ledger for every invocation.
 - `SchemaCompressor` accumulates across `compress()` calls until rollback or
   `clear_stash_session()`. That matches `compress-schema --batch` (compress
   every item, then one all-or-nothing rollback). Call rollback only after

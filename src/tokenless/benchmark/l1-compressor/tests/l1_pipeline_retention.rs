@@ -15,7 +15,7 @@
 //! End-to-end pipeline retention tests.
 //!
 //! Verifies that canonical payloads traversing the compression pipeline
-//! (ResponseCompressor/SchemaCompressor → TOON encode → TOON decode) retain
+//! (JsonCompressor/SchemaCompressor → TOON encode → TOON decode) retain
 //! their semantic fields while noise is stripped.
 //!
 //! Decode outcomes are pinned, never swallowed: the pipeline helper returns
@@ -33,13 +33,14 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokenless_bench::{response_canonical, schema_canonical};
+use tokenless_bench::{compress_json, compress_json_with, response_canonical, schema_canonical};
 use tokenless_ccr::{InMemoryStore, StashStore};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_compressors::JsonCompressionConfig;
+use tokenless_schema::SchemaCompressor;
 
 /// Compress a response value (stage 1 of the pipeline).
 fn response_compressed(value: &Value) -> Value {
-    ResponseCompressor::new().compress(value)
+    compress_json(value)
 }
 
 /// Run a response value through compress → TOON encode → TOON decode and
@@ -52,9 +53,10 @@ fn response_compressed(value: &Value) -> Value {
 /// so a regression that produces undecodable TOON fails loudly.
 fn response_pipeline(
     value: &Value,
-    compressor: ResponseCompressor,
+    config: JsonCompressionConfig,
+    stash: Option<&dyn StashStore>,
 ) -> Result<Value, toon_format::ToonError> {
-    let compressed = compressor.compress(value);
+    let (compressed, _) = compress_json_with(value, config, stash);
     let encoded = toon_format::encode_default(&compressed).expect("TOON encode");
     toon_format::decode_default::<Value>(&encoded)
 }
@@ -71,8 +73,12 @@ fn response_pipeline_preserves_tool_and_status() {
     // Tool and status are top-level scalar keys appearing after the large
     // `results` list. With the TOON-safe truncation marker the strict
     // round-trip recovers them, so assert on real decoded output.
-    let decoded = response_pipeline(&response_canonical(), ResponseCompressor::new())
-        .expect("default no-stash pipeline must round-trip through strict TOON decode");
+    let decoded = response_pipeline(
+        &response_canonical(),
+        JsonCompressionConfig::default(),
+        None,
+    )
+    .expect("default no-stash pipeline must round-trip through strict TOON decode");
     assert_eq!(decoded["tool"], "search_code");
     assert_eq!(decoded["status"], "ok");
     // The compression stage must preserve them too.
@@ -86,8 +92,12 @@ fn response_pipeline_preserves_result_item_fields() {
     // Default configuration: the plain marker sits BETWEEN the head and tail
     // items of `results`. The marker's `, not stashed` clause forces the TOON
     // encoder to quote it, so the strict round-trip keeps it intact.
-    let decoded = response_pipeline(&response_canonical(), ResponseCompressor::new())
-        .expect("default no-stash pipeline must round-trip through strict TOON decode");
+    let decoded = response_pipeline(
+        &response_canonical(),
+        JsonCompressionConfig::default(),
+        None,
+    )
+    .expect("default no-stash pipeline must round-trip through strict TOON decode");
     let results = decoded["results"]
         .as_array()
         .expect("results array exists after pipeline");
@@ -114,8 +124,12 @@ fn response_pipeline_preserves_result_item_fields() {
 
 #[test]
 fn response_pipeline_drops_noise_fields() {
-    let decoded = response_pipeline(&response_canonical(), ResponseCompressor::new())
-        .expect("default no-stash pipeline must round-trip through strict TOON decode");
+    let decoded = response_pipeline(
+        &response_canonical(),
+        JsonCompressionConfig::default(),
+        None,
+    )
+    .expect("default no-stash pipeline must round-trip through strict TOON decode");
     let obj = decoded.as_object().expect("decoded response is an object");
     // Top-level noise fields dropped by the compressor.
     for k in ["debug", "trace", "logs"] {
@@ -144,7 +158,11 @@ fn response_pipeline_head_only_marker_roundtrips() {
     // the root-level keys after the array are recovered as well.
     let decoded = response_pipeline(
         &response_canonical(),
-        ResponseCompressor::new().with_array_tail_preserve(0),
+        JsonCompressionConfig {
+            array_tail_preserve: 0,
+            ..JsonCompressionConfig::default()
+        },
+        None,
     )
     .expect("head-only truncation must round-trip through strict TOON decode");
     let results = decoded["results"]
@@ -173,7 +191,8 @@ fn response_pipeline_stash_marker_roundtrips_intact() {
     let store = Arc::new(InMemoryStore::new());
     let decoded = response_pipeline(
         &response_canonical(),
-        ResponseCompressor::new().with_stash_store(store.clone()),
+        JsonCompressionConfig::default(),
+        Some(store.as_ref()),
     )
     .expect("stash-marker shape must round-trip through strict TOON decode");
     let results = decoded["results"]

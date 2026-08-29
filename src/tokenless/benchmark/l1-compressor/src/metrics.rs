@@ -35,9 +35,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_schema::SchemaCompressor;
 
-use crate::{response_canonical, rtk_command_samples, schema_canonical};
+use crate::{compress_json, response_canonical, rtk_command_samples, schema_canonical};
 
 // Cost-analysis limitations:
 // 1. Token counting: bytes/4 heuristic (div_ceil), not a real tokenizer
@@ -322,7 +322,7 @@ fn toon(value: &Value) -> String {
 
 /// Pure compression-rate and cost-analysis metrics over the canonical fixtures.
 ///
-/// Runs `ResponseCompressor`, `SchemaCompressor`, and TOON encoding in-process
+/// Runs `JsonCompressor`, `SchemaCompressor`, and TOON encoding in-process
 /// on the SAME canonical payloads the latency benches measure, counting tokens
 /// immediately before and after each stage. Also derives the 7 stacking
 /// configurations from the V5 report and projects dollar savings over a
@@ -334,7 +334,6 @@ pub fn compression_metrics() -> Value {
     let response = response_canonical();
     let schema = schema_canonical();
 
-    let response_compressor = ResponseCompressor::new();
     let schema_compressor = SchemaCompressor::new();
 
     // Wire-form strings for byte counting.
@@ -346,7 +345,7 @@ pub fn compression_metrics() -> Value {
     let schema_raw_tok = estimate_tokens(&schema_raw_wire);
 
     // Tokens after each stage.
-    let resp_compressed = response_compressor.compress(&response);
+    let resp_compressed = compress_json(&response);
     let schema_compressed = schema_compressor.compress(&schema);
     let resp_comp_wire = wire(&resp_compressed);
     let schema_comp_wire = wire(&schema_compressed);
@@ -366,12 +365,12 @@ pub fn compression_metrics() -> Value {
     // Stacking configurations — 7 combinations measuring cumulative token savings.
     // Each config name has a fixed definition:
     //   baseline:        raw JSON, no compression (reference point)
-    //   response_only:   ResponseCompressor only (no TOON, no schema compression)
+    //   response_only:   JsonCompressor only (no TOON, no schema compression)
     //   toon_only:       TOON-encode raw payloads directly (no compressor stage)
     //   schema_only:     SchemaCompressor only (no TOON, no response compression)
-    //   response_toon:   ResponseCompressor + TOON on response; schema raw
-    //   schema_response: ResponseCompressor + SchemaCompressor (no TOON)
-    //   full_stack:      ResponseCompressor + SchemaCompressor + TOON on both
+    //   response_toon:   JsonCompressor + TOON on response; schema raw
+    //   schema_response: JsonCompressor + SchemaCompressor (no TOON)
+    //   full_stack:      JsonCompressor + SchemaCompressor + TOON on both
     //
     // NOTE: "toon_only" here encodes the RAW input. In benches/l1_pipeline_latency.rs,
     // "toon_encode_on_compressed" encodes the COMPRESSED output. These are different

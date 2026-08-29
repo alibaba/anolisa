@@ -19,6 +19,23 @@ pub fn marker_for(hash: &str) -> String {
     format!("{MARKER_PREFIX}{hash}{MARKER_SUFFIX}")
 }
 
+/// Builds the human-readable suffix used by bounded string compression.
+#[must_use]
+pub fn truncation_suffix(hash: &str) -> String {
+    format!(
+        "… (truncated, run: tokenless retrieve '{}')",
+        marker_for(hash)
+    )
+}
+
+/// Character length of [`truncation_suffix`].
+#[must_use]
+pub fn truncation_suffix_char_len() -> usize {
+    truncation_suffix("000000000000000000000000")
+        .chars()
+        .count()
+}
+
 /// Parse a marker that occupies the entirety of `s`, returning the embedded
 /// hash. Returns `None` for malformed input rather than panicking, so callers
 /// can pass untrusted LLM output directly.

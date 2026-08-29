@@ -14,7 +14,7 @@
 
 //! Pipeline latency: in-process library micro-benchmarks.
 //!
-//! Measures the ResponseCompressor + TOON encode pipeline as called from Rust.
+//! Measures the JsonCompressor + TOON encode pipeline as called from Rust.
 //! Does NOT include subprocess overhead, network I/O, disk I/O, TOON decode,
 //! RTK processing, or LLM inference time. For production end-to-end latency,
 //! use adapter-level instrumentation (not this micro-benchmark).
@@ -45,8 +45,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use tokenless_bench::{response_canonical, response_items, schema_canonical};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_bench::{compress_json, response_canonical, response_items, schema_canonical};
+use tokenless_schema::SchemaCompressor;
 
 fn bench_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("response_toon_inprocess");
@@ -54,18 +54,17 @@ fn bench_pipeline(c: &mut Criterion) {
 
     for (label, n) in [("small", 20usize), ("large", 200usize)] {
         let input = response_items(n);
-        let compressor = ResponseCompressor::new();
         // Pre-compute L1's output once, outside the timed closures, so
         // `toon_only` encodes exactly what the combined pipeline feeds into L2.
         // This ensures the three measurement points share the same L1 output.
-        let compressed = compressor.compress(&input);
+        let compressed = compress_json(&input);
 
         // L1 — response compression only.
         group.bench_function(format!("{label}/response_only"), |b| {
-            b.iter(|| compressor.compress(black_box(&input)));
+            b.iter(|| compress_json(black_box(&input)));
         });
 
-        // "toon_encode_on_compressed": TOON-encodes the output of ResponseCompressor
+        // "toon_encode_on_compressed": TOON-encodes the output of JsonCompressor
         // (L1 compressed value). Differs from metrics.rs "toon_only" which TOON-encodes raw input.
         // L2 — TOON encode only, on L1's output (object passing, no to_string).
         group.bench_function(format!("{label}/toon_encode_on_compressed"), |b| {
@@ -75,7 +74,7 @@ fn bench_pipeline(c: &mut Criterion) {
         // L1 + L2 — full in-process pipeline, object passing.
         group.bench_function(format!("{label}/response_then_toon"), |b| {
             b.iter(|| {
-                let c = compressor.compress(black_box(&input));
+                let c = compress_json(black_box(&input));
                 toon_format::encode_default(&c).unwrap()
             });
         });
@@ -86,12 +85,11 @@ fn bench_pipeline(c: &mut Criterion) {
     // token-gate and falls back to compressed-only when TOON inflates.
     let resp = response_canonical();
     let schema = schema_canonical();
-    let resp_compressor = ResponseCompressor::new();
     let schema_compressor = SchemaCompressor::new();
 
     group.bench_function("canonical/forced_all_stages", |b| {
         b.iter(|| {
-            let rc = resp_compressor.compress(black_box(&resp));
+            let rc = compress_json(black_box(&resp));
             let sc = schema_compressor.compress(black_box(&schema));
             let rt = toon_format::encode_default(&rc).unwrap();
             let st = toon_format::encode_default(&sc).unwrap();

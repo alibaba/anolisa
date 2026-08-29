@@ -75,15 +75,14 @@ fn no_config_exceeds_baseline() {
 
 #[test]
 fn array_33_short_elements_may_expand() {
-    use tokenless_schema::ResponseCompressor;
+    use tokenless_bench::compress_json;
 
     // 33 numeric zeros — just above the default array truncation threshold (32).
     // For short elements, the truncation marker itself can cost more bytes than
     // the elements it replaces, causing net expansion. This test documents that
     // known behaviour rather than asserting non-expansion.
     let input = serde_json::Value::Array(vec![serde_json::json!(0); 33]);
-    let compressor = ResponseCompressor::new();
-    let output = compressor.compress(&input);
+    let output = compress_json(&input);
     let input_bytes = serde_json::to_string(&input).unwrap().len();
     let output_bytes = serde_json::to_string(&output).unwrap().len();
     // Must produce valid output regardless of expansion.

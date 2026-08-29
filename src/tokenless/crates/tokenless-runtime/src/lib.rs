@@ -1,34 +1,29 @@
 //! Stateful application API shared by Tokenless frontends.
 //!
-//! The runtime composes the shared compression pipeline, reversible SQLite
-//! stash, and statistics without depending on a command-line or
-//! language-binding layer. Response compression routes through
-//! [`tokenless_pipeline::run`], with the existing cleanup registered as the
-//! first entry of the production registry (roadmap §5.3).
+//! The runtime owns lifecycle orchestration, including the PostTool pipeline,
+//! reversible SQLite stash, and statistics, without depending on a
+//! command-line or language-binding layer.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use thiserror::Error;
-use tokenless_ccr::{SqliteStore, StashError, StashStore, StashWrite, extract_hash, is_valid_hash};
-use tokenless_pipeline::PipelineConfig;
+use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
+use tokenless_compressors::JsonCompressionConfig;
 use tokenless_protocol::{Capabilities, CompressionRequest, Seam};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
     CompressionMode, OperationType, SlsWriter, StatsRecord, StatsRecorder, ensure_state_dir,
     estimate_tokens, get_home_dir, resolve_data_dir, validate_data_dir, validate_database_path,
 };
 
 mod entry;
-mod log_compressors;
-mod response_cleanup;
+mod post_tool;
 mod taxonomy;
 
 pub use entry::{EntryOptions, EntryOutcome, compress_with_store};
-use log_compressors::{BuildLogAdapter, TerminalCleanupAdapter};
-use response_cleanup::ResponseCleanup;
+use post_tool::{PostToolPipeline, PostToolPipelineConfig};
 
 /// Why a compression attempt did or did not replace the input: the protocol
 /// disposition vocabulary, re-exported verbatim so CLI, Runtime, and
@@ -638,67 +633,14 @@ fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// Overall pipeline budget for one response compression. The pre-pipeline
-/// path had no timeout; this bound honors the one-budget contract (roadmap
-/// §5.3) while sitting far above any observed in-process compression time,
-/// so it only fires on pathological input. Timeout is fail-open: the
-/// original content is returned.
+/// Overall budget for one in-process PostTool compression.
 const RESPONSE_PIPELINE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Forwards to the caller's store while counting the pipeline ledger's
-/// deletes, which is what keeps `CompressResult`'s legacy stash metrics on
-/// their pre-pipeline semantics: `stash_writes` reports the rows still live
-/// after a rollback, and a failed rollback delete surfaces in
-/// `stash_errors` so the CLI's stash-health warning still fires on orphaned
-/// rows.
-struct DeleteTracking<'a> {
-    inner: &'a dyn StashStore,
-    // Atomics because `StashStore` is `Sync`; this tracker never actually
-    // crosses threads within one compress call.
-    removed: AtomicUsize,
-    failed: AtomicUsize,
-}
-
-impl StashStore for DeleteTracking<'_> {
-    fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
-        self.inner.stash(payload)
-    }
-
-    fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
-        self.inner.retrieve(hash)
-    }
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn evict_expired(&self) -> Result<usize, StashError> {
-        self.inner.evict_expired()
-    }
-
-    fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
-        let result = self.inner.delete(hash, generation);
-        match &result {
-            Ok(true) => {
-                self.removed.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(false) => {}
-            Err(_) => {
-                self.failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-}
 
 /// Compress a response using an optional caller-owned stash store.
 ///
-/// CLI and embedded frontends use this function to share the pipeline's
-/// routing, staged execution, and end-to-end arbitration (roadmap §4.3):
-/// no-savings fallback, dry-run behavior, reversibility policy, timeout,
-/// and stash rollback all come from [`tokenless_pipeline::run`]. A failing
-/// compression step is fail-open and reported through the disposition, not
-/// as an error.
+/// CLI and embedded frontends use the same Runtime-owned JSON PostTool
+/// pipeline. The explicit API validates JSON at its boundary; optional
+/// compression failures remain fail-open inside the pipeline.
 ///
 /// # Errors
 ///
@@ -727,7 +669,23 @@ pub fn compress_response_with_store(
         // their envelopes.
         replace_with_text: false,
     };
-    let run = run_response_pipeline(&request, options, compression_enabled, stash_store);
+    let run = PostToolPipeline::run(
+        &request,
+        &PostToolPipelineConfig {
+            timeout: RESPONSE_PIPELINE_TIMEOUT,
+            max_input_bytes: MAX_INPUT_BYTES,
+            min_input_chars: 0,
+            compression_enabled,
+            stash_enabled: options.stash_enabled,
+            require_reversibility: options.require_reversible,
+            force_json: true,
+            preserve_top_level_shape: false,
+            allow_toon: false,
+            min_toon_chars: MIN_TOON_CHARS,
+            json: json_config(options),
+        },
+        stash_store,
+    );
 
     // Legacy measurement channel (see `CompressResult::compressed_output`):
     // the candidate the adapter produced, or the original when none ran.
@@ -737,6 +695,7 @@ pub fn compress_response_with_store(
     let before_tokens = estimate_tokens(input);
     let after_tokens = estimate_tokens(&compressed_output);
 
+    let stash_attached = run.stash_writes.is_some();
     Ok(CompressResult {
         output: run.response.output,
         compressed_output,
@@ -745,216 +704,26 @@ pub fn compress_response_with_store(
         after_tokens,
         stash_writes: run.stash_writes,
         stash_errors: run.stash_errors,
-        unrecoverable_truncations: run.unrecoverable_truncations,
+        unrecoverable_truncations: stash_attached
+            .then(|| run.unrecoverable_truncations.unwrap_or(0)),
         stash_size: run.stash_size,
     })
 }
 
-/// Result of one pipeline execution over a post-tool request.
-struct ResponsePipelineRun {
-    response: tokenless_protocol::CompressionResponse,
-    /// Candidate the cleanup produced, or `None` when it never ran.
-    candidate: Option<String>,
-    /// Stash writes of the run, with their generations, so the entry router
-    /// can roll back rows whose markers its own acceptance checks keep from
-    /// reaching the model (the ledger inside [`tokenless_pipeline::run`]
-    /// only rolls back the pipeline's rejections).
-    committed_writes: Vec<StashWrite>,
-    /// Legacy stash metrics on the pre-pipeline contract documented for
-    /// [`CompressResult`]: rows still live after the ledger's rollback and
-    /// orphan-commit deletes; write and delete failures combined.
-    stash_writes: Option<usize>,
-    stash_errors: Option<usize>,
-    unrecoverable_truncations: Option<usize>,
-    stash_size: Option<usize>,
-    /// Total truncation events, measured with or without an attached store —
-    /// unlike `unrecoverable_truncations`, whose store-attached-only measure
-    /// is the legacy [`CompressResult`] contract.
-    truncations: usize,
-    /// Contributing compressor ids in run order, carried out-of-band because
-    /// the pipeline's dry-run rejection clears `response.compressor_chain`.
-    /// The JSON path's winner builds its own chain and ignores this.
-    chain: Vec<String>,
-}
-
-/// Runs the response cleanup behind the pipeline over `request.content`,
-/// shared by [`compress_response_with_store`] and the unified entry router:
-/// routing, staged execution, end-to-end arbitration, dry-run, timeout, and
-/// stash rollback all come from [`tokenless_pipeline::run`].
-fn run_response_pipeline(
-    request: &CompressionRequest,
-    options: &CompressOptions,
-    compression_enabled: bool,
-    stash_store: Option<&Arc<dyn StashStore>>,
-) -> ResponsePipelineRun {
-    let mut compressor = ResponseCompressor::new();
-    if let Some(value) = options.truncate_strings_at {
-        compressor = compressor.with_truncate_strings_at(value);
-    }
-    if let Some(value) = options.truncate_arrays_at {
-        compressor = compressor.with_truncate_arrays_at(value);
-    }
-    if let Some(value) = options.array_tail_preserve {
-        compressor = compressor.with_array_tail_preserve(value);
-    }
-    if let Some(value) = options.max_depth {
-        compressor = compressor.with_max_depth(value);
-    }
-
-    // In dry-run no store is attached at all — the measured candidate is
-    // never emitted, so writing stash rows (even rolled-back ones) would be
-    // pure churn.
-    let attached_store = if options.stash_enabled && compression_enabled {
-        stash_store
-    } else {
-        None
-    };
-    if let Some(store) = attached_store {
-        compressor = compressor.with_stash_store(Arc::clone(store));
-    }
-    let adapter = ResponseCleanup::new(compressor, attached_store.is_some());
-
-    let config = PipelineConfig {
-        timeout: RESPONSE_PIPELINE_TIMEOUT,
-        // The pre-pipeline policy is "always try to shrink": a permanently
-        // unmet size target keeps the cleanup's retrievable-lossy stage on.
-        max_tokens: Some(0),
-        // Reversibility is enforced only when something would be emitted;
-        // in dry-run the pre-pipeline precedence (dry-run wins) applies.
-        require_reversibility: options.require_reversible
-            && options.stash_enabled
-            && compression_enabled,
-        dry_run: !compression_enabled,
-    };
-    let tracker = attached_store.map(|store| DeleteTracking {
-        inner: store.as_ref(),
-        removed: AtomicUsize::new(0),
-        failed: AtomicUsize::new(0),
-    });
-    let response = tokenless_pipeline::run(
-        request,
-        &[&adapter],
-        tracker.as_ref().map(|tracker| tracker as &dyn StashStore),
-        &config,
-    );
-
-    let stash_writes = tracker.as_ref().map(|tracker| {
-        adapter
-            .stash_writes()
-            .saturating_sub(tracker.removed.load(Ordering::Relaxed))
-    });
-    let stash_errors = tracker
-        .as_ref()
-        .map(|tracker| adapter.stash_errors() + tracker.failed.load(Ordering::Relaxed));
-    let unrecoverable_truncations = attached_store.map(|_| adapter.unrecoverable_truncations());
-    let stash_size = attached_store.map(|store| store.len());
-
-    let chain = response.compressor_chain.clone();
-    ResponsePipelineRun {
-        response,
-        candidate: adapter.take_candidate(),
-        committed_writes: adapter.take_writes(),
-        stash_writes,
-        stash_errors,
-        unrecoverable_truncations,
-        stash_size,
-        truncations: adapter.truncations(),
-        chain,
-    }
-}
-
-/// Runs the terminal-cleanup and build/log compressors over a plain-text
-/// post-tool request (roadmap §6.1), the text-slot sibling of
-/// [`run_response_pipeline`]: routing, staged execution, end-to-end
-/// arbitration, dry-run, timeout, and stash rollback all come from
-/// [`tokenless_pipeline::run`].
-fn run_text_pipeline(
-    request: &CompressionRequest,
-    compression_enabled: bool,
-    stash_enabled: bool,
-    stash_store: Option<&Arc<dyn StashStore>>,
-) -> ResponsePipelineRun {
-    // Same dry-run discipline as the JSON path: no store is attached at all
-    // — the measured candidate is never emitted, so stash rows (even
-    // rolled-back ones) would be pure churn.
-    let attached_store = if stash_enabled && compression_enabled {
-        stash_store
-    } else {
-        None
-    };
-    let terminal = TerminalCleanupAdapter::default();
-    let build_log = BuildLogAdapter::default();
-    // Active without a reachable store, the lossy stage's markers would be
-    // dead ends (§12 validity); dry-run keeps it as a pure measurement —
-    // the candidate is never emitted. Registry routing would also drop it
-    // when the host declares no retrieve tool; this covers the
-    // stash-disabled and store-open-failure cases on top.
-    let include_lossy = attached_store.is_some() || !compression_enabled;
-    let mut compressors: Vec<&dyn tokenless_pipeline::Compressor> = vec![&terminal];
-    if include_lossy {
-        compressors.push(&build_log);
-    }
-
-    let config = PipelineConfig {
-        timeout: RESPONSE_PIPELINE_TIMEOUT,
-        // "Always try to shrink": a permanently unmet size target keeps the
-        // retrievable-lossy stage on, mirroring the JSON path.
-        max_tokens: Some(0),
-        require_reversibility: false,
-        dry_run: !compression_enabled,
-    };
-    let tracker = attached_store.map(|store| DeleteTracking {
-        inner: store.as_ref(),
-        removed: AtomicUsize::new(0),
-        failed: AtomicUsize::new(0),
-    });
-    let response = tokenless_pipeline::run(
-        request,
-        &compressors,
-        tracker.as_ref().map(|tracker| tracker as &dyn StashStore),
-        &config,
-    );
-
-    let stash_writes = tracker.as_ref().map(|tracker| {
-        build_log
-            .stash_writes()
-            .saturating_sub(tracker.removed.load(Ordering::Relaxed))
-    });
-    let stash_errors = tracker
-        .as_ref()
-        .map(|tracker| build_log.stash_errors() + tracker.failed.load(Ordering::Relaxed));
-    // The engine never leaves an omission unmarked — a failed stash keeps
-    // its gap verbatim — so an attached store measures zero unrecoverable
-    // truncations by construction.
-    let unrecoverable_truncations = attached_store.map(|_| 0);
-    let stash_size = attached_store.map(|store| store.len());
-    let chain = if response.compressor_chain.is_empty() {
-        // The dry-run rejection cleared the pipeline's chain; rebuild the
-        // contributing ids for the measurement row.
-        let mut chain = Vec::new();
-        if terminal.changed() {
-            chain.push(tokenless_pipeline::TERMINAL_CLEANUP.id.to_owned());
-        }
-        if include_lossy && build_log.changed() {
-            chain.push(tokenless_pipeline::BUILD_LOG.id.to_owned());
-        }
-        chain
-    } else {
-        response.compressor_chain.clone()
-    };
-
-    ResponsePipelineRun {
-        response,
-        candidate: build_log
-            .take_candidate()
-            .or_else(|| terminal.take_candidate()),
-        committed_writes: build_log.take_writes(),
-        stash_writes,
-        stash_errors,
-        unrecoverable_truncations,
-        stash_size,
-        truncations: build_log.omitted_blocks(),
-        chain,
+fn json_config(options: &CompressOptions) -> JsonCompressionConfig {
+    let defaults = JsonCompressionConfig::default();
+    JsonCompressionConfig {
+        truncate_strings_at: options
+            .truncate_strings_at
+            .unwrap_or(defaults.truncate_strings_at),
+        truncate_arrays_at: options
+            .truncate_arrays_at
+            .unwrap_or(defaults.truncate_arrays_at),
+        array_tail_preserve: options
+            .array_tail_preserve
+            .unwrap_or(defaults.array_tail_preserve),
+        max_depth: options.max_depth.unwrap_or(defaults.max_depth),
+        ..defaults
     }
 }
 
@@ -1105,19 +874,11 @@ pub fn record_compression(
     }
 }
 
-/// The chain element that owns an applied result's stash keys: the first one
-/// registered as retrievable-lossy — a chain like `["terminal-cleanup",
-/// "build-log"]` must not attribute build-log's keys to the lossless head.
-/// Falls back to the chain head for ids outside the registry
-/// (before-model's `schema-compress`), preserving their prior attribution.
+/// The v1 chain element that owns an applied result's Stash keys.
 fn stash_owning_compressor(chain: &[String]) -> Option<&str> {
     chain
         .iter()
-        .find(|id| {
-            tokenless_pipeline::REGISTRY.iter().any(|spec| {
-                spec.id == id.as_str() && spec.stage == tokenless_pipeline::Stage::RetrievableLossy
-            })
-        })
+        .find(|id| matches!(id.as_str(), "response-cleanup" | "schema-compress"))
         .or_else(|| chain.first())
         .map(String::as_str)
 }
@@ -1135,7 +896,7 @@ fn resolve_runtime_data_dir(explicit: Option<&Path>) -> Result<PathBuf, RuntimeE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokenless_ccr::{InMemoryStore, StashError};
+    use tokenless_ccr::{InMemoryStore, StashError, StashWrite};
     use tokenless_protocol::ContentOrigin;
 
     struct AlwaysFail;
@@ -1301,6 +1062,29 @@ mod tests {
         assert!(result.applied());
         assert_ne!(result.output, input);
         assert!(result.output.contains("truncated"));
+        assert_eq!(result.unrecoverable_truncations, None);
+    }
+
+    #[test]
+    fn explicit_response_api_removes_top_level_nulls() {
+        let mut value = serde_json::Map::new();
+        value.insert(
+            "keep".to_owned(),
+            serde_json::Value::String("value".to_owned()),
+        );
+        for index in 0..80 {
+            value.insert(format!("null_{index}"), serde_json::Value::Null);
+        }
+        let input = serde_json::to_string(&value).unwrap();
+
+        let result =
+            compress_response_with_store(&input, &CompressOptions::default(), true, None).unwrap();
+
+        assert_eq!(result.disposition, Disposition::Applied);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.output).unwrap(),
+            serde_json::json!({"keep": "value"})
+        );
     }
 
     #[test]
@@ -1412,13 +1196,10 @@ mod tests {
     }
 
     #[test]
-    fn non_record_json_passes_through_untouched() {
-        // Detection routes only record-shaped JSON ({...}/[...]) to the
-        // cleanup; a scalar root passes through, where the pre-pipeline path
-        // would truncate it. Deliberate: routing by detected content is the
-        // §4.2 contract. The unified entry now routes non-JSON text to the
-        // build/log pipeline; this legacy JSON-only API keeps the gate
-        // (python tests depend on it).
+    fn explicit_json_api_compresses_string_roots() {
+        // JSON scalars remain valid input to the explicit JSON API even
+        // though the general PostTool detector only dispatches structured
+        // JSON and wrapped structured output.
         let input = serde_json::to_string(&"x".repeat(400)).unwrap();
         let result = compress_response_with_store(
             &input,
@@ -1430,9 +1211,9 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(result.disposition, Disposition::Passthrough);
-        assert_eq!(result.output, input);
-        assert_eq!(result.after_tokens, result.before_tokens);
+        assert_eq!(result.disposition, Disposition::Applied);
+        assert_ne!(result.output, input);
+        assert!(result.after_tokens < result.before_tokens);
     }
 
     #[test]
@@ -1860,10 +1641,10 @@ mod tests {
         assert_eq!(rows, expected_sorted);
     }
 
-    /// A text-slot run chains terminal-cleanup before build-log; artifact
-    /// rows must name the stash-owning compressor, not the chain head.
+    /// Unsupported text domains produce neither compression rows nor
+    /// artifacts while the first Runtime-owned Pipeline ships JSON only.
     #[test]
-    fn artifacts_attribute_to_the_stash_owning_compressor() {
+    fn passthrough_text_produces_no_artifacts() {
         let directory = tempfile::tempdir().unwrap();
         let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
         let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
@@ -1881,23 +1662,18 @@ mod tests {
         request.capabilities.replace_with_text = true;
         request.capabilities.publish_retrieve_tool = true;
         let outcome = compress_with_store(&request, &ENTRY_ENABLED, Some(&store));
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert_eq!(
-            outcome.response.compressor_chain,
-            ["terminal-cleanup", "build-log"]
-        );
-        assert!(!outcome.response.stash_keys.is_empty());
+        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+        assert!(outcome.response.compressor_chain.is_empty());
+        assert!(outcome.response.stash_keys.is_empty());
         record_compression(&request, &outcome, Some(&recorder), false);
 
         let conn = rusqlite::Connection::open(directory.path().join("stats.db")).unwrap();
-        let owners: Vec<String> = conn
-            .prepare("SELECT DISTINCT compressor_id FROM compression_artifacts")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
+        let artifacts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM compression_artifacts", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(owners, ["build-log"]);
+        assert_eq!(artifacts, 0);
     }
 
     #[test]

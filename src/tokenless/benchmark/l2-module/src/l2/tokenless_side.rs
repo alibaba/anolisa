@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tokenless side: direct in-process calls to `tokenless_schema`'s
-//! `ResponseCompressor` — the same code path the L1 suite measures, so L2
+//! Tokenless side: direct in-process calls to `JsonCompressor` — the same
+//! code path the L1 suite measures, so L2
 //! numbers stay comparable with L1 rather than adding CLI subprocess noise.
 //!
 //! Latency basis: **in-process** (`Instant` around the compress call only).
@@ -21,7 +21,7 @@
 use crate::l2::{Category, L2Error};
 use serde_json::{Value, json};
 use std::time::Instant;
-use tokenless_schema::ResponseCompressor;
+use tokenless_compressors::{JsonCompressionContext, JsonCompressor};
 
 /// Latency-basis label stamped on every tokenless-side result row.
 pub const LATENCY_BASIS: &str = "in-process";
@@ -35,7 +35,7 @@ pub struct TokenlessOutput {
     pub latency_s: f64,
 }
 
-/// Compresses `content` with the tokenless `ResponseCompressor`.
+/// Compresses `content` with the tokenless `JsonCompressor`.
 ///
 /// JSON samples are parsed and compressed as-is. Non-JSON text (source code,
 /// command output) is wrapped as `{"content": text}` — the engine's generic
@@ -55,15 +55,24 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         json!({ "content": content })
     };
 
-    let compressor = ResponseCompressor::new();
+    let input = serde_json::to_string(&value)?;
+    let compressor = JsonCompressor::default();
+    let context = JsonCompressionContext {
+        stash: None,
+        allow_toon: false,
+        preserve_top_level_shape: false,
+        min_toon_chars: usize::MAX,
+    };
     // Time only the compress call: the wire-form serialization below is
     // measurement plumbing, not engine work.
     let start = Instant::now();
-    let compressed_value = compressor.compress(&value);
+    let compressed = compressor
+        .compress(&input, &context)
+        .map_err(|error| L2Error::InvalidSample(error.to_string()))?;
     let latency_s = start.elapsed().as_secs_f64();
 
     Ok(TokenlessOutput {
-        compressed: serde_json::to_string(&compressed_value)?,
+        compressed: compressed.output,
         latency_s,
     })
 }

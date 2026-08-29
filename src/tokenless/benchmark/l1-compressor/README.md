@@ -148,6 +148,6 @@ stacking report) is computed in Rust in-process.
 ## Version note
 
 Reconstructed against tokenless **0.7.3**. The 0.2.0-era reports used
-`ResponseCompressor` default `truncate_arrays_at = 16`; it is **32** now, so
+The old response compressor defaulted `truncate_arrays_at = 16`; `JsonCompressor` uses **32**, so
 the `items/*` and `medium/large/huge` response curves flatten after 32 items
 rather than 16. The curve shape matches the report; the truncation knee moved.

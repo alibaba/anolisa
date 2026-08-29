@@ -473,12 +473,11 @@ tokenless env-check --tool Shell --fix
 
 ## 架构
 
-- `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
+- `crates/tokenless-schema/` — BeforeModel 工具 Schema 压缩：`SchemaCompressor`
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
-- `crates/tokenless-runtime/` — CLI 与语言绑定共用的有状态 Rust API
-- `crates/tokenless-protocol/` — 版本化 Adapter 请求/响应契约
-- `crates/tokenless-pipeline/` — 内容检测、路由、分阶段执行与仲裁
-- `crates/tokenless-compressors/` — Terminal 与 build/log Compressor
+- `crates/tokenless-runtime/` — 生命周期 API 与 Runtime 内部的 `PostToolPipeline`
+- `crates/tokenless-protocol/` — 版本化 Adapter 契约与共享 `heuristic-v1` Token Estimator
+- `crates/tokenless-compressors/` — JSON 领域压缩器和暂未接入 PostTool 的文本引擎
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据

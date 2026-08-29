@@ -40,6 +40,7 @@ path = "src/lib.rs"
 serde_json = "1.0"
 toon-format = { version = "0.5", default-features = false }
 tokenless-schema = { path = "../../crates/tokenless-schema" }
+tokenless-compressors = { path = "../../crates/tokenless-compressors" }
 tokenless-ccr = { path = "../../crates/tokenless-ccr" }
 # SIGKILL fallback for rtk children that outlive the 5s timeout — used in
 # `src/metrics.rs` behind `#[cfg(unix)]`, so a plain grep misses it.

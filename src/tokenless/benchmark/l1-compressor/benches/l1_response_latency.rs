@@ -28,10 +28,9 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use tokenless_bench::{
-    response_canonical, response_deep_nesting, response_high_repetition, response_huge,
-    response_items, response_small,
+    compress_json, response_canonical, response_deep_nesting, response_high_repetition,
+    response_huge, response_items, response_small,
 };
-use tokenless_schema::ResponseCompressor;
 
 fn bench_response(c: &mut Criterion) {
     let mut group = c.benchmark_group("response_latency");
@@ -45,8 +44,7 @@ fn bench_response(c: &mut Criterion) {
         "small_1kb: actual={small_bytes}B"
     );
     group.bench_function("small_1kb", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&small)));
+        b.iter(|| compress_json(black_box(&small)));
     });
 
     // medium_10kb uses response_items(31) ≈ 10KB. This is the same input as the
@@ -61,8 +59,7 @@ fn bench_response(c: &mut Criterion) {
         "medium_10kb: actual={medium_bytes}B"
     );
     group.bench_function("medium_10kb", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&medium)));
+        b.iter(|| compress_json(black_box(&medium)));
     });
 
     // ~100KB: 307 records.
@@ -73,8 +70,7 @@ fn bench_response(c: &mut Criterion) {
         "large_100kb: actual={large_bytes}B"
     );
     group.bench_function("large_100kb", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&large)));
+        b.iter(|| compress_json(black_box(&large)));
     });
 
     // ~1MB: records cycled to fill approximately one megabyte.
@@ -85,36 +81,31 @@ fn bench_response(c: &mut Criterion) {
         "huge_1mb: actual={huge_bytes}B"
     );
     group.bench_function("huge_1mb", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&huge)));
+        b.iter(|| compress_json(black_box(&huge)));
     });
 
     let deep = response_deep_nesting(8);
     group.bench_function("deep_nesting_8", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&deep)));
+        b.iter(|| compress_json(black_box(&deep)));
     });
 
     let rep = response_high_repetition(100);
     group.bench_function("high_repetition_100", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&rep)));
+        b.iter(|| compress_json(black_box(&rep)));
     });
 
     // Items curve including 31/32/33 around the truncation threshold.
     for n in [10usize, 31, 32, 33, 50, 100, 500, 1000] {
         let items = response_items(n);
         group.bench_function(format!("items/{n}"), |b| {
-            let compressor = ResponseCompressor::new();
-            b.iter(|| compressor.compress(black_box(&items)));
+            b.iter(|| compress_json(black_box(&items)));
         });
     }
 
     // Shared canonical payload — identical bytes to what Python compresses.
     let canonical = response_canonical();
     group.bench_function("canonical", |b| {
-        let compressor = ResponseCompressor::new();
-        b.iter(|| compressor.compress(black_box(&canonical)));
+        b.iter(|| compress_json(black_box(&canonical)));
     });
 
     group.finish();

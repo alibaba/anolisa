@@ -1,4 +1,4 @@
-//! Tokenless compression benchmark — throughput & latency metrics.
+//! Tokenless schema compression benchmark — throughput and latency metrics.
 //!
 //! Run: `cargo run --example bench --release -p tokenless-schema`
 
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_schema::SchemaCompressor;
 
 fn load_fixture(dir: &str, name: &str) -> Value {
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -70,34 +70,6 @@ fn run_schema_bench(name: &str, fixture: &Value, stash: bool) -> BenchResult {
     }
 }
 
-fn run_response_bench(name: &str, fixture: &Value, stash: bool) -> BenchResult {
-    let store = Arc::new(InMemoryStore::new());
-    let compressor = if stash {
-        ResponseCompressor::new().with_stash_store(store.clone() as Arc<dyn StashStore>)
-    } else {
-        ResponseCompressor::new()
-    };
-
-    let orig_bytes = serde_json::to_string(fixture).unwrap().len();
-
-    let start = Instant::now();
-    let mut comp_bytes = 0usize;
-    for _ in 0..ITERATIONS {
-        let compressed = compressor.compress(fixture);
-        comp_bytes = serde_json::to_string(&compressed).unwrap().len();
-    }
-    let total = start.elapsed();
-
-    BenchResult {
-        name: name.to_string(),
-        iterations: ITERATIONS,
-        total,
-        orig_bytes,
-        comp_bytes,
-        stash_count: store.len(),
-    }
-}
-
 fn print_result(r: &BenchResult) {
     println!(
         "  {:<40} {:>7.1} MB/s  {:>7.1} µs/op  {:>5.1}% saved  stash={}",
@@ -122,14 +94,6 @@ fn main() {
     .map(|name| (*name, load_fixture("schemas", name)))
     .collect();
 
-    let response_fixtures: Vec<(&str, Value)> = [
-        ("github_issues.json", "lossy field removal"),
-        ("github_issues_stashable.json", "reversible array stash"),
-    ]
-    .iter()
-    .map(|(name, _)| (*name, load_fixture("responses", name)))
-    .collect();
-
     println!("Tokenless Benchmark ({ITERATIONS} iterations per test)\n");
 
     println!("L1 — SchemaCompressor (no stash)");
@@ -145,74 +109,4 @@ fn main() {
             true,
         ));
     }
-
-    println!("\nL1 — ResponseCompressor (lossy field removal)");
-    print_result(&run_response_bench(
-        "response/github_issues.json",
-        &response_fixtures[0].1,
-        false,
-    ));
-
-    println!("\nL1 — ResponseCompressor + Stash (reversible array truncation)");
-    print_result(&run_response_bench(
-        "response+stash/github_issues_stashable.json",
-        &response_fixtures[1].1,
-        true,
-    ));
-
-    println!("\nL4 — Full pipeline aggregate");
-    let store = Arc::new(InMemoryStore::new());
-    let schema_comp =
-        SchemaCompressor::new().with_stash_store(store.clone() as Arc<dyn StashStore>);
-    let resp_comp =
-        ResponseCompressor::new().with_stash_store(store.clone() as Arc<dyn StashStore>);
-
-    let mut total_orig = 0usize;
-    let mut total_comp = 0usize;
-
-    // Precompute serialized byte lengths outside the timed loop so the
-    // measurement boundary matches L1 (which also precomputes orig_bytes
-    // before starting the timer). Including serialization inside the loop
-    // would add work L1 does not include, making throughput figures incomparable.
-    let schema_orig_bytes: Vec<usize> = schema_fixtures
-        .iter()
-        .map(|(_, f)| serde_json::to_string(f).unwrap().len())
-        .collect();
-    let response_orig_bytes: Vec<usize> = response_fixtures
-        .iter()
-        .map(|(_, f)| serde_json::to_string(f).unwrap().len())
-        .collect();
-
-    let start = Instant::now();
-    for _ in 0..ITERATIONS {
-        for (i, (_, fixture)) in schema_fixtures.iter().enumerate() {
-            let compressed = schema_comp.compress(fixture);
-            total_orig += schema_orig_bytes[i];
-            total_comp += serde_json::to_string(&compressed).unwrap().len();
-        }
-        for (i, (_, fixture)) in response_fixtures.iter().enumerate() {
-            let compressed = resp_comp.compress(fixture);
-            total_orig += response_orig_bytes[i];
-            total_comp += serde_json::to_string(&compressed).unwrap().len();
-        }
-    }
-    let total_time = start.elapsed();
-
-    let combined_mbps = total_orig as f64 / total_time.as_secs_f64() / 1_000_000.0;
-    let saved = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
-
-    println!(
-        "  {:<40} {:>7.1} MB/s  overall {:.1}% saved  stash={}",
-        "full-pipeline",
-        combined_mbps,
-        saved,
-        store.len(),
-    );
-    println!(
-        "\n  Total processed: {} bytes in {:.2}s ({} iterations over {} fixtures)",
-        total_orig,
-        total_time.as_secs_f64(),
-        ITERATIONS,
-        schema_fixtures.len() + response_fixtures.len(),
-    );
 }

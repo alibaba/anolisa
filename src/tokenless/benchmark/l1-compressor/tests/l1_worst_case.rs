@@ -23,7 +23,8 @@
 //! are returned unchanged (equal size). 9 tests.
 
 use serde_json::{Value, json};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_bench::compress_json;
+use tokenless_schema::SchemaCompressor;
 
 /// Serialized byte length — the proxy for token cost used across these tests.
 fn len(v: &Value) -> usize {
@@ -42,7 +43,7 @@ fn assert_not_expanded(input: &Value, output: &Value) {
 #[test]
 fn long_string_shrinks() {
     let input = json!({ "log": "detail ".repeat(5000) });
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }
 
@@ -52,7 +53,7 @@ fn large_object_array_shrinks() {
         .map(|i| json!({ "id": i, "name": format!("record-{i}"), "note": "some substantial payload text" }))
         .collect();
     let input = Value::Array(items);
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }
 
@@ -64,7 +65,7 @@ fn debug_fields_removal_shrinks() {
         "stacktrace": "y".repeat(2000),
         "logs": "z".repeat(2000)
     });
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }
 
@@ -76,7 +77,7 @@ fn null_removal_shrinks() {
     }
     obj.insert("keep".into(), json!("value"));
     let input = Value::Object(obj);
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }
 
@@ -88,7 +89,7 @@ fn empty_field_removal_shrinks() {
     }
     obj.insert("keep".into(), json!("value"));
     let input = Value::Object(obj);
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }
 
@@ -98,7 +99,7 @@ fn over_deep_nesting_collapses_smaller() {
     for _ in 0..50 {
         input = json!({ "child": input });
     }
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }
 
@@ -134,6 +135,6 @@ fn combined_noise_response_shrinks() {
         })
         .collect();
     let input = json!({ "results": items, "trace": "t".repeat(5000) });
-    let output = ResponseCompressor::new().compress(&input);
+    let output = compress_json(&input);
     assert_not_expanded(&input, &output);
 }

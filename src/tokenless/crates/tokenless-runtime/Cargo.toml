@@ -12,7 +12,6 @@ thiserror.workspace = true
 toon-format.workspace = true
 tokenless-ccr = { path = "../tokenless-ccr" }
 tokenless-compressors = { path = "../tokenless-compressors" }
-tokenless-pipeline = { path = "../tokenless-pipeline" }
 tokenless-protocol = { path = "../tokenless-protocol" }
 tokenless-schema = { path = "../tokenless-schema" }
 tokenless-stats = { path = "../tokenless-stats" }

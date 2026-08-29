@@ -107,12 +107,11 @@ Example: dashboard shows 60% compression rate, but if tool responses account for
 
 ```
 Token-Less/
-├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
+├── crates/tokenless-schema/   # BeforeModel tool-schema compressor
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
-├── crates/tokenless-runtime/  # Stateful in-process compression and retrieval API
-├── crates/tokenless-protocol/ # Versioned adapter request/response contract
-├── crates/tokenless-pipeline/ # Content detection, routing, staging, and arbitration
-├── crates/tokenless-compressors/ # Terminal and build/log compressors
+├── crates/tokenless-runtime/  # Lifecycle API and Runtime-owned PostTool pipeline
+├── crates/tokenless-protocol/ # Versioned adapter contract and token estimator
+├── crates/tokenless-compressors/ # JSON compressor plus standalone text engines
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
 ├── python/tokenless/          # PyO3 package: `anolisa_tokenless`
 ├── python/agentscope/         # Pure-Python AgentScope integration package
@@ -839,8 +838,10 @@ layout and single-target interface.
 | Path | Description |
 |---|---|
 | `crates/tokenless-cli/` | CLI binary — `tokenless` command (compress, stats, env-check) |
-| `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
-| `crates/tokenless-runtime/` | Stateful Rust API shared by the CLI and language bindings |
+| `crates/tokenless-schema/` | BeforeModel tool-schema compression — `SchemaCompressor` |
+| `crates/tokenless-compressors/` | Content-domain engines — phase one wires only `JsonCompressor` into PostTool |
+| `crates/tokenless-runtime/` | Lifecycle API and Runtime-owned `PostToolPipeline`, shared by CLI and language bindings |
+| `crates/tokenless-protocol/` | Versioned adapter contract and shared `heuristic-v1` token estimator |
 | `python/tokenless/` | PyO3 package exposing `anolisa_tokenless` for CPython 3.11+ |
 | `python/agentscope/` | Independent AgentScope framework integration and wheel metadata |
 | `adapters/tokenless/` | FHS adapter bundle — manifest, env-check spec/fix, hooks, OpenClaw plugin |
