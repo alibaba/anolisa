@@ -147,6 +147,34 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(composed.rewritten)
         self.assertIn("\ncargo test", composed.arguments["command"])
 
+    async def test_rtk_rewrite_state_bypasses_result_optimization(self) -> None:
+        sdk = self.sdk()
+        rewritten = await sdk.before_tool_call(
+            ToolCall(
+                "shell",
+                {"command": "grep needle file.txt"},
+                Attribution("sdk-agent", "sdk-session", "call-rtk"),
+                command_field="command",
+            )
+        )
+        self.assertTrue(rewritten.rewritten)
+
+        sdk._response.compress_text = AsyncMock(
+            side_effect=AssertionError("RTK output reached response compression")
+        )
+        sdk._compress_toon = AsyncMock(
+            side_effect=AssertionError("RTK output reached TOON compression")
+        )
+        result = ToolResult(
+            rewritten,
+            json.dumps({"items": list(range(100))}),
+            ToolStatus.SUCCESS,
+        )
+
+        self.assertIs(await sdk.after_tool_call(result), result)
+        sdk._response.compress_text.assert_not_awaited()
+        sdk._compress_toon.assert_not_awaited()
+
     def test_rtk_anchoring_preserves_shell_separators_and_quotes(self) -> None:
         sdk = self.sdk()
         attribution = Attribution("sdk-agent", "sdk-session", "call-anchor")

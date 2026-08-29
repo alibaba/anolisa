@@ -8,7 +8,7 @@ import json
 import sys
 import types
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -186,6 +186,55 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         result = await hook(self.agent, {"tool_call": original})
         self.assertIsNot(result["tool_call"], original)
         self.assertEqual(original["input"], {"value": 1})
+
+    async def test_rtk_state_survives_until_the_final_response(self) -> None:
+        async def rewrite(call):
+            return replace(
+                call,
+                arguments={**call.arguments, "command": "rtk grep needle file.txt"},
+                rewritten=True,
+            )
+
+        self.integration.sdk.before_tool_call = rewrite
+        original = {
+            "name": "shell",
+            "id": "call-rtk",
+            "input": {"command": "grep needle file.txt"},
+        }
+        hook = self.agent.hooks[("pre_acting", "tokenless")]
+        transformed = (await hook(self.agent, {"tool_call": original}))["tool_call"]
+
+        self.assertEqual(original["input"]["command"], "grep needle file.txt")
+        self.assertEqual(transformed["input"]["command"], "rtk grep needle file.txt")
+        self.assertIn("call-rtk", self.toolkit.rewritten_calls)
+
+        def fail_compression(_value: str, **_kwargs) -> _CompressionResult:
+            raise AssertionError("RTK output reached response compression")
+
+        self.integration.sdk.runtime.compress_impl = fail_compression
+        partial = _Response(
+            [{"type": "text", "text": "stream"}],
+            is_last=False,
+        )
+        self.assertIs(
+            await self.integration._after_tool(self.toolkit, transformed, partial),
+            partial,
+        )
+        self.assertIn("call-rtk", self.toolkit.rewritten_calls)
+
+        final = _Response(
+            [
+                {
+                    "type": "text",
+                    "text": json.dumps({"items": list(range(100))}),
+                }
+            ]
+        )
+        self.assertIs(
+            await self.integration._after_tool(self.toolkit, transformed, final),
+            final,
+        )
+        self.assertNotIn("call-rtk", self.toolkit.rewritten_calls)
 
     def test_retrieve_name_collision_is_rejected(self) -> None:
         original = self.toolkit.tools["tokenless_retrieve"].original_func

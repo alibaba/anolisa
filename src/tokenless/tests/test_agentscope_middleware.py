@@ -9,7 +9,7 @@ import json
 import sys
 import types
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -269,6 +269,48 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(output[0], chunk)
         self.assertEqual(output[1].content[0].text, "short")
         self.assertEqual(response.content[0].text, "long " * 100)
+
+    async def test_rtk_state_reaches_the_final_response(self) -> None:
+        async def rewrite(call):
+            return replace(
+                call,
+                arguments={**call.arguments, "command": "rtk grep needle file.txt"},
+                rewritten=True,
+            )
+
+        self.middleware.sdk.before_tool_call = rewrite
+
+        def fail_compression(_value, **_kwargs):
+            raise AssertionError("RTK output reached response compression")
+
+        self.middleware.sdk.runtime.compress_impl = fail_compression
+        source = _Call(
+            "call-rtk",
+            "shell",
+            json.dumps({"command": "grep needle file.txt"}),
+        )
+        chunk = _ToolChunk([_TextBlock("stream")])
+        response = _ToolResponse([_TextBlock(json.dumps({"items": list(range(100))}))])
+
+        async def next_handler(**kwargs):
+            self.assertEqual(
+                json.loads(kwargs["tool_call"].input)["command"],
+                "rtk grep needle file.txt",
+            )
+            yield chunk
+            yield response
+
+        output = await _collect(
+            self.middleware.on_acting(
+                self.agent,
+                {"tool_call": source},
+                next_handler,
+            )
+        )
+
+        self.assertEqual(json.loads(source.input)["command"], "grep needle file.txt")
+        self.assertIs(output[0], chunk)
+        self.assertIs(output[1], response)
 
     async def test_error_adds_environment_guidance(self) -> None:
         response = _ToolResponse(
