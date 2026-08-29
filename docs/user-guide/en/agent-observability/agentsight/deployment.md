@@ -109,6 +109,32 @@ For a Kubernetes sidecar, the same three things matter:
    (`shareProcessNamespace: true`) so it can see Agent processes and attach uprobes;
 3. BTF — mount `/sys/kernel/btf` read-only from the host.
 
+**Persistence (mandatory)**: mount a volume at `/var/log/sysak/.agentsight`, or every container restart wipes
+all captured data — the writable layer is recreated from the image on restart (`kubectl exec ... pkill`, OOM,
+image updates, node drains all trigger it). Prefer `hostPath` for host-scoped observation data; use a PVC only
+when the data truly needs to follow the pod across nodes (note the data then lives and dies with the pod);
+`emptyDir` survives container restarts but not pod recreation.
+
+```yaml
+# sidecar reference shape (excerpt)
+volumes:
+  - name: agentsight-data
+    hostPath:
+      path: /var/log/sysak/.agentsight
+      type: DirectoryOrCreate
+containers:
+  - name: agentsight
+    # ...capabilities / shareProcessNamespace as above
+    volumeMounts:
+      - name: agentsight-data
+        mountPath: /var/log/sysak/.agentsight
+```
+
+> Permission note: the databases contain full prompts and responses. `DirectoryOrCreate` creates the host
+> directory root-owned with mode 0755, and the sidecar does not inherit the packaged service's `UMask=0077`.
+> Pre-create the directory with `chmod 700` (or tighten it from an initContainer) before production use so
+> other host users cannot read conversation content.
+
 Keep the Dashboard port inside the cluster and reach it through a Service or port-forward rather
 than exposing 7396 publicly.
 

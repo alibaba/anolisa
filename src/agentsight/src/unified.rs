@@ -209,6 +209,10 @@ impl AgentSight {
             log::warn!("Failed to load config from {path:?}: {e}, using embedded defaults");
         }
 
+        // Persistence check runs after the config file load so the warning
+        // targets the storage directory actually in effect.
+        crate::container::warn_if_data_dir_not_persistent(&config.storage_base_path);
+
         let all_cmdline_rules = config.cmdline_rules.clone();
 
         // Derive tcp_targets from http_targets (endpoint entries only)

@@ -42,6 +42,9 @@ tracer 自身始终写入默认目录。
 `sudo sqlite3 /var/log/sysak/.agentsight/<db> 'VACUUM;'`（VACUUM 会重建整个文件，
 建议先停止服务，避免 cgroup 内存限制下触发 OOM）。
 
+> 容器部署请注意：这些保留语义只在数据目录持久化时才有意义。不挂卷时容器每次重启都会清空全部数据，
+> 详见 [容器与 Sidecar](deployment.md#容器与-sidecar) 的持久化一节。
+
 给安装包服务调高 GenAI 上限：
 
 ```bash

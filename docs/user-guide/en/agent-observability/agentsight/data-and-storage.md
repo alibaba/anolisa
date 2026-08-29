@@ -47,6 +47,10 @@ space to the filesystem, run `sudo sqlite3 /var/log/sysak/.agentsight/<db>
 'VACUUM;'` manually during a low-traffic window — VACUUM rebuilds the whole
 file, so stop the service first to avoid tripping the cgroup memory limit.
 
+> For container deployments: retention only matters when the data directory is
+> persistent. Without a volume mount, every container restart wipes all data —
+> see [Containers and sidecars](deployment.md#containers-and-sidecars).
+
 To raise the GenAI cap for the packaged service:
 
 ```bash

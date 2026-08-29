@@ -188,6 +188,11 @@ impl TraceCommand {
             );
             std::process::exit(1);
         };
+        // Warn about the directory the trajectory db will actually live in
+        // (the shared dir or the $HOME fallback), not the unused default.
+        if let Some(dir) = db_path.parent() {
+            agentsight::container::warn_if_data_dir_not_persistent(dir);
+        }
 
         let collector_config = CollectorConfig {
             scan_interval_secs: config.features.trajectory_scan_interval_secs,

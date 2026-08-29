@@ -105,6 +105,30 @@ ANOLISA 的容器入口脚本（`docker/docker-entrypoint.sh`）已经按这个�
    进程并挂载 uprobe；
 3. BTF——以只读方式挂载宿主机的 `/sys/kernel/btf`。
 
+**持久化（必须）**：`/var/log/sysak/.agentsight` 必须挂卷，否则容器每次重启都会清空全部观测数据——
+可写层随容器重建而丢弃（`kubectl exec ... pkill`、OOM、镜像升级、节点漂移都会触发）。主机观测数据推荐
+`hostPath`；PVC 仅在确实需要跨节点迁移时使用（注意数据随 Pod 生命周期走，Pod 删除即丢失）；
+`emptyDir` 只能扛住容器重启，Pod 重建仍会丢失。
+
+```yaml
+# sidecar 参考形态（节选）
+volumes:
+  - name: agentsight-data
+    hostPath:
+      path: /var/log/sysak/.agentsight
+      type: DirectoryOrCreate
+containers:
+  - name: agentsight
+    # ...capabilities / shareProcessNamespace 见上
+    volumeMounts:
+      - name: agentsight-data
+        mountPath: /var/log/sysak/.agentsight
+```
+
+> 权限注意：库里含完整 prompt 与回答。`DirectoryOrCreate` 创建的目录是 root 0755，且 sidecar 没有
+> 打包 systemd 服务的 `UMask=0077`。生产部署前请预建目录并 `chmod 700`（或用 initContainer 收紧权限），
+> 避免主机上其他用户读到对话内容。
+
 Dashboard 端口建议只在集群内可达，通过 Service 或端口转发访问，而不是把 7396 直接暴露到公网。
 
 ## macOS

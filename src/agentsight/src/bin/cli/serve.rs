@@ -44,8 +44,15 @@ impl ServeCommand {
                 .unwrap_or_else(GenAISqliteStore::default_path);
 
             let server_config = super::load_server_config(&self.config);
+            // Initialize logging before warning: standalone `serve` does not
+            // register a logger, so a `log::warn!` before this point is lost.
+            server_config.apply_verbose();
             let auth_config = server_config.server_auth;
             let retention_days = server_config.retention_days;
+
+            if let Some(dir) = db_path.parent() {
+                agentsight::container::warn_if_data_dir_not_persistent(dir);
+            }
 
             actix_web::rt::System::new().block_on(async move {
                 if let Err(e) = run_server(&host, port, db_path, auth_config, retention_days).await
