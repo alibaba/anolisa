@@ -43,12 +43,12 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
-| Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Runs on the cosh/Cosh-NG `BeforeModel` hook and per OpenCode tool definition (Qwen Code's manifest entry is skipped by current hosts); other users can call the CLI |
-| Content-aware response compression | Routes JSON records, build logs, and long plain text through matching compressors, then accepts only a smaller end-to-end result | Direct `compress-response` remains JSON-only; host capabilities decide whether shared hooks can replace with text and publish retrieval |
+| Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel currently passes schemas through because these transformations are lossy and it has no trusted Retrieve; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
+| Content-aware response compression | Protocol v2 routes successful PostTool JSON to `JsonCompressor`, then accepts only a smaller end-to-end result | Non-JSON domains currently pass through; Common Hooks declare no trusted Retrieve and therefore apply only lossless candidates |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
-| Stash | Stores content removed by string, array, depth, or schema-description truncation and by build/log gap removal | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
+| Stash | Stores content removed by string, array, depth, or schema-description truncation | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
 
@@ -58,8 +58,10 @@ After an adapter is enabled, a tool call may pass through these stages:
 
 ```text
 Before the tool: hard-disabled Tool Ready hook → command rewrite
-After the tool: content detection → eligible compressors → optional Stash/TOON → statistics
-Before the model: schema compression
+Before the tool: RTK rewrite → carry output-optimization state
+After the tool: status and optimization bypass → JSON-only PostTool Pipeline → optional Stash/TOON → statistics
+Before the model: schema compression → visible Marker extraction → conditional Retrieve declaration
+Retrieve: visible-Marker authorization → byte-identical Stash read
 ```
 
 This is a capability map, not a pipeline that every framework runs. For example, the content-aware
@@ -94,14 +96,17 @@ anolisa adapter disable tokenless <framework>
 
 ### Reversible compression is conditional
 
-Active response/schema truncation and build/log gap removal stash the removed payload in
+Active response and schema truncation stash the removed payload in
 `~/.tokenless/stash.db` by default and add a marker such as:
 
 ```text
 <<tokenless:0123456789abcdef01234567>>
 ```
 
-The payload can be recovered through `tokenless retrieve` or the MCP `tokenless_retrieve` tool. Recovery is unavailable when:
+The payload can be recovered locally through the trusted `tokenless retrieve` command. Protocol v2
+agent-facing retrieval first requires the requested Marker to be present in the model's current
+`visible_markers` set. The old stateless MCP server was removed because it had no trustworthy
+model-visibility context. Recovery is unavailable when:
 
 - `--no-stash` was used.
 - Compression was running in dry-run mode.
@@ -114,10 +119,12 @@ Stash does not make all compression reversible. Removed `debug`/`trace` fields, 
 
 ### Processing errors usually fail open
 
-Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing,
-compression provides no savings, or an ordinary processing error occurs. The `compress` command returns
-the original in every non-`applied` response. Tool Ready is hard-disabled before its legacy check,
-repair, and blocking logic. Post-tool failure attribution is independent and remains unchanged.
+Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing
+or compression provides no savings. For Protocol v2 `compress`, normal non-application outcomes
+return a result with exit code `0`; malformed transport exits `2`, while RTK timeout, unauthorized
+Retrieve, Stash failure, and Pipeline failure exit `1` without response JSON. Tool Ready is
+hard-disabled before its legacy check, repair, and blocking logic. Post-tool failure attribution is
+independent and remains unchanged.
 
 Command rewriting also changes the shell command submitted by the host. Most adapters replace the command input directly; Hermes blocks the first call and tells the agent to retry with the rewritten command. Validate important command workflows as well as compressed output.
 
@@ -149,7 +156,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Use the in-process Python SDK | [Python SDK](sdk.md) |
 | Integrate AgentScope | [AgentScope SDK integration](sdk/agentscope.md) |
 | Connect an Agent product | [Agent integration](framework-integration.md) |
-| Compress, retrieve, or run MCP manually | [CLI reference](cli-reference.md) |
+| Compress or retrieve manually | [CLI reference](cli-reference.md) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |
 | Change settings or understand local data | [Configuration and data privacy](configuration-and-privacy.md) |
 | Fix missing statistics, adapter, or Stash issues | [Troubleshooting](troubleshooting.md) |

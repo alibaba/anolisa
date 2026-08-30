@@ -10,7 +10,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | ✅ |
+| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces lossless JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
 | Hermes | `hermes` | Hard-disabled | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
@@ -33,23 +33,26 @@ smaller, not by itself that the host removed the original from its model request
 
 ## Adapter processing rules
 
-The shared Cosh-NG, Qoder, Claude Code, and OpenCode hook sends one compression request to
-`tokenless compress`. The command detects the model-visible content, filters compressors by the
-host's declared replacement and retrieval capabilities, runs the eligible stages, and returns the
-original for every non-`applied` disposition. It currently routes:
+The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one Protocol v2
+`post_tool` request to `tokenless compress`. It declares output replacement but no trusted
+agent-facing Retrieve capability. Core therefore applies only lossless JSON candidates and returns
+the original for every non-`applied` disposition. It currently routes:
 
 | Content | Current shared-hook behavior |
 |---------|------------------------------|
-| JSON records | Structural response cleanup, with TOON considered for text-capable replacement slots |
-| Build/test/package logs | Lossless terminal cleanup, then signal-preserving build/log compression with retrievable gap markers |
-| Long plain text | Lossless terminal cleanup, then conservative head/tail retention with retrievable gap markers |
-| Diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching compressor exists |
+| JSON | Lossless structural cleanup; TOON may be selected for text-capable replacement slots |
+| JSON requiring string, array, or depth truncation | Rejected with `recoverability_unavailable` because the Common Hook cannot publish an authorized Retrieve tool |
+| Build/test/package logs, long plain text, diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching domain compressor is connected |
 
-Build/log compression requires all three capabilities: replace the original output, publish a
-retrieval Tool, and replace with arbitrary text. It preserves signal lines and stack-trace regions,
-keeps context around failures plus fixed head/tail windows, and stashes each omitted gap. Short logs
-or candidates saving fewer than 200 characters pass through. Plain text engages at 100 lines, or at
-65,536 characters for the single-line safety path.
+Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
+selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
+skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
+
+The Common BeforeModel hook also uses Protocol v2 and declares no trusted Retrieve capability.
+Core returns transformed tools only when the result is lossless. Every current `SchemaCompressor`
+transformation removes or rewrites schema information, so this Common path passes tools through
+unchanged, emits no schema-compression Stats rows, and never emits unrecoverable Markers. OpenCode's
+separate per-tool definition path and the direct `compress-schema` command are unchanged.
 
 Legacy OpenClaw, Hermes, and DeepSeek Harness integrations still use their dedicated response paths.
 Their response thresholds and feature sets are described below; the content-aware build/log path
@@ -64,13 +67,17 @@ For JSON response cleanup, shared and legacy adapters classify tools as follows:
 | Shell/exec | 65,536-character strings, 128 retained array items, depth 8 |
 | Other structured tools | 1,048,576-character strings, 65,536 retained array items, depth 32 |
 
-The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Skill-like
-text with YAML frontmatter is also skipped by the shared paths. TOON runs only on payloads of at
-least 500 characters and only when the selected host slot accepts text; smaller payloads keep the
-prior candidate. The same default minimum applies to the standalone `compress-toon` CLI and SDK
-TOON path, while the CLI can lower it per call with `--min-toon-chars`. Codex and Qwen Code do not
-run response compression or TOON because their current PostToolUse contracts cannot replace the
-original model-visible output.
+OpenClaw and Hermes still apply their existing adapter-side 200-character gates. In the Common Hook,
+that gate now belongs to Core. TOON runs only on payloads of at least 500 characters and only when
+the selected host slot accepts text; smaller payloads keep the prior candidate. The same default
+minimum applies to the standalone `compress-toon` CLI and SDK TOON path, while the CLI can lower it
+per call with `--min-toon-chars`. Codex and Qwen Code do not run response compression or TOON because
+their current PostToolUse contracts cannot replace the original model-visible output.
+
+The Common PreTool rewrite hook still invokes RTK directly and does not yet carry v2
+`output_optimization: "rtk"` into the later PostTool process. OpenClaw has the same per-call state
+gap. Their complete state migration is deferred to the adapter phase; the current PostTool request
+uses `output_optimization: "none"`.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 

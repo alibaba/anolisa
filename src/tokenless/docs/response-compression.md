@@ -57,14 +57,14 @@ execFileSync("tokenless", ["compress-response"], { input: JSON, timeout: 3s })
 
 **RTK 跳过逻辑**：当 RTK 启用且可用时，`exec` 工具的结果已经过 RTK 优化，不再二次压缩。
 
-### 路径 2：共享 PostTool hook（Protocol v1）
+### 路径 2：共享 PostTool Hook（Protocol v2）
 
 ```
 工具执行完成
    ↓
 Adapter 触发 PostTool 事件，stdin 传入框架 Envelope
    ↓
-Hook 转换为 `CompressionRequest`
+Hook 转换为 `operation: "post_tool"` 的 v2 Request
    ↓
 调用一次 `tokenless compress`
    ↓
@@ -74,13 +74,16 @@ JSON → `JsonCompressor`；非 JSON → Passthrough
    ↓
 Runtime 执行一次字符/Token 仲裁和一次 Stash Commit/Rollback
    ↓
-Hook 按宿主 Capability 应用 `CompressionResponse`
+Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
 `ContentType::Json -> JsonCompressor`；清理、截断、Structured Slot 恢复、Compact JSON 与
 可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
-任何可选压缩失败都返回原始内容（fail-open）。
+Common Hook 不声明受信 Retrieve 能力，因此只接受无损 JSON 候选；需要截断的候选以
+`recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK 操作错误由 CLI 以退出码 1
+返回，Hook 在进程边界上 fail-open。Common PreTool Hook 仍直接调用 RTK，本阶段尚未把逐调用
+`output_optimization: "rtk"` 状态传给 PostTool。
 
 **TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。
 

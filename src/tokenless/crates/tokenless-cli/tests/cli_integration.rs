@@ -834,18 +834,21 @@ fn retrieve_records_events_and_summary_reports_attribution() {
         Some(fixture) => fixture,
         None => return,
     };
-    let request = post_tool_request_json(
-        &format!(
-            r#"{{"records":[{}]}}"#,
-            (0..200)
-                .map(|i| format!(r#"{{"id":{i},"name":"row-{i}"}}"#))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        "Bash",
-        false,
-        "retrieve-attribution",
+    let content = format!(
+        r#"{{"records":[{}]}}"#,
+        (0..200)
+            .map(|i| format!(r#"{{"id":{i},"name":"row-{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
     );
+    let mut request: serde_json::Value = serde_json::from_str(&post_tool_request_json(
+        &content,
+        true,
+        "retrieve-attribution",
+    ))
+    .unwrap();
+    request["input"]["tool_name"] = serde_json::json!("Bash");
+    request["input"]["content_origin"] = serde_json::json!("command_output");
     let output = spawn_with_stdin(
         fixture
             .command()
@@ -853,12 +856,12 @@ fn retrieve_records_events_and_summary_reports_attribution() {
             .env("TOKENLESS_STATS_ENABLED", "1")
             .env("TOKENLESS_SLS_ENABLED", "0"),
         &["compress"],
-        &request,
+        &request.to_string(),
     );
     assert!(output.status.success());
     let response: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
-    let marker_text = response["output"].as_str().unwrap();
+    let marker_text = response["result"]["output"].as_str().unwrap();
     let marker_start = marker_text
         .find("<<tokenless:")
         .expect("array truncation should emit a stash marker");
@@ -1748,7 +1751,7 @@ fn stats_summary_compare_rejects_zero_limit() {
     assert!(!stdout.contains("saved_percent"));
 }
 
-// ---- unified `compress` entry point (roadmap §5.4) ----
+// ---- Protocol v2 `compress` lifecycle transport ----
 
 fn spawn_with_stdin(
     command: &mut Command,
@@ -1762,7 +1765,7 @@ fn spawn_with_stdin(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .and_then(|mut child| {
-            use std::io::Write;
+            use std::io::Write as _;
             child
                 .stdin
                 .take()
@@ -1773,30 +1776,32 @@ fn spawn_with_stdin(
         .unwrap()
 }
 
-fn post_tool_request_json(
-    content: &str,
-    tool_name: &str,
-    replace_with_text: bool,
-    session_id: &str,
-) -> String {
+fn post_tool_request_json(content: &str, publish_retrieve_tool: bool, session_id: &str) -> String {
     serde_json::json!({
-        "protocol_version": 1,
-        "content": content,
-        "agent_id": "integration-agent",
-        "session_id": session_id,
-        "tool_name": tool_name,
-        "seam": "post_tool",
-        "capabilities": {
-            "replace_output": true,
-            "publish_retrieve_tool": true,
-            "replace_with_text": replace_with_text,
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": session_id,
+            "tool_use_id": "call-1"
         },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "WebFetch",
+            "content": content,
+            "status": "success",
+            "content_origin": "api_response",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "publish_retrieve_tool": publish_retrieve_tool,
+                "replace_with_text": false
+            }
+        }
     })
     .to_string()
 }
 
-/// A cleanup win that survives the structured-slot schema restore and does
-/// not touch the stash (no truncation).
 fn debug_laden_content() -> String {
     serde_json::to_string(&serde_json::json!({
         "url": "https://registry.example.com/packages",
@@ -1813,28 +1818,13 @@ fn debug_laden_content() -> String {
     .unwrap()
 }
 
-/// Uniform records with nothing to clean: only TOON can win, and only on a
-/// text slot.
-fn toon_friendly_content() -> String {
-    serde_json::to_string(&serde_json::json!({
-        "matches": (0..16).map(|i| serde_json::json!({
-            "file": format!("src/deep/nested/module_{i:02}.rs"),
-            "line": 100 + i * 13,
-            "column": 5 + i % 9,
-            "symbol": format!("handle_case_{i:02}"),
-        })).collect::<Vec<_>>(),
-    }))
-    .unwrap()
-}
-
 #[test]
-fn compress_applies_and_reports_the_protocol_response() {
+fn compress_post_tool_uses_the_v2_result_envelope() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
     let content = debug_laden_content();
-    let request = post_tool_request_json(&content, "WebFetch", false, "compress-applied");
     let output = spawn_with_stdin(
         fixture
             .command()
@@ -1842,7 +1832,7 @@ fn compress_applies_and_reports_the_protocol_response() {
             .env("TOKENLESS_STATS_ENABLED", "0")
             .env("TOKENLESS_SLS_ENABLED", "0"),
         &["compress"],
-        &request,
+        &post_tool_request_json(&content, false, "v2-post-tool"),
     );
     assert!(
         output.status.success(),
@@ -1850,298 +1840,184 @@ fn compress_applies_and_reports_the_protocol_response() {
         String::from_utf8_lossy(&output.stderr)
     );
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "applied");
+    assert_eq!(response["protocol_version"], 2);
+    assert_eq!(response["operation"], "post_tool");
+    assert_eq!(response["result"]["disposition"], "applied");
     assert_eq!(
-        response["compressor_chain"],
-        serde_json::json!(["response-cleanup"])
+        response["result"]["applied_operations"],
+        serde_json::json!(["json_cleanup"])
     );
-    let emitted = response["output"].as_str().unwrap();
-    assert!(emitted.chars().count() < content.chars().count());
-    assert!(
-        !emitted.contains("cache=miss"),
-        "debug payload must be dropped"
-    );
-    assert!(response["after_tokens"].as_u64() < response["before_tokens"].as_u64());
+    assert_eq!(response["result"]["recoverability"], "lossless");
+    assert_eq!(response["result"]["content_type"], "json");
 }
 
 #[test]
-fn compress_dry_run_emits_the_original_and_measures() {
+fn compress_before_model_and_retrieve_operations_are_dispatched() {
     let fixture = match TempDataDir::new() {
         Some(fixture) => fixture,
         None => return,
     };
-    let content = debug_laden_content();
-    let request = post_tool_request_json(&content, "WebFetch", false, "compress-dry");
+    let request = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "before_model",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "verbose description ".repeat(200),
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "visible_context": {"messages": []},
+            "retrieve_tool_name": "tokenless_retrieve",
+            "capabilities": {
+                "replace_tools": true,
+                "publish_retrieve_tool": true
+            }
+        }
+    });
     let output = spawn_with_stdin(
         fixture
             .command()
-            .env("TOKENLESS_COMPRESSION_ENABLED", "0")
-            .env("TOKENLESS_STATS_ENABLED", "0")
-            .env("TOKENLESS_SLS_ENABLED", "0"),
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0"),
         &["compress"],
-        &request,
+        &request.to_string(),
     );
     assert!(output.status.success());
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "dry_run");
-    assert_eq!(response["output"].as_str().unwrap(), content);
-    assert!(response["after_tokens"].as_u64() < response["before_tokens"].as_u64());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("dry-run mode"));
-}
+    let hash = response["result"]["visible_markers"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(response["result"]["retrieve_tool"].is_object());
 
-#[test]
-fn compress_build_log_text_is_phase_one_passthrough() {
-    let fixture = match TempDataDir::new() {
-        Some(fixture) => fixture,
-        None => return,
-    };
-    let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
-    lines.extend((0..70).map(|i| format!("   Compiling pkg{i:03} v0.1.{i}")));
-    lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
-    lines.extend((0..12).map(|i| format!("summary tail line {i}")));
-    let content = lines.join("\n") + "\n";
-
-    let request = post_tool_request_json(&content, "Bash", true, "build-log-e2e");
+    let retrieve = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "retrieve",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "hash_or_marker": hash,
+            "visible_markers": [hash]
+        }
+    });
     let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
-            .env("TOKENLESS_STATS_ENABLED", "0")
-            .env("TOKENLESS_SLS_ENABLED", "0"),
+        fixture.command().env("TOKENLESS_STATS_ENABLED", "0"),
         &["compress"],
-        &request,
-    );
-    assert!(
-        output.status.success(),
-        "compress failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "passthrough");
-    assert_eq!(response["output"].as_str().unwrap(), content);
-    assert_eq!(response["compressor_chain"], serde_json::json!([]));
-    assert_eq!(response["stash_keys"], serde_json::json!([]));
-}
-
-#[test]
-fn build_log_passthrough_records_no_compression_artifacts() {
-    let fixture = match TempDataDir::new() {
-        Some(fixture) => fixture,
-        None => return,
-    };
-    // The retained terminal and build-log engines are deliberately not
-    // connected to the phase-one PostTool pipeline.
-    let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
-    lines.extend((0..70).map(|i| format!("\u{1b}[1;32m   Compiling\u{1b}[0m pkg{i:03} v0.1.{i}")));
-    lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
-    lines.extend((0..12).map(|i| format!("summary tail line {i}")));
-    let content = lines.join("\n") + "\n";
-
-    let request = post_tool_request_json(&content, "Bash", true, "build-log-artifacts");
-    let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
-            .env("TOKENLESS_STATS_ENABLED", "1")
-            .env("TOKENLESS_SLS_ENABLED", "0"),
-        &["compress"],
-        &request,
-    );
-    assert!(
-        output.status.success(),
-        "compress failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "passthrough");
-    assert_eq!(response["output"].as_str().unwrap(), content);
-    assert_eq!(response["compressor_chain"], serde_json::json!([]));
-    assert_eq!(response["stash_keys"], serde_json::json!([]));
-
-    let conn = rusqlite::Connection::open(fixture.data_dir.join("stats.db")).unwrap();
-    let records: usize = conn
-        .query_row("SELECT COUNT(*) FROM stats", [], |row| row.get(0))
-        .unwrap();
-    let artifacts: usize = conn
-        .query_row("SELECT COUNT(*) FROM compression_artifacts", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(records, 0);
-    assert_eq!(artifacts, 0);
-}
-
-#[test]
-fn compress_undecodable_requests_exit_2() {
-    for bad in [
-        "not json",
-        r#"{"protocol_version":2,"content":"x","agent_id":"a","seam":"post_tool"}"#,
-        r#"{"protocol_version":1,"content":7}"#,
-    ] {
-        let output = spawn_with_stdin(&mut tokenless_bin(), &["compress"], bad);
-        assert_eq!(output.status.code(), Some(2), "input: {bad}");
-        assert!(output.stdout.is_empty());
-    }
-}
-
-#[test]
-fn compress_records_stats_by_the_winning_operation() {
-    let fixture = match TempDataDir::new() {
-        Some(fixture) => fixture,
-        None => return,
-    };
-    let cleanup_request =
-        post_tool_request_json(&debug_laden_content(), "WebFetch", false, "winner-cleanup");
-    let toon_request =
-        post_tool_request_json(&toon_friendly_content(), "mcp__search", true, "winner-toon");
-    for request in [&cleanup_request, &toon_request] {
-        let output = spawn_with_stdin(
-            fixture
-                .command()
-                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
-                .env("TOKENLESS_STATS_ENABLED", "1")
-                .env("TOKENLESS_SLS_ENABLED", "0"),
-            &["compress"],
-            request,
-        );
-        assert!(output.status.success());
-    }
-
-    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
-    let cleanup_records = recorder.records_by_session("winner-cleanup", None).unwrap();
-    assert_eq!(cleanup_records.len(), 1);
-    assert_eq!(
-        cleanup_records[0].operation,
-        OperationType::CompressResponse
-    );
-    // §4.6 attribution columns arrive with the row.
-    assert_eq!(cleanup_records[0].seam.as_deref(), Some("post_tool"));
-    assert!(cleanup_records[0].content_type.is_some());
-    assert_eq!(
-        cleanup_records[0].compressor_chain.as_deref(),
-        Some(r#"["response-cleanup"]"#)
-    );
-    assert_eq!(
-        cleanup_records[0].tokenizer_id.as_deref(),
-        Some("heuristic-v1")
-    );
-    let toon_records = recorder.records_by_session("winner-toon", None).unwrap();
-    assert_eq!(toon_records.len(), 1);
-    assert_eq!(toon_records[0].operation, OperationType::CompressToon);
-    assert!(toon_records[0].after_tokens < toon_records[0].before_tokens);
-}
-
-#[test]
-fn compress_no_savings_passes_through_and_records_nothing() {
-    let fixture = match TempDataDir::new() {
-        Some(fixture) => fixture,
-        None => return,
-    };
-    // Only empty top-level fields are droppable: the structured-slot
-    // restore cancels the win.
-    let content = serde_json::to_string(&serde_json::json!({
-        "stdout": "line of output. ".repeat(20),
-        "stderr": "",
-        "metadata": null,
-        "warnings": [],
-        "env": {},
-    }))
-    .unwrap();
-    let request = post_tool_request_json(&content, "Bash", false, "no-savings-session");
-    let output = spawn_with_stdin(
-        fixture
-            .command()
-            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
-            .env("TOKENLESS_STATS_ENABLED", "1")
-            .env("TOKENLESS_SLS_ENABLED", "0"),
-        &["compress"],
-        &request,
+        &retrieve.to_string(),
     );
     assert!(output.status.success());
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["disposition"], "no_savings");
-    assert_eq!(response["output"].as_str().unwrap(), content);
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("did not reduce size"));
-
-    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
-    let records = recorder
-        .records_by_session("no-savings-session", None)
-        .unwrap();
-    assert!(records.is_empty(), "no-savings must not book savings");
-}
-
-#[test]
-fn compress_cli_and_embedded_runtime_share_dispositions_and_counts() {
-    // §5.6: CLI and embedded Runtime produce the same dispositions and
-    // normalized token counts for the same request corpus. The corpus
-    // avoids stash-touching content so the two frontends' separate stores
-    // cannot diverge the comparison.
-    let fixture = match TempDataDir::new() {
-        Some(fixture) => fixture,
-        None => return,
-    };
-    let corpus = [
-        post_tool_request_json(&debug_laden_content(), "WebFetch", false, "parity"),
-        post_tool_request_json(&toon_friendly_content(), "mcp__search", true, "parity"),
-        post_tool_request_json(&toon_friendly_content(), "mcp__search", false, "parity"),
-        post_tool_request_json("plain text, not JSON at all", "Bash", false, "parity"),
-        post_tool_request_json(&debug_laden_content(), "Read", false, "parity"),
-        serde_json::json!({
-            "protocol_version": 1,
-            "content": "12345678",
-            "agent_id": "integration-agent",
-            "seam": "pre_tool",
-            "capabilities": {"replace_output": true},
-        })
-        .to_string(),
-    ];
-
-    let runtime = tokenless_runtime::TokenlessRuntime::new(tokenless_runtime::RuntimeConfig {
-        data_dir: Some(fixture.data_dir.join("embedded")),
-        stats_enabled: false,
-        sls_enabled: false,
-        compression_enabled: true,
-    })
-    .unwrap();
-
-    for request_json in &corpus {
-        let output = spawn_with_stdin(
-            fixture
-                .command()
-                .env("TOKENLESS_COMPRESSION_ENABLED", "1")
-                .env("TOKENLESS_STATS_ENABLED", "0")
-                .env("TOKENLESS_SLS_ENABLED", "0"),
-            &["compress"],
-            request_json,
-        );
-        assert!(output.status.success());
-        let cli: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
-        let request = tokenless_protocol::CompressionRequest::from_json(request_json).unwrap();
-        let embedded = runtime.compress(&request);
-
-        assert_eq!(
-            cli["disposition"].as_str().unwrap(),
-            embedded.disposition.wire_str(),
-            "request: {request_json}"
-        );
-        assert_eq!(cli["output"].as_str().unwrap(), embedded.output);
-        assert_eq!(
-            cli["before_tokens"].as_u64().unwrap(),
-            embedded.before_tokens
-        );
-        assert_eq!(cli["after_tokens"].as_u64().unwrap(), embedded.after_tokens);
-        assert_eq!(cli["tokenizer_id"].as_str().unwrap(), embedded.tokenizer_id);
-        let cli_chain: Vec<String> = cli["compressor_chain"]
-            .as_array()
+    assert_eq!(response["operation"], "retrieve");
+    assert!(
+        response["result"]["payload"]
+            .as_str()
             .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(cli_chain, embedded.compressor_chain);
+            .contains("verbose description")
+    );
+}
+
+#[test]
+fn compress_pre_tool_resolves_the_independent_rtk_binary() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let bin_dir = tempfile::tempdir().unwrap();
+    let rtk = bin_dir.path().join("rtk");
+    std::fs::write(
+        &rtk,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'rtk 0.43.0'; exit 0; fi\nprintf 'rtk grep --count error log'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&rtk).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&rtk, permissions).unwrap();
     }
+    let request = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "pre_tool",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "tool_name": "Bash",
+            "arguments": {"command": "grep error log"},
+            "command_field": "command",
+            "capabilities": {
+                "replace_arguments": true,
+                "block_and_suggest": false
+            }
+        }
+    });
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env(
+                "PATH",
+                std::env::join_paths(std::iter::once(bin_dir.path().to_path_buf()).chain(
+                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+                ))
+                .unwrap(),
+            )
+            .env("TOKENLESS_STATS_ENABLED", "0"),
+        &["compress"],
+        &request.to_string(),
+    );
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["action"], "replace_arguments");
+    assert_eq!(response["result"]["output_optimization"], "rtk");
+}
+
+#[test]
+fn compress_exit_contract_rejects_v1_and_operation_failures() {
+    let v1 = r#"{"protocol_version":1,"content":"x","agent_id":"a","seam":"post_tool"}"#;
+    let output = spawn_with_stdin(&mut tokenless_bin(), &["compress"], v1);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+
+    let unauthorized = serde_json::json!({
+        "protocol_version": 2,
+        "operation": "retrieve",
+        "attribution": {"agent_id": "integration-agent"},
+        "input": {
+            "hash_or_marker": "0123456789abcdef01234567",
+            "visible_markers": []
+        }
+    });
+    let output = spawn_with_stdin(
+        &mut tokenless_bin(),
+        &["compress"],
+        &unauthorized.to_string(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+
+    let post_tool = post_tool_request_json(
+        &serde_json::json!({"records": [{"value": "x".repeat(2000)}]}).to_string(),
+        true,
+        "database-error",
+    );
+    let output = spawn_with_stdin(
+        tokenless_bin()
+            .env("TOKENLESS_DATA_DIR", "relative/data")
+            .env("TOKENLESS_STATS_ENABLED", "0"),
+        &["compress"],
+        &post_tool,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn mcp_command_is_absent() {
+    let output = tokenless_bin().args(["mcp", "serve"]).output().unwrap();
+    assert_ne!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
 }
 
 /// Regression for GH-2838: a short payload with real token savings must

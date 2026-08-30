@@ -418,6 +418,31 @@ fn chmod_file(path: &std::path::Path, mode: u32) {
 
 #[cfg(unix)]
 #[test]
+fn rtk_resolution_skips_incompatible_path_candidate() {
+    let directory = tempfile::tempdir().unwrap();
+    let incompatible = directory.path().join("path-rtk");
+    std::fs::write(&incompatible, "#!/bin/sh\nprintf 'rtk 0.1.0'\n").unwrap();
+    chmod_file(&incompatible, 0o700);
+
+    let bundled_dir = directory
+        .path()
+        .join(".local/lib/anolisa/libexec/tokenless");
+    std::fs::create_dir_all(&bundled_dir).unwrap();
+    let bundled = bundled_dir.join("rtk");
+    std::fs::write(&bundled, "#!/bin/sh\nprintf 'rtk 0.43.0'\n").unwrap();
+    chmod_file(&bundled, 0o700);
+
+    assert_eq!(
+        select_rtk_path(
+            Some(incompatible),
+            directory.path().to_str().unwrap()
+        ),
+        Some(bundled.to_string_lossy().into_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn is_trusted_path_system_prefixes_unconditional() {
     // The system-path branch returns early without touching the
     // filesystem, so non-existent paths still report trusted.

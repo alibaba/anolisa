@@ -10,7 +10,7 @@
 
 | 命令 | 用途 |
 |------|------|
-| `tokenless compress` | 让模型可见内容进入 content-aware Pipeline |
+| `tokenless compress` | 执行一个 Protocol v2 生命周期操作 |
 | `tokenless compress-schema` | 压缩 Function Calling 工具 Schema |
 | `tokenless compress-response` | 压缩 JSON/API/工具响应 |
 | `tokenless compress-toon` | 将 JSON 编码为 TOON |
@@ -18,7 +18,6 @@
 | `tokenless retrieve` | 取回被截断并写入 Stash 的 Payload |
 | `tokenless env-check` | 报告旧版环境检查已硬关闭 |
 | `tokenless stats` | 查询和控制本地统计 |
-| `tokenless mcp serve` | 启动提供取回工具的 MCP stdio 服务 |
 
 使用当前安装版本的帮助查看最终参数定义：
 
@@ -61,67 +60,74 @@ Agent Adapter 还可能在启动 CLI 前应用独立的大小门槛，详见
 
 ## `compress`
 
-`compress` 是共享 Agent Hook 使用的稳定 JSON 边界。它从 stdin 或 `--file` 接收一个
-`CompressionRequest`；请求可解码时，始终输出一个 `CompressionResponse` JSON 对象：
+`compress` 是共享 Agent Hook 使用的严格 Protocol v2 Transport。命令名保持不变，但 Wire
+格式有意不兼容 Protocol v1。每个 Envelope 顶层严格只有四个字段：请求使用
+`protocol_version`、`operation`、`attribution`、`input`，响应把 `input` 换为 `result`。
+Envelope 和操作 Payload 中的未知字段都会被拒绝。
+
+PostTool 示例：
 
 ```bash
 jq -n \
   --rawfile content build.log \
   '{
-    protocol_version: 1,
-    content: $content,
-    agent_id: "my-agent",
-    session_id: "session-42",
-    tool_use_id: "tool-7",
-    tool_name: "Bash",
-    seam: "post_tool",
-    capabilities: {
-      replace_output: true,
-      publish_retrieve_tool: true,
-      replace_with_text: true
+    protocol_version: 2,
+    operation: "post_tool",
+    attribution: {
+      agent_id: "my-agent",
+      session_id: "session-42",
+      tool_use_id: "tool-7"
+    },
+    input: {
+      result_kind: "tool",
+      tool_name: "Bash",
+      content: $content,
+      status: "success",
+      content_origin: "command_output",
+      output_optimization: "none",
+      capabilities: {
+        replace_output: true,
+        publish_retrieve_tool: true,
+        replace_with_text: true
+      }
     }
   }' \
   | tokenless compress \
-  | jq '{disposition, content_type, compressor_chain, reversibility, output}'
+  | jq '{operation, result: (.result | {disposition, content_type, applied_operations, recoverability, output})}'
 ```
 
-请求字段：
+操作：
 
-| 字段 | 是否必需 | 含义 |
-|------|----------|------|
-| `protocol_version` | 是 | 压缩请求格式版本；当前为 `1` |
-| `content` | 是 | 要处理的精确模型可见字符串 |
-| `agent_id` | 是 | 稳定的前端标识 |
-| `session_id`、`tool_use_id`、`tool_name` | 否 | 归属与工具路由数据 |
-| `seam` | 是 | `before_model`、`pre_tool`、`post_tool` 或 `proxy` |
-| `capabilities.replace_output` | 否；默认 `false` | 宿主可以替换原始模型可见值 |
-| `capabilities.publish_retrieve_tool` | 否；默认 `false` | 宿主暴露可用的恢复 Tool |
-| `capabilities.replace_with_text` | 否；默认 `false` | 替换槽接受任意文本，而不是要求保持稳定 JSON Schema |
+| `operation` | 必填 `input` 事实 | 结果 |
+|-------------|-------------------|------|
+| `before_model` | `tools`、排除工具后的模型可见上下文、Retrieve Tool 名称，以及工具替换/发布能力 | 变换后的工具、排序后的可见 Marker Hash，以及可选 Retrieve 声明 |
+| `pre_tool` | 工具名、参数、明确的命令字段，以及参数替换/阻止能力 | 参数、`passthrough`/`replace_arguments`/`block_and_suggest` Action，以及 `none`/`rtk` 输出优化状态 |
+| `post_tool` | Result Kind、工具名、内容、状态、明确 Content Origin、上游输出优化状态和输出能力 | Output、Disposition、检测类型、实际操作、Recoverability、Token 计数和 Stash Keys |
+| `retrieve` | Hash 或 Marker，以及模型当前可见的 Marker 集合 | 授权后的规范化 Hash 和字节级一致 Payload |
 
-Pipeline 会检测 `json_records`、`search_results`、`build_log`、`stack_trace`、`diff`、
-`html`、`tabular`、`source_code`、`plain_text` 或 `unknown`，随后只运行与 seam 和宿主声明
-能力兼容的 Compressor。当前生产路由为：
+只有 `post_tool` 会进入 `PostToolPipeline`。当前生产路由为：
 
-- `before_model` JSON 工具数组：Schema 压缩。
-- `post_tool` JSON Records：结构化响应清理；文本槽还可能选择 TOON。
-- `post_tool` 构建日志与长纯文本：无损 Terminal 清理；同时具备替换、恢复与文本能力时，
-  再执行可恢复的 build/log 压缩。
-- 其他检测类型：尚无匹配 Compressor，原样透传。
+- Retrieve Result、Interrupted/Denied 调用和 RTK 已优化输出绕过压缩。
+- Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
+- 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
+- 在对应领域 Compressor 接入前，所有非 JSON 内容类型都原样透传。
 
 只有 `disposition: "applied"` 表示 `output` 与原文不同。`dry_run`、`passthrough`、
-`no_savings`、`reversibility_unavailable`、`timeout` 和 `error` 的 `output` 都携带原始
-`content`，Adapter 可以无条件交付。响应还会报告 `content_type`、有序
-`compressor_chain`、`reversibility`、Token 估算、已提交 `stash_keys`、`tokenizer_id` 和
-可选的限长诊断。
+`no_savings`、`recoverability_unavailable`、`timeout` 和 `tool_error` 都携带原始内容。
+JSON 的 `content_type` 现在是 `json`；`applied_operations` 报告实际发生的变换，而不是配置的
+Compressor 列表。
 
-无法读取、超过大小限制、格式错误或版本不支持的请求以状态 `2` 退出，因为 CLI 无法从合法
-请求中恢复原文。解码成功后，压缩失败会表示为 fail-open 响应，并以状态 `0` 退出。
-`--stash-db` 按与直接命令相同的路径安全规则覆盖 Stash 路径。
+退出码属于 Transport 契约：
 
-build/log Compressor 只处理真实多行日志，保留 Signal 与 Trace 区域、固定头尾窗口和失败
-周围 Context，并把每个符合条件的省略区间替换为可恢复 marker。节省少于 200 字符的候选会
-被拒绝。通用纯文本在达到 100 行后使用保守的 40 行头尾窗口；达到 65,536 字符的文本还会
-使用 16,384 字符头尾的单行保护路径。
+- `0`：正常操作结果，包括透传、无收益、Dry-run、Recoverability 不可用、RTK 不适用和
+  Tool Error。
+- `1`：操作失败，包括 RTK Timeout、未授权/缺失 Retrieve、Stash 或 Pipeline 失败。错误写入
+  stderr，不输出 Response JSON。
+- `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
+
+`pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
+并继续尝试后续打包位置。Agent-facing `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
+请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
 
 ## `compress-schema`
 
@@ -285,16 +291,6 @@ tokenless retrieve 0123456789abcdef01234567 \
 ```
 
 Hash 必须是 24 个十六进制字符，且不区分大小写。SQLite Stash 默认 TTL 为一小时，最多保留 10,000 个有效条目。超过 TTL、被容量策略淘汰、使用 `--no-stash`、处于 dry-run、写入失败或数据库路径不一致时都无法取回。
-
-## `mcp serve`
-
-启动 stdio MCP 服务：
-
-```bash
-tokenless mcp serve
-```
-
-服务暴露 `tokenless_retrieve` 工具，让支持 MCP 的 Agent 无需执行 Shell 命令即可取回 Stash 内容。MCP 服务必须使用与压缩流程相同的用户和 Stash 数据库。
 
 ## `env-check`
 

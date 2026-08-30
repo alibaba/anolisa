@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Golden parity for the unified-entry hook rewrite (roadmap §5.6).
+"""Golden parity for the Common Hook Protocol v2 transport.
 
 Replays the tests/contract corpus through the current hooks against the
-real `tokenless` debug binary and compares every envelope with the goldens
-generated from the pre-PR-6 two-subprocess hooks. The only sanctioned
-differences are enumerated in corpus.PARITY_ALLOWLIST (additive hosts
-becoming passthrough).
+real `tokenless` debug binary and compares every envelope with the Protocol
+v2 goldens. The baseline includes Core-owned lossless-only policy for Common
+Hooks and JSON-only PostTool dispatch.
 
 Requires target/debug/tokenless — run `cargo build -p tokenless-cli` first
 (the Makefile target does).
@@ -39,10 +38,8 @@ class HookParity(unittest.TestCase):
                         proc.returncode, 0, f"hook failed: {proc.stderr}"
                     )
                     actual = json.loads(proc.stdout)
-                    expected = corpus.PARITY_ALLOWLIST.get((kind, name, agent))
-                    if expected is None:
-                        with open(corpus.golden_path(kind, name, agent)) as f:
-                            expected = json.load(f)["envelope"]
+                    with open(corpus.golden_path(kind, name, agent)) as f:
+                        expected = json.load(f)["envelope"]
                     self.assertEqual(actual, expected)
 
     def test_response_hook_matches_the_goldens(self):

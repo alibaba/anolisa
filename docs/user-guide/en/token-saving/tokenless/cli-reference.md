@@ -10,7 +10,7 @@ operations, Stash retrieval, environment status, and statistics. Shared Agent ho
 
 | Command | Purpose |
 |---------|---------|
-| `tokenless compress` | Send model-visible content through the content-aware Pipeline |
+| `tokenless compress` | Run one Protocol v2 lifecycle operation |
 | `tokenless compress-schema` | Compress Function Calling tool schemas |
 | `tokenless compress-response` | Compress JSON/API/tool responses |
 | `tokenless compress-toon` | Encode JSON as TOON |
@@ -18,7 +18,6 @@ operations, Stash retrieval, environment status, and statistics. Shared Agent ho
 | `tokenless retrieve` | Recover a payload truncated into Stash |
 | `tokenless env-check` | Report the hard-disabled state of the legacy environment check |
 | `tokenless stats` | Query and control local statistics |
-| `tokenless mcp serve` | Start an MCP stdio server for retrieval |
 
 Use the installed version's help as the final argument reference:
 
@@ -65,70 +64,76 @@ can apply separate pre-spawn size gates; see
 
 ## `compress`
 
-`compress` is the stable JSON boundary used by shared Agent hooks. It accepts one
-`CompressionRequest` on stdin or through `--file` and always writes one `CompressionResponse` JSON
-object when the request is decodable:
+`compress` is the strict Protocol v2 transport used by shared Agent hooks. The command name is
+unchanged, but the wire format is intentionally incompatible with Protocol v1. Every envelope has
+exactly four top-level fields: `protocol_version`, `operation`, `attribution`, and `input` for a
+request or `result` for a response. Unknown envelope and operation fields are rejected.
+
+PostTool example:
 
 ```bash
 jq -n \
   --rawfile content build.log \
   '{
-    protocol_version: 1,
-    content: $content,
-    agent_id: "my-agent",
-    session_id: "session-42",
-    tool_use_id: "tool-7",
-    tool_name: "Bash",
-    seam: "post_tool",
-    capabilities: {
-      replace_output: true,
-      publish_retrieve_tool: true,
-      replace_with_text: true
+    protocol_version: 2,
+    operation: "post_tool",
+    attribution: {
+      agent_id: "my-agent",
+      session_id: "session-42",
+      tool_use_id: "tool-7"
+    },
+    input: {
+      result_kind: "tool",
+      tool_name: "Bash",
+      content: $content,
+      status: "success",
+      content_origin: "command_output",
+      output_optimization: "none",
+      capabilities: {
+        replace_output: true,
+        publish_retrieve_tool: true,
+        replace_with_text: true
+      }
     }
   }' \
   | tokenless compress \
-  | jq '{disposition, content_type, compressor_chain, reversibility, output}'
+  | jq '{operation, result: (.result | {disposition, content_type, applied_operations, recoverability, output})}'
 ```
 
-Request fields:
+Operations:
 
-| Field | Required | Meaning |
-|-------|----------|---------|
-| `protocol_version` | Yes | Compression request format version; currently `1` |
-| `content` | Yes | The exact model-visible string to consider |
-| `agent_id` | Yes | Stable frontend identifier |
-| `session_id`, `tool_use_id`, `tool_name` | No | Attribution and tool routing data |
-| `seam` | Yes | `before_model`, `pre_tool`, `post_tool`, or `proxy` |
-| `capabilities.replace_output` | No; default `false` | The host can replace the original model-visible value |
-| `capabilities.publish_retrieve_tool` | No; default `false` | The host exposes a usable retrieval Tool |
-| `capabilities.replace_with_text` | No; default `false` | The replacement slot accepts arbitrary text instead of schema-stable JSON |
+| `operation` | Required `input` facts | Result |
+|-------------|------------------------|--------|
+| `before_model` | `tools`, model-visible context without tools, Retrieve tool name, and tool replacement/publication capabilities | Transformed tools, sorted visible Marker hashes, and an optional Retrieve declaration |
+| `pre_tool` | Tool name, arguments, explicit command field, and argument replacement/block capabilities | Arguments, `passthrough`/`replace_arguments`/`block_and_suggest` action, and `none`/`rtk` output optimization state |
+| `post_tool` | Result kind, tool name, content, status, explicit content origin, carried output optimization, and output capabilities | Output, disposition, detected type, applied operations, recoverability, token counts, and Stash keys |
+| `retrieve` | Hash or Marker plus the Marker set currently visible to the model | Normalized hash and byte-identical payload after authorization |
 
-The pipeline detects `json_records`, `search_results`, `build_log`, `stack_trace`, `diff`, `html`,
-`tabular`, `source_code`, `plain_text`, or `unknown`, then runs only compressors compatible with the
-seam and declared host capabilities. Current production routing is:
+`post_tool` is the only operation that enters `PostToolPipeline`. Current production routing is:
 
-- `before_model` JSON tool arrays: schema compression.
-- `post_tool` JSON records: structural response cleanup; TOON may win for text-capable slots.
-- `post_tool` build logs and long plain text: lossless terminal cleanup followed by retrievable
-  build/log compression when replacement, retrieval, and text capabilities are all present.
-- Other detected content types: passthrough until a matching compressor is implemented.
+- Retrieve results, interrupted or denied calls, and RTK-optimized output bypass compression.
+- Tool errors pass through unchanged and may include bounded `additional_context` diagnostics.
+- Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
+- Every non-JSON content type passes through until its domain compressor is connected.
 
 Only `disposition: "applied"` means `output` differs from the original. `dry_run`, `passthrough`,
-`no_savings`, `reversibility_unavailable`, `timeout`, and `error` all carry the original `content` in
-`output`, so adapters can emit it unconditionally. Responses also report `content_type`, ordered
-`compressor_chain`, `reversibility`, token estimates, committed `stash_keys`, `tokenizer_id`, and an
-optional bounded diagnostic.
+`no_savings`, `recoverability_unavailable`, `timeout`, and `tool_error` carry the original content.
+`content_type: "json"` replaces the old JSON label, and `applied_operations` reports the actual
+transformations instead of a configured compressor list.
 
-Unreadable, oversized, malformed, or unsupported-version requests exit with status `2` because the
-CLI cannot recover the original content from a valid request. Once decoding succeeds, compression
-failures are represented by a fail-open response and exit status `0`. `--stash-db` overrides the
-Stash path under the same path-safety rules as the direct commands.
+Exit codes are part of the transport contract:
 
-The build/log compressor engages only for real multi-line logs, preserves signal and trace regions,
-keeps fixed head/tail and failure-context windows, and replaces each eligible omitted gap with a
-retrievable marker. It rejects candidates saving fewer than 200 characters. Generic plain text uses
-a conservative 40-line head/tail window once it reaches 100 lines, plus a 16,384-character
-head/tail safety path for text at least 65,536 characters long.
+- `0`: a normal operation result, including passthrough, no savings, dry-run, unavailable
+  recoverability, RTK not applicable, and tool errors.
+- `1`: an operation failed, including RTK timeout, unauthorized or missing Retrieve, Stash failure,
+  or Pipeline failure. The error is written to stderr and no response JSON is emitted.
+- `2`: malformed JSON, unsupported protocol version, or an invalid envelope/payload shape.
+
+The `pre_tool` operation resolves the separately packaged `rtk` executable from `PATH` and supported
+install layouts, skipping candidates older than 0.35.0 before trying the next packaged location.
+Agent-facing `retrieve` authorizes the requested hash against `visible_markers` before reading Stash.
+The standalone `tokenless retrieve` command below is a separate trusted local operations path and
+does not require model-visibility context.
 
 ## `compress-schema`
 
@@ -293,16 +298,6 @@ tokenless retrieve 0123456789abcdef01234567 \
 ```
 
 The hash must contain 24 hexadecimal characters and is case-insensitive. The default SQLite Stash TTL is one hour and its live-entry capacity is 10,000. Retrieval fails after expiry or capacity eviction, with `--no-stash`, in dry-run mode, after a failed write, or when a different database path is used.
-
-## `mcp serve`
-
-Start the stdio MCP server:
-
-```bash
-tokenless mcp serve
-```
-
-It exposes `tokenless_retrieve`, allowing an MCP-capable agent to recover Stash content without a shell call. The MCP server must use the same user and Stash database as the compression flow.
 
 ## `env-check`
 

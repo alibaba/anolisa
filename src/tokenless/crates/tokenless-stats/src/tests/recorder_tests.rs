@@ -422,8 +422,8 @@ fn schema_migration_adds_missing_columns() {
     assert_eq!(legacy.before_tokens, 4);
     assert_eq!(legacy.stash_writes, None);
     assert_eq!(legacy.content_type, None);
-    assert_eq!(legacy.seam, None);
-    assert_eq!(legacy.compressor_chain, None);
+    assert_eq!(legacy.applied_operations, None);
+    assert_eq!(legacy.recoverability, None);
     assert_eq!(legacy.tokenizer_id, None);
     assert_eq!(legacy.unrecoverable_truncations, None);
 
@@ -509,22 +509,22 @@ fn entry_metadata_round_trips() {
     let rec = StatsRecorder::new(dir.path().join("stats.db")).unwrap();
     let record = StatsRecord::new(OperationType::CompressResponse, "cli".into(), 100, 40, 50, 20)
         .with_entry_metadata(
-            "post_tool",
             Some("api-records".into()),
             Some("command_output".into()),
-            Some(r#"["response-cleanup","toon"]"#.into()),
+            Some(vec!["json_cleanup".into(), "toon".into()]),
+            Some("lossless".into()),
             "heuristic-v1",
             Some(2),
         );
     let id = rec.record(&record).unwrap();
     let got = rec.record_by_id(id).unwrap().unwrap();
-    assert_eq!(got.seam.as_deref(), Some("post_tool"));
     assert_eq!(got.content_type.as_deref(), Some("api-records"));
     assert_eq!(got.content_origin.as_deref(), Some("command_output"));
     assert_eq!(
-        got.compressor_chain.as_deref(),
-        Some(r#"["response-cleanup","toon"]"#)
+        got.applied_operations.as_deref(),
+        Some(["json_cleanup".to_string(), "toon".to_string()].as_slice())
     );
+    assert_eq!(got.recoverability.as_deref(), Some("lossless"));
     assert_eq!(got.tokenizer_id.as_deref(), Some("heuristic-v1"));
     assert_eq!(got.unrecoverable_truncations, Some(2));
 }
@@ -570,13 +570,31 @@ fn retrieve_events_aggregate_into_totals() {
     let dir = tempfile::tempdir().unwrap();
     let rec = StatsRecorder::new(dir.path().join("stats.db")).unwrap();
     let hash = "c".repeat(24);
-    rec.record_retrieve_event(&hash, "hit", "cli", Some(120), Some("heuristic-v1"))
+    rec.record_retrieve_event(
+        &hash,
+        "hit",
+        "cli",
+        Some(120),
+        Some("heuristic-v1"),
+        Some("agent"),
+        Some("session"),
+        Some("tool"),
+    )
+    .unwrap();
+    rec.record_retrieve_event(
+        &hash,
+        "hit",
+        "cli",
+        Some(80),
+        Some("heuristic-v1"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    rec.record_retrieve_event(&hash, "miss", "embedded", None, None, None, None, None)
         .unwrap();
-    rec.record_retrieve_event(&hash, "hit", "mcp", Some(80), Some("heuristic-v1"))
-        .unwrap();
-    rec.record_retrieve_event(&hash, "miss", "embedded", None, None)
-        .unwrap();
-    rec.record_retrieve_event(&hash, "error", "cli", None, None)
+    rec.record_retrieve_event(&hash, "error", "cli", None, None, None, None, None)
         .unwrap();
 
     let totals = rec.retrieve_totals().unwrap();
@@ -607,8 +625,17 @@ fn clear_empties_the_attribution_tables() {
         .unwrap();
     rec.record_artifacts(id, "response-cleanup", &["d".repeat(24)])
         .unwrap();
-    rec.record_retrieve_event(&"d".repeat(24), "hit", "cli", Some(10), None)
-        .unwrap();
+    rec.record_retrieve_event(
+        &"d".repeat(24),
+        "hit",
+        "cli",
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     rec.clear().unwrap();
     assert_eq!(rec.count().unwrap(), 0);

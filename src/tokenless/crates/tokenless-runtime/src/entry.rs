@@ -1,197 +1,188 @@
-//! The unified external-hook entry point (roadmap §5.4).
-//!
-//! One seam router backs `tokenless compress` and
-//! [`crate::TokenlessRuntime::compress`]. Phase one routes JSON through the
-//! Runtime-owned PostTool pipeline and passes every other content domain
-//! through unchanged. Adapters keep only envelope construction.
-//!
-//! Every failure past request decoding is fail-open and reported through
-//! the disposition: a failed optional compressor never blocks the agent
-//! (§5.6).
+//! Operation-specific lifecycle services and protocol transport dispatch.
 
+use std::collections::BTreeSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use tokenless_ccr::StashStore;
+use serde_json::{Value, json};
+use tokenless_ccr::{MARKER_PREFIX, MARKER_SUFFIX, StashStore, extract_hash, is_valid_hash};
 use tokenless_compressors::{JsonCompressionConfig, JsonOperation};
 use tokenless_protocol::{
-    CompressionRequest, CompressionResponse, Disposition, Reversibility, Seam,
+    AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, Disposition, Operation,
+    OutputOptimization, PostToolRequest, PostToolResponse, PreToolAction, PreToolRequest,
+    PreToolResponse, Recoverability, Request, RequestEnvelope, Response, ResponseEnvelope,
+    ResultKind, RetrieveRequest, RetrieveResponse, RetrieveToolDeclaration, TOKENIZER_ID,
+    ToolResultStatus, estimate_tokens,
 };
 use tokenless_schema::SchemaCompressor;
-use tokenless_stats::{OperationType, estimate_tokens};
+use tokenless_stats::{OperationType, StatsRecorder};
 
+use crate::post_tool::{PostToolPipeline, PostToolPipelineConfig};
 use crate::{
-    MAX_INPUT_BYTES, MIN_TOON_CHARS, RESPONSE_PIPELINE_TIMEOUT, finish_schema_compression,
-    post_tool::{PostToolPipeline, PostToolPipelineConfig},
-    taxonomy,
+    MAX_INPUT_BYTES, MIN_TOON_CHARS, RESPONSE_PIPELINE_TIMEOUT, RuntimeError,
+    finish_schema_compression, taxonomy,
 };
 
-/// Minimum content size (Unicode scalar values, matching the Python hooks'
-/// `len()`) for post-tool compression to be attempted at all.
 const MIN_RESPONSE_CHARS: usize = 200;
+const RTK_TIMEOUT: Duration = Duration::from_secs(5);
 
-// TOON selection gate: minimum candidate size for the TOON encoding pass,
-// shared with the standalone compress-toon CLI/runtime path via
-// [`crate::MIN_TOON_CHARS`].
-
-/// Per-call behavior toggles resolved by the frontend from its config.
+/// Per-call behavior resolved by a transport frontend.
 #[derive(Debug, Clone)]
 pub struct EntryOptions {
-    /// `false` measures and reports [`Disposition::DryRun`] while emitting
-    /// the original content.
+    /// Whether accepted candidates replace the original content.
     pub compression_enabled: bool,
-    /// `false` never attaches the stash, making truncations unrecoverable.
+    /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
+    /// Resolved RTK executable for PreTool.
+    pub rtk_path: Option<PathBuf>,
 }
 
-/// A [`CompressionResponse`] plus the payload the §5.5 recording path
-/// ([`crate::record_compression`]) turns into one statistics row.
-pub struct EntryOutcome {
-    /// The protocol response to hand back to the adapter.
-    pub response: CompressionResponse,
-    /// Attribution consumed only by [`crate::record_compression`].
-    pub(crate) stats: EntryStats,
-    /// Successful stash writes still live after all rollbacks, or `None`
-    /// when no store was attached.
-    pub stash_writes: Option<usize>,
-    /// Failed stash operations (writes and rollback deletes), or `None`
-    /// when no store was attached.
-    pub stash_errors: Option<usize>,
-    /// Live stash entry count, or `None` when no store was attached.
-    pub stash_size: Option<usize>,
-}
-
-/// Per-invocation statistics attribution of the winning path.
-pub(crate) struct EntryStats {
-    /// Historical operation type of the winning path: TOON win records as
-    /// [`OperationType::CompressToon`], cleanup as `CompressResponse`,
-    /// before-model as `CompressSchema`.
-    pub(crate) op: OperationType,
-    /// Measured candidate — meaningful in dry-run, where `response.output`
-    /// is the original content.
-    pub(crate) measured_text: String,
-    /// Truncations without an emitted recovery marker; `None` for seams
-    /// and dispositions that cannot truncate.
+/// Runtime-only facts used for statistics recording.
+pub struct EntryStats {
+    pub(crate) operation: OperationType,
+    pub(crate) input: String,
+    pub(crate) measured_output: String,
+    pub(crate) disposition: Disposition,
+    pub(crate) content_type: Option<String>,
+    pub(crate) content_origin: Option<String>,
+    pub(crate) applied_operations: Vec<AppliedOperation>,
+    pub(crate) recoverability: Recoverability,
     pub(crate) unrecoverable_truncations: Option<usize>,
 }
 
-impl EntryOutcome {
-    fn passthrough(request: &CompressionRequest, diagnostic: Option<String>) -> Self {
-        let mut response =
-            CompressionResponse::passthrough(request, estimate_tokens(&request.content) as u64);
-        response.diagnostic = diagnostic;
-        Self {
-            response,
-            stats: EntryStats {
-                op: match request.seam {
-                    Seam::BeforeModel => OperationType::CompressSchema,
-                    _ => OperationType::CompressResponse,
-                },
-                measured_text: request.content.clone(),
-                unrecoverable_truncations: None,
-            },
-            stash_writes: None,
-            stash_errors: None,
-            stash_size: None,
-        }
-    }
+/// One protocol response plus compression artifact facts.
+pub struct EntryOutcome {
+    /// Response to emit across the transport boundary.
+    pub response: ResponseEnvelope,
+    /// Compression measurement, absent for PreTool and Retrieve.
+    pub stats: Option<EntryStats>,
+    /// Successful stash writes still referenced by the response.
+    pub stash_writes: Option<usize>,
+    /// Failed stash operations.
+    pub stash_errors: Option<usize>,
+    /// Live stash entry count after the operation.
+    pub stash_size: Option<usize>,
+    /// Stash keys attributed to this lifecycle result.
+    pub artifact_keys: Vec<String>,
 }
 
-/// Routes one protocol request through the seam-appropriate compression
-/// path and applies the single end-to-end acceptance.
-pub fn compress_with_store(
-    request: &CompressionRequest,
+/// Dispatches a v2 transport request to one typed lifecycle service.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] when the selected lifecycle operation fails.
+pub fn dispatch_with_store(
+    envelope: &RequestEnvelope,
     options: &EntryOptions,
     stash_store: Option<&Arc<dyn StashStore>>,
-) -> EntryOutcome {
-    match request.seam {
-        Seam::PostTool => post_tool(request, options, stash_store),
-        Seam::BeforeModel => {
-            if request.content.len() > MAX_INPUT_BYTES {
-                EntryOutcome::passthrough(
-                    request,
-                    Some(format!(
-                        "input exceeds {} MiB limit",
-                        MAX_INPUT_BYTES / (1024 * 1024)
-                    )),
+    stats_recorder: Option<&StatsRecorder>,
+) -> Result<EntryOutcome, RuntimeError> {
+    let (response, stats, stash_writes, stash_errors, stash_size, artifact_keys) =
+        match &envelope.request {
+            Request::BeforeModel(request) => {
+                let outcome = before_model_with_store(request, options, stash_store)?;
+                (
+                    Response::BeforeModel(outcome.response),
+                    Some(outcome.stats),
+                    outcome.stash_writes,
+                    outcome.stash_errors,
+                    outcome.stash_size,
+                    outcome.artifact_keys,
                 )
-            } else if !request.capabilities.replace_output {
-                EntryOutcome::passthrough(request, None)
-            } else {
-                before_model(request, options, stash_store)
             }
-        }
-        // Unimplemented seams route to passthrough (roadmap §5.2).
-        Seam::PreTool | Seam::Proxy => EntryOutcome::passthrough(request, None),
-    }
+            Request::PreTool(request) => (
+                Response::PreTool(pre_tool_with_optional_rtk(
+                    request,
+                    &envelope.attribution,
+                    options.rtk_path.as_deref(),
+                    RTK_TIMEOUT,
+                )?),
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+            ),
+            Request::PostTool(request) => {
+                let outcome = post_tool_with_store(request, options, stash_store)?;
+                let artifact_keys = outcome.response.stash_keys.clone();
+                (
+                    Response::PostTool(outcome.response),
+                    Some(outcome.stats),
+                    outcome.stash_writes,
+                    outcome.stash_errors,
+                    outcome.stash_size,
+                    artifact_keys,
+                )
+            }
+            Request::Retrieve(request) => (
+                Response::Retrieve(retrieve_authorized_with_store(
+                    request,
+                    stash_store,
+                    stats_recorder,
+                    &envelope.attribution,
+                    "cli",
+                )?),
+                None,
+                None,
+                None,
+                stash_store.map(|store| store.len()),
+                Vec::new(),
+            ),
+        };
+    Ok(EntryOutcome {
+        response: ResponseEnvelope {
+            attribution: envelope.attribution.clone(),
+            response,
+        },
+        stats,
+        stash_writes,
+        stash_errors,
+        stash_size,
+        artifact_keys,
+    })
 }
 
-fn post_tool(
-    request: &CompressionRequest,
-    options: &EntryOptions,
-    stash_store: Option<&Arc<dyn StashStore>>,
-) -> EntryOutcome {
-    let thresholds = taxonomy::thresholds_for(request.content_origin, request.tool_name.as_deref());
-    let run = PostToolPipeline::run(
-        request,
-        &PostToolPipelineConfig {
-            timeout: RESPONSE_PIPELINE_TIMEOUT,
-            max_input_bytes: MAX_INPUT_BYTES,
-            min_input_chars: MIN_RESPONSE_CHARS,
-            compression_enabled: options.compression_enabled,
-            stash_enabled: options.stash_enabled,
-            require_reversibility: false,
-            force_json: false,
-            preserve_top_level_shape: !request.capabilities.replace_with_text,
-            allow_toon: true,
-            min_toon_chars: MIN_TOON_CHARS,
-            json: JsonCompressionConfig {
-                truncate_strings_at: thresholds.truncate_strings_at,
-                truncate_arrays_at: thresholds.truncate_arrays_at,
-                max_depth: thresholds.max_depth,
-                ..JsonCompressionConfig::default()
-            },
-        },
-        stash_store,
-    );
-    let measured = matches!(
-        run.response.disposition,
-        Disposition::Applied | Disposition::DryRun
-    );
-    let op = if run.operations.contains(&JsonOperation::Toon) {
-        OperationType::CompressToon
-    } else {
-        OperationType::CompressResponse
-    };
-    EntryOutcome {
-        stats: EntryStats {
-            op,
-            measured_text: if measured {
-                run.candidate.unwrap_or_else(|| request.content.clone())
-            } else {
-                request.content.clone()
-            },
-            unrecoverable_truncations: run.unrecoverable_truncations,
-        },
-        response: run.response,
-        stash_writes: run.stash_writes,
-        stash_errors: run.stash_errors,
-        stash_size: run.stash_size,
-    }
+pub(crate) struct BeforeModelOutcome {
+    pub(crate) response: BeforeModelResponse,
+    pub(crate) stats: EntryStats,
+    pub(crate) stash_writes: Option<usize>,
+    pub(crate) stash_errors: Option<usize>,
+    pub(crate) stash_size: Option<usize>,
+    pub(crate) artifact_keys: Vec<String>,
 }
 
-fn before_model(
-    request: &CompressionRequest,
+pub(crate) fn before_model_with_store(
+    request: &BeforeModelRequest,
     options: &EntryOptions,
     stash_store: Option<&Arc<dyn StashStore>>,
-) -> EntryOutcome {
-    let value = match serde_json::from_str::<serde_json::Value>(&request.content) {
-        Ok(value @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => value,
-        // Fail-open boundary: schema requests carry JSON tool declarations;
-        // anything else is not a compression subject.
-        _ => return EntryOutcome::passthrough(request, None),
-    };
+) -> Result<BeforeModelOutcome, RuntimeError> {
+    if request.capabilities.publish_retrieve_tool
+        && request
+            .tools
+            .iter()
+            .any(|tool| tool_name(tool).is_some_and(|name| name == request.retrieve_tool_name))
+    {
+        return Err(RuntimeError::RetrieveToolConflict {
+            name: request.retrieve_tool_name.clone(),
+        });
+    }
 
-    let attached_store = if options.compression_enabled && options.stash_enabled {
+    let input = serde_json::to_string(&request.tools).map_err(RuntimeError::Serialize)?;
+    if input.len() > MAX_INPUT_BYTES {
+        return Err(RuntimeError::InputTooLarge {
+            limit_mib: MAX_INPUT_BYTES / (1024 * 1024),
+        });
+    }
+    let attached_store = if request.capabilities.replace_tools
+        && options.compression_enabled
+        && options.stash_enabled
+        && request.capabilities.publish_retrieve_tool
+    {
         stash_store
     } else {
         None
@@ -200,634 +191,1229 @@ fn before_model(
     if let Some(store) = attached_store {
         compressor = compressor.with_stash_store(Arc::clone(store));
     }
-    // An array compresses element-wise (the CLI `--batch` semantics the
-    // schema hook has always used); a single declaration object as-is.
-    let compressed_value = match &value {
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(|item| compressor.compress(item)).collect())
+    let mut pending_keys = Vec::new();
+    let compression = if request.capabilities.replace_tools {
+        let candidate = Value::Array(
+            request
+                .tools
+                .iter()
+                .map(|tool| compressor.compress(tool))
+                .collect(),
+        );
+        let candidate_text = serde_json::to_string(&candidate).map_err(RuntimeError::Serialize)?;
+        pending_keys = compressor.stash_keys();
+        finish_schema_compression(
+            &input,
+            candidate_text,
+            options.compression_enabled,
+            attached_store,
+            &compressor,
+        )
+    } else {
+        crate::CompressResult {
+            output: input.clone(),
+            compressed_output: input.clone(),
+            disposition: Disposition::Passthrough,
+            before_tokens: estimate_tokens(&input),
+            after_tokens: estimate_tokens(&input),
+            stash_writes: None,
+            stash_errors: None,
+            unrecoverable_truncations: None,
+            stash_size: None,
         }
-        other => compressor.compress(other),
     };
-    let Ok(compressed_output) = serde_json::to_string(&compressed_value) else {
-        return EntryOutcome::passthrough(request, Some("serialize failed".into()));
-    };
-    // Capture before the disposition ladder rolls back or clears the
-    // session: on Applied these are exactly the emitted keys (every schema
-    // stash write has a marker in the applied output).
-    let pending_keys = compressor.stash_keys();
-    let result = finish_schema_compression(
-        &request.content,
-        compressed_output,
-        options.compression_enabled,
-        attached_store,
-        &compressor,
-    );
+    if let Some(count) = compression.stash_errors.filter(|count| *count > 0) {
+        return Err(RuntimeError::StashWrite { count });
+    }
+    let tools = serde_json::from_str::<Vec<Value>>(&compression.output)?;
 
-    let applied = result.disposition == Disposition::Applied;
+    let mut markers = BTreeSet::new();
+    collect_markers(&request.visible_context, &mut markers);
+    collect_markers(&Value::Array(tools.clone()), &mut markers);
+    let visible_markers = markers.into_iter().collect::<Vec<_>>();
+    let retrieve_tool = if request.capabilities.publish_retrieve_tool && !visible_markers.is_empty()
+    {
+        Some(retrieve_tool_declaration(&request.retrieve_tool_name))
+    } else {
+        None
+    };
     let measured = matches!(
-        result.disposition,
+        compression.disposition,
         Disposition::Applied | Disposition::DryRun
     );
-    let mut response =
-        CompressionResponse::passthrough(request, estimate_tokens(&request.content) as u64);
-    response.output = result.output.clone();
-    response.disposition = result.disposition;
-    response.compressor_chain = vec!["schema-compress".into()];
-    response.after_tokens = if measured {
-        result.after_tokens as u64
+    let emitted_keys = if compression.disposition == Disposition::Applied {
+        pending_keys
     } else {
-        result.before_tokens as u64
+        Vec::new()
     };
-    response.reversibility = if applied && result.stash_writes.unwrap_or(0) > 0 {
-        Reversibility::Retrievable
+    let recoverability = if emitted_keys.is_empty() {
+        Recoverability::Lossless
     } else {
-        Reversibility::Lossless
+        Recoverability::Retrievable
     };
-    if applied {
-        response.stash_keys = pending_keys;
-    }
-    EntryOutcome {
-        response,
+    Ok(BeforeModelOutcome {
+        response: BeforeModelResponse {
+            tools,
+            visible_markers,
+            retrieve_tool,
+        },
         stats: EntryStats {
-            op: OperationType::CompressSchema,
-            measured_text: if measured {
-                result.compressed_output
+            operation: OperationType::CompressSchema,
+            input,
+            measured_output: if measured {
+                compression.compressed_output
             } else {
-                request.content.clone()
+                compression.output
             },
+            disposition: compression.disposition,
+            content_type: None,
+            content_origin: None,
+            applied_operations: (compression.disposition == Disposition::Applied)
+                .then_some(vec![AppliedOperation::SchemaCompression])
+                .unwrap_or_default(),
+            recoverability,
             unrecoverable_truncations: None,
         },
-        stash_writes: result.stash_writes,
-        stash_errors: result.stash_errors,
-        stash_size: result.stash_size,
+        stash_writes: compression.stash_writes,
+        stash_errors: compression.stash_errors,
+        stash_size: compression.stash_size,
+        artifact_keys: emitted_keys,
+    })
+}
+
+fn tool_name(tool: &Value) -> Option<&str> {
+    tool.get("name")
+        .and_then(Value::as_str)
+        .or_else(|| tool.get("function")?.get("name")?.as_str())
+}
+
+fn collect_markers(value: &Value, markers: &mut BTreeSet<String>) {
+    let Ok(text) = serde_json::to_string(value) else {
+        return;
+    };
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find(MARKER_PREFIX) {
+        let after_prefix = &rest[start + MARKER_PREFIX.len()..];
+        if let Some(hash) = after_prefix.get(..24)
+            && is_valid_hash(hash)
+            && after_prefix[24..].starts_with(MARKER_SUFFIX)
+        {
+            markers.insert(hash.to_ascii_lowercase());
+            rest = &after_prefix[24 + MARKER_SUFFIX.len()..];
+        } else {
+            rest = after_prefix;
+        }
     }
+}
+
+fn retrieve_tool_declaration(name: &str) -> RetrieveToolDeclaration {
+    RetrieveToolDeclaration {
+        name: name.to_owned(),
+        description: "Restore content referenced by a visible Tokenless marker.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "hash_or_marker": {
+                    "type": "string",
+                    "description": "A visible <<tokenless:HASH>> marker or its hash"
+                }
+            },
+            "required": ["hash_or_marker"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub(crate) fn pre_tool_with_rtk(
+    request: &PreToolRequest,
+    attribution: &Attribution,
+    rtk_path: &Path,
+) -> Result<PreToolResponse, RuntimeError> {
+    pre_tool_with_optional_rtk(request, attribution, Some(rtk_path), RTK_TIMEOUT)
+}
+
+fn pre_tool_with_optional_rtk(
+    request: &PreToolRequest,
+    attribution: &Attribution,
+    rtk_path: Option<&Path>,
+    timeout: Duration,
+) -> Result<PreToolResponse, RuntimeError> {
+    let Some(arguments) = request.arguments.as_object() else {
+        return Ok(pre_tool_passthrough(request));
+    };
+    let Some(command) = arguments
+        .get(&request.command_field)
+        .and_then(Value::as_str)
+    else {
+        return Ok(pre_tool_passthrough(request));
+    };
+    if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
+        return Ok(pre_tool_passthrough(request));
+    }
+    let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
+
+    let mut child = Command::new(rtk_path);
+    child
+        .arg("rewrite")
+        .arg(command)
+        .env("TOKENLESS_AGENT_ID", &attribution.agent_id)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(session_id) = &attribution.session_id {
+        child.env("TOKENLESS_SESSION_ID", session_id);
+    }
+    if let Some(tool_use_id) = &attribution.tool_use_id {
+        child.env("TOKENLESS_TOOL_USE_ID", tool_use_id);
+    }
+    let mut child = child.spawn().map_err(|source| RuntimeError::RtkSpawn {
+        path: rtk_path.to_path_buf(),
+        source,
+    })?;
+    let mut stdout_pipe = child.stdout.take().ok_or_else(|| {
+        RuntimeError::RtkOutput(std::io::Error::other("RTK stdout pipe was not created"))
+    })?;
+    let stdout_reader = thread::spawn(move || {
+        let mut stdout = String::new();
+        stdout_pipe.read_to_string(&mut stdout)?;
+        Ok::<_, std::io::Error>(stdout)
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(RuntimeError::RtkWait)? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            return Err(RuntimeError::RtkTimeout);
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| {
+            RuntimeError::RtkOutput(std::io::Error::other("RTK stdout reader terminated"))
+        })?
+        .map_err(RuntimeError::RtkOutput)?;
+    let code = status.code().ok_or(RuntimeError::RtkTerminated)?;
+    if matches!(code, 1 | 2) {
+        return Ok(pre_tool_passthrough(request));
+    }
+    if !matches!(code, 0 | 3) {
+        return Err(RuntimeError::RtkUnexpectedExit { code });
+    }
+    let rewritten = stdout.trim();
+    if rewritten.is_empty() || rewritten == command {
+        return Ok(pre_tool_passthrough(request));
+    }
+    let anchored = anchor_rtk_prefix(rewritten, rtk_path);
+    let mut rewritten_arguments = arguments.clone();
+    rewritten_arguments.insert(request.command_field.clone(), Value::String(anchored));
+    let action = if request.capabilities.replace_arguments {
+        PreToolAction::ReplaceArguments
+    } else {
+        PreToolAction::BlockAndSuggest
+    };
+    Ok(PreToolResponse {
+        arguments: Value::Object(rewritten_arguments),
+        action,
+        output_optimization: OutputOptimization::Rtk,
+    })
+}
+
+fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
+    PreToolResponse {
+        arguments: request.arguments.clone(),
+        action: PreToolAction::Passthrough,
+        output_optimization: OutputOptimization::None,
+    }
+}
+
+fn anchor_rtk_prefix(rewritten: &str, rtk_path: &Path) -> String {
+    let quoted_path = shell_quote(&rtk_path.to_string_lossy());
+    let mut anchored = String::with_capacity(rewritten.len() + quoted_path.len());
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut word_start = true;
+    let mut anchored_in_segment = false;
+
+    // RTK can preserve arbitrary configured transparent prefixes before its
+    // wrapper, so anchor the first bare `rtk` token in each command segment
+    // without interpreting those prefixes. Backtick and double-quoted command
+    // substitutions are left untouched because they require the host parser.
+    while index < rewritten.len() {
+        let Some(ch) = rewritten[index..].chars().next() else {
+            break;
+        };
+        let width = ch.len_utf8();
+
+        if escaped {
+            anchored.push(ch);
+            escaped = false;
+            index += width;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            anchored.push(ch);
+            escaped = true;
+            word_start = false;
+            index += width;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            anchored.push(ch);
+            if ch == delimiter {
+                quote = None;
+            }
+            index += width;
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            word_start = false;
+            anchored.push(ch);
+            index += width;
+            continue;
+        }
+        if ch.is_whitespace() {
+            word_start = true;
+            if ch == '\n' {
+                anchored_in_segment = false;
+            }
+            anchored.push(ch);
+            index += width;
+            continue;
+        }
+        if matches!(ch, '&' | '|' | ';' | '(') {
+            word_start = true;
+            anchored_in_segment = false;
+            anchored.push(ch);
+            index += width;
+            continue;
+        }
+        if word_start && !anchored_in_segment && rewritten[index..].starts_with("rtk") {
+            let next = rewritten[index + 3..].chars().next();
+            if next.is_none_or(|value| {
+                value.is_whitespace() || matches!(value, '&' | '|' | ';' | '(' | ')')
+            }) {
+                anchored.push_str(&quoted_path);
+                index += 3;
+                word_start = false;
+                anchored_in_segment = true;
+                continue;
+            }
+        }
+        word_start = false;
+        anchored.push(ch);
+        index += width;
+    }
+    anchored
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'.'))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+pub(crate) struct PostToolOutcome {
+    pub(crate) response: PostToolResponse,
+    pub(crate) stats: EntryStats,
+    pub(crate) stash_writes: Option<usize>,
+    pub(crate) stash_errors: Option<usize>,
+    pub(crate) stash_size: Option<usize>,
+}
+
+pub(crate) fn post_tool_with_store(
+    request: &PostToolRequest,
+    options: &EntryOptions,
+    stash_store: Option<&Arc<dyn StashStore>>,
+) -> Result<PostToolOutcome, RuntimeError> {
+    let before_tokens = estimate_tokens(&request.content) as u64;
+    let routed = if request.result_kind == ResultKind::Retrieve
+        || matches!(
+            request.status,
+            ToolResultStatus::Interrupted | ToolResultStatus::Denied
+        )
+        || request.output_optimization == OutputOptimization::Rtk
+    {
+        Some(PostToolResponse::passthrough(request, before_tokens))
+    } else if request.status == ToolResultStatus::Error {
+        let mut response = PostToolResponse::passthrough(request, before_tokens);
+        response.disposition = Disposition::ToolError;
+        response.additional_context = diagnose_tool_error(&request.tool_name, &request.content);
+        Some(response)
+    } else {
+        None
+    };
+    let attached_store = request
+        .capabilities
+        .publish_retrieve_tool
+        .then_some(stash_store)
+        .flatten();
+
+    let (response, candidate, operations, stash_writes, stash_errors, stash_size, unrecoverable) =
+        if let Some(response) = routed {
+            (response, None, Vec::new(), None, None, None, None)
+        } else {
+            let thresholds = taxonomy::thresholds_for(request.content_origin);
+            let run = PostToolPipeline::run(
+                request,
+                &PostToolPipelineConfig {
+                    timeout: RESPONSE_PIPELINE_TIMEOUT,
+                    max_input_bytes: MAX_INPUT_BYTES,
+                    min_input_chars: MIN_RESPONSE_CHARS,
+                    compression_enabled: options.compression_enabled,
+                    stash_enabled: options.stash_enabled,
+                    require_reversibility: true,
+                    force_json: false,
+                    preserve_top_level_shape: !request.capabilities.replace_with_text,
+                    allow_toon: true,
+                    min_toon_chars: MIN_TOON_CHARS,
+                    json: JsonCompressionConfig {
+                        truncate_strings_at: thresholds.truncate_strings_at,
+                        truncate_arrays_at: thresholds.truncate_arrays_at,
+                        max_depth: thresholds.max_depth,
+                        ..JsonCompressionConfig::default()
+                    },
+                },
+                attached_store,
+            )
+            .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
+            if let Some(count) = run.stash_errors.filter(|count| *count > 0) {
+                return Err(RuntimeError::StashWrite { count });
+            }
+            (
+                run.response,
+                run.candidate,
+                run.operations,
+                run.stash_writes,
+                run.stash_errors,
+                run.stash_size,
+                run.unrecoverable_truncations,
+            )
+        };
+    let measured = matches!(
+        response.disposition,
+        Disposition::Applied | Disposition::DryRun
+    );
+    let measured_output = if measured {
+        candidate.unwrap_or_else(|| request.content.clone())
+    } else {
+        request.content.clone()
+    };
+    let operation = if operations.contains(&JsonOperation::Toon) {
+        OperationType::CompressToon
+    } else {
+        OperationType::CompressResponse
+    };
+    Ok(PostToolOutcome {
+        stats: EntryStats {
+            operation,
+            input: request.content.clone(),
+            measured_output,
+            disposition: response.disposition,
+            content_type: response
+                .content_type
+                .map(|value| value.wire_str().to_owned()),
+            content_origin: Some(request.content_origin.wire_str().to_owned()),
+            applied_operations: response.applied_operations.clone(),
+            recoverability: response.recoverability,
+            unrecoverable_truncations: unrecoverable,
+        },
+        response,
+        stash_writes,
+        stash_errors,
+        stash_size,
+    })
+}
+
+fn diagnose_tool_error(tool_name: &str, content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let (category, hint) = if ["command not found", "not installed", "unable to locate"]
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        (
+            "ENV_DEPENDENCY_MISSING",
+            "Install the missing dependency or ask the user for guidance.",
+        )
+    } else if lower.contains("permission denied") || lower.contains("operation not permitted") {
+        (
+            "ENV_PERMISSION",
+            "Check file or directory permissions and required access.",
+        )
+    } else if lower.contains("no such file or directory") || lower.contains("enoent") {
+        (
+            "ENV_FILE_MISSING",
+            "Verify the path or create the required file or directory.",
+        )
+    } else if [
+        "connection refused",
+        "network is unreachable",
+        "could not resolve host",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+    {
+        (
+            "ENV_NETWORK",
+            "Check DNS, proxy, firewall, and network connectivity.",
+        )
+    } else if ["modulenotfounderror", "no module named", "importerror"]
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        (
+            "ENV_PACKAGE_MISSING",
+            "Install the required package or module.",
+        )
+    } else {
+        return None;
+    };
+    Some(format!(
+        "[tokenless:env] {tool_name} failed: {category} ({hint})."
+    ))
+}
+
+pub(crate) fn retrieve_authorized_with_store(
+    request: &RetrieveRequest,
+    stash_store: Option<&Arc<dyn StashStore>>,
+    recorder: Option<&StatsRecorder>,
+    attribution: &Attribution,
+    source: &str,
+) -> Result<RetrieveResponse, RuntimeError> {
+    let hash = normalize_hash(&request.hash_or_marker)?;
+    let visible = request
+        .visible_markers
+        .iter()
+        .filter_map(|marker| normalize_hash(marker).ok())
+        .any(|visible_hash| visible_hash == hash);
+    if !visible {
+        return Err(RuntimeError::RetrieveUnauthorized { hash });
+    }
+    let store = stash_store
+        .ok_or_else(|| RuntimeError::StashUnavailable("stash is not configured".to_string()))?;
+    let result = store.retrieve(&hash);
+    if let Some(recorder) = recorder {
+        let (outcome, payload_tokens) = match &result {
+            Ok(Some(payload)) => ("hit", Some(estimate_tokens(payload) as i64)),
+            Ok(None) => ("miss", None),
+            Err(_) => ("error", None),
+        };
+        let tokenizer_id = payload_tokens.is_some().then_some(TOKENIZER_ID);
+        let _ = recorder.record_retrieve_event(
+            &hash,
+            outcome,
+            source,
+            payload_tokens,
+            tokenizer_id,
+            Some(&attribution.agent_id),
+            attribution.session_id.as_deref(),
+            attribution.tool_use_id.as_deref(),
+        );
+    }
+    match result {
+        Ok(Some(payload)) => Ok(RetrieveResponse { hash, payload }),
+        Ok(None) => Err(RuntimeError::StashEntryNotFound { hash }),
+        Err(error) => Err(RuntimeError::StashRetrieve(error.to_string())),
+    }
+}
+
+fn normalize_hash(hash_or_marker: &str) -> Result<String, RuntimeError> {
+    let candidate = extract_hash(hash_or_marker).unwrap_or(hash_or_marker);
+    if !is_valid_hash(candidate) {
+        return Err(RuntimeError::InvalidHash {
+            value: hash_or_marker.to_owned(),
+        });
+    }
+    Ok(candidate.to_ascii_lowercase())
+}
+
+/// Returns the operation of an entry response.
+#[must_use]
+pub fn response_operation(outcome: &EntryOutcome) -> Operation {
+    outcome.response.response.operation()
 }
 
 #[cfg(test)]
 mod tests {
-    use tokenless_ccr::InMemoryStore;
-    use tokenless_protocol::{ContentOrigin, PROTOCOL_VERSION};
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tempfile::tempdir;
+    use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite};
+    use tokenless_protocol::{
+        BeforeModelCapabilities, ContentOrigin, PostToolCapabilities, PreToolCapabilities,
+    };
 
     use super::*;
 
-    const ENABLED: EntryOptions = EntryOptions {
-        compression_enabled: true,
-        stash_enabled: true,
-    };
-    const DRY_RUN: EntryOptions = EntryOptions {
-        compression_enabled: false,
-        stash_enabled: true,
-    };
-
-    fn request(content: &str, seam: Seam) -> CompressionRequest {
-        let mut request = CompressionRequest::new(content, "test-agent", seam);
-        request.capabilities.replace_output = true;
-        request
-    }
-
-    fn post_tool_request(content: &str, tool_name: &str) -> CompressionRequest {
-        let mut request = request(content, Seam::PostTool);
-        request.tool_name = Some(tool_name.into());
-        request
-    }
-
-    /// A compressible API payload: the non-empty debug field is dropped for
-    /// a win that survives the structured-slot schema restore.
-    fn compressible_object() -> String {
-        serde_json::to_string(&serde_json::json!({
-            "url": "https://example.com/data",
-            "status": 200,
-            "debug": "trace=9f2e11c0 backend_latency_ms=184 retries=0 tls=reused pool=warm shard=eu-central-1a cache=miss",
-            "results": (0..6).map(|i| serde_json::json!({
-                "name": format!("pkg-{i}"),
-                "version": "1.0.0",
-                "license": null,
-                "homepage": "",
-            })).collect::<Vec<_>>(),
-            "count": 6,
-        }))
-        .unwrap()
-    }
-
-    /// Uniform records with nothing to clean up: cleanup yields no savings,
-    /// but the shape is TOON-friendly and over the TOON gate.
-    fn toon_only_object() -> String {
-        serde_json::to_string(&serde_json::json!({
-            "matches": (0..16).map(|i| serde_json::json!({
-                "file": format!("src/deep/nested/module_{i:02}.rs"),
-                "line": 100 + i * 13,
-                "column": 5 + i % 9,
-                "symbol": format!("handle_case_{i:02}"),
-            })).collect::<Vec<_>>(),
-        }))
-        .unwrap()
-    }
-
-    fn verbose_tools() -> String {
-        let description =
-            "Read a file from the workspace and return its contents as text. ".repeat(12);
-        serde_json::to_string(&serde_json::json!([
-            {"type": "function", "function": {"name": "read_file", "description": description,
-             "parameters": {"type": "object", "properties": {}}}},
-        ]))
-        .unwrap()
-    }
-
-    #[test]
-    fn unimplemented_seams_route_to_passthrough() {
-        for seam in [Seam::PreTool, Seam::Proxy] {
-            let outcome =
-                compress_with_store(&request(&compressible_object(), seam), &ENABLED, None);
-            assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-            assert_eq!(outcome.response.output, compressible_object());
-        }
-    }
-
-    #[test]
-    fn missing_replace_output_is_passthrough() {
-        let mut req = post_tool_request(&compressible_object(), "WebFetch");
-        req.capabilities.replace_output = false;
-        let outcome = compress_with_store(&req, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-    }
-
-    #[test]
-    fn a_tool_name_no_longer_decides_on_its_own() {
-        // The layer-1 skip list is gone (roadmap §6.3): a request naming a
-        // read tool but declaring no origin is judged by its content like any
-        // other. Adapters still prefilter these before spawning, so this is
-        // not a change any host sees — it is a change to what this API means.
-        let outcome = compress_with_store(
-            &post_tool_request(&compressible_object(), "Read"),
-            &ENABLED,
-            None,
-        );
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-    }
-
-    /// The same request with an origin declared.
-    fn origin_request(content: &str, tool: &str, origin: ContentOrigin) -> CompressionRequest {
-        let mut request = post_tool_request(content, tool);
-        request.content_origin = origin;
-        request
-    }
-
-    /// A build log committed to this repository, read back the way an agent
-    /// would read any tracked file.
-    const TRACKED_BUILD_LOG: &str =
-        include_str!("../../tokenless-compressors/tests/fixtures/build_logs/cargo_failure.txt");
-
-    #[test]
-    fn a_build_log_read_from_disk_is_not_rewritten() {
-        // `BuildLog` was released until review found it shares the flaw that
-        // keeps JSON protected: the detector scores content alone, so
-        // this fixture — or a contributor doc quoting a compiler twice, see
-        // `prose_carrying_two_generic_markers_is_a_known_detection_boundary` —
-        // sits in the bucket beside the output of the build that just ran.
-        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-
-        let mut file = text_request(TRACKED_BUILD_LOG);
-        file.content_origin = ContentOrigin::FileContent;
-        let file = compress_with_store(&file, &ENABLED, Some(&store));
-        assert_eq!(file.response.disposition, Disposition::Passthrough);
-        assert_eq!(file.response.output, TRACKED_BUILD_LOG);
-        assert!(file.response.compressor_chain.is_empty());
-        assert!(file.response.stash_keys.is_empty());
-        // Protected means full passthrough: nothing was stashed either.
-        assert_eq!(store.len(), 0);
-
-        // Phase one connects only JSON to the Runtime-owned pipeline. The
-        // same bytes as command output therefore stay unchanged too.
-        let mut command = text_request(TRACKED_BUILD_LOG);
-        command.content_origin = ContentOrigin::CommandOutput;
-        let command = compress_with_store(&command, &ENABLED, Some(&store));
-        assert_eq!(command.response.disposition, Disposition::Passthrough);
-        assert_eq!(command.response.output, TRACKED_BUILD_LOG);
-        assert_eq!(store.len(), 0);
-    }
-
-    #[test]
-    fn an_authored_json_config_read_from_disk_is_not_rewritten() {
-        // The taxonomy has one bucket for all JSON, so releasing it would hand
-        // the response cleanup a hand-authored `package.json`: it drops null
-        // and empty fields, and the model's next exact-match edit then fails
-        // against a file it believes it read. Measured before this test
-        // existed: `"description"` and `"license"` were both removed.
-        let package_json = serde_json::to_string_pretty(&serde_json::json!({
-            "name": "my-app",
-            "version": "1.0.0",
-            "description": "",
-            "license": null,
-            "keywords": [],
-            "dependencies": (0..40)
-                .map(|i| (format!("dep-{i:02}"), serde_json::json!("^1.0.0")))
-                .collect::<serde_json::Map<_, _>>(),
-        }))
-        .unwrap();
-
-        // A text slot, where the cleanup's removals are final — a structured
-        // slot restores top-level fields on the way out, which hides the
-        // damage for that shape but not for this one. It is also the slot
-        // TOON needs, so the byte-identical assertion below pins the entry's
-        // carve-out too: no pipeline candidate on a file read, no TOON.
-        let mut file = origin_request(&package_json, "Read", ContentOrigin::FileContent);
-        file.capabilities.replace_with_text = true;
-        let outcome = compress_with_store(&file, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert_eq!(outcome.response.output, package_json);
-
-        // The same bytes as command output: still compressed, and the fields
-        // do go. The gate is about where the content came from, not what it
-        // is — and this is what the file path was about to do.
-        let mut command = origin_request(&package_json, "Bash", ContentOrigin::CommandOutput);
-        command.capabilities.replace_with_text = true;
-        let outcome = compress_with_store(&command, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert!(!outcome.response.output.contains("description"));
-        assert!(!outcome.response.output.contains("license"));
-    }
-
-    /// Long enough to engage the generic mode, and detected as `PlainText` —
-    /// the release list protects it.
-    fn prose_text() -> String {
-        (0..120)
-            .map(|i| format!("record {i} holding some ordinary content\n"))
-            .collect()
-    }
-
-    #[test]
-    fn protected_content_from_a_file_passes_through_byte_identical() {
-        // The detector cannot tell prose from source code in a language it
-        // does not know, and a rewritten copy of either breaks the model's
-        // next exact-match edit against the file.
-        let prose = prose_text();
-        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-
-        let mut command = text_request(&prose);
-        command.content_origin = ContentOrigin::CommandOutput;
-        let command = compress_with_store(&command, &ENABLED, Some(&store));
-        assert_eq!(command.response.disposition, Disposition::Passthrough);
-
-        let mut file = text_request(&prose);
-        file.content_origin = ContentOrigin::FileContent;
-        let before = store.len();
-        let file = compress_with_store(&file, &ENABLED, Some(&store));
-        assert_eq!(file.response.disposition, Disposition::Passthrough);
-        assert_eq!(file.response.output, prose);
-        assert!(file.response.compressor_chain.is_empty());
-        assert!(file.response.stash_keys.is_empty());
-        // Protected means full passthrough: not even the lossless stage ran.
-        assert_eq!(store.len(), before);
-    }
-
-    #[test]
-    fn an_undeclared_origin_never_reaches_the_release_gate() {
-        // Origin does not opt an unsupported content domain into phase one.
-        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-        let outcome = compress_with_store(&text_request(&prose_text()), &ENABLED, Some(&store));
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-    }
-
-    #[test]
-    fn non_json_and_scalar_content_pass_through() {
-        let text = "plain build log without any JSON structure ".repeat(10);
-        for content in [text.as_str(), "12345678", "\"a JSON string of plain text\""] {
-            let outcome = compress_with_store(&post_tool_request(content, "Bash"), &ENABLED, None);
-            assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        }
-    }
-
-    /// A post-tool request whose host offers a text slot and a retrieve
-    /// tool — the shape the hook sends after unwrapping a shell envelope.
-    fn text_request(content: &str) -> CompressionRequest {
-        let mut request = post_tool_request(content, "Bash");
-        request.capabilities.replace_with_text = true;
-        request.capabilities.publish_retrieve_tool = true;
-        request
-    }
-
-    fn build_log_text() -> String {
-        let mut lines: Vec<String> = (0..4).map(|i| format!("$ cargo build step {i}")).collect();
-        lines.extend((0..70).map(|i| format!("   Compiling pkg{i:03} v0.1.{i}")));
-        lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
-        lines.extend((0..12).map(|i| format!("summary tail line {i}")));
-        lines.join("\n") + "\n"
-    }
-
-    #[test]
-    fn text_slot_build_log_temporarily_passes_through() {
-        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-        let req = text_request(&build_log_text());
-        let outcome = compress_with_store(&req, &ENABLED, Some(&store));
-
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert_eq!(outcome.response.output, build_log_text());
-        assert!(outcome.response.compressor_chain.is_empty());
-        assert_eq!(outcome.stats.op, OperationType::CompressResponse);
-        assert!(outcome.response.stash_keys.is_empty());
-        assert_eq!(outcome.stats.unrecoverable_truncations, None);
-        assert_eq!(outcome.stash_writes, None);
-        assert_eq!(store.len(), 0);
-    }
-
-    #[test]
-    fn text_without_a_text_slot_stays_passthrough() {
-        let mut req = post_tool_request(&build_log_text(), "Bash");
-        req.capabilities.publish_retrieve_tool = true;
-        let outcome = compress_with_store(&req, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert_eq!(outcome.response.output, build_log_text());
-    }
-
-    #[test]
-    fn short_text_is_passthrough() {
-        let outcome = compress_with_store(&text_request("error: boom\n"), &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-    }
-
-    #[test]
-    fn text_dry_run_is_also_passthrough_until_the_domain_is_connected() {
-        let req = text_request(&build_log_text());
-        let outcome = compress_with_store(&req, &DRY_RUN, None);
-
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert_eq!(outcome.response.output, build_log_text());
-        assert!(outcome.response.compressor_chain.is_empty());
-        assert_eq!(outcome.stats.measured_text, build_log_text());
-        assert!(outcome.response.stash_keys.is_empty());
-        assert_eq!(outcome.stash_writes, None);
-        assert_eq!(outcome.stats.unrecoverable_truncations, None);
-    }
-
-    #[test]
-    fn text_dry_run_does_not_invoke_terminal_cleanup() {
-        // A parameterless SGR is three characters, and `heuristic-v1` counts
-        // `chars.div_ceil(4)`: at a character count that is a multiple of
-        // four, removing it leaves the count unchanged, so the pipeline
-        // reverts the whole lossless stage and the build/log engine runs on
-        // the uncleaned text. The measurement chain must then name only what
-        // actually shaped the candidate.
-        let mut content = build_log_text().replacen("$ cargo", "$ \u{1b}[mcargo", 1);
-        while !content.chars().count().is_multiple_of(4) {
-            content.push(' ');
-        }
-        let outcome = compress_with_store(&text_request(&content), &DRY_RUN, None);
-
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert!(outcome.response.compressor_chain.is_empty());
-        assert!(outcome.stats.measured_text.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn text_active_without_stash_preserves_terminal_bytes() {
-        let mut lines: Vec<String> = (0..40)
-            .map(|i| format!("\u{1b}[1m\u{1b}[32m   Compiling\u{1b}[0m pkg{i:03} v0.1.{i}"))
-            .collect();
-        lines.push("\u{1b}[1m    Finished\u{1b}[0m `release` profile in 12.02s".to_string());
-        let content = lines.join("\n") + "\n";
-        let options = EntryOptions {
+    fn options() -> EntryOptions {
+        EntryOptions {
             compression_enabled: true,
-            stash_enabled: false,
-        };
-        let outcome = compress_with_store(&text_request(&content), &options, None);
-
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert!(outcome.response.compressor_chain.is_empty());
-        assert!(outcome.response.output.contains('\u{1b}'));
-        assert!(!outcome.response.output.contains("<<tokenless:"));
-        assert!(outcome.response.stash_keys.is_empty());
-        // The lossy stage was excluded, so the emitted candidate holds no
-        // unmarked omissions.
-        assert_eq!(outcome.stats.unrecoverable_truncations, None);
+            stash_enabled: true,
+            rtk_path: None,
+        }
     }
 
-    #[test]
-    fn long_non_log_text_temporarily_passes_through() {
-        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-        let prose: String = (0..120)
-            .map(|i| format!("record {i} holding some ordinary content\n"))
-            .collect();
-        let outcome = compress_with_store(&text_request(&prose), &ENABLED, Some(&store));
-
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert_eq!(outcome.response.output, prose);
-        assert!(outcome.response.compressor_chain.is_empty());
-        assert!(outcome.response.stash_keys.is_empty());
-        assert_eq!(store.len(), 0);
+    fn write_executable(path: &Path, script: &str) {
+        fs::write(path, script).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).unwrap();
     }
 
-    #[test]
-    fn size_gate_counts_code_points_not_bytes() {
-        // 98 chars but 278 bytes: under the gate only when counted in
-        // Unicode scalar values, like the Python hooks' len().
-        let content = format!(r#"{{"k":"{}"}}"#, "你".repeat(90));
-        assert!(content.len() > MIN_RESPONSE_CHARS);
-        assert!(content.chars().count() < MIN_RESPONSE_CHARS);
-        let outcome = compress_with_store(&post_tool_request(&content, "WebFetch"), &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+    #[derive(Default)]
+    struct ReadCountingStore {
+        inner: InMemoryStore,
+        reads: AtomicUsize,
     }
 
-    #[test]
-    fn structured_slot_win_restores_empty_fields_and_drops_debug() {
-        let outcome = compress_with_store(
-            &post_tool_request(&compressible_object(), "WebFetch"),
-            &ENABLED,
-            None,
-        );
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert_eq!(outcome.response.compressor_chain, ["response-cleanup"]);
-        assert_eq!(outcome.stats.op, OperationType::CompressResponse);
-        let output: serde_json::Value = serde_json::from_str(&outcome.response.output).unwrap();
-        assert!(output.get("debug").is_none());
-        // Nested empties stay dropped; only top-level schema fields return.
-        assert!(output["results"][0].get("license").is_none());
-        assert!(outcome.response.after_tokens < outcome.response.before_tokens);
+    impl StashStore for ReadCountingStore {
+        fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+            self.inner.stash(payload)
+        }
+
+        fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.retrieve(hash)
+        }
+
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+
+        fn evict_expired(&self) -> Result<usize, StashError> {
+            self.inner.evict_expired()
+        }
+
+        fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
+            self.inner.delete(hash, generation)
+        }
     }
 
-    #[test]
-    fn restore_cancelling_win_is_no_savings_for_structured_slots() {
-        // Only empty top-level fields are droppable: the restore puts every
-        // one of them back, cancelling the win.
-        let content = serde_json::to_string(&serde_json::json!({
-            "stdout": "line of output. ".repeat(20),
-            "stderr": "",
-            "metadata": null,
-            "warnings": [],
-            "env": {},
-        }))
-        .unwrap();
-        let outcome = compress_with_store(&post_tool_request(&content, "Bash"), &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::NoSavings);
-        assert_eq!(outcome.response.output, content);
-        assert!(outcome.response.compressor_chain.is_empty());
+    struct FailingStore;
 
-        // A text slot keeps the unrestored candidate instead.
-        let mut text_slot = post_tool_request(&content, "Bash");
-        text_slot.capabilities.replace_with_text = true;
-        let outcome = compress_with_store(&text_slot, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        let output: serde_json::Value = serde_json::from_str(&outcome.response.output).unwrap();
-        assert!(output.get("stderr").is_none());
-    }
+    impl StashStore for FailingStore {
+        fn stash(&self, _payload: &str) -> Result<StashWrite, StashError> {
+            Err(StashError::Backend("simulated write failure".into()))
+        }
 
-    #[test]
-    fn toon_runs_only_for_text_slots() {
-        let mut text_slot = post_tool_request(&toon_only_object(), "mcp__code_search");
-        text_slot.capabilities.replace_with_text = true;
-        let outcome = compress_with_store(&text_slot, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert_eq!(outcome.response.compressor_chain, ["toon"]);
-        assert_eq!(outcome.stats.op, OperationType::CompressToon);
-        assert_eq!(outcome.response.reversibility, Reversibility::Lossless);
-        assert!(!outcome.response.output.starts_with('{'));
+        fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
+            Ok(None)
+        }
 
-        // The same content on a structured slot: cleanup finds nothing and
-        // TOON never runs.
-        let outcome = compress_with_store(
-            &post_tool_request(&toon_only_object(), "mcp__code_search"),
-            &ENABLED,
-            None,
-        );
-        assert_eq!(outcome.response.disposition, Disposition::NoSavings);
-        assert_eq!(outcome.response.output, toon_only_object());
-    }
+        fn len(&self) -> usize {
+            0
+        }
 
-    #[test]
-    fn toon_composes_with_an_accepted_cleanup() {
-        // Like compressible_object, but large enough that the cleaned
-        // candidate stays over the 500-char TOON gate.
-        let content = serde_json::to_string(&serde_json::json!({
-            "debug": "trace=9f2e11c0 backend_latency_ms=184 retries=0 cache=miss",
-            "results": (0..16).map(|i| serde_json::json!({
-                "name": format!("package-{i:02}"),
-                "version": format!("1.{i}.0"),
-                "license": null,
-                "homepage": "",
-            })).collect::<Vec<_>>(),
-        }))
-        .unwrap();
-        let mut req = post_tool_request(&content, "WebFetch");
-        req.capabilities.replace_with_text = true;
-        let outcome = compress_with_store(&req, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert_eq!(
-            outcome.response.compressor_chain,
-            ["response-cleanup", "toon"]
-        );
-        assert_eq!(outcome.stats.op, OperationType::CompressToon);
-    }
+        fn evict_expired(&self) -> Result<usize, StashError> {
+            Ok(0)
+        }
 
-    #[test]
-    fn string_wrapped_json_is_unwrapped_before_compression() {
-        let wrapped = serde_json::to_string(&toon_only_object()).unwrap();
-        assert!(wrapped.starts_with('"'));
-        let mut req = post_tool_request(&wrapped, "mcp__code_search");
-        req.capabilities.replace_with_text = true;
-        let outcome = compress_with_store(&req, &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert_eq!(outcome.response.compressor_chain, ["toon"]);
-    }
-
-    #[test]
-    fn dry_run_measures_the_candidate_without_emitting_it() {
-        let content = compressible_object();
-        let outcome = compress_with_store(&post_tool_request(&content, "WebFetch"), &DRY_RUN, None);
-        assert_eq!(outcome.response.disposition, Disposition::DryRun);
-        assert_eq!(outcome.response.output, content);
-        assert_ne!(outcome.stats.measured_text, content);
-        assert!(outcome.response.after_tokens < outcome.response.before_tokens);
-        assert_eq!(outcome.stash_writes, None);
-    }
-
-    #[test]
-    fn oversized_content_passes_through_with_a_diagnostic() {
-        let content = format!(r#"{{"k":"{}"}}"#, "x".repeat(MAX_INPUT_BYTES));
-        let outcome = compress_with_store(&post_tool_request(&content, "Bash"), &ENABLED, None);
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-        assert_eq!(outcome.response.content_type.as_deref(), Some("unknown"));
-        assert!(outcome.response.diagnostic.is_some());
-    }
-
-    #[test]
-    fn schema_array_compresses_element_wise_with_markers() {
-        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-        let content = verbose_tools();
-        let outcome = compress_with_store(
-            &request(&content, Seam::BeforeModel),
-            &ENABLED,
-            Some(&store),
-        );
-        assert_eq!(outcome.response.disposition, Disposition::Applied);
-        assert_eq!(outcome.response.compressor_chain, ["schema-compress"]);
-        assert_eq!(outcome.stats.op, OperationType::CompressSchema);
-        assert_eq!(outcome.response.reversibility, Reversibility::Retrievable);
-        let output: serde_json::Value = serde_json::from_str(&outcome.response.output).unwrap();
-        assert!(output.is_array());
-        assert!(outcome.response.output.contains("<<tokenless:"));
-        assert!(outcome.response.after_tokens < outcome.response.before_tokens);
-        // Applied schema results expose their emitted keys for the
-        // artifacts ledger; every key's marker is in the output.
-        assert!(!outcome.response.stash_keys.is_empty());
-        for key in &outcome.response.stash_keys {
-            assert!(outcome.response.output.contains(key.as_str()));
+        fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
+            Ok(false)
         }
     }
 
     #[test]
-    fn schema_without_a_store_reports_reversibility_unavailable() {
-        let outcome = compress_with_store(
-            &request(&verbose_tools(), Seam::BeforeModel),
-            &ENABLED,
+    fn retrieve_authorization_precedes_store_read() {
+        let concrete = Arc::new(ReadCountingStore::default());
+        let write = concrete.stash("byte-exact\n").unwrap();
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let denied = RetrieveRequest {
+            hash_or_marker: write.key.clone(),
+            visible_markers: vec![],
+        };
+        assert!(matches!(
+            retrieve_authorized_with_store(
+                &denied,
+                Some(&store),
+                None,
+                &Attribution::new("test"),
+                "test"
+            ),
+            Err(RuntimeError::RetrieveUnauthorized { .. })
+        ));
+        assert_eq!(concrete.reads.load(Ordering::Relaxed), 0);
+        let allowed = RetrieveRequest {
+            hash_or_marker: write.key.clone(),
+            visible_markers: vec![write.key.clone()],
+        };
+        let restored = retrieve_authorized_with_store(
+            &allowed,
+            Some(&store),
             None,
+            &Attribution::new("test"),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(restored.payload.as_bytes(), b"byte-exact\n");
+        assert_eq!(concrete.reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn retrieve_records_attribution_only_after_authorization() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("stats.db");
+        let recorder = StatsRecorder::new(&database).unwrap();
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let write = store.stash("payload").unwrap();
+        let attribution = Attribution {
+            agent_id: "agent".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+
+        let denied = RetrieveRequest {
+            hash_or_marker: write.key.clone(),
+            visible_markers: Vec::new(),
+        };
+        assert!(
+            retrieve_authorized_with_store(
+                &denied,
+                Some(&store),
+                Some(&recorder),
+                &attribution,
+                "test"
+            )
+            .is_err()
+        );
+        assert_eq!(recorder.retrieve_totals().unwrap().hits, 0);
+
+        let allowed = RetrieveRequest {
+            hash_or_marker: write.key.clone(),
+            visible_markers: vec![format!("<<tokenless:{}>>", write.key.to_ascii_uppercase())],
+        };
+        dispatch_with_store(
+            &RequestEnvelope {
+                attribution,
+                request: Request::Retrieve(allowed),
+            },
+            &options(),
+            Some(&store),
+            Some(&recorder),
+        )
+        .unwrap();
+
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let event: (String, String, String, String, String) = connection
+            .query_row(
+                "SELECT source, agent_id, session_id, tool_use_id, outcome FROM retrieve_events",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            event,
+            (
+                "cli".into(),
+                "agent".into(),
+                "session".into(),
+                "call".into(),
+                "hit".into()
+            )
+        );
+    }
+
+    #[test]
+    fn pre_tool_applies_rtk_exit_zero_and_anchors_path() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("fake rtk");
+        write_executable(&rtk, "#!/bin/sh\nprintf 'rtk grep --count error log'\n");
+        let response = pre_tool_with_rtk(
+            &PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": "grep error log"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            },
+            &Attribution::new("test"),
+            &rtk,
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::ReplaceArguments);
+        assert_eq!(response.output_optimization, OutputOptimization::Rtk);
+        assert!(
+            response.arguments["command"]
+                .as_str()
+                .unwrap()
+                .contains("fake rtk")
+        );
+    }
+
+    #[test]
+    fn pre_tool_anchor_preserves_quoted_arguments_and_handles_subshells() {
+        let path = Path::new("/opt/tokenless/rtk");
+        assert_eq!(
+            anchor_rtk_prefix("rtk grep -E 'foo | rtk bar' src && rtk git status", path),
+            "/opt/tokenless/rtk grep -E 'foo | rtk bar' src && /opt/tokenless/rtk git status"
         );
         assert_eq!(
-            outcome.response.disposition,
-            Disposition::ReversibilityUnavailable
+            anchor_rtk_prefix("echo $(rtk git status)", path),
+            "echo $(/opt/tokenless/rtk git status)"
         );
-        assert_eq!(outcome.response.output, verbose_tools());
+        assert_eq!(
+            anchor_rtk_prefix("echo `rtk git status`", path),
+            "echo `rtk git status`"
+        );
+        assert_eq!(
+            anchor_rtk_prefix("sudo rtk git status", path),
+            "sudo /opt/tokenless/rtk git status"
+        );
+        assert_eq!(
+            anchor_rtk_prefix("RUST_BACKTRACE=1 rtk cargo test", path),
+            "RUST_BACKTRACE=1 /opt/tokenless/rtk cargo test"
+        );
+        assert_eq!(
+            anchor_rtk_prefix("sudo noglob rtk git status", path),
+            "sudo noglob /opt/tokenless/rtk git status"
+        );
+        assert_eq!(
+            anchor_rtk_prefix("shadowenv exec -- rtk git status", path),
+            "shadowenv exec -- /opt/tokenless/rtk git status"
+        );
     }
 
     #[test]
-    fn schema_no_savings_returns_the_original() {
+    fn pre_tool_no_op_does_not_require_rtk() {
+        let requests = [
+            PreToolRequest {
+                tool_name: "Read".into(),
+                arguments: json!({"path": "README.md"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            },
+            PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: Value::String("not an object".into()),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: true,
+                    block_and_suggest: false,
+                },
+            },
+            PreToolRequest {
+                tool_name: "Bash".into(),
+                arguments: json!({"command": "git status"}),
+                command_field: "command".into(),
+                capabilities: PreToolCapabilities {
+                    replace_arguments: false,
+                    block_and_suggest: false,
+                },
+            },
+        ];
+        for request in requests {
+            let outcome = dispatch_with_store(
+                &RequestEnvelope {
+                    attribution: Attribution::new("test"),
+                    request: Request::PreTool(request.clone()),
+                },
+                &options(),
+                None,
+                None,
+            )
+            .unwrap();
+            let Response::PreTool(response) = outcome.response.response else {
+                unreachable!("the request operation fixes the response variant")
+            };
+            assert_eq!(response.action, PreToolAction::Passthrough);
+            assert_eq!(response.arguments, request.arguments);
+        }
+
+        let applicable = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "git status"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        assert!(matches!(
+            pre_tool_with_optional_rtk(&applicable, &Attribution::new("test"), None, RTK_TIMEOUT),
+            Err(RuntimeError::RtkUnavailable)
+        ));
+    }
+
+    #[test]
+    fn pre_tool_honors_rtk_exit_contract_and_preserves_arguments() {
+        let directory = tempdir().unwrap();
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "grep error log", "timeout": 30}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        for code in [1, 2] {
+            let rtk = directory.path().join(format!("rtk-{code}"));
+            write_executable(&rtk, &format!("#!/bin/sh\nprintf 'changed'\nexit {code}\n"));
+            let response = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk).unwrap();
+            assert_eq!(response.action, PreToolAction::Passthrough);
+            assert_eq!(response.arguments, request.arguments);
+        }
+        for (name, output) in [("empty", ""), ("unchanged", "grep error log")] {
+            let rtk = directory.path().join(format!("rtk-{name}"));
+            write_executable(&rtk, &format!("#!/bin/sh\nprintf '%s' '{output}'\n"));
+            let response = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk).unwrap();
+            assert_eq!(response.action, PreToolAction::Passthrough);
+            assert_eq!(response.arguments, request.arguments);
+        }
+
+        let rtk = directory.path().join("rtk-3");
+        write_executable(&rtk, "#!/bin/sh\nprintf 'optimized command'\nexit 3\n");
+        let response = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk).unwrap();
+        assert_eq!(response.action, PreToolAction::ReplaceArguments);
+        assert_eq!(response.output_optimization, OutputOptimization::Rtk);
+        assert_eq!(response.arguments["command"], "optimized command");
+        assert_eq!(response.arguments["timeout"], 30);
+    }
+
+    #[test]
+    fn pre_tool_passes_attribution_and_rejects_unexpected_exit() {
+        let directory = tempdir().unwrap();
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "original"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: false,
+                block_and_suggest: true,
+            },
+        };
+        let rtk = directory.path().join("rtk-env");
+        write_executable(
+            &rtk,
+            "#!/bin/sh\nprintf '%s:%s:%s' \"$TOKENLESS_AGENT_ID\" \"$TOKENLESS_SESSION_ID\" \"$TOKENLESS_TOOL_USE_ID\"\n",
+        );
+        let attribution = Attribution {
+            agent_id: "agent".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+        let response = pre_tool_with_rtk(&request, &attribution, &rtk).unwrap();
+        assert_eq!(response.action, PreToolAction::BlockAndSuggest);
+        assert_eq!(response.arguments["command"], "agent:session:call");
+
+        let unexpected = directory.path().join("rtk-9");
+        write_executable(&unexpected, "#!/bin/sh\nexit 9\n");
+        assert!(matches!(
+            pre_tool_with_rtk(&request, &attribution, &unexpected),
+            Err(RuntimeError::RtkUnexpectedExit { code: 9 })
+        ));
+        assert!(matches!(
+            pre_tool_with_rtk(
+                &request,
+                &attribution,
+                &directory.path().join("missing-rtk")
+            ),
+            Err(RuntimeError::RtkSpawn { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_tool_timeout_is_an_operation_error() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("rtk-slow");
+        write_executable(&rtk, "#!/bin/sh\nsleep 1\n");
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "original"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        assert!(matches!(
+            pre_tool_with_optional_rtk(
+                &request,
+                &Attribution::new("test"),
+                Some(&rtk),
+                Duration::from_millis(20)
+            ),
+            Err(RuntimeError::RtkTimeout)
+        ));
+    }
+
+    #[test]
+    fn pre_tool_drains_large_rtk_output_before_exit() {
+        let directory = tempdir().unwrap();
+        let rtk = directory.path().join("rtk-large-output");
+        write_executable(
+            &rtk,
+            &format!("#!/bin/sh\nprintf 'optimized {}'\n", "x".repeat(256 * 1024)),
+        );
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "original"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        let response = pre_tool_with_optional_rtk(
+            &request,
+            &Attribution::new("test"),
+            Some(&rtk),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::ReplaceArguments);
+        assert!(response.arguments["command"].as_str().unwrap().len() > 256 * 1024);
+    }
+
+    #[test]
+    fn before_model_without_retrieve_capability_keeps_schema_unchanged() {
+        let request = BeforeModelRequest {
+            tools: vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "long description ".repeat(200),
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            })],
+            visible_context: json!({"messages": []}),
+            retrieve_tool_name: "tokenless_retrieve".into(),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                publish_retrieve_tool: false,
+            },
+        };
+        let outcome = before_model_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.tools, request.tools);
+        assert!(outcome.response.visible_markers.is_empty());
+        assert!(outcome.response.retrieve_tool.is_none());
+        assert_eq!(
+            outcome.stats.disposition,
+            Disposition::RecoverabilityUnavailable
+        );
+        assert!(outcome.stats.applied_operations.is_empty());
+    }
+
+    #[test]
+    fn before_model_publishes_sorted_markers_only_with_capability() {
         let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-        let content = r#"[{"type":"function","function":{"name":"ping","description":"Check connectivity.","parameters":{"type":"object","properties":{}}}}]"#;
-        let outcome =
-            compress_with_store(&request(content, Seam::BeforeModel), &ENABLED, Some(&store));
-        assert_eq!(outcome.response.disposition, Disposition::NoSavings);
-        assert_eq!(outcome.response.output, content);
-        assert_eq!(store.len(), 0, "no-savings rolls the stash session back");
+        let request = BeforeModelRequest {
+            tools: vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "long description ".repeat(200),
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            })],
+            visible_context: json!({
+                "messages": [
+                    "<<tokenless:ABCDEF0123456789ABCDEF01>>",
+                    "<<tokenless:abcdef0123456789abcdef01>>"
+                ]
+            }),
+            retrieve_tool_name: "tokenless_retrieve".into(),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                publish_retrieve_tool: true,
+            },
+        };
+        let outcome = before_model_with_store(&request, &options(), Some(&store)).unwrap();
+        assert_eq!(
+            outcome.response.retrieve_tool.unwrap().name,
+            "tokenless_retrieve"
+        );
         assert!(
-            outcome.response.stash_keys.is_empty(),
-            "unapplied schema results expose no artifact keys"
+            outcome
+                .response
+                .visible_markers
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert_eq!(
+            outcome
+                .response
+                .visible_markers
+                .iter()
+                .filter(|hash| *hash == "abcdef0123456789abcdef01")
+                .count(),
+            1
+        );
+        assert!(!outcome.artifact_keys.is_empty());
+    }
+
+    #[test]
+    fn before_model_obeys_replace_capability_and_checks_publish_conflicts() {
+        let tool = json!({
+            "type": "function",
+            "function": {
+                "name": "tokenless_retrieve",
+                "description": "description ".repeat(100),
+                "parameters": {"type": "object"}
+            }
+        });
+        let mut request = BeforeModelRequest {
+            tools: vec![tool.clone()],
+            visible_context: json!({}),
+            retrieve_tool_name: "tokenless_retrieve".into(),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: false,
+                publish_retrieve_tool: false,
+            },
+        };
+        let outcome = before_model_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.tools, vec![tool]);
+        assert_eq!(outcome.stats.disposition, Disposition::Passthrough);
+
+        request.capabilities.publish_retrieve_tool = true;
+        assert!(matches!(
+            before_model_with_store(&request, &options(), None),
+            Err(RuntimeError::RetrieveToolConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn rtk_and_retrieve_results_bypass_post_tool_pipeline() {
+        for (kind, optimization) in [
+            (ResultKind::Tool, OutputOptimization::Rtk),
+            (ResultKind::Retrieve, OutputOptimization::None),
+        ] {
+            let request = PostToolRequest {
+                result_kind: kind,
+                tool_name: "Bash".into(),
+                content: r#"{"debug":"remove me","value":1}"#.into(),
+                status: ToolResultStatus::Success,
+                content_origin: ContentOrigin::CommandOutput,
+                output_optimization: optimization,
+                capabilities: PostToolCapabilities {
+                    replace_output: true,
+                    publish_retrieve_tool: false,
+                    replace_with_text: true,
+                },
+            };
+            let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+            assert!(outcome.response.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
+    fn post_tool_routes_statuses_before_the_json_pipeline() {
+        for status in [ToolResultStatus::Interrupted, ToolResultStatus::Denied] {
+            let request = post_tool_request(r#"{"debug":"remove me","value":1}"#);
+            let request = PostToolRequest { status, ..request };
+            let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+            assert_eq!(outcome.response.output, request.content);
+        }
+
+        let request = PostToolRequest {
+            status: ToolResultStatus::Error,
+            content: "/bin/sh: jq: command not found".into(),
+            ..post_tool_request("unused")
+        };
+        let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::ToolError);
+        assert_eq!(outcome.response.output, request.content);
+        assert!(
+            outcome
+                .response
+                .additional_context
+                .unwrap()
+                .contains("ENV_DEPENDENCY_MISSING")
         );
     }
 
     #[test]
-    fn schema_dry_run_measures_without_emitting() {
-        let content = verbose_tools();
-        let outcome = compress_with_store(&request(&content, Seam::BeforeModel), &DRY_RUN, None);
-        assert_eq!(outcome.response.disposition, Disposition::DryRun);
-        assert_eq!(outcome.response.output, content);
-        assert_ne!(outcome.stats.measured_text, content);
+    fn post_tool_accepts_lossless_json_and_requires_retrieve_for_truncation() {
+        let cleanup = post_tool_request(&format!(
+            r#"{{"debug":"{}","value":"kept"}}"#,
+            "noise".repeat(100)
+        ));
+        let outcome = post_tool_with_store(&cleanup, &options(), None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+        assert_eq!(
+            outcome.response.applied_operations,
+            vec![AppliedOperation::JsonCleanup]
+        );
+
+        let lossy =
+            post_tool_request(&serde_json::to_string(&(0..300).collect::<Vec<_>>()).unwrap());
+        let unavailable_store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let rejected = post_tool_with_store(&lossy, &options(), Some(&unavailable_store)).unwrap();
+        assert_eq!(
+            rejected.response.disposition,
+            Disposition::RecoverabilityUnavailable
+        );
+        assert_eq!(rejected.response.output, lossy.content);
+        assert!(unavailable_store.is_empty());
+
+        let failing: Arc<dyn StashStore> = Arc::new(FailingStore);
+        let failing_request = PostToolRequest {
+            capabilities: PostToolCapabilities {
+                publish_retrieve_tool: true,
+                ..lossy.capabilities
+            },
+            ..lossy.clone()
+        };
+        assert!(matches!(
+            post_tool_with_store(&failing_request, &options(), Some(&failing)),
+            Err(RuntimeError::StashWrite { count }) if count > 0
+        ));
+
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let recoverable = PostToolRequest {
+            capabilities: PostToolCapabilities {
+                publish_retrieve_tool: true,
+                ..lossy.capabilities
+            },
+            ..lossy
+        };
+        let applied = post_tool_with_store(&recoverable, &options(), Some(&store)).unwrap();
+        assert_eq!(applied.response.disposition, Disposition::Applied);
+        assert_eq!(applied.response.recoverability, Recoverability::Retrievable);
+        assert!(!applied.response.stash_keys.is_empty());
     }
 
-    #[test]
-    fn schema_non_json_content_is_passthrough() {
-        let outcome = compress_with_store(
-            &request("not json at all", Seam::BeforeModel),
-            &ENABLED,
-            None,
-        );
-        assert_eq!(outcome.response.disposition, Disposition::Passthrough);
-    }
-
-    #[test]
-    fn request_version_is_the_protocol_version() {
-        let outcome = compress_with_store(
-            &post_tool_request(&compressible_object(), "WebFetch"),
-            &ENABLED,
-            None,
-        );
-        assert_eq!(outcome.response.protocol_version, PROTOCOL_VERSION);
+    fn post_tool_request(content: &str) -> PostToolRequest {
+        PostToolRequest {
+            result_kind: ResultKind::Tool,
+            tool_name: "Bash".into(),
+            content: content.into(),
+            status: ToolResultStatus::Success,
+            content_origin: ContentOrigin::CommandOutput,
+            output_optimization: OutputOptimization::None,
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                publish_retrieve_tool: false,
+                replace_with_text: true,
+            },
+        }
     }
 }

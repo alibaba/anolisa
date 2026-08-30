@@ -20,9 +20,10 @@ called **stash** to avoid the proprietary abbreviation.
    after expiry, deletion, or eviction.
 2. **Mark**: the truncation marker becomes
    `<... N items truncated, retrieve with <<tokenless:KEY>>`.
-3. **Retrieve**: the LLM emits the marker (or the bare key); the agent calls
-   `tokenless retrieve <KEY>` (or the future MCP `tokenless_retrieve` tool)
-   to fetch the original payload from the stash.
+3. **Retrieve**: a trusted local operator can call `tokenless retrieve <KEY>`.
+   An agent uses the Protocol v2 `retrieve` operation, which authorizes the
+   key against the Marker set currently visible to the model before reading
+   Stash.
 
 When no stash store is attached (`Option<Arc<dyn StashStore>>` = `None`),
 truncation is lossy and non-retrievable — the original pre-stash behavior.
@@ -158,30 +159,33 @@ from `getpwuid_r(getuid())`, never `$HOME` — or the selected data directory.
 Existing database files must be regular files rather than symlinks. The CLI
 and bundled RTK writer use the same path policy.
 
-`retrieve` queries are parameterized SQL; a malformed hash simply yields "no
-payload" rather than an injection.
+`retrieve` queries are parameterized SQL. Invalid input fails before a Stash
+read. Agent-facing Protocol v2 retrieval also rejects an unauthorized hash
+before the read and does not record that attempt as a Hit or Miss.
 
 ## Fail-open policy
 
-- **Compress path**: if the stash cannot be opened (invalid data directory,
-  directory cannot be created, db open fails) or `stash()` errors, compression
-  proceeds without stash and the marker degrades to the plain
-  `<... N more items truncated, not stashed>` form. The trailing `, not
-  stashed` clause also keeps the plain marker TOON-safe: it forces the TOON
-  encoder to quote the string, so `compress-toon`/`decompress-toon`
-  round-trip it intact (the stash marker is quoted for the same reason).
-  Compression never fails because of the stash.
+- **Direct compression commands**: `compress-response --no-stash` may emit an
+  explicitly unrecoverable truncation. The low-level API retains the same
+  opt-in behavior.
+- **Protocol v2 lifecycle path**: no truncation is applied unless every removed
+  payload is recoverable. Missing state produces
+  `recoverability_unavailable`; an actual Stash write error fails the
+  operation instead of emitting an invalid recovery promise.
 - **Retrieve path**: retrieve is user-initiated, so failures surface as
   errors (exit 1) rather than being swallowed.
 
-## What is not (yet) stashed
+## What is not stashed
 
-- **String truncation**: long string values are truncated with a `… (truncated)`
-  marker but the tail is not stashed. The stash marker (~65 chars) against
-  small per-field limits would be proportionally large overhead; the
-  high-value case is array truncation, which is covered.
-- **MCP `tokenless_retrieve`**: not yet implemented; retrieval is via the CLI
-  today. MCP integration is tracked separately.
+`JsonCompressor` stashes complete long strings, dropped array windows, and
+depth-truncated subtrees when a trusted recovery path is available. Structural
+cleanup—blacklisted diagnostic fields, `null`, and empty values—is classified
+as lossless and does not emit recovery markers.
+
+The former stateless MCP Retrieve server was removed. It accepted hashes
+without verified model-visibility context, so it cannot serve as an authorized
+agent recovery endpoint. Protocol v2 `retrieve` is the agent-facing path;
+`tokenless retrieve` remains the trusted local operations path.
 
 Schema description truncation **is** stashed when a store is attached (CLI
 default): `SchemaCompressor::truncate_description` writes the verbatim
@@ -194,7 +198,7 @@ stash is off or the stash write fails.
 |---|---|---|
 | CCR Store | stash store (`StashStore` trait) | InMemory / SQLite(WAL) / Redis* |
 | `<<ccr:HASH>>` | `<<tokenless:HASH>>` | 24-hex BLAKE3, same key length |
-| `headroom_retrieve` (MCP) | `tokenless retrieve` (CLI) | MCP tool pending |
+| `headroom_retrieve` (MCP) | Protocol v2 `retrieve` | Requires current visible Markers; trusted local CLI remains separate |
 | DashMap `remove_if` TOCTOU fix | `BEGIN IMMEDIATE` ownership transaction | SQLite path |
 | default TTL 5 min / cap 1000 | InMemory 5 min / 1000; SQLite 1 h / 10 000 | tuned for hook process model |
 

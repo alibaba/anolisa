@@ -473,8 +473,8 @@ fn record_metadata_json(record: &StatsRecord) -> serde_json::Value {
         "stash_size": record.stash_size,
         "content_type": record.content_type,
         "content_origin": record.content_origin,
-        "seam": record.seam,
-        "compressor_chain": record.compressor_chain,
+        "applied_operations": record.applied_operations,
+        "recoverability": record.recoverability,
         "tokenizer_id": record.tokenizer_id,
         "unrecoverable_truncations": record.unrecoverable_truncations,
     })

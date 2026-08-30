@@ -128,8 +128,8 @@ class StatsRecord:
     stash_size: int | None
     content_type: str | None
     content_origin: str | None
-    seam: str | None
-    compressor_chain: str | None
+    applied_operations: tuple[str, ...] | None
+    recoverability: str | None
     tokenizer_id: str | None
     unrecoverable_truncations: int | None
 
@@ -480,6 +480,7 @@ def _operation_mapping(
 
 
 def _parse_record(value: Mapping[str, Any]) -> StatsRecord:
+    applied_operations = value.get("applied_operations")
     return StatsRecord(
         id=value["id"],
         timestamp=datetime.fromisoformat(value["timestamp"]),
@@ -502,8 +503,10 @@ def _parse_record(value: Mapping[str, Any]) -> StatsRecord:
         stash_size=value["stash_size"],
         content_type=value.get("content_type"),
         content_origin=value.get("content_origin"),
-        seam=value.get("seam"),
-        compressor_chain=value.get("compressor_chain"),
+        applied_operations=(
+            None if applied_operations is None else tuple(applied_operations)
+        ),
+        recoverability=value.get("recoverability"),
         tokenizer_id=value.get("tokenizer_id"),
         unrecoverable_truncations=value.get("unrecoverable_truncations"),
     )

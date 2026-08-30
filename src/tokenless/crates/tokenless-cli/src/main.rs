@@ -1,6 +1,5 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
 mod env_check;
-mod mcp;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
@@ -9,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore};
-use tokenless_protocol::CompressionRequest;
+use tokenless_protocol::{Disposition, Request, RequestEnvelope, Response};
 use tokenless_runtime::{
-    CompressOptions, CompressResult, Disposition, EntryOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS,
-    compress_response_with_store, compress_toon, compress_with_store, record_compression,
+    CompressOptions, CompressResult, EntryOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS,
+    compress_response_with_store, compress_toon, dispatch_with_store, record_compression,
     retrieve_recorded,
 };
 use tokenless_schema::SchemaCompressor;
@@ -39,11 +38,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compress via the protocol-v1 entry point: reads a CompressionRequest
-    /// JSON from stdin or --file and writes a CompressionResponse JSON to
-    /// stdout (roadmap §5.4). Fail-open: compression failures surface as
-    /// response dispositions with exit 0; exit 2 is reserved for
-    /// unreadable, oversized, or undecodable requests.
+    /// Run one Protocol v2 lifecycle operation from a JSON request.
     Compress {
         #[arg(short, long)]
         file: Option<String>,
@@ -180,16 +175,6 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Start the tokenless MCP stdio server (exposes `tokenless_retrieve` so
-    /// an MCP-connected agent can recover stashed payloads on demand).
-    #[command(subcommand)]
-    Mcp(McpCommands),
-}
-
-#[derive(Subcommand)]
-enum McpCommands {
-    /// Start the MCP stdio server.
-    Serve,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -448,7 +433,7 @@ fn get_stash_db_path_with(
     // An explicit --stash-db override is validated the same way as the
     // TOKENLESS_STASH_DB env var: on rejection we warn AND fall back to the
     // selected data directory, so a bad file override does not silently drop
-    // reversibility. An invalid data-directory override still fails closed.
+    // recoverability. An invalid data-directory override still fails closed.
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
         match validate_db_path(Path::new(p), home, data_dir.ok()) {
             Ok(valid) => return Ok(valid),
@@ -489,10 +474,6 @@ fn open_stash_store_or_err_with(
 /// Open a stash store, failing open to `None` on any error. Compression
 /// proceeds without stash (lossy truncation) when no valid data directory is
 /// available, the parent cannot be created, or the database cannot be opened.
-fn open_stash_store(override_path: Option<&str>) -> Option<Arc<dyn StashStore>> {
-    open_stash_store_with(&DatabasePathResolver::default(), override_path)
-}
-
 fn open_stash_store_with(
     paths: &DatabasePathResolver,
     override_path: Option<&str>,
@@ -517,7 +498,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             // Undecodable or version-mismatched requests carry no content to
             // echo, so no fail-open response can be built: exit 2.
-            let request = CompressionRequest::from_json(&input).map_err(|e| (e.to_string(), 2))?;
+            let request = RequestEnvelope::from_json(&input).map_err(|e| (e.to_string(), 2))?;
 
             // Load config before deciding on the stash so we can skip it
             // entirely when compression is disabled (dry-run). Attaching the
@@ -527,49 +508,51 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let config = TokenlessConfig::load();
             let database_paths = DatabasePathResolver::default();
             let compression_on = config.is_compression_enabled();
-            let stash = if !compression_on {
-                None
-            } else {
-                open_stash_store_with(&database_paths, stash_db.as_deref())
+            let needs_stash = match &request.request {
+                Request::BeforeModel(value) => {
+                    compression_on && value.capabilities.publish_retrieve_tool
+                }
+                Request::PostTool(value) => {
+                    compression_on && value.capabilities.publish_retrieve_tool
+                }
+                Request::Retrieve(_) => true,
+                Request::PreTool(_) => false,
             };
-            let outcome = compress_with_store(
-                &request,
-                &EntryOptions {
-                    compression_enabled: compression_on,
-                    stash_enabled: true,
-                },
-                stash.as_ref(),
-            );
-            if matches!(outcome.stash_errors, Some(errors) if errors > 0) {
-                eprintln!(
-                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
-                    outcome.stash_errors.expect("checked Some above")
-                );
-            }
-            if outcome.response.disposition == Disposition::NoSavings {
-                eprintln!(
-                    "tokenless: compression did not reduce size ({} -> {} est. tokens), outputting original",
-                    outcome.response.before_tokens, outcome.response.after_tokens
-                );
-            }
-
-            // Kept for its dry-run stderr notice only; the recorded mode is
-            // derived from the response disposition inside record_compression.
-            let _ = resolve_mode(
-                compression_on,
-                outcome.response.before_tokens as usize,
-                outcome.response.after_tokens as usize,
-            );
-            let response_json = outcome.response.to_json().map_err(|e| (e.to_string(), 1))?;
-            println!("{response_json}");
-
+            let stash = needs_stash
+                .then(|| open_stash_store_or_err_with(&database_paths, stash_db.as_deref()))
+                .transpose()
+                .map_err(|error| (error, 1))?;
             let recorder = if config.is_stats_enabled() {
                 open_recorder_with(&database_paths).ok()
             } else {
                 None
             };
-            record_compression(
+            let rtk_path = matches!(&request.request, Request::PreTool(_))
+                .then(env_check::resolve_rtk_path)
+                .flatten()
+                .map(PathBuf::from);
+            let outcome = dispatch_with_store(
                 &request,
+                &EntryOptions {
+                    compression_enabled: compression_on,
+                    stash_enabled: true,
+                    rtk_path,
+                },
+                stash.as_ref(),
+                recorder.as_ref(),
+            )
+            .map_err(|error| (error.to_string(), 1))?;
+            if let Response::PostTool(response) = &outcome.response.response
+                && response.disposition == Disposition::NoSavings
+            {
+                eprintln!("tokenless: compression did not reduce size, outputting original");
+            }
+
+            let response_json = outcome.response.to_json().map_err(|e| (e.to_string(), 1))?;
+            println!("{response_json}");
+
+            record_compression(
+                &request.attribution,
                 &outcome,
                 recorder.as_ref(),
                 config.is_sls_enabled(),
@@ -1081,9 +1064,6 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
-        Commands::Mcp(McpCommands::Serve) => {
-            mcp::serve()?;
-        }
     }
 
     Ok(())
@@ -1092,7 +1072,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 /// Text recorded as the statistics "after" side for one compression result.
 ///
 /// Only `Applied` and `DryRun` measure the candidate. Every other
-/// disposition (no-savings, timeout, passthrough, reversibility, error)
+/// disposition (no-savings, timeout, passthrough, recoverability, tool error)
 /// emitted the original, so recording the discarded candidate would book
 /// savings that never reached the model. Mirrors the Runtime's
 /// `record_stats` selection; `record_compression_stats` then skips records

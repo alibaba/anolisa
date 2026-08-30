@@ -2,8 +2,8 @@
 """Tokenless schema compression hook.
 
 Reads a BeforeModel JSON from stdin, extracts the tools array, forwards it
-to the unified ``tokenless compress`` entry point (protocol v1, seam
-``before_model``, roadmap §5.4), and writes a HookOutput JSON to stdout.
+to the unified ``tokenless compress`` Protocol v2 BeforeModel operation and
+writes a HookOutput JSON to stdout.
 The entry point returns the original array on no-savings, which this hook
 wraps exactly like a compressed one — the historical behavior of the
 ``compress-schema`` flow it replaces.
@@ -32,7 +32,7 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
-    build_compression_request,
+    build_before_model_request,
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
@@ -110,14 +110,6 @@ def _marker_lock():
 
 
 # -- helpers -----------------------------------------------------------------
-
-
-def _is_json_array(data: str) -> bool:
-    try:
-        obj = json.loads(data)
-        return isinstance(obj, list)
-    except (json.JSONDecodeError, ValueError):
-        return False
 
 
 def _session_warn_key(session_id: str) -> str:
@@ -275,37 +267,33 @@ def main() -> None:
                 )
         skip()
 
-    tools_json = json.dumps(tools, separators=(",", ":"))
-
     # 4. Extract caller context
     session_id = input_data.get("session_id", "")
     tool_use_id = resolve_tool_call_id(_AGENT_ID, input_data)
 
     # 5. Compress schemas via the unified entry point (one subprocess).
-    request = build_compression_request(
-        tools_json,
+    llm_request = input_data.get("llm_request", {})
+    visible_context = dict(llm_request) if isinstance(llm_request, dict) else {}
+    visible_context.pop("tools", None)
+    config = visible_context.get("config")
+    if isinstance(config, dict):
+        visible_context["config"] = dict(config)
+        visible_context["config"].pop("tools", None)
+    request = build_before_model_request(
+        tools,
+        visible_context,
         _AGENT_ID,
-        "before_model",
         session_id=session_id,
         tool_use_id=tool_use_id,
-        replace_output=True,
-        publish_retrieve_tool=True,
     )
-    response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT)
+    response = run_compress(
+        tokenless_bin, request, _COMPRESS_TIMEOUT, "before_model"
+    )
     if response is None:
         warn("Schema compression subprocess failed. Passing through unchanged.")
         skip()
-    if response.get("disposition") in {"error", "timeout"}:
-        warn("Schema compression failed. Passing through unchanged.")
-        skip()
-    if response.get("disposition") == "reversibility_unavailable":
-        # Savings existed but the stash could not record the originals;
-        # the entry point returned the uncompressed schemas. Surface the
-        # distinction from "nothing to compress" (envelope unchanged).
-        warn("Schema stash unavailable; truncated descriptions would be lossy.")
-
-    compressed = response.get("output")
-    if not isinstance(compressed, str) or not _is_json_array(compressed):
+    compressed = response.get("tools")
+    if not isinstance(compressed, list):
         warn(
             "Schema compression returned invalid JSON. Passing through unchanged."
         )
@@ -317,7 +305,7 @@ def main() -> None:
             "hookEventName": "BeforeModel",
             "llm_request": {
                 "config": {
-                    "tools": json.loads(compressed),
+                    "tools": compressed,
                 },
             },
         },

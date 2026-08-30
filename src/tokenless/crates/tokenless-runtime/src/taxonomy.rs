@@ -8,16 +8,9 @@
 //! adapter files installed — which ties this crate to the workspace layout;
 //! acceptable for a workspace-internal crate that is never `cargo package`d.
 //!
-//! A malformed edit of the JSON falls back to the hardcoded sets below
-//! (mirroring the Python fail-open behaviour), and the unit tests fail so
-//! CI reports the breakage instead of silently degrading.
-//!
-//! The layer-1 skip list is gone from here (roadmap §6.3): whether content
-//! is compressed follows from its type, its origin, and whether a compressor
-//! is registered. `tool_categories.json` keeps the list for the adapters,
-//! which use it to avoid a spawn; this crate no longer reads it.
+//! A malformed edit of the JSON falls back to the hardcoded thresholds and
+//! the unit tests fail so CI reports the breakage instead of degrading.
 
-use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -46,23 +39,6 @@ const API_THRESHOLDS: ToolThresholds = ToolThresholds {
     truncate_arrays_at: 65_536,
     max_depth: 32,
 };
-
-// Minimum safe classification, matching `hook_utils.py`'s fallback set.
-// Only `ContentOrigin::Unspecified` still reaches it; it goes when every
-// adapter declares an origin (roadmap §6.3, item 10).
-const FALLBACK_SHELL_TOOLS: &[&str] = &[
-    "Bash",
-    "bash",
-    "Shell",
-    "shell",
-    "exec",
-    "terminal",
-    "run_shell_command",
-    "run_in_terminal",
-    "get_terminal_output",
-    "execute_command",
-    "process",
-];
 
 #[derive(Deserialize)]
 struct RawTaxonomy {
@@ -104,14 +80,12 @@ impl RawThresholds {
 }
 
 struct Taxonomy {
-    shell_tools: HashSet<String>,
     shell_thresholds: ToolThresholds,
     api_thresholds: ToolThresholds,
 }
 
 fn fallback_taxonomy() -> Taxonomy {
     Taxonomy {
-        shell_tools: FALLBACK_SHELL_TOOLS.iter().map(|t| (*t).into()).collect(),
         shell_thresholds: SHELL_THRESHOLDS,
         api_thresholds: API_THRESHOLDS,
     }
@@ -122,7 +96,6 @@ fn taxonomy() -> &'static Taxonomy {
     TAXONOMY.get_or_init(
         || match serde_json::from_str::<RawTaxonomy>(TAXONOMY_JSON) {
             Ok(raw) if !raw.layer_2_shell.tools.is_empty() => Taxonomy {
-                shell_tools: raw.layer_2_shell.tools.into_iter().collect(),
                 shell_thresholds: RawThresholds::resolve(
                     raw.layer_2_shell.thresholds,
                     SHELL_THRESHOLDS,
@@ -137,19 +110,13 @@ fn taxonomy() -> &'static Taxonomy {
 /// Truncation thresholds: layer 2 limits for command output, layer 3
 /// zero-truncation limits for everything else.
 ///
-/// A declared origin decides on its own. `Unspecified` falls back to the
-/// tool-name test, because the two sets differ by more than an order of
-/// magnitude — handing an unmigrated caller the API set would silently
-/// change the shape of its shell output (roadmap §4.3).
-pub(crate) fn thresholds_for(origin: ContentOrigin, tool_name: Option<&str>) -> ToolThresholds {
+/// The required origin decides the threshold family without tool-name
+/// fallback.
+pub(crate) fn thresholds_for(origin: ContentOrigin) -> ToolThresholds {
     let tax = taxonomy();
     match origin {
         ContentOrigin::CommandOutput => tax.shell_thresholds,
         ContentOrigin::FileContent | ContentOrigin::ApiResponse => tax.api_thresholds,
-        ContentOrigin::Unspecified => match tool_name {
-            Some(name) if tax.shell_tools.contains(name) => tax.shell_thresholds,
-            _ => tax.api_thresholds,
-        },
     }
 }
 
@@ -168,36 +135,13 @@ mod tests {
     }
 
     #[test]
-    fn unspecified_origin_still_classifies_by_tool_name() {
-        use ContentOrigin::Unspecified;
-        assert_eq!(thresholds_for(Unspecified, Some("Bash")), SHELL_THRESHOLDS);
+    fn origin_selects_thresholds() {
         assert_eq!(
-            thresholds_for(Unspecified, Some("run_shell_command")),
+            thresholds_for(ContentOrigin::CommandOutput),
             SHELL_THRESHOLDS
         );
-        assert_eq!(
-            thresholds_for(Unspecified, Some("WebFetch")),
-            API_THRESHOLDS
-        );
-        assert_eq!(thresholds_for(Unspecified, None), API_THRESHOLDS);
-    }
-
-    #[test]
-    fn a_declared_origin_ignores_the_tool_name() {
-        // Both directions: the origin decides even when the tool name would
-        // have said otherwise.
-        assert_eq!(
-            thresholds_for(ContentOrigin::CommandOutput, Some("WebFetch")),
-            SHELL_THRESHOLDS
-        );
-        assert_eq!(
-            thresholds_for(ContentOrigin::ApiResponse, Some("Bash")),
-            API_THRESHOLDS
-        );
-        assert_eq!(
-            thresholds_for(ContentOrigin::FileContent, Some("Bash")),
-            API_THRESHOLDS
-        );
+        assert_eq!(thresholds_for(ContentOrigin::ApiResponse), API_THRESHOLDS);
+        assert_eq!(thresholds_for(ContentOrigin::FileContent), API_THRESHOLDS);
     }
 
     #[test]
@@ -206,7 +150,6 @@ mod tests {
         // so a fallback activation changes availability, never behaviour.
         let fallback = fallback_taxonomy();
         let parsed = taxonomy();
-        assert_eq!(fallback.shell_tools, parsed.shell_tools);
         assert_eq!(fallback.shell_thresholds, parsed.shell_thresholds);
         assert_eq!(fallback.api_thresholds, parsed.api_thresholds);
     }

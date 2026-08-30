@@ -6,7 +6,7 @@
 
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
-- **Content-aware Compression** — Routes tool schemas, JSON records, build logs, and long plain text through a capability-aware pipeline, accepting only a smaller end-to-end result.
+- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline currently compresses JSON only.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing syntax overhead for suitable structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
@@ -32,13 +32,13 @@ retrieval, and attribution.
 | Capability | Savings indicator | Details |
 |---|---|---|
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
-| Content-aware response compression | 65.8% on the JSON reference fixture | Routes JSON, build logs, and long plain text through matching compressors |
+| Content-aware response compression | 65.8% on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; non-JSON domains currently pass through |
 | Reversible compression (stash) | — | Dropped array items are stashed and retrievable via `<<tokenless:KEY>>` markers |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, optional TOON ✅, Schema compression — |
-| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅; Cosh-NG can replace pipeline output, legacy Copilot Shell cannot |
+| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Protocol v2 PostTool; Common BeforeModel passes schemas through until trusted Retrieve is available |
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
@@ -268,11 +268,14 @@ Agent adapters may apply separate pre-check thresholds; see the
 
 ### compress
 
-Shared Agent hooks send a compression request to `tokenless compress`. The command
-detects content, filters compressors by the host's declared
-capabilities, and returns a structured disposition plus the exact output to
-emit. It currently handles model tool schemas, JSON records, build logs, and
-long plain text; other detected content types pass through. See the
+Shared Agent hooks send a strict Protocol v2 lifecycle request to `tokenless compress`.
+The tagged envelope selects `before_model`, `pre_tool`, `post_tool`, or
+`retrieve`; only successful, non-bypassed PostTool JSON enters the Runtime-owned
+Pipeline. Common Hooks have no trusted Retrieve capability, so Core applies
+lossless PostTool candidates and rejects truncation that cannot be recovered.
+The current `SchemaCompressor` transformations are lossy, so Common BeforeModel
+passes tools through unchanged and creates no schema-compression Stats rows in
+this migration phase. See the
 [CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#compress)
 for the request/response contract and an executable example.
 
@@ -405,7 +408,7 @@ The adapter provides hooks that are auto-discovered by copilot-shell via the cos
 | Tool Ready (hard-disabled) | PreToolUse (all tools) | `tool_ready_hook.sh` | Silent pass-through; no check, repair, context, or block |
 | Command rewriting | PreToolUse (Shell) | `rewrite_hook.py` | Rewrite commands via RTK |
 | Response compression + attribution + TOON | PostToolUse | `compress_response_hook.py` | Compress + env error attribution + TOON |
-| Schema compression | BeforeModel | `compress_schema_hook.py` | Compress tool schemas |
+| Schema compression | BeforeModel | `compress_schema_hook.py` | Protocol v2 passthrough until the Common Hook can publish trusted Retrieve |
 
 ### Install
 

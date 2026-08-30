@@ -9,7 +9,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
-| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换响应；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | ✅ |
+| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换无损 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
 | Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并要求 Agent 重试 | 替换结果字符串 | 在响应压缩后尝试 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
@@ -31,21 +31,25 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 
 ## Adapter 处理规则
 
-共享 Cosh-NG、Qoder、Claude Code 和 OpenCode Hook 会向 `tokenless compress` 发送一个
-压缩请求。该命令检测模型可见内容，根据宿主声明的替换与恢复能力筛选 Compressor，
-运行符合条件的阶段，并对所有非 `applied` disposition 返回原文。当前路由如下：
+共享 Cosh-NG、Qoder、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
+发送一个 Protocol v2 `post_tool` 请求。它声明输出替换能力，但不声明受信 Agent-facing
+Retrieve 能力。因此 Core 只应用无损 JSON 候选，并对所有非 `applied` Disposition 返回原文。
+当前路由如下：
 
 | 内容 | 当前共享 Hook 行为 |
 |------|--------------------|
-| JSON Records | 结构化响应清理；文本替换槽还会考虑 TOON |
-| 构建/测试/包管理日志 | 无损 Terminal 清理，再运行保留 Signal 的 build/log 压缩，并为省略区间写入可恢复 marker |
-| 长纯文本 | 无损 Terminal 清理，再保守保留头尾，并为省略区间写入可恢复 marker |
-| Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 尚无匹配 Compressor，原样透传 |
+| JSON | 无损结构清理；文本替换槽还会考虑 TOON |
+| 需要字符串、数组或深度截断的 JSON | Common Hook 无法发布经过授权的 Retrieve Tool，因此以 `recoverability_unavailable` 拒绝候选 |
+| 构建/测试/包管理日志、长纯文本、Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
-build/log 压缩要求宿主同时具备三项能力：替换原输出、发布恢复 Tool、以任意文本替换。它会
-保留 Signal 行和 Stack Trace 区域、失败周围 Context 以及固定头尾窗口，并把每个省略区间
-写入 Stash。短日志或节省少于 200 字符的候选会透传。纯文本在达到 100 行时触发；单行保护
-路径在达到 65,536 字符时触发。
+内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
+Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显不是 JSON 的 Skill 文件，避免
+无意义地启动子进程。
+
+Common BeforeModel Hook 同样使用 Protocol v2，并声明没有受信 Retrieve 能力。只有 Core
+证明结果无损时才返回变换后的 Tools。当前 `SchemaCompressor` 的每一种变换都会移除或改写
+Schema 信息，因此这条 Common 路径会原样返回 Tools、不产生 Schema 压缩 Stats 记录，也不会
+发出不可恢复 Marker。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
 
 旧版 OpenClaw、Hermes 和 DeepSeek Harness 集成仍使用各自的专用响应路径，其阈值与能力见
 下文；content-aware build/log 路径尚未接入这些 Adapter。独立 `compress-response` 命令也
@@ -59,11 +63,15 @@ build/log 压缩要求宿主同时具备三项能力：替换原输出、发布�
 | Shell/exec | 字符串 65,536 字符、数组保留 128 项、深度 8 |
 | 其他结构化工具 | 字符串 1,048,576 字符、数组保留 65,536 项、深度 32 |
 
-共享响应 Hook、OpenClaw 与 Hermes 会跳过短于 200 字符的输入；共享路径也会跳过带 YAML
-Frontmatter 的 Skill 文本。TOON 只处理至少 500 字符的 Payload，并且要求选中的宿主槽支持
-文本；更短 Payload 保留前一阶段结果。独立 `compress-toon` CLI 和 SDK TOON 路径使用相同
-默认阈值，CLI 可通过 `--min-toon-chars` 为单次调用降低阈值。Codex 和 Qwen Code 当前的
-PostToolUse 契约不能替换原始模型可见输出，因此不运行响应压缩或 TOON。
+OpenClaw 与 Hermes 仍保留现有 Adapter 侧 200 字符门禁；Common Hook 的该门禁已经归 Core。
+TOON 只处理至少 500 字符的 Payload，并且要求选中的宿主槽支持文本；更短 Payload 保留前一
+阶段结果。独立 `compress-toon` CLI 和 SDK TOON 路径使用相同默认阈值，CLI 可通过
+`--min-toon-chars` 为单次调用降低阈值。Codex 和 Qwen Code 当前的 PostToolUse 契约不能替换
+原始模型可见输出，因此不运行响应压缩或 TOON。
+
+Common PreTool Rewrite Hook 仍直接调用 RTK，尚未把 v2 `output_optimization: "rtk"` 传给
+后续 PostTool 进程；OpenClaw 也存在相同的逐调用状态缺口。完整状态迁移留到 Adapter 阶段，
+当前 PostTool 请求使用 `output_optimization: "none"`。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 

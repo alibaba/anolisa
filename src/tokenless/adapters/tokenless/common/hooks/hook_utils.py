@@ -496,45 +496,83 @@ def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.Comple
         return None
 
 
-def build_compression_request(
-    content: str,
+def _attribution(
     agent_id: str,
-    seam: str,
     session_id: str = "",
     tool_use_id: str = "",
-    tool_name: str = "",
-    replace_output: bool = False,
-    publish_retrieve_tool: bool = False,
-    replace_with_text: bool = False,
 ) -> dict:
-    """Build a protocol-v1 CompressionRequest for ``tokenless compress``.
+    """Build the shared Protocol v2 attribution object."""
+    value = {"agent_id": agent_id}
+    if session_id:
+        value["session_id"] = session_id
+    if tool_use_id:
+        value["tool_use_id"] = tool_use_id
+    return value
 
-    The adapter only copies the model-visible value and declares what its
-    host can do with the result (roadmap §4.5); all compression decisions
-    live behind the entry point.
-    """
-    request = {
-        "protocol_version": 1,
-        "content": content,
-        "agent_id": agent_id,
-        "seam": seam,
-        "capabilities": {
-            "replace_output": replace_output,
-            "publish_retrieve_tool": publish_retrieve_tool,
-            "replace_with_text": replace_with_text,
+
+def build_before_model_request(
+    tools: list,
+    visible_context: object,
+    agent_id: str,
+    session_id: str = "",
+    tool_use_id: str = "",
+) -> dict:
+    """Build a Protocol v2 BeforeModel transport request."""
+    return {
+        "protocol_version": 2,
+        "operation": "before_model",
+        "attribution": _attribution(agent_id, session_id, tool_use_id),
+        "input": {
+            "tools": tools,
+            "visible_context": visible_context,
+            "retrieve_tool_name": "tokenless_retrieve",
+            "capabilities": {
+                "replace_tools": True,
+                # Common Hooks have no trusted agent-facing Retrieve entry.
+                "publish_retrieve_tool": False,
+            },
         },
     }
-    if session_id:
-        request["session_id"] = session_id
-    if tool_use_id:
-        request["tool_use_id"] = tool_use_id
-    if tool_name:
-        request["tool_name"] = tool_name
-    return request
+
+
+def build_post_tool_request(
+    content: str,
+    agent_id: str,
+    tool_name: str,
+    status: str,
+    content_origin: str,
+    session_id: str = "",
+    tool_use_id: str = "",
+    replace_output: bool = False,
+    replace_with_text: bool = False,
+) -> dict:
+    """Build a Protocol v2 PostTool transport request.
+
+    Common Hooks intentionally declare no trusted Retrieve capability, so
+    Core may apply lossless cleanup but rejects lossy candidates.
+    """
+    return {
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": _attribution(agent_id, session_id, tool_use_id),
+        "input": {
+            "result_kind": "tool",
+            "tool_name": tool_name,
+            "content": content,
+            "status": status,
+            "content_origin": content_origin,
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": replace_output,
+                "publish_retrieve_tool": False,
+                "replace_with_text": replace_with_text,
+            },
+        },
+    }
 
 
 def run_compress(
-    tokenless_bin: str, request: dict, timeout: int
+    tokenless_bin: str, request: dict, timeout: int, expected_operation: str
 ) -> dict | None:
     """Run ``tokenless compress`` on one request; None on any failure.
 
@@ -555,12 +593,19 @@ def run_compress(
     if not isinstance(response, dict):
         warn("tokenless compress returned malformed output")
         return None
-    if response.get("protocol_version") != 1:
+    if response.get("protocol_version") != 2:
         # Version-skewed binary: never trust a response whose contract
         # this adapter does not speak.
         warn("tokenless compress returned an unsupported protocol version")
         return None
-    return response
+    if response.get("operation") != expected_operation:
+        warn("tokenless compress returned a mismatched operation")
+        return None
+    result = response.get("result")
+    if not isinstance(result, dict):
+        warn("tokenless compress returned a malformed operation result")
+        return None
+    return result
 
 
 def detect_cosh_ng_runtime() -> tuple | None:

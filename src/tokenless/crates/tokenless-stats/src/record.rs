@@ -128,7 +128,7 @@ pub struct StatsRecord {
     /// pre-stash records or operations without a stash store attached.
     pub stash_size: Option<i64>,
     /// Detected content taxonomy (protocol `content_type` wire string).
-    /// `None` for legacy paths and seams without a detector (before_model).
+    /// `None` for low-level paths and operations without a detector.
     #[serde(default)]
     pub content_type: Option<String>,
     /// Origin declared by the adapter (protocol `content_origin` wire
@@ -142,14 +142,12 @@ pub struct StatsRecord {
     /// emits them.
     #[serde(default)]
     pub content_origin: Option<String>,
-    /// Protocol seam wire string (`before_model`, `pre_tool`, `post_tool`,
-    /// `proxy`). `None` for rows written outside the unified entry point.
+    /// Lifecycle operations that shaped the emitted content.
     #[serde(default)]
-    pub seam: Option<String>,
-    /// JSON array of stable compressor IDs applied, in order (e.g.
-    /// `["response-cleanup","toon"]`). `None` outside the unified entry.
+    pub applied_operations: Option<Vec<String>>,
+    /// Recovery state of the emitted content.
     #[serde(default)]
-    pub compressor_chain: Option<String>,
+    pub recoverability: Option<String>,
     /// Token counter identity used for this row's estimates. `None` outside
     /// the unified entry.
     #[serde(default)]
@@ -192,8 +190,8 @@ impl StatsRecord {
             stash_size: None,
             content_type: None,
             content_origin: None,
-            seam: None,
-            compressor_chain: None,
+            applied_operations: None,
+            recoverability: None,
             tokenizer_id: None,
             unrecoverable_truncations: None,
         }
@@ -265,22 +263,20 @@ impl StatsRecord {
         self
     }
 
-    /// Set the unified-entry attribution written by the §5.5 recording path:
-    /// seam, detected content type, applied compressor chain (JSON array of
-    /// stable IDs), tokenizer identity, and unmarked-truncation count.
+    /// Sets lifecycle metadata written by the shared recording path.
     pub fn with_entry_metadata(
         mut self,
-        seam: impl Into<String>,
         content_type: Option<String>,
         content_origin: Option<String>,
-        compressor_chain: Option<String>,
+        applied_operations: Option<Vec<String>>,
+        recoverability: Option<String>,
         tokenizer_id: impl Into<String>,
         unrecoverable_truncations: Option<i64>,
     ) -> Self {
-        self.seam = Some(seam.into());
         self.content_type = content_type;
         self.content_origin = content_origin;
-        self.compressor_chain = compressor_chain;
+        self.applied_operations = applied_operations;
+        self.recoverability = recoverability;
         self.tokenizer_id = Some(tokenizer_id.into());
         self.unrecoverable_truncations = unrecoverable_truncations;
         self

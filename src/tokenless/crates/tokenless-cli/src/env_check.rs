@@ -583,7 +583,7 @@ fn is_executable_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn resolve_binary_path(binary: &str) -> Option<String> {
+pub(crate) fn resolve_binary_path(binary: &str) -> Option<String> {
     let which_result = Command::new("sh")
         .args(["-c", "command -v \"$1\"", "--", binary])
         .output();
@@ -604,6 +604,44 @@ fn resolve_binary_path(binary: &str) -> Option<String> {
                 .map(|path| path.to_string_lossy().into_owned())
         }
     }
+}
+
+pub(crate) fn resolve_rtk_path() -> Option<String> {
+    let path_candidate = if let Ok(output) = Command::new("sh")
+        .args(["-c", "command -v \"$1\"", "--", "rtk"])
+        .output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    } else {
+        None
+    };
+    select_rtk_path(path_candidate, &crate::get_home_dir())
+}
+
+fn select_rtk_path(path_candidate: Option<PathBuf>, home: &str) -> Option<String> {
+    let mut candidates = path_candidate.into_iter().collect::<Vec<_>>();
+    candidates.extend(binary_fallback_paths("rtk", home));
+    candidates.into_iter().find_map(|path| {
+        if !is_executable_file(&path) {
+            return None;
+        }
+        let output = Command::new(&path).arg("--version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let version_text = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let version = VERSION_RE
+            .captures(&version_text)
+            .and_then(|captures| captures.get(1))?
+            .as_str();
+        version_ge(version, "0.35.0").then(|| path.to_string_lossy().into_owned())
+    })
 }
 
 /// Check if a binary is available and meets version constraints.

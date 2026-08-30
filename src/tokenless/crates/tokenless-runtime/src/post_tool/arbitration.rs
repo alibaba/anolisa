@@ -30,7 +30,7 @@ pub(super) fn decide(input: &ArbitrationInput<'_>) -> Verdict {
         return Verdict::Reject(Disposition::NoSavings);
     }
     if input.require_reversibility && input.recoverability == Recoverability::Unrecoverable {
-        return Verdict::Reject(Disposition::ReversibilityUnavailable);
+        return Verdict::Reject(Disposition::RecoverabilityUnavailable);
     }
     let saves_chars = input.candidate.chars().count() < input.original.chars().count();
     let saves_tokens = estimate_tokens(input.candidate) < estimate_tokens(input.original);
@@ -80,7 +80,7 @@ mod tests {
         case.recoverability = Recoverability::Unrecoverable;
         assert_eq!(
             decide(&case),
-            Verdict::Reject(Disposition::ReversibilityUnavailable)
+            Verdict::Reject(Disposition::RecoverabilityUnavailable)
         );
 
         case.require_reversibility = false;

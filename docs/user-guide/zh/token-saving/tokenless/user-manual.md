@@ -41,12 +41,12 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
-| Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | 通过 cosh/Cosh-NG 的 `BeforeModel` Hook 和 OpenCode 的逐工具定义 Hook 运行（Qwen Code 清单中的条目会被当前宿主跳过）；其他场景可直接调用 CLI |
-| Content-aware 响应压缩 | 把 JSON Records、构建日志和长纯文本路由到匹配 Compressor，只接受端到端更小的结果 | 直接 `compress-response` 仍只处理 JSON；宿主能力决定共享 Hook 能否用文本替换并发布恢复能力 |
+| Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | 这些变换均为有损且 Common BeforeModel 没有受信 Retrieve，因此当前原样返回 Schema；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
+| Content-aware 响应压缩 | Protocol v2 把成功的 PostTool JSON 路由给 `JsonCompressor`，只接受端到端更小的结果 | 非 JSON 内容域当前透传；Common Hook 不声明受信 Retrieve，因此只应用无损候选 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 真正提交给 Shell 的命令会变化；无规则或被拒绝时透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
-| Stash | 保存因字符串、数组、深度或 Schema 描述截断以及 build/log 间隙移除而省略的内容 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
+| Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
 
 代码没有提供固定节省率保证。结果取决于 Payload、Adapter 交付语义，以及工具数据在模型上下文中的占比。请按[效果度量](measuring-savings.md)使用自己的工作负载测量。
 
@@ -55,9 +55,10 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 启用对应 Adapter 后，一次工具调用可能经过以下阶段：
 
 ```text
-工具调用前：已硬关闭的 Tool Ready Hook → 命令重写
-工具调用后：内容检测 → 符合条件的 Compressor → 可选 Stash/TOON → 写入统计
-模型调用前：Schema 压缩
+工具调用前：RTK 改写 → 传递输出优化状态
+工具调用后：状态与优化旁路 → JSON-only PostTool Pipeline → 可选 Stash/TOON → 写入统计
+模型调用前：Schema 压缩 → 提取可见 Marker → 条件式 Retrieve 声明
+Retrieve：可见 Marker 授权 → 字节级一致的 Stash Read
 ```
 
 这是能力示意，不是所有框架都会完整执行的固定流水线。例如 content-aware Protocol 路径
@@ -91,14 +92,16 @@ anolisa adapter disable tokenless <framework>
 
 ### 可逆压缩是有条件的
 
-启用压缩时，响应/Schema 截断和 build/log 省略区间默认会把被移除的 Payload 写入
+启用压缩时，响应和 Schema 截断默认会把被移除的 Payload 写入
 `~/.tokenless/stash.db`，并在输出中加入：
 
 ```text
 <<tokenless:0123456789abcdef01234567>>
 ```
 
-可以通过 `tokenless retrieve` 或 MCP `tokenless_retrieve` 取回。以下情况会失去可逆性：
+本地可以通过受信 `tokenless retrieve` 命令取回。Protocol v2 的 Agent-facing Retrieve 会先
+要求请求 Marker 存在于模型当前的 `visible_markers` 集合。旧的无状态 MCP Server 无法获得
+可信模型可见性上下文，因此已经删除。以下情况会失去可恢复性：
 
 - 使用了 `--no-stash`。
 - 压缩处于 dry-run 模式。
@@ -111,9 +114,10 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 ### 普通处理错误通常 fail-open
 
-缺少 `tokenless` 或 `rtk`、压缩无收益或发生普通处理错误时，压缩和重写 Hook 通常不返回
-修改。`compress` 命令的所有非 `applied` 响应都会返回原文。Tool Ready 会在旧版检查、修复和
-阻断逻辑之前硬退出；工具执行后的失败归因是独立能力，保持不变。
+缺少 `tokenless` 或 `rtk`、压缩无收益时，压缩和重写 Hook 通常不返回修改。Protocol v2
+`compress` 的正常未应用结果使用退出码 `0`；Transport 格式错误退出 `2`；RTK Timeout、
+未授权 Retrieve、Stash 或 Pipeline 失败退出 `1`，且不输出 Response JSON。Tool Ready 会在
+旧版检查、修复和阻断逻辑之前硬退出；工具执行后的失败归因是独立能力，保持不变。
 
 命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes 会先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
 
@@ -145,7 +149,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | 使用进程内 Python SDK | [Python SDK](sdk.md) |
 | 集成 AgentScope | [AgentScope SDK 集成](sdk/agentscope.md) |
 | 接入 Agent 产品 | [Agent 集成](framework-integration.md) |
-| 手动压缩、取回或运行 MCP | [CLI 参考](cli-reference.md) |
+| 手动压缩或取回 | [CLI 参考](cli-reference.md) |
 | 查看节省或内容变化、做双跑对比 | [效果度量](measuring-savings.md) |
 | 修改配置或了解本地数据 | [配置与数据隐私](configuration-and-privacy.md) |
 | 解决无统计、Adapter 或 Stash 问题 | [故障排查](troubleshooting.md) |

@@ -53,7 +53,7 @@ adapter hooks are plain bash/python scripts — OS and architecture independent 
 so they work on both Linux and macOS.
 
 DeepSeek Harness uses its dedicated `tools/post-execute` path for JSON response compression and
-environment-error attribution. It does not use the content-aware build/log Pipeline.
+environment-error attribution. It does not use the Protocol v2 PostTool Pipeline.
 
 On install, they are copied to the user-level data directory searched by the
 hook dispatcher:
@@ -72,11 +72,15 @@ bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
 ## Usage
 
 ```bash
-# Run the content-aware Pipeline used by shared Agent hooks
+# Run the Protocol v2 PostTool operation used by shared Agent hooks
 jq -n --rawfile content build.log \
-  '{protocol_version: 1, content: $content, agent_id: "manual", seam: "post_tool",
-    capabilities: {replace_output: true, publish_retrieve_tool: true,
-                   replace_with_text: true}}' \
+  '{protocol_version: 2, operation: "post_tool",
+    attribution: {agent_id: "manual"},
+    input: {result_kind: "tool", tool_name: "Bash", content: $content,
+      status: "success", content_origin: "command_output",
+      output_optimization: "none",
+      capabilities: {replace_output: true, publish_retrieve_tool: false,
+                     replace_with_text: true}}}' \
   | tokenless compress
 
 # Compress an API response

@@ -22,6 +22,8 @@ pub enum StatsError {
     Database(#[from] rusqlite::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
 }
 
 /// Statistics recorder that stores metrics in SQLite
@@ -71,8 +73,11 @@ impl StatsRecorder {
                 stash_errors INTEGER,
                 stash_size INTEGER,
                 content_type TEXT,
+                content_origin TEXT,
                 seam TEXT,
                 compressor_chain TEXT,
+                applied_operations TEXT,
+                recoverability TEXT,
                 tokenizer_id TEXT,
                 unrecoverable_truncations INTEGER
             )",
@@ -109,7 +114,10 @@ impl StatsRecorder {
                 outcome        TEXT    NOT NULL,
                 source         TEXT    NOT NULL,
                 payload_tokens INTEGER,
-                tokenizer_id   TEXT
+                tokenizer_id   TEXT,
+                agent_id       TEXT,
+                session_id     TEXT,
+                tool_use_id    TEXT
             )",
             [],
         )?;
@@ -155,6 +163,8 @@ impl StatsRecorder {
             ("content_origin", "TEXT"),
             ("seam", "TEXT"),
             ("compressor_chain", "TEXT"),
+            ("applied_operations", "TEXT"),
+            ("recoverability", "TEXT"),
             ("tokenizer_id", "TEXT"),
             ("unrecoverable_truncations", "INTEGER"),
         ] {
@@ -169,6 +179,23 @@ impl StatsRecorder {
             if !exists {
                 conn.execute(
                     &format!("ALTER TABLE stats ADD COLUMN {col} {col_type}"),
+                    [],
+                )?;
+            }
+        }
+
+        for column in ["agent_id", "session_id", "tool_use_id"] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('retrieve_events') WHERE name = ?",
+                    [column],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)
+                .unwrap_or(false);
+            if !exists {
+                conn.execute(
+                    &format!("ALTER TABLE retrieve_events ADD COLUMN {column} TEXT"),
                     [],
                 )?;
             }
@@ -200,6 +227,11 @@ impl StatsRecorder {
     /// Record a statistics entry
     pub fn record(&self, record: &StatsRecord) -> StatsResult<i64> {
         let conn = self.lock_conn();
+        let applied_operations = record
+            .applied_operations
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
 
         conn.execute(
             "INSERT INTO stats (
@@ -208,7 +240,7 @@ impl StatsRecorder {
                 before_text, after_text,
                 before_output, after_output, mode,
                 stash_writes, stash_errors, stash_size,
-                content_type, content_origin, seam, compressor_chain, tokenizer_id,
+                content_type, content_origin, applied_operations, recoverability, tokenizer_id,
                 unrecoverable_truncations
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
@@ -232,8 +264,8 @@ impl StatsRecorder {
                 record.stash_size,
                 record.content_type,
                 record.content_origin,
-                record.seam,
-                record.compressor_chain,
+                applied_operations,
+                record.recoverability,
                 record.tokenizer_id,
                 record.unrecoverable_truncations,
             ],
@@ -256,8 +288,8 @@ impl StatsRecorder {
         "session_id, tool_use_id, before_chars, before_tokens, ",
         "after_chars, after_tokens, before_text, after_text, ",
         "before_output, after_output, mode, stash_writes, ",
-        "stash_errors, stash_size, content_type, content_origin, seam, ",
-        "compressor_chain, tokenizer_id, unrecoverable_truncations"
+        "stash_errors, stash_size, content_type, content_origin, applied_operations, ",
+        "recoverability, tokenizer_id, unrecoverable_truncations"
     );
 
     /// Query all records, newest first, with optional limit
@@ -404,7 +436,7 @@ impl StatsRecorder {
                 ordered.mode, ordered.stash_writes, ordered.stash_errors,
                 ordered.stash_size,
                 NULL AS content_type, NULL AS content_origin,
-                NULL AS seam, NULL AS compressor_chain,
+                NULL AS applied_operations, NULL AS recoverability,
                 NULL AS tokenizer_id, NULL AS unrecoverable_truncations,
                 CASE
                     WHEN ordered.tool_use_id IS NOT NULL
@@ -521,9 +553,10 @@ impl StatsRecorder {
     }
 
     /// Record one retrieve operation (roadmap §4.6). `outcome` is `hit`,
-    /// `miss`, or `error`; `source` names the frontend (`cli`, `mcp`,
-    /// `embedded`). `payload_tokens` is the estimated size of the returned
-    /// payload on a hit.
+    /// `miss`, or `error`; `source` names the trusted frontend.
+    // Keep the persisted event fields explicit at this storage boundary; a
+    // second DTO would only duplicate the SQLite row without adding policy.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_retrieve_event(
         &self,
         hash: &str,
@@ -531,12 +564,16 @@ impl StatsRecorder {
         source: &str,
         payload_tokens: Option<i64>,
         tokenizer_id: Option<&str>,
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+        tool_use_id: Option<&str>,
     ) -> StatsResult<i64> {
         let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO retrieve_events (
-                timestamp, hash, outcome, source, payload_tokens, tokenizer_id
-            ) VALUES (?, ?, ?, ?, ?, ?)",
+                timestamp, hash, outcome, source, payload_tokens, tokenizer_id,
+                agent_id, session_id, tool_use_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 chrono::Local::now().to_rfc3339(),
                 hash,
@@ -544,6 +581,9 @@ impl StatsRecorder {
                 source,
                 payload_tokens,
                 tokenizer_id,
+                agent_id,
+                session_id,
+                tool_use_id,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -618,8 +658,19 @@ impl StatsRecorder {
             stash_size: row.get(18)?,
             content_type: row.get(19)?,
             content_origin: row.get(20)?,
-            seam: row.get(21)?,
-            compressor_chain: row.get(22)?,
+            applied_operations: row
+                .get::<_, Option<String>>(21)?
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            21,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+                .transpose()?,
+            recoverability: row.get(22)?,
             tokenizer_id: row.get(23)?,
             unrecoverable_truncations: row.get(24)?,
         })

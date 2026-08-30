@@ -1,64 +1,22 @@
-//! Versioned compression protocol shared by every tokenless frontend.
+//! Protocol v2 lifecycle transport shared by Tokenless frontends.
 //!
-//! This crate defines protocol v1 (evolution roadmap §4.1): the compatibility
-//! boundary between agent-specific adapters and the shared compression
-//! pipeline. It is deliberately not an OpenAI or Anthropic request shape —
-//! [`CompressionRequest`] carries only the model-visible content plus the
-//! attribution and capability facts the pipeline needs, and
-//! [`CompressionResponse`] carries the final content plus the decision the
-//! adapter needs to build its host-specific envelope.
-//!
-//! The roadmap section numbers cited throughout this crate (§4.1, §4.5,
-//! §5.1, §5.6, …) refer to the tokenless evolution roadmap, which has not
-//! landed in this repository yet. Until it does, the JSON examples and
-//! contract tests in this crate are the authoritative wire contract.
-//!
-//! # Compatibility rules
-//!
-//! - Readers ignore unknown fields within a supported major protocol version,
-//!   so optional fields may be added without a version bump.
-//! - An incompatible shape requires a new `protocol_version`, never a
-//!   parallel adapter-specific payload.
-//! - [`CompressionRequest::from_json`] / [`CompressionResponse::from_json`]
-//!   check the version before the full parse, so a future version is reported
-//!   as [`ProtocolError::UnsupportedVersion`] rather than a shape error.
-//!
-//! # Fail-open contract
-//!
-//! `CompressionResponse::output` always holds exactly what the adapter must
-//! emit. On every non-[`Disposition::Applied`] disposition it is the original
-//! model-visible content, so adapters never need fallback logic of their own
-//! (roadmap principle 6).
-//!
-//! # Token counter identity
-//!
-//! Token counts use the counter named by each response's `tokenizer_id`.
-//! Normal processing uses [`TOKENIZER_ID`], the character-class heuristic
-//! `heuristic-v1`. Inputs rejected before a text scan use
-//! [`BYTE_ESTIMATOR_ID`]. Counts are normalized tokens for arbitration and
-//! attribution, not billing estimates.
+//! In-process callers use the operation-specific payload types directly.
+//! [`RequestEnvelope`] and [`ResponseEnvelope`] exist only for CLI and other
+//! cross-process transports.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-/// The protocol version this crate implements.
-pub const PROTOCOL_VERSION: u32 = 1;
-
-/// Identity of the normalized token counter used for every count in
-/// protocol v1: the character-class heuristic implemented by
-/// `tokenless-stats` (CJK ≈ 1 token per char, other ≈ 1 token per 4 chars).
-///
-/// Any change to the estimator's character classes or ratios requires a new
-/// ID; rows and responses produced under different IDs must never be merged
-/// into one series without an explicit per-counter breakdown.
+/// The protocol version implemented by this crate.
+pub const PROTOCOL_VERSION: u32 = 2;
+/// Identity of the normalized token estimator used by Tokenless.
 pub const TOKENIZER_ID: &str = "heuristic-v1";
-
-/// Identity of the byte-length fallback used when an input is rejected before
-/// the character-class counter can scan it.
+/// Identity of the byte-length fallback used before a text scan is possible.
 pub const BYTE_ESTIMATOR_ID: &str = "byte-length-v1";
+/// Maximum diagnostic length emitted by lifecycle operations.
+pub const DIAGNOSTIC_MAX_BYTES: usize = 4096;
 
-/// Estimates normalized tokens using the counter identified by
-/// [`TOKENIZER_ID`]. CJK characters count as one token each; all other
-/// characters count as approximately one token per four characters.
+/// Estimates normalized tokens using [`TOKENIZER_ID`].
 #[must_use]
 pub fn estimate_tokens(text: &str) -> usize {
     let mut cjk = 0usize;
@@ -73,8 +31,7 @@ pub fn estimate_tokens(text: &str) -> usize {
     cjk + other.div_ceil(4)
 }
 
-/// Estimates normalized tokens using the fallback identified by
-/// [`BYTE_ESTIMATOR_ID`].
+/// Estimates normalized tokens from a byte count.
 #[must_use]
 pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
     bytes.div_ceil(4)
@@ -104,96 +61,236 @@ fn is_cjk(character: char) -> bool {
     )
 }
 
-/// Upper bound, in bytes, for [`CompressionResponse::diagnostic`]. Writers
-/// truncate to this limit on a char boundary before emitting, so a failing
-/// pipeline can never bloat the response payload it is supposed to shrink
-/// (roadmap principle 6: diagnostics stay bounded).
-pub const DIAGNOSTIC_MAX_BYTES: usize = 4096;
-
-/// Error returned when a protocol payload cannot be accepted or produced.
+/// Error returned for an invalid protocol transport.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
-    /// The payload declares a protocol version this build does not support.
+    /// The payload declares an unsupported protocol version.
     #[error("unsupported protocol_version {found} (supported: {PROTOCOL_VERSION})")]
     UnsupportedVersion {
-        /// The version the payload declared.
+        /// Version found in the payload.
         found: u32,
     },
-    /// The payload is not valid JSON for the declared version's shape.
+    /// The JSON does not match the selected operation shape.
     #[error("malformed protocol payload: {0}")]
     Malformed(#[from] serde_json::Error),
-    /// A value could not be serialized to the wire format. Unreachable for
-    /// the derived v1 shapes; kept so `to_json` stays honest if a future
-    /// field gains a fallible serializer.
+    /// The response operation differs from the request operation.
+    #[error("response operation {found:?} does not match request operation {expected:?}")]
+    OperationMismatch {
+        /// Operation selected by the request.
+        expected: Operation,
+        /// Operation returned in the response.
+        found: Operation,
+    },
+    /// Serialization failed.
     #[error("protocol serialization failed: {0}")]
     Serialize(#[source] serde_json::Error),
 }
 
-/// Where in the agent loop the content was intercepted (roadmap §4.6).
+/// Lifecycle operation carried by a transport envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Seam {
-    /// Content headed into a model request (e.g. schema publication).
+pub enum Operation {
+    /// Transform model-bound tool declarations.
     BeforeModel,
-    /// Tool input before execution (e.g. command rewrite).
+    /// Rewrite tool arguments before execution.
     PreTool,
-    /// Tool output after execution — the primary compression seam.
+    /// Process one completed tool result.
     PostTool,
-    /// A proxy frontend observing model traffic.
-    Proxy,
+    /// Restore one visible stash marker.
+    Retrieve,
 }
 
-impl Seam {
-    /// The `snake_case` wire name, identical to this enum's serde encoding.
-    /// The stable vocabulary for language bindings, logs, and statistics.
+impl Operation {
+    /// Returns the stable wire name.
     #[must_use]
     pub fn wire_str(self) -> &'static str {
         match self {
             Self::BeforeModel => "before_model",
             Self::PreTool => "pre_tool",
             Self::PostTool => "post_tool",
-            Self::Proxy => "proxy",
+            Self::Retrieve => "retrieve",
         }
     }
 }
 
-/// Where the content came from, as observed by the adapter (roadmap §4.3).
-///
-/// Detection answers what the content *is*; only the caller knows whether an
-/// authoritative copy of it lives somewhere else. Compressing a copy of
-/// stored content desynchronizes the model from that authority — the model
-/// cannot see the divergence, and its next exact-match edit fails against a
-/// string it believes it read. Command output has no such authority to
-/// diverge from.
+/// Attribution shared by lifecycle operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attribution {
+    /// Stable agent or adapter identifier.
+    pub agent_id: String,
+    /// Conversation identifier when supplied by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Tool-call identifier when supplied by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+}
+
+impl Attribution {
+    /// Creates attribution with only an agent identifier.
+    #[must_use]
+    pub fn new(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            session_id: None,
+            tool_use_id: None,
+        }
+    }
+}
+
+/// Host capabilities relevant to BeforeModel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeforeModelCapabilities {
+    /// The host can replace tool declarations.
+    #[serde(default)]
+    pub replace_tools: bool,
+    /// The host can publish the returned Retrieve tool declaration.
+    #[serde(default)]
+    pub publish_retrieve_tool: bool,
+}
+
+/// Input for the BeforeModel lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeforeModelRequest {
+    /// Tool declarations visible to the next model call.
+    pub tools: Vec<Value>,
+    /// Model-visible request context with tool declarations removed.
+    pub visible_context: Value,
+    /// Name to use for a conditionally published Retrieve tool.
+    pub retrieve_tool_name: String,
+    /// Host capabilities for applying the result.
+    pub capabilities: BeforeModelCapabilities,
+}
+
+/// Declaration of the agent-facing Retrieve tool.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetrieveToolDeclaration {
+    /// Tool name selected by the adapter.
+    pub name: String,
+    /// Human-readable behavior summary.
+    pub description: String,
+    /// JSON Schema accepted by the tool.
+    pub input_schema: Value,
+}
+
+/// Result of the BeforeModel lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeforeModelResponse {
+    /// Tool declarations to send to the model.
+    pub tools: Vec<Value>,
+    /// Sorted, deduplicated lowercase markers visible to the model.
+    pub visible_markers: Vec<String>,
+    /// Retrieve declaration to publish, when both needed and supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieve_tool: Option<RetrieveToolDeclaration>,
+}
+
+/// Host capabilities relevant to PreTool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreToolCapabilities {
+    /// The host can replace arguments before execution.
+    #[serde(default)]
+    pub replace_arguments: bool,
+    /// The host can block this call and suggest a retry.
+    #[serde(default)]
+    pub block_and_suggest: bool,
+}
+
+/// Input for the PreTool lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreToolRequest {
+    /// Name of the tool about to run.
+    pub tool_name: String,
+    /// Original host arguments.
+    pub arguments: Value,
+    /// Object field that contains the command string.
+    pub command_field: String,
+    /// Host capabilities for applying a rewrite.
+    pub capabilities: PreToolCapabilities,
+}
+
+/// Action the adapter must take after PreTool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreToolAction {
+    /// Execute the original arguments.
+    Passthrough,
+    /// Replace the call arguments directly.
+    ReplaceArguments,
+    /// Block the call and ask the model to retry with the returned arguments.
+    BlockAndSuggest,
+}
+
+/// Optimization already applied to a tool's eventual output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputOptimization {
+    /// No earlier optimization is known.
+    None,
+    /// RTK rewrote the command and owns the resulting output shape.
+    Rtk,
+}
+
+/// Result of the PreTool lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreToolResponse {
+    /// Arguments to execute or suggest.
+    pub arguments: Value,
+    /// Host action selected from declared capabilities.
+    pub action: PreToolAction,
+    /// Optimization state to carry into PostTool.
+    pub output_optimization: OutputOptimization,
+}
+
+/// Whether PostTool is processing an ordinary or Retrieve result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultKind {
+    /// An ordinary tool result.
+    Tool,
+    /// Output returned by an agent-facing Retrieve operation.
+    Retrieve,
+}
+
+/// Host-reported status of a tool result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    /// The tool completed successfully.
+    Success,
+    /// The tool completed with an error result.
+    Error,
+    /// The host interrupted execution.
+    Interrupted,
+    /// The host denied execution.
+    Denied,
+}
+
+/// Origin of model-visible PostTool content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentOrigin {
-    /// No origin declared. The pre-migration path: no origin gate applies,
-    /// and tool-name-based selectors stay in effect.
-    #[default]
-    Unspecified,
-    /// Produced by executing something; no authoritative copy exists
-    /// elsewhere.
+    /// Output produced by executing a command.
     CommandOutput,
-    /// A copy of stored content whose authority lives elsewhere.
+    /// A copy of authoritative file content.
     FileContent,
-    /// A service or framework result that is neither of the above.
+    /// A service or framework response.
     ApiResponse,
 }
 
 impl ContentOrigin {
-    /// Whether no origin was declared. Also the serde skip predicate: an
-    /// unspecified origin never reaches the wire.
-    #[must_use]
-    pub fn is_unspecified(&self) -> bool {
-        matches!(self, Self::Unspecified)
-    }
-
-    /// The `snake_case` wire name, identical to this enum's serde encoding.
+    /// Returns the stable wire name.
     #[must_use]
     pub fn wire_str(self) -> &'static str {
         match self {
-            Self::Unspecified => "unspecified",
             Self::CommandOutput => "command_output",
             Self::FileContent => "file_content",
             Self::ApiResponse => "api_response",
@@ -201,153 +298,63 @@ impl ContentOrigin {
     }
 }
 
-/// What the requesting adapter's host can actually do with the result.
-///
-/// The pipeline intersects compressor candidates with these capabilities
-/// (roadmap principle 2): a response compressor must not run when the host
-/// cannot replace the original model-visible output. Every capability
-/// defaults to `false`, so an adapter that declares nothing gets passthrough
-/// rather than an unemittable candidate.
+/// Host capabilities relevant to PostTool.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Capabilities {
-    /// The host can replace the model-visible tool output with
-    /// [`CompressionResponse::output`].
+#[serde(deny_unknown_fields)]
+pub struct PostToolCapabilities {
+    /// The host can replace the model-visible output.
     #[serde(default)]
     pub replace_output: bool,
-    /// The host exposes a retrieval tool (`tokenless_retrieve` or an
-    /// equivalent), so retrievable-lossy markers are actually recoverable.
+    /// A trusted agent-facing Retrieve tool is available.
     #[serde(default)]
     pub publish_retrieve_tool: bool,
-    /// The host's replacement slot accepts arbitrary text. When `false`,
-    /// an applied post-tool output must remain valid JSON with a stable
-    /// top-level schema (a structured slot): non-JSON encodings such as
-    /// TOON never win, and empty top-level fields dropped by cleanup are
-    /// restored before final acceptance.
+    /// The replacement slot accepts arbitrary text.
     #[serde(default)]
     pub replace_with_text: bool,
 }
 
-/// A compression request: the model-visible content plus attribution.
-///
-/// Adapters own their private host contracts (roadmap §4.5); only the
-/// model-visible value is copied here. UI or business objects that must
-/// remain unmodified never enter the protocol.
+/// Input for the PostTool lifecycle operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompressionRequest {
-    /// Must equal [`PROTOCOL_VERSION`]. Enforced on every deserialization
-    /// path, including direct `serde_json::from_str`.
-    #[serde(deserialize_with = "version_must_match")]
-    pub protocol_version: u32,
-    /// The model-visible content to consider for compression.
+#[serde(deny_unknown_fields)]
+pub struct PostToolRequest {
+    /// Whether this is an ordinary tool or Retrieve result.
+    pub result_kind: ResultKind,
+    /// Name of the tool that produced the result.
+    pub tool_name: String,
+    /// Model-visible result content.
     pub content: String,
-    /// Stable identifier of the requesting agent frontend
-    /// (e.g. `claude-code`).
-    pub agent_id: String,
-    /// Session attribution, when the host provides one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    /// Tool-use attribution, when the host provides one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    /// Name of the tool that produced the content, when one exists.
-    /// Absent for non-tool seams such as schema publication.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    /// Where in the agent loop this content was intercepted.
-    pub seam: Seam,
-    /// Where the content came from. Absent on the wire means
-    /// [`ContentOrigin::Unspecified`], and an unspecified origin is left off
-    /// the wire, so an adapter that has not migrated keeps both its current
-    /// behaviour and its current payload.
-    #[serde(default, skip_serializing_if = "ContentOrigin::is_unspecified")]
+    /// Host-reported execution status.
+    pub status: ToolResultStatus,
+    /// Authoritative origin selected by the adapter.
     pub content_origin: ContentOrigin,
-    /// What the host can do with the result. Missing fields are `false`.
-    #[serde(default)]
-    pub capabilities: Capabilities,
+    /// Optimization state returned by PreTool.
+    pub output_optimization: OutputOptimization,
+    /// Host capabilities for applying the result.
+    pub capabilities: PostToolCapabilities,
 }
 
-impl CompressionRequest {
-    /// Creates a v1 request with the required fields; optional attribution
-    /// and capabilities are set directly on the public fields.
-    pub fn new(content: impl Into<String>, agent_id: impl Into<String>, seam: Seam) -> Self {
-        Self {
-            protocol_version: PROTOCOL_VERSION,
-            content: content.into(),
-            agent_id: agent_id.into(),
-            session_id: None,
-            tool_use_id: None,
-            tool_name: None,
-            seam,
-            content_origin: ContentOrigin::Unspecified,
-            capabilities: Capabilities::default(),
-        }
-    }
-
-    /// Parses a request, rejecting unsupported versions before shape errors.
-    ///
-    /// # Errors
-    ///
-    /// [`ProtocolError::UnsupportedVersion`] when `protocol_version` differs
-    /// from [`PROTOCOL_VERSION`]; [`ProtocolError::Malformed`] when the JSON
-    /// does not match the v1 shape.
-    pub fn from_json(json: &str) -> Result<Self, ProtocolError> {
-        check_version(json)?;
-        Ok(serde_json::from_str(json)?)
-    }
-
-    /// Serializes to the wire format.
-    ///
-    /// # Errors
-    ///
-    /// [`ProtocolError::Serialize`] — unreachable for the current derived
-    /// shape, surfaced instead of a panic per library error policy.
-    pub fn to_json(&self) -> Result<String, ProtocolError> {
-        serde_json::to_string(self).map_err(ProtocolError::Serialize)
-    }
-}
-
-/// The pipeline's verdict on one request.
-///
-/// Only [`Disposition::Applied`] means [`CompressionResponse::output`]
-/// differs from the request content; every other disposition returns the
-/// original so the adapter can emit unconditionally. These names are the
-/// shared vocabulary the M1 exit gate requires CLI and Runtime to agree on
-/// (roadmap §5.6).
-///
-/// The Runtime shares this enum directly (its pre-protocol
-/// `CompressionDisposition` retired when response compression moved behind
-/// the registry), so user-visible strings come from [`Disposition::wire_str`]
-/// and cannot fork from the wire values.
+/// Final PostTool disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disposition {
-    /// A compressed candidate was accepted; `output` replaces the original.
+    /// A candidate replaced the original result.
     Applied,
-    /// Dry-run mode: a candidate was produced and measured, but `output` is
-    /// the original content. `before_tokens`/`after_tokens` carry the
-    /// predicted delta; dry-run results are never mixed into applied
-    /// savings. Mirrors the Runtime's existing dry-run disposition.
+    /// A candidate was measured but the original result was returned.
     DryRun,
-    /// The pipeline chose not to touch the content (skip rule, missing
-    /// capability, or unrecognized content routed to passthrough).
+    /// Policy did not select a compressor.
     Passthrough,
-    /// A candidate was produced but rejected because it did not remove
-    /// normalized tokens; no active savings are recorded.
+    /// A candidate did not save both characters and tokens.
     NoSavings,
-    /// Required-reversible mode rejected a candidate whose removed content
-    /// would not be retrievable.
-    ReversibilityUnavailable,
-    /// The pipeline exceeded its overall timeout budget; the original is
-    /// preserved.
+    /// A lossy candidate was rejected because no trusted Retrieve path exists.
+    RecoverabilityUnavailable,
+    /// The pipeline exhausted its time budget.
     Timeout,
-    /// An optional compression step failed; the original is preserved and
-    /// a bounded diagnostic is recorded (roadmap principle 6).
-    Error,
+    /// The operation produced a bounded tool-error diagnostic.
+    ToolError,
 }
 
 impl Disposition {
-    /// The `snake_case` wire name, identical to this enum's serde encoding.
-    /// The stable vocabulary for language bindings, logs, and statistics.
+    /// Returns the stable wire name.
     #[must_use]
     pub fn wire_str(self) -> &'static str {
         match self {
@@ -355,162 +362,414 @@ impl Disposition {
             Self::DryRun => "dry_run",
             Self::Passthrough => "passthrough",
             Self::NoSavings => "no_savings",
-            Self::ReversibilityUnavailable => "reversibility_unavailable",
+            Self::RecoverabilityUnavailable => "recoverability_unavailable",
             Self::Timeout => "timeout",
-            Self::Error => "error",
+            Self::ToolError => "tool_error",
         }
     }
 }
 
-/// Recovery state of an applied transformation (roadmap principle 5).
+/// Detected PostTool content domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Reversibility {
-    /// Nothing task-relevant was removed; no recovery needed.
+pub enum ContentType {
+    /// JSON object or array.
+    Json,
+    /// Search-result listing.
+    SearchResults,
+    /// Compiler, package-manager, or test output.
+    BuildLog,
+    /// Stack trace or panic report.
+    StackTrace,
+    /// Unified diff.
+    Diff,
+    /// Complete HTML document.
+    Html,
+    /// Delimiter-consistent table.
+    Tabular,
+    /// Program source code.
+    SourceCode,
+    /// Readable text without a more specific domain.
+    PlainText,
+    /// Empty, binary-like, or unclassified content.
+    Unknown,
+}
+
+impl ContentType {
+    /// Returns the stable wire name.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::SearchResults => "search_results",
+            Self::BuildLog => "build_log",
+            Self::StackTrace => "stack_trace",
+            Self::Diff => "diff",
+            Self::Html => "html",
+            Self::Tabular => "tabular",
+            Self::SourceCode => "source_code",
+            Self::PlainText => "plain_text",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Concrete transformations applied to an emitted result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedOperation {
+    /// Function schema descriptions were compacted.
+    SchemaCompression,
+    /// Empty and diagnostic JSON fields were removed.
+    JsonCleanup,
+    /// Oversized JSON values were truncated.
+    JsonTruncation,
+    /// JSON was encoded as TOON.
+    Toon,
+}
+
+impl AppliedOperation {
+    /// Returns the stable wire name.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::SchemaCompression => "schema_compression",
+            Self::JsonCleanup => "json_cleanup",
+            Self::JsonTruncation => "json_truncation",
+            Self::Toon => "toon",
+        }
+    }
+}
+
+/// Recovery state of an applied transformation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Recoverability {
+    /// Nothing task-relevant was removed.
     Lossless,
-    /// Removed content is stored in the Stash and referenced by emitted
-    /// markers; retrieval restores it byte-exactly.
+    /// Removed bytes are available through emitted stash markers.
     Retrievable,
-    /// Content was removed without a recovery path. Rejected outright in
-    /// required-reversible mode.
+    /// Removed bytes have no recovery path.
     Unrecoverable,
 }
 
-/// A compression response: the content to emit plus the decision facts.
+/// Result of the PostTool lifecycle operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompressionResponse {
-    /// Must equal [`PROTOCOL_VERSION`]. Enforced on every deserialization
-    /// path, including direct `serde_json::from_str`.
-    #[serde(deserialize_with = "version_must_match")]
-    pub protocol_version: u32,
-    /// Exactly what the adapter must emit — compressed on
-    /// [`Disposition::Applied`], the original otherwise.
+#[serde(deny_unknown_fields)]
+pub struct PostToolResponse {
+    /// Text the adapter must emit.
     pub output: String,
-    /// The pipeline's verdict.
+    /// Pipeline or routing decision.
     pub disposition: Disposition,
-    /// Detected content taxonomy value (e.g. `build_log`), once a detector
-    /// classified the content. Wire values are stable strings; the Rust
-    /// taxonomy type arrives with the detector and registry.
+    /// Detected domain when content detection ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_type: Option<String>,
-    /// Stable IDs of the compressors that shaped `output`, in order.
-    /// Empty on non-applied dispositions.
+    pub content_type: Option<ContentType>,
+    /// Transformations that shaped `output`, in execution order.
     #[serde(default)]
-    pub compressor_chain: Vec<String>,
-    /// Recovery state of `output`. [`Reversibility::Lossless`] whenever the
-    /// original was returned unchanged.
-    pub reversibility: Reversibility,
-    /// Normalized tokens of the request content, counted by `tokenizer_id`.
+    pub applied_operations: Vec<AppliedOperation>,
+    /// Recovery state of `output`.
+    pub recoverability: Recoverability,
+    /// Estimated tokens in the input.
     pub before_tokens: u64,
-    /// Normalized tokens of `output`, counted by `tokenizer_id`.
+    /// Estimated tokens in the emitted or measured candidate.
     pub after_tokens: u64,
-    /// Stash keys committed by this response. Only keys present in an
-    /// applied, emitted result appear here; rolled-back candidates never
-    /// leak keys (roadmap §4.6).
+    /// Stash keys referenced by the emitted output.
     #[serde(default)]
     pub stash_keys: Vec<String>,
-    /// Identity of the counter behind both token counts. A payload missing
-    /// the field reads as [`TOKENIZER_ID`]: the character-class heuristic is
-    /// the only counter that shipped before the field existed, so the default
-    /// is the factual legacy identity rather than an ambiguous empty string.
-    #[serde(default = "default_tokenizer_id")]
+    /// Token estimator identity for both counts.
     pub tokenizer_id: String,
-    /// Bounded diagnostic accompanying [`Disposition::Error`]: at most
-    /// [`DIAGNOSTIC_MAX_BYTES`] bytes. The pipeline, as the only writer,
-    /// truncates before setting it.
+    /// Additive context for a tool error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic: Option<String>,
+    pub additional_context: Option<String>,
 }
 
-impl CompressionResponse {
-    /// The canonical passthrough response: the original content, unchanged
-    /// counts, and no artifacts. Every frontend must produce this same shape
-    /// so dispositions stay comparable across CLI and Runtime (§5.6).
+impl PostToolResponse {
+    /// Builds the canonical unchanged response.
     #[must_use]
-    pub fn passthrough(request: &CompressionRequest, before_tokens: u64) -> Self {
+    pub fn passthrough(request: &PostToolRequest, before_tokens: u64) -> Self {
         Self {
-            protocol_version: PROTOCOL_VERSION,
             output: request.content.clone(),
             disposition: Disposition::Passthrough,
             content_type: None,
-            compressor_chain: Vec::new(),
-            reversibility: Reversibility::Lossless,
+            applied_operations: Vec::new(),
+            recoverability: Recoverability::Lossless,
             before_tokens,
             after_tokens: before_tokens,
             stash_keys: Vec::new(),
             tokenizer_id: TOKENIZER_ID.to_owned(),
-            diagnostic: None,
+            additional_context: None,
         }
     }
 
-    /// True when `output` replaced the original content.
+    /// Returns whether the output replaced the input.
     #[must_use]
     pub fn is_applied(&self) -> bool {
         self.disposition == Disposition::Applied
     }
+}
 
-    /// Parses a response, rejecting unsupported versions before shape errors.
-    ///
-    /// # Errors
-    ///
-    /// [`ProtocolError::UnsupportedVersion`] when `protocol_version` differs
-    /// from [`PROTOCOL_VERSION`]; [`ProtocolError::Malformed`] when the JSON
-    /// does not match the v1 shape.
-    pub fn from_json(json: &str) -> Result<Self, ProtocolError> {
-        check_version(json)?;
-        Ok(serde_json::from_str(json)?)
-    }
+/// Input for an authorized Retrieve lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetrieveRequest {
+    /// Bare hash or text containing one stash marker.
+    pub hash_or_marker: String,
+    /// Markers visible to the model at the time of retrieval.
+    pub visible_markers: Vec<String>,
+}
 
-    /// Serializes to the wire format.
-    ///
-    /// # Errors
-    ///
-    /// [`ProtocolError::Serialize`] — unreachable for the current derived
-    /// shape, surfaced instead of a panic per library error policy.
-    pub fn to_json(&self) -> Result<String, ProtocolError> {
-        serde_json::to_string(self).map_err(ProtocolError::Serialize)
+/// Result of an authorized Retrieve lifecycle operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetrieveResponse {
+    /// Normalized lowercase stash hash.
+    pub hash: String,
+    /// Byte-exact stashed payload.
+    pub payload: String,
+}
+
+/// Operation-specific request carried by [`RequestEnvelope`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Request {
+    /// BeforeModel payload.
+    BeforeModel(BeforeModelRequest),
+    /// PreTool payload.
+    PreTool(PreToolRequest),
+    /// PostTool payload.
+    PostTool(PostToolRequest),
+    /// Retrieve payload.
+    Retrieve(RetrieveRequest),
+}
+
+impl Request {
+    /// Returns the operation selected by this payload.
+    #[must_use]
+    pub fn operation(&self) -> Operation {
+        match self {
+            Self::BeforeModel(_) => Operation::BeforeModel,
+            Self::PreTool(_) => Operation::PreTool,
+            Self::PostTool(_) => Operation::PostTool,
+            Self::Retrieve(_) => Operation::Retrieve,
+        }
     }
 }
 
-/// Extracts and checks `protocol_version` without depending on the rest of
-/// the shape, so a future version's payload reports as unsupported rather
-/// than malformed.
+/// Operation-specific response carried by [`ResponseEnvelope`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Response {
+    /// BeforeModel result.
+    BeforeModel(BeforeModelResponse),
+    /// PreTool result.
+    PreTool(PreToolResponse),
+    /// PostTool result.
+    PostTool(PostToolResponse),
+    /// Retrieve result.
+    Retrieve(RetrieveResponse),
+}
+
+impl Response {
+    /// Returns the operation selected by this result.
+    #[must_use]
+    pub fn operation(&self) -> Operation {
+        match self {
+            Self::BeforeModel(_) => Operation::BeforeModel,
+            Self::PreTool(_) => Operation::PreTool,
+            Self::PostTool(_) => Operation::PostTool,
+            Self::Retrieve(_) => Operation::Retrieve,
+        }
+    }
+}
+
+/// Protocol v2 request transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestEnvelope {
+    /// Request attribution.
+    pub attribution: Attribution,
+    /// Operation-specific input.
+    pub request: Request,
+}
+
+impl RequestEnvelope {
+    /// Parses a strict v2 request envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] for unsupported versions, unknown fields, or
+    /// a payload that does not match its operation.
+    pub fn from_json(json: &str) -> Result<Self, ProtocolError> {
+        check_version(json)?;
+        let raw: RawRequestEnvelope = serde_json::from_str(json)?;
+        let request = match raw.operation {
+            Operation::BeforeModel => Request::BeforeModel(serde_json::from_value(raw.input)?),
+            Operation::PreTool => Request::PreTool(serde_json::from_value(raw.input)?),
+            Operation::PostTool => Request::PostTool(serde_json::from_value(raw.input)?),
+            Operation::Retrieve => Request::Retrieve(serde_json::from_value(raw.input)?),
+        };
+        Ok(Self {
+            attribution: raw.attribution,
+            request,
+        })
+    }
+
+    /// Serializes the request to the fixed v2 wire shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::Serialize`] if serialization fails.
+    pub fn to_json(&self) -> Result<String, ProtocolError> {
+        serialize_envelope(
+            self.request.operation(),
+            &self.attribution,
+            request_value(&self.request)?,
+            "input",
+        )
+    }
+}
+
+/// Protocol v2 response transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResponseEnvelope {
+    /// Response attribution copied from the request.
+    pub attribution: Attribution,
+    /// Operation-specific result.
+    pub response: Response,
+}
+
+impl ResponseEnvelope {
+    /// Parses a strict v2 response envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] for unsupported versions, unknown fields, or
+    /// a payload that does not match its operation.
+    pub fn from_json(json: &str) -> Result<Self, ProtocolError> {
+        check_version(json)?;
+        let raw: RawResponseEnvelope = serde_json::from_str(json)?;
+        let response = match raw.operation {
+            Operation::BeforeModel => Response::BeforeModel(serde_json::from_value(raw.result)?),
+            Operation::PreTool => Response::PreTool(serde_json::from_value(raw.result)?),
+            Operation::PostTool => Response::PostTool(serde_json::from_value(raw.result)?),
+            Operation::Retrieve => Response::Retrieve(serde_json::from_value(raw.result)?),
+        };
+        Ok(Self {
+            attribution: raw.attribution,
+            response,
+        })
+    }
+
+    /// Serializes the response to the fixed v2 wire shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::Serialize`] if serialization fails.
+    pub fn to_json(&self) -> Result<String, ProtocolError> {
+        serialize_envelope(
+            self.response.operation(),
+            &self.attribution,
+            response_value(&self.response)?,
+            "result",
+        )
+    }
+
+    /// Verifies that the response operation matches its request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::OperationMismatch`] on a mismatch.
+    pub fn ensure_operation(&self, expected: Operation) -> Result<(), ProtocolError> {
+        let found = self.response.operation();
+        if found == expected {
+            Ok(())
+        } else {
+            Err(ProtocolError::OperationMismatch { expected, found })
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRequestEnvelope {
+    #[serde(rename = "protocol_version", deserialize_with = "version_must_match")]
+    _protocol_version: u32,
+    operation: Operation,
+    attribution: Attribution,
+    input: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResponseEnvelope {
+    #[serde(rename = "protocol_version", deserialize_with = "version_must_match")]
+    _protocol_version: u32,
+    operation: Operation,
+    attribution: Attribution,
+    result: Value,
+}
+
+fn request_value(request: &Request) -> Result<Value, ProtocolError> {
+    match request {
+        Request::BeforeModel(value) => serde_json::to_value(value),
+        Request::PreTool(value) => serde_json::to_value(value),
+        Request::PostTool(value) => serde_json::to_value(value),
+        Request::Retrieve(value) => serde_json::to_value(value),
+    }
+    .map_err(ProtocolError::Serialize)
+}
+
+fn response_value(response: &Response) -> Result<Value, ProtocolError> {
+    match response {
+        Response::BeforeModel(value) => serde_json::to_value(value),
+        Response::PreTool(value) => serde_json::to_value(value),
+        Response::PostTool(value) => serde_json::to_value(value),
+        Response::Retrieve(value) => serde_json::to_value(value),
+    }
+    .map_err(ProtocolError::Serialize)
+}
+
+fn serialize_envelope(
+    operation: Operation,
+    attribution: &Attribution,
+    payload: Value,
+    payload_name: &str,
+) -> Result<String, ProtocolError> {
+    let mut object = serde_json::Map::new();
+    object.insert("protocol_version".into(), Value::from(PROTOCOL_VERSION));
+    object.insert(
+        "operation".into(),
+        serde_json::to_value(operation).map_err(ProtocolError::Serialize)?,
+    );
+    object.insert(
+        "attribution".into(),
+        serde_json::to_value(attribution).map_err(ProtocolError::Serialize)?,
+    );
+    object.insert(payload_name.into(), payload);
+    serde_json::to_string(&object).map_err(ProtocolError::Serialize)
+}
+
 fn check_version(json: &str) -> Result<(), ProtocolError> {
     #[derive(Deserialize)]
     struct VersionOnly {
         protocol_version: u32,
     }
-    let v: VersionOnly = serde_json::from_str(json)?;
-    if v.protocol_version != PROTOCOL_VERSION {
+    let version: VersionOnly = serde_json::from_str(json)?;
+    if version.protocol_version != PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedVersion {
-            found: v.protocol_version,
+            found: version.protocol_version,
         });
     }
     Ok(())
 }
 
-/// Field-level guard used by the derived `Deserialize` impls, so the version
-/// gate cannot be bypassed by deserializing the structs directly instead of
-/// going through `from_json`.
 fn version_must_match<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let v = u32::deserialize(deserializer)?;
-    if v != PROTOCOL_VERSION {
-        return Err(serde::de::Error::custom(format!(
-            "unsupported protocol_version {v} (supported: {PROTOCOL_VERSION})"
-        )));
+    let version = u32::deserialize(deserializer)?;
+    if version == PROTOCOL_VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "unsupported protocol_version {version} (supported: {PROTOCOL_VERSION})"
+        )))
     }
-    Ok(v)
-}
-
-fn default_tokenizer_id() -> String {
-    TOKENIZER_ID.to_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    include!("tests/protocol_tests.rs");
 }

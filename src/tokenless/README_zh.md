@@ -9,7 +9,7 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 | 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
-| Content-aware 响应压缩 | JSON 参考 fixture 65.8% | 把 JSON、构建日志和长纯文本路由到匹配 Compressor |
+| Content-aware 响应压缩 | JSON 参考 fixture 65.8% | 把成功 JSON 路由给 `JsonCompressor`；非 JSON 内容域当前透传 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
@@ -75,7 +75,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 ### Agent Adapter
 
 - **OpenClaw 插件** — 命令重写 + 响应压缩 + 可选 TOON；不支持 Schema 压缩
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + Schema；Cosh-NG 可替换 Pipeline 输出，旧版 Copilot Shell 透传
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + Protocol v2 PostTool；Common BeforeModel 在受信 Retrieve 接入前透传 Schema，旧版 Copilot Shell 透传 Pipeline 输出
 - **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
@@ -145,10 +145,12 @@ dsh --profile <profile>
 
 ### `compress` 压缩入口
 
-共享 Agent Hook 会向 `tokenless compress` 发送压缩请求。该命令检测内容，根据
-宿主声明能力筛选 Compressor，并返回结构化 disposition 与应当交付的精确输出。当前覆盖
-模型工具 Schema、JSON Records、构建日志和长纯文本；其他已检测内容类型原样透传。请求/
-响应契约和可执行示例见
+共享 Agent Hook 会向 `tokenless compress` 发送严格的 Protocol v2 生命周期请求。
+Tagged Envelope 选择 `before_model`、`pre_tool`、`post_tool` 或 `retrieve`；只有成功且未旁路的
+PostTool JSON 会进入 Runtime 内部 Pipeline。Common Hook 没有受信 Retrieve 能力，因此 Core
+只应用无损 PostTool 候选，并拒绝无法恢复的截断。当前 `SchemaCompressor` 的变换均为有损，
+因此本迁移阶段 Common BeforeModel 会原样返回 Tools，也不会产生 Schema 压缩 Stats 记录。
+请求/响应契约和可执行示例见
 [CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
 
 ### Schema 压缩 CLI

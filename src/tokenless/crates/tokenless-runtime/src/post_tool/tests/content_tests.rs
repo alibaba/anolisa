@@ -201,7 +201,7 @@ fn detection_is_deterministic_and_bounded() {
 #[test]
 fn wire_values_are_stable_and_unique() {
     let all = [
-        (ContentType::Json, "json_records"),
+        (ContentType::Json, "json"),
         (ContentType::SearchResults, "search_results"),
         (ContentType::BuildLog, "build_log"),
         (ContentType::StackTrace, "stack_trace"),

@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""Mock `tokenless` binary for the adapter contract suite.
+"""Mock ``tokenless`` Protocol v2 transport for the hook contract suite.
 
-Speaks the protocol-v1 `compress` entry point. The behavior is selected by
-the TOKENLESS_MOCK_BEHAVIOR environment variable:
+The behavior is selected by ``TOKENLESS_MOCK_BEHAVIOR``:
 
-  applied           truncate every string > 20 chars in the content to its
-                    first 20 and respond `applied`
-  no_savings        respond `no_savings` with the original content
-  passthrough       respond `passthrough` with the original content
-  error_disposition respond `error` with the original content
-  timeout           sleep past every hook timeout (the hook must kill and
-                    fail open)
+  applied           return a deterministic transformed result
+  no_savings        return the original result with a no-savings disposition
+  passthrough       return the original result with a passthrough disposition
+  error_disposition return a well-formed result the hook must not apply
+  timeout           sleep past the hook timeout
   nonzero_exit      exit 1 without output
-  malformed_stdout  print garbage instead of a protocol response
+  malformed_stdout  print non-JSON output
 
-Every invocation appends its argv to the file named by TOKENLESS_MOCK_LOG
-(when set) so the runner can assert the one-subprocess gate (§5.6). The
-request itself is validated: a malformed request from an adapter exits
-non-zero, surfacing request-construction bugs as envelope mismatches.
+Every invocation appends its argv to ``TOKENLESS_MOCK_LOG`` when set. The
+mock also validates the v2 envelope and operation payload used by each hook.
 """
 
 import json
@@ -36,28 +31,94 @@ def truncate_strings(value):
     return value
 
 
-def applied_output(content: str) -> str:
-    data = json.loads(content)
-    if isinstance(data, str):
-        data = json.loads(data)
-    return json.dumps(truncate_strings(data), separators=(",", ":"), ensure_ascii=False)
+def envelope(request: dict, result: dict) -> None:
+    print(
+        json.dumps(
+            {
+                "protocol_version": 2,
+                "operation": request["operation"],
+                "attribution": request["attribution"],
+                "result": result,
+            }
+        )
+    )
 
 
-def respond(output: str, disposition: str, seam: str) -> None:
-    chain = []
-    if disposition == "applied":
-        chain = ["schema-compress"] if seam == "before_model" else ["response-cleanup"]
-    print(json.dumps({
-        "protocol_version": 1,
-        "output": output,
-        "disposition": disposition,
-        "compressor_chain": chain,
-        "reversibility": "lossless",
-        "before_tokens": 100,
-        "after_tokens": 50 if disposition == "applied" else 100,
-        "stash_keys": [],
-        "tokenizer_id": "heuristic-v1",
-    }))
+def respond_before_model(request: dict, behavior: str) -> int:
+    input_data = request.get("input")
+    if (
+        not isinstance(input_data, dict)
+        or not isinstance(input_data.get("tools"), list)
+        or "visible_context" not in input_data
+        or not isinstance(input_data.get("capabilities"), dict)
+    ):
+        return 3
+
+    if behavior == "error_disposition":
+        envelope(request, {})
+        return 0
+    tools = input_data["tools"]
+    if behavior == "applied":
+        tools = truncate_strings(tools)
+    elif behavior not in {"no_savings", "passthrough"}:
+        return 4
+    envelope(
+        request,
+        {"tools": tools, "visible_markers": [], "retrieve_tool": None},
+    )
+    return 0
+
+
+def respond_post_tool(request: dict, behavior: str) -> int:
+    input_data = request.get("input")
+    if (
+        not isinstance(input_data, dict)
+        or not isinstance(input_data.get("content"), str)
+        or not isinstance(input_data.get("capabilities"), dict)
+        or "content_origin" not in input_data
+        or "output_optimization" not in input_data
+    ):
+        return 3
+
+    content = input_data["content"]
+    disposition = behavior
+    output = content
+    operations = []
+    before_tokens = 100
+    after_tokens = 100
+    can_replace = input_data["capabilities"].get("replace_output") is True
+    if behavior == "applied" and can_replace:
+        output = json.dumps(
+            truncate_strings(json.loads(content)),
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        disposition = "applied"
+        operations = ["json_truncation"]
+        after_tokens = 50
+    elif behavior == "applied" or behavior == "passthrough":
+        disposition = "passthrough"
+    elif behavior == "no_savings":
+        disposition = "no_savings"
+    elif behavior == "error_disposition":
+        disposition = "tool_error"
+    else:
+        return 4
+
+    envelope(
+        request,
+        {
+            "output": output,
+            "disposition": disposition,
+            "content_type": "json",
+            "applied_operations": operations,
+            "recoverability": "lossless",
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "stash_keys": [],
+        },
+    )
+    return 0
 
 
 def main() -> int:
@@ -82,26 +143,15 @@ def main() -> int:
 
     request = json.loads(raw)
     if (
-        request.get("protocol_version") != 1
-        or "capabilities" not in request
-        or "seam" not in request
-        or not isinstance(request.get("content"), str)
+        request.get("protocol_version") != 2
+        or request.get("operation") not in {"before_model", "post_tool"}
+        or not isinstance(request.get("attribution"), dict)
+        or set(request) != {"protocol_version", "operation", "attribution", "input"}
     ):
         return 3
-    content = request["content"]
-    seam = request["seam"]
-
-    if behavior == "applied":
-        respond(applied_output(content), "applied", seam)
-    elif behavior == "no_savings":
-        respond(content, "no_savings", seam)
-    elif behavior == "passthrough":
-        respond(content, "passthrough", seam)
-    elif behavior == "error_disposition":
-        respond(content, "error", seam)
-    else:
-        return 4
-    return 0
+    if request["operation"] == "before_model":
+        return respond_before_model(request, behavior)
+    return respond_post_tool(request, behavior)
 
 
 if __name__ == "__main__":

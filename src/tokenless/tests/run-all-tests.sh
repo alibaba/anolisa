@@ -493,30 +493,29 @@ EOF
     rm -rf "$bypass_dir"
 
     # ==========================================
-    # 6.23 Attribution: ENV_DEPENDENCY_MISSING
+    # 6.23 Core attribution: ENV_DEPENDENCY_MISSING
     # ==========================================
     log_info "Test 6.23: Attribution — ENV_DEPENDENCY_MISSING"
     local attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
-    local attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
+    local attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     local attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_DEPENDENCY_MISSING" "Attribution detects command not found"
-    assert_contains "$attr_out" "Skip retry" "Attribution includes Skip retry"
 
     # ==========================================
-    # 6.24 Attribution: ENV_PERMISSION
+    # 6.24 Core attribution: ENV_PERMISSION
     # ==========================================
     log_info "Test 6.24: Attribution — ENV_PERMISSION"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
-    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
+    attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_PERMISSION" "Attribution detects Permission denied"
 
     # ==========================================
-    # 6.25 Attribution: ENV_FILE_MISSING
+    # 6.25 Core attribution: ENV_FILE_MISSING
     # ==========================================
     log_info "Test 6.25: Attribution — ENV_FILE_MISSING"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
-    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
+    attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
 
@@ -525,20 +524,19 @@ EOF
     # ==========================================
     log_info "Test 6.26a: Bash + ENV_DEPENDENCY_MISSING — attribution injected"
     local skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
-    local skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    local skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     local skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_DEPENDENCY_MISSING" "Bash attribution detects command not found"
-    assert_contains "$skip_attr_out" "Skip retry" "Bash attribution includes Skip retry"
 
     log_info "Test 6.26b: Bash + ENV_PERMISSION — attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
-    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_PERMISSION" "Bash attribution detects Permission denied"
 
     log_info "Test 6.26c: Bash + ENV_FILE_MISSING — attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
-    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_FILE_MISSING" "Bash attribution detects No such file"
 
@@ -556,10 +554,9 @@ EOF
     # ==========================================
     log_info "Test 6.26e: Write (non-skip) + ENV_PERMISSION small — attribution injected"
     local small_err_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret"}'
-    local small_err_input=$(jq -n --arg r "$small_err_resp" '{"tool_name":"Write","tool_response":$r}')
+    local small_err_input=$(jq -n --argjson r "$small_err_resp" '{"tool_name":"Write","tool_response":$r,"is_error":true}')
     local small_err_out=$(echo "$small_err_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$small_err_out" "ENV_PERMISSION" "Write small error: attribution injected"
-    assert_contains "$small_err_out" "Skip retry" "Write small error: Skip retry included"
 
     log_info "Test 6.26f: Write (non-skip) + no env error small — skip entirely"
     local small_ok_resp='{"exit_code":0,"stdout":"ok"}'

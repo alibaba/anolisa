@@ -213,6 +213,12 @@ class TokenlessRuntimeTests(unittest.TestCase):
             tool_use_id="tool-active",
         )
         self.assertTrue(active_result.applied)
+        with sqlite3.connect(Path(data_dir, "stats.db")) as connection:
+            connection.execute(
+                "UPDATE stats SET applied_operations = ?, recoverability = ? "
+                "WHERE session_id = ?",
+                ('["json_cleanup","toon"]', "lossless", "tokenless-session"),
+            )
 
         stats = TokenlessStats(data_dir)
         status = stats.status
@@ -240,6 +246,8 @@ class TokenlessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0].session_id, "tokenless-session")
         self.assertEqual(records[0].mode, StatsMode.ACTIVE)
+        self.assertEqual(records[0].applied_operations, ("json_cleanup", "toon"))
+        self.assertEqual(records[0].recoverability, "lossless")
         self.assertIsNone(records[0].before_text)
         self.assertIsNone(records[0].after_text)
         self.assertEqual(len(stats.list(limit=1)), 1)
@@ -347,14 +355,14 @@ class TokenlessRuntimeTests(unittest.TestCase):
                 truncate_arrays_at=2,
                 agent_id="python-test",
             )
-            self.assertEqual(result.disposition, "reversibility_unavailable")
+            self.assertEqual(result.disposition, "recoverability_unavailable")
             self.assertEqual(result.output, original)
 
     def test_short_string_limit_is_reversible_fail_open(self) -> None:
         original = json.dumps({"tail": "x" * 400})
         result = self.runtime.compress_response(original, truncate_strings_at=10)
 
-        self.assertEqual(result.disposition, "reversibility_unavailable")
+        self.assertEqual(result.disposition, "recoverability_unavailable")
         self.assertEqual(result.output, original)
         self.assertEqual(result.stash_errors, 0)
         self.assertEqual(result.unrecoverable_truncations, 1)
@@ -369,7 +377,7 @@ class TokenlessRuntimeTests(unittest.TestCase):
 
             original = json.dumps({"tail": "x" * 400})
             result = runtime.compress_response(original, truncate_strings_at=80)
-            self.assertEqual(result.disposition, "reversibility_unavailable")
+            self.assertEqual(result.disposition, "recoverability_unavailable")
             self.assertEqual(result.output, original)
             self.assertEqual(result.stash_errors, 1)
             self.assertEqual(result.unrecoverable_truncations, 1)
@@ -384,7 +392,7 @@ class TokenlessRuntimeTests(unittest.TestCase):
 
             original = json.dumps({"nested": {"payload": "x" * 400}})
             result = runtime.compress_response(original, max_depth=0)
-            self.assertEqual(result.disposition, "reversibility_unavailable")
+            self.assertEqual(result.disposition, "recoverability_unavailable")
             self.assertEqual(result.output, original)
             self.assertEqual(result.stash_errors, 1)
             self.assertEqual(result.unrecoverable_truncations, 1)

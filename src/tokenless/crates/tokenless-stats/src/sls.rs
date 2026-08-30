@@ -176,12 +176,12 @@ pub struct SlsRecord {
     #[serde(rename = "tokenless.compression.content_origin")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_origin: Option<String>,
-    #[serde(rename = "tokenless.compression.seam")]
+    #[serde(rename = "tokenless.compression.applied_operations")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub seam: Option<String>,
-    #[serde(rename = "tokenless.compression.compressor_chain")]
+    pub applied_operations: Option<Vec<String>>,
+    #[serde(rename = "tokenless.compression.recoverability")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub compressor_chain: Option<String>,
+    pub recoverability: Option<String>,
     #[serde(rename = "tokenless.compression.tokenizer_id")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer_id: Option<String>,
@@ -210,8 +210,8 @@ impl From<&StatsRecord> for SlsRecord {
             tokens_saved_percent: r.tokens_percent(),
             content_type: r.content_type.clone(),
             content_origin: r.content_origin.clone(),
-            seam: r.seam.clone(),
-            compressor_chain: r.compressor_chain.clone(),
+            applied_operations: r.applied_operations.clone(),
+            recoverability: r.recoverability.clone(),
             tokenizer_id: r.tokenizer_id.clone(),
             unrecoverable_truncations: r.unrecoverable_truncations,
         }
@@ -365,8 +365,8 @@ mod tests {
         assert_eq!(sls.tool_use_id, None);
         assert_eq!(sls.source_pid, None);
         assert_eq!(sls.content_type, None);
-        assert_eq!(sls.seam, None);
-        assert_eq!(sls.compressor_chain, None);
+        assert_eq!(sls.applied_operations, None);
+        assert_eq!(sls.recoverability, None);
         assert_eq!(sls.tokenizer_id, None);
         assert_eq!(sls.unrecoverable_truncations, None);
     }
@@ -374,23 +374,23 @@ mod tests {
     #[test]
     fn test_sls_record_mirrors_entry_metadata() {
         let r = make_record().with_entry_metadata(
-            "post_tool",
             Some("api-records".to_string()),
             Some("file_content".to_string()),
-            Some(r#"["response-cleanup"]"#.to_string()),
+            Some(vec!["json_cleanup".to_string()]),
+            Some("lossless".to_string()),
             "heuristic-v1",
             Some(1),
         );
         let sls = SlsRecord::from(&r);
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&sls).unwrap()).unwrap();
-        assert_eq!(json["tokenless.compression.seam"], "post_tool");
         assert_eq!(json["tokenless.compression.content_type"], "api-records");
         assert_eq!(json["tokenless.compression.content_origin"], "file_content");
         assert_eq!(
-            json["tokenless.compression.compressor_chain"],
-            r#"["response-cleanup"]"#
+            json["tokenless.compression.applied_operations"],
+            serde_json::json!(["json_cleanup"])
         );
+        assert_eq!(json["tokenless.compression.recoverability"], "lossless");
         assert_eq!(json["tokenless.compression.tokenizer_id"], "heuristic-v1");
         assert_eq!(json["tokenless.compression.unrecoverable_truncations"], 1);
     }

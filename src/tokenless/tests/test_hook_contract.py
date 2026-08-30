@@ -60,8 +60,8 @@ class ResponseHookContract(unittest.TestCase):
     maxDiff = None
 
     # Replacement hosts and how an applied output lands in their envelope.
-    # qwencode is additionalContext-only: no replacement capability, so every
-    # class must be passthrough with zero spawns.
+    # qwencode is additionalContext-only: Core sees that it cannot replace
+    # output and returns passthrough, but the hook still makes its one v2 call.
     REPLACEMENT_AGENTS = ["claude-code", "qoder-cli", "opencode", "cosh-ng"]
 
     def setUp(self):
@@ -107,12 +107,12 @@ class ResponseHookContract(unittest.TestCase):
                     self.assertEqual(result.envelope, {})
                     self.assertEqual(result.spawns, ["compress"])
 
-    def test_additive_host_is_passthrough_without_spawning(self):
+    def test_additive_host_declares_passthrough_capability(self):
         for behavior in ["applied"] + FAIL_OPEN_BEHAVIORS:
             with self.subTest(behavior=behavior):
                 result = self.run_case("qwencode", behavior)
                 self.assertEqual(result.envelope, {})
-                self.assertEqual(result.spawns, [])
+                self.assertEqual(result.spawns, ["compress"])
 
     def test_missing_binary_passes_through(self):
         for agent in self.REPLACEMENT_AGENTS:

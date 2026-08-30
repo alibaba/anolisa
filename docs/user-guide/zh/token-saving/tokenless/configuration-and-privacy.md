@@ -184,7 +184,7 @@ tokenless stats clear --yes
 该命令会清空当前环境解析到的统计库记录，但不会删除数据库文件或 SQLite sidecar。Tokenless 当前没有 Stash clear 子命令。需要不可逆地删除本地数据库时：
 
 1. 先禁用所有 Tokenless Adapter。
-2. 退出仍可能使用数据库的 Agent、MCP 服务和 Tokenless 进程。
+2. 退出仍可能使用数据库的 Agent 和 Tokenless 进程。
 3. 确认不再需要历史统计和 Stash 取回。
 4. 备份需要保留的数据。
 5. 在启动 Agent、服务和 Tokenless 的实际环境中检查路径覆盖：

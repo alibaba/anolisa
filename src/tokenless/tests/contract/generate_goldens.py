@@ -3,9 +3,9 @@
 
 Runs every fixture x agent case through the common hooks against the real
 `tokenless` debug binary and records the envelope each hook emits on stdout.
-The committed goldens were generated from the pre-PR-6 two-subprocess hooks;
-`tests/test_hook_parity.py` replays the same corpus through the current hooks
-and diffs against them, so regenerate only when an intentional behavior
+The committed goldens define the current Protocol v2 Common Hook behavior.
+``tests/test_hook_parity.py`` replays the same corpus through the current
+hooks and diffs against them, so regenerate only when an intentional behavior
 change is being re-baselined.
 """
 

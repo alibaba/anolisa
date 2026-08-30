@@ -184,7 +184,7 @@ tokenless stats clear --yes
 This clears records from the statistics database resolved in the current environment, but it does not remove the database file or SQLite sidecars. Tokenless currently has no Stash clear subcommand. For irreversible local-database removal:
 
 1. Disable every Tokenless adapter.
-2. Exit agents, MCP servers, and Tokenless processes that may still use the databases.
+2. Exit agents and Tokenless processes that may still use the databases.
 3. Confirm that statistics history and Stash retrieval are no longer needed.
 4. Back up anything that must be retained.
 5. Inspect path overrides in the actual environment used to start the agent, service, and Tokenless:

@@ -6,16 +6,15 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokenless_ccr::StashStore;
 use tokenless_compressors::{
-    JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonOperation, Recoverability,
+    JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonOperation,
 };
 use tokenless_protocol::{
-    BYTE_ESTIMATOR_ID, CompressionRequest, CompressionResponse, ContentOrigin,
-    DIAGNOSTIC_MAX_BYTES, Disposition, PROTOCOL_VERSION, Reversibility, TOKENIZER_ID,
-    estimate_tokens, estimate_tokens_from_bytes,
+    AppliedOperation, BYTE_ESTIMATOR_ID, ContentOrigin, ContentType, Disposition, PostToolRequest,
+    PostToolResponse, Recoverability, TOKENIZER_ID, estimate_tokens, estimate_tokens_from_bytes,
 };
 
 use super::arbitration::{ArbitrationInput, Verdict, decide};
-use super::content::{ContentType, detect};
+use super::content::detect;
 use super::stash_ledger::StashLedger;
 
 /// Policy resolved by Runtime for one PostTool call.
@@ -36,7 +35,7 @@ pub(crate) struct PostToolPipelineConfig {
 
 /// Protocol response plus Runtime-only measurement and artifact facts.
 pub(crate) struct PostToolRun {
-    pub(crate) response: CompressionResponse,
+    pub(crate) response: PostToolResponse,
     pub(crate) candidate: Option<String>,
     pub(crate) operations: Vec<JsonOperation>,
     pub(crate) stash_writes: Option<usize>,
@@ -48,12 +47,17 @@ pub(crate) struct PostToolRun {
 /// The first Runtime-owned PostTool pipeline, dispatching only JSON.
 pub(crate) struct PostToolPipeline;
 
+/// Error returned when the selected domain compressor fails.
+#[derive(Debug, thiserror::Error)]
+#[error("PostTool pipeline failed: {0}")]
+pub(crate) struct PostToolPipelineError(String);
+
 impl PostToolPipeline {
     pub(crate) fn run(
-        request: &CompressionRequest,
+        request: &PostToolRequest,
         config: &PostToolPipelineConfig,
         stash_store: Option<&Arc<dyn StashStore>>,
-    ) -> PostToolRun {
+    ) -> Result<PostToolRun, PostToolPipelineError> {
         let started = Instant::now();
 
         if request.content.len() > config.max_input_bytes {
@@ -61,13 +65,9 @@ impl PostToolPipeline {
                 request,
                 estimate_tokens_from_bytes(request.content.len()) as u64,
                 ContentType::Unknown,
-                Some(format!(
-                    "input exceeds {} MiB limit",
-                    config.max_input_bytes / (1024 * 1024)
-                )),
             );
             run.response.tokenizer_id = BYTE_ESTIMATOR_ID.to_owned();
-            return run;
+            return Ok(run);
         }
         let before_tokens = estimate_tokens(&request.content) as u64;
         let content_type = detect(&request.content);
@@ -75,14 +75,14 @@ impl PostToolPipeline {
             || request.content_origin == ContentOrigin::FileContent
             || request.content.chars().count() < config.min_input_chars
         {
-            return passthrough(request, before_tokens, content_type, None);
+            return Ok(passthrough(request, before_tokens, content_type));
         }
 
         let json_candidate = config.force_json
             || content_type == ContentType::Json
             || is_wrapped_structured_json(&request.content);
         if !json_candidate {
-            return passthrough(request, before_tokens, content_type, None);
+            return Ok(passthrough(request, before_tokens, content_type));
         }
 
         let attached_store = if config.stash_enabled
@@ -99,16 +99,9 @@ impl PostToolPipeline {
             preserve_top_level_shape: config.preserve_top_level_shape,
             min_toon_chars: config.min_toon_chars,
         };
-        let outcome =
-            match JsonCompressor::new(config.json.clone()).compress(&request.content, &context) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let mut run = passthrough(request, before_tokens, content_type, None);
-                    run.response.disposition = Disposition::Error;
-                    run.response.diagnostic = Some(truncate_diagnostic(&error.to_string()));
-                    return run;
-                }
-            };
+        let outcome = JsonCompressor::new(config.json.clone())
+            .compress(&request.content, &context)
+            .map_err(|error| PostToolPipelineError(error.to_string()))?;
 
         let mut ledger = StashLedger::default();
         for write in outcome.stash_writes {
@@ -146,14 +139,14 @@ impl PostToolPipeline {
             before_tokens
         };
         let response_operations = if matches!(verdict, Verdict::Apply) {
-            legacy_chain(&outcome.operations)
+            applied_operations(&outcome.operations)
         } else {
             Vec::new()
         };
-        let reversibility = if selected {
-            protocol_reversibility(outcome.recoverability)
+        let recoverability = if matches!(verdict, Verdict::Apply) {
+            protocol_recoverability(outcome.recoverability)
         } else {
-            Reversibility::Lossless
+            Recoverability::Lossless
         };
         let unrecoverable_truncations = if !outcome.operations.contains(&JsonOperation::Truncation)
             || !config.compression_enabled
@@ -165,19 +158,18 @@ impl PostToolPipeline {
             None
         };
         let store_attached = attached_store.is_some();
-        PostToolRun {
-            response: CompressionResponse {
-                protocol_version: PROTOCOL_VERSION,
+        Ok(PostToolRun {
+            response: PostToolResponse {
                 output,
                 disposition,
-                content_type: Some(ContentType::Json.wire_str().to_owned()),
-                compressor_chain: response_operations,
-                reversibility,
+                content_type: Some(ContentType::Json),
+                applied_operations: response_operations,
+                recoverability,
                 before_tokens,
                 after_tokens,
                 stash_keys,
                 tokenizer_id: TOKENIZER_ID.to_owned(),
-                diagnostic: None,
+                additional_context: None,
             },
             candidate: Some(outcome.output),
             operations: outcome.operations,
@@ -185,7 +177,7 @@ impl PostToolPipeline {
             stash_errors: store_attached.then(|| outcome.metrics.stash_errors + ledger.errors()),
             stash_size: attached_store.map(|store| store.len()),
             unrecoverable_truncations,
-        }
+        })
     }
 }
 
@@ -200,14 +192,12 @@ fn is_wrapped_structured_json(content: &str) -> bool {
 }
 
 fn passthrough(
-    request: &CompressionRequest,
+    request: &PostToolRequest,
     before_tokens: u64,
     content_type: ContentType,
-    diagnostic: Option<String>,
 ) -> PostToolRun {
-    let mut response = CompressionResponse::passthrough(request, before_tokens);
-    response.content_type = Some(content_type.wire_str().to_owned());
-    response.diagnostic = diagnostic;
+    let mut response = PostToolResponse::passthrough(request, before_tokens);
+    response.content_type = Some(content_type);
     PostToolRun {
         response,
         candidate: None,
@@ -219,41 +209,25 @@ fn passthrough(
     }
 }
 
-fn legacy_chain(operations: &[JsonOperation]) -> Vec<String> {
-    let mut chain = Vec::new();
-    if operations.iter().any(|operation| {
-        matches!(
-            operation,
-            JsonOperation::Cleanup | JsonOperation::Truncation
-        )
-    }) {
-        chain.push("response-cleanup".to_owned());
-    }
-    if operations.contains(&JsonOperation::Toon) {
-        chain.push("toon".to_owned());
-    }
-    chain
+fn applied_operations(operations: &[JsonOperation]) -> Vec<AppliedOperation> {
+    operations
+        .iter()
+        .map(|operation| match operation {
+            JsonOperation::Cleanup => AppliedOperation::JsonCleanup,
+            JsonOperation::Truncation => AppliedOperation::JsonTruncation,
+            JsonOperation::Toon => AppliedOperation::Toon,
+        })
+        .collect()
 }
 
-fn protocol_reversibility(recoverability: Recoverability) -> Reversibility {
+fn protocol_recoverability(
+    recoverability: tokenless_compressors::Recoverability,
+) -> Recoverability {
     match recoverability {
-        Recoverability::Lossless => Reversibility::Lossless,
-        Recoverability::Retrievable => Reversibility::Retrievable,
-        Recoverability::Unrecoverable => Reversibility::Unrecoverable,
+        tokenless_compressors::Recoverability::Lossless => Recoverability::Lossless,
+        tokenless_compressors::Recoverability::Retrievable => Recoverability::Retrievable,
+        tokenless_compressors::Recoverability::Unrecoverable => Recoverability::Unrecoverable,
     }
-}
-
-const TRUNCATION_SUFFIX: &str = " [truncated]";
-
-fn truncate_diagnostic(message: &str) -> String {
-    if message.len() <= DIAGNOSTIC_MAX_BYTES {
-        return message.to_owned();
-    }
-    let mut end = DIAGNOSTIC_MAX_BYTES - TRUNCATION_SUFFIX.len();
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{TRUNCATION_SUFFIX}", &message[..end])
 }
 
 #[cfg(test)]
@@ -261,7 +235,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokenless_ccr::{InMemoryStore, StashError, StashWrite};
-    use tokenless_protocol::{Capabilities, Seam};
+    use tokenless_protocol::{
+        OutputOptimization, PostToolCapabilities, ResultKind, ToolResultStatus,
+    };
 
     use super::*;
 
@@ -296,14 +272,20 @@ mod tests {
         }
     }
 
-    fn request(content: &str) -> CompressionRequest {
-        let mut request = CompressionRequest::new(content, "test", Seam::PostTool);
-        request.capabilities = Capabilities {
-            replace_output: true,
-            publish_retrieve_tool: true,
-            replace_with_text: true,
-        };
-        request
+    fn request(content: &str) -> PostToolRequest {
+        PostToolRequest {
+            result_kind: ResultKind::Tool,
+            tool_name: "Bash".into(),
+            content: content.into(),
+            status: ToolResultStatus::Success,
+            content_origin: ContentOrigin::CommandOutput,
+            output_optimization: OutputOptimization::None,
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                publish_retrieve_tool: true,
+                replace_with_text: true,
+            },
+        }
     }
 
     fn config(timeout: Duration, truncate_arrays_at: usize) -> PostToolPipelineConfig {
@@ -342,14 +324,21 @@ mod tests {
             &request(&input),
             &config(Duration::from_secs(1), 2),
             Some(&store),
-        );
+        )
+        .unwrap();
 
         assert_eq!(run.response.disposition, Disposition::Applied);
         assert_eq!(
             run.operations,
             [JsonOperation::Cleanup, JsonOperation::Truncation]
         );
-        assert_eq!(run.response.compressor_chain, ["response-cleanup"]);
+        assert_eq!(
+            run.response.applied_operations,
+            [
+                AppliedOperation::JsonCleanup,
+                AppliedOperation::JsonTruncation
+            ]
+        );
         assert_eq!(run.response.stash_keys.len(), 1);
         assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
         assert_eq!(concrete.delete_calls.load(Ordering::Relaxed), 0);
@@ -364,7 +353,8 @@ mod tests {
             &request(r#"["a","b"]"#),
             &config(Duration::from_secs(1), 1),
             Some(&store),
-        );
+        )
+        .unwrap();
 
         assert_eq!(run.response.disposition, Disposition::NoSavings);
         assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
@@ -382,7 +372,8 @@ mod tests {
         .unwrap();
         let concrete = Arc::new(CountingStore::default());
         let store: Arc<dyn StashStore> = concrete.clone();
-        let run = PostToolPipeline::run(&request(&input), &config(Duration::ZERO, 2), Some(&store));
+        let run = PostToolPipeline::run(&request(&input), &config(Duration::ZERO, 2), Some(&store))
+            .unwrap();
 
         assert_eq!(run.response.disposition, Disposition::Timeout);
         assert_eq!(concrete.stash_calls.load(Ordering::Relaxed), 1);
@@ -391,12 +382,33 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_reports_recoverability_for_the_emitted_original() {
+        let input = serde_json::to_string(
+            &(0..12)
+                .map(|index| format!("item-{index}-{}", "x".repeat(80)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut dry_run = config(Duration::from_secs(1), 2);
+        dry_run.compression_enabled = false;
+        dry_run.stash_enabled = false;
+
+        let run = PostToolPipeline::run(&request(&input), &dry_run, None).unwrap();
+
+        assert_eq!(run.response.disposition, Disposition::DryRun);
+        assert_eq!(run.response.output, input);
+        assert!(run.response.applied_operations.is_empty());
+        assert_eq!(run.response.recoverability, Recoverability::Lossless);
+        assert!(run.response.after_tokens < run.response.before_tokens);
+    }
+
+    #[test]
     fn quoted_json_scalar_passes_through() {
         let input = serde_json::to_string(&"x".repeat(5_000)).unwrap();
         let mut config = config(Duration::from_secs(1), 2);
         config.force_json = false;
 
-        let run = PostToolPipeline::run(&request(&input), &config, None);
+        let run = PostToolPipeline::run(&request(&input), &config, None).unwrap();
 
         assert_eq!(run.response.disposition, Disposition::Passthrough);
         assert_eq!(run.response.output, input);
@@ -409,7 +421,7 @@ mod tests {
         let mut config = config(Duration::from_secs(1), 2);
         config.max_input_bytes = input.len() - 1;
 
-        let run = PostToolPipeline::run(&request(&input), &config, None);
+        let run = PostToolPipeline::run(&request(&input), &config, None).unwrap();
 
         assert_eq!(run.response.disposition, Disposition::Passthrough);
         assert_eq!(run.response.before_tokens, 3);

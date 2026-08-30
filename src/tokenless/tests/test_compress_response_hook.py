@@ -38,7 +38,7 @@ def _make_large_json_payload(char_target: int = 500) -> dict:
 
 
 def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
-    """Create a mock `tokenless` speaking the protocol-v1 `compress` entry.
+    """Create a mock `tokenless` speaking the Protocol v2 PostTool operation.
 
     Every invocation appends its argv to a `spawn_log` file next to the
     binary, so tests can assert the one-subprocess contract (§5.6). The
@@ -61,22 +61,45 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
         if sys.argv[1:] != ["compress"]:
             sys.exit(2)
         request = json.loads(sys.stdin.read())
-        if request.get("protocol_version") != 1 or "capabilities" not in request:
+        if (request.get("protocol_version") != 2
+                or request.get("operation") != "post_tool"
+                or "capabilities" not in request.get("input", {})):
             sys.exit(2)
-        content = request["content"]
+        operation_input = request["input"]
+        content = operation_input["content"]
 
-        def respond(output, disposition):
-            print(json.dumps({
-                "protocol_version": 1,
+        def respond(output, disposition, additional_context=None):
+            result = {
                 "output": output,
                 "disposition": disposition,
-                "compressor_chain": ["response-cleanup"] if disposition == "applied" else [],
-                "reversibility": "lossless",
+                "content_type": "json",
+                "applied_operations": ["json_cleanup"] if disposition == "applied" else [],
+                "recoverability": "lossless",
                 "before_tokens": 100,
                 "after_tokens": 50 if disposition == "applied" else 100,
                 "stash_keys": [],
                 "tokenizer_id": "heuristic-v1",
+            }
+            if additional_context:
+                result["additional_context"] = additional_context
+            print(json.dumps({
+                "protocol_version": 2,
+                "operation": "post_tool",
+                "attribution": request["attribution"],
+                "result": result,
             }))
+
+        if operation_input["status"] == "error":
+            context = None
+            if "command not found" in content.lower():
+                context = "[tokenless:env] tool failed: ENV_DEPENDENCY_MISSING."
+            respond(content, "tool_error", context)
+            sys.exit(0)
+        if (not operation_input["capabilities"]["replace_output"]
+                or operation_input["content_origin"] == "file_content"
+                or len(content) < 200):
+            respond(content, "passthrough")
+            sys.exit(0)
     """)
 
     if behavior == "compress":
@@ -95,7 +118,7 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
         # the unwrapped shell field; the deterministic head-truncation lets
         # tests assert exactly which field's text was sent.
         script = prologue + textwrap.dedent("""\
-            if request["capabilities"].get("replace_with_text") is not True:
+            if operation_input["capabilities"].get("replace_with_text") is not True:
                 sys.exit(2)
             respond(content[:40], "applied")
         """)
@@ -106,15 +129,10 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
     elif behavior == "wrong-protocol-version":
         script = prologue + textwrap.dedent("""\
             print(json.dumps({
-                "protocol_version": 2,
-                "output": content[:20],
-                "disposition": "applied",
-                "compressor_chain": ["response-cleanup"],
-                "reversibility": "lossless",
-                "before_tokens": 100,
-                "after_tokens": 50,
-                "stash_keys": [],
-                "tokenizer_id": "heuristic-v1",
+                "protocol_version": 1,
+                "operation": "post_tool",
+                "attribution": request["attribution"],
+                "result": {},
             }))
         """)
     else:
@@ -174,6 +192,8 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
 
     env = os.environ.copy()
     env["TOKENLESS_AGENT_ID"] = agent_id
+    if agent_id == "cosh-ng":
+        env["COSH_NG_VERSION"] = "0.5.0"
     env["PATH"] = os.path.dirname(mock_tokenless_path) + ":" + env.get("PATH", "")
     # Isolate HOME so hook doesn't read/write ~/.tokenless/.claude-version
     if isolated_home:
@@ -446,6 +466,56 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertIsInstance(hso.get("updatedToolOutput"), str)
         self.assertNotIn("additionalContext", hso,
                          "OpenCode compressed content must not be additive")
+
+    def test_business_exit_code_is_not_a_process_failure(self):
+        payload = {
+            "exitCode": 1,
+            "error": "business status, not a host execution failure",
+            "message": "permission denied is a documented business status " * 12,
+        }
+        result = _run_hook(
+            {
+                "tool_name": "mcp__analytics_report",
+                "tool_response": payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso)
+        self.assertNotIn("additionalContext", hso)
+
+    def test_cosh_ng_nested_shell_failure_uses_llm_content_status(self):
+        result = _run_hook(
+            {
+                "tool_name": "run_shell_command",
+                "tool_response": {
+                    "llmContent": {
+                        "stdout": "",
+                        "stderr": "sh: rg: command not found",
+                        "exitCode": 127,
+                    },
+                    "returnDisplay": "ran `rg pattern` (exit 127)",
+                },
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="cosh-ng",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("ENV_DEPENDENCY_MISSING", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolResponse", hso)
 
     def test_replacement_is_smaller(self):
         """The replacement output should be smaller than the original."""
@@ -757,9 +827,8 @@ class TestSkipTools(unittest.TestCase):
         self.assertNotIn("updatedToolOutput", hso,
                          "Skip-tools should not replace tool output")
 
-    def test_skip_tools_spawn_nothing(self):
-        """Content retrieval is the hottest PostToolUse traffic: the
-        prefilter must save the spawn, not just discard the result."""
+    def test_skip_tools_are_classified_by_core(self):
+        """File-content policy belongs to the PostTool service."""
         result = _run_hook(
             {
                 "tool_name": "Read",
@@ -775,8 +844,7 @@ class TestSkipTools(unittest.TestCase):
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
         self.assertEqual(result, {})
-        self.assertEqual(_spawn_log_lines(self.mock_bin), [],
-                         "skip-tool responses must not spawn tokenless")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
@@ -795,9 +863,8 @@ class TestNonReplacementAdapters(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         shutil.rmtree(self.isolated_home, ignore_errors=True)
 
-    def test_qwencode_passes_through_without_spawning(self):
-        """Qwen Code declares no replacement capability: passthrough, and
-        the hook does not even spawn the subprocess."""
+    def test_qwencode_passes_through_via_core(self):
+        """Qwen Code declares no replacement capability to Core."""
         large_payload = _make_large_json_payload()
 
         result = _run_hook(
@@ -816,8 +883,7 @@ class TestNonReplacementAdapters(unittest.TestCase):
                          f"Hook subprocess failed: {result}")
         self.assertEqual(result, {},
                          "Hosts without true replacement remain passthrough")
-        self.assertEqual(_spawn_log_lines(self.mock_bin), [],
-                         "No-capability requests must not spawn tokenless")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
     def test_qwencode_still_receives_env_attribution(self):
         """Environment attribution is genuinely additive and stays."""
@@ -838,6 +904,29 @@ class TestNonReplacementAdapters(unittest.TestCase):
                          f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
         self.assertIn("[tokenless:env]", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolOutput", hso)
+
+    def test_shell_diagnostic_uses_short_stderr_not_large_stdout(self):
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {
+                    "stdout": "routine output\n" * 1_000,
+                    "stderr": "bash: rg: command not found",
+                    "exit_code": 127,
+                },
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qwencode",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("ENV_DEPENDENCY_MISSING", hso.get("additionalContext", ""))
         self.assertNotIn("updatedToolOutput", hso)
 
 
@@ -879,7 +968,7 @@ class TestSingleSubprocess(unittest.TestCase):
         self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
                          "exactly one tokenless subprocess per invocation")
 
-    def test_small_payload_spawns_nothing(self):
+    def test_small_payload_is_gated_by_core(self):
         result = _run_hook(
             {
                 "tool_name": "Bash",
@@ -894,8 +983,7 @@ class TestSingleSubprocess(unittest.TestCase):
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
         self.assertEqual(result, {})
-        self.assertEqual(_spawn_log_lines(self.mock_bin), [],
-                         "the sub-200-char prefilter must save the spawn")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
 
 if __name__ == "__main__":

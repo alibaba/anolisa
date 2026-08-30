@@ -418,14 +418,6 @@ fn get_stash_db_path_with_valid_override() {
 }
 
 #[test]
-fn open_stash_store_falls_back_on_bad_override() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    // Bad override is rejected but falls back to the temp DB path.
-    let result = open_stash_store(Some("/nonexistent/deep/dir/stash.db"));
-    assert!(result.is_some());
-}
-
-#[test]
 fn open_stash_store_or_err_falls_back_on_bad_override() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_stash_store_or_err(Some("/nonexistent/deep/dir/stash.db"));
@@ -778,11 +770,7 @@ fn run_command_decompress_toon_empty_input() {
 #[test]
 fn run_command_retrieve_with_marker() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let store = open_stash_store(None);
-    if store.is_none() {
-        return;
-    }
-    let store = store.unwrap();
+    let store = open_stash_store_or_err(None).unwrap();
     let key = store.stash("hello world").unwrap().key;
     let marker = format!("<<tokenless:{key}>>");
     let result = run_command(Commands::Retrieve {
@@ -795,11 +783,7 @@ fn run_command_retrieve_with_marker() {
 #[test]
 fn run_command_retrieve_bare_hash() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let store = open_stash_store(None);
-    if store.is_none() {
-        return;
-    }
-    let store = store.unwrap();
+    let store = open_stash_store_or_err(None).unwrap();
     let key = store.stash("retrieve bare hash test").unwrap().key;
     let result = run_command(Commands::Retrieve {
         hash: key,
@@ -1484,13 +1468,6 @@ fn run_command_compress_response_file_not_found() {
 }
 
 #[test]
-fn open_stash_store_none_returns_some() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let result = open_stash_store(None);
-    assert!(result.is_some());
-}
-
-#[test]
 fn open_stash_store_or_err_none_returns_ok() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_stash_store_or_err(None);
@@ -1717,8 +1694,8 @@ fn stats_after_text_records_the_candidate_only_when_it_was_measured() {
         Disposition::NoSavings,
         Disposition::Timeout,
         Disposition::Passthrough,
-        Disposition::ReversibilityUnavailable,
-        Disposition::Error,
+        Disposition::RecoverabilityUnavailable,
+        Disposition::ToolError,
     ] {
         assert_eq!(
             stats_after_text(&result_with(disposition), "original"),
