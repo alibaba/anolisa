@@ -21,12 +21,12 @@ edition = "2024"
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
 anyhow = "1.0.86"
-actplane-ifc-compiler = { path = "crates/actplane-ifc-compiler" }
+actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
 ctrlc = "3.4"
 dirs = "6"
-ebpf-ifc-engine = { path = "crates/ebpf-ifc-engine" }
+ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"
@@ -151,3 +151,10 @@ libbpf-cargo = "0.23.3"
 bindgen = "0.69.4"
 cc = "1.1.31"
 cbindgen = "0.27"
+
+# Redirect the pinned ActPlane git dependencies to the reviewed vendored copies.
+# The git+rev pins above are what scripts/build-enforcer.sh attests against; this
+# [patch] makes the workspace build the vendored crates without a network fetch.
+[patch."https://github.com/eunomia-bpf/ActPlane.git"]
+actplane-ifc-compiler = { path = "crates/actplane-ifc-compiler" }
+ebpf-ifc-engine = { path = "crates/ebpf-ifc-engine" }
