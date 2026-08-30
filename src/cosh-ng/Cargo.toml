@@ -7,6 +7,7 @@ members = [
     "crates/cosh-shell",
     "crates/cosh-gateway-contracts",
     "crates/cosh-gateway",
+    "crates/cosh-gateway-app",
 ]
 resolver = "2"
 

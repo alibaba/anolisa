@@ -12,10 +12,16 @@ use crate::common::{BoundedName, BoundedOpaque, Digest, TargetRef};
 pub const TASK_ONLY_V1_PROFILE: &str = "task-only-v1";
 /// Canonical wire and configuration name of the workspace-checkpoint profile.
 pub const WORKSPACE_CHECKPOINT_V1_PROFILE: &str = "workspace-checkpoint-v1";
+/// Canonical wire and configuration name of the workspace-write profile.
+pub const WORKSPACE_WRITE_V1_PROFILE: &str = "workspace-write-v1";
+/// Canonical wire and configuration name of the full ACP delegation profile.
+pub const DELEGATED_ACP_V1_PROFILE: &str = "delegated-acp-v1";
 /// Runtime tool resolved by the Gateway without a host side effect.
 pub const ASK_USER_QUESTION_TOOL: &str = "ask_user_question";
 /// Runtime tool whose side effect must cross a governed checkpoint target.
 pub const WORKSPACE_CHECKPOINT_CREATE_TOOL: &str = "workspace_checkpoint_create";
+/// Runtime tool that writes through the Core's pinned workspace boundary.
+pub const WRITE_FILE_TOOL: &str = "write_file";
 /// Canonical name of the only checkpoint provider admitted by this contract.
 pub const WS_CKPT_PROVIDER: &str = "ws-ckpt";
 /// Domain separator for the first capability-profile manifest format.
@@ -52,16 +58,50 @@ pub const WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST: &str = concat!(
 /// Pinned SHA-256 digest of [`WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST`].
 pub const WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST: &str =
     "6b3e7093e7b8656d4a7cf21faa85b9eed761ef415d002623cfc442f3ef3c8ae1";
+/// Canonical manifest of the workspace-scoped write profile.
+pub const WORKSPACE_WRITE_V1_CANONICAL_MANIFEST: &str = concat!(
+    "cosh.gateway.capability-profile.v1\n",
+    "profile:workspace-write-v1\n",
+    "target:\n",
+    "workspace/cosh/workspace-write-v1\n",
+    "runtime-tools:\n",
+    "ask_user_question\n",
+    "write_file\n",
+);
+/// Pinned SHA-256 digest of [`WORKSPACE_WRITE_V1_CANONICAL_MANIFEST`].
+pub const WORKSPACE_WRITE_V1_MANIFEST_DIGEST: &str =
+    "30574302eeba3adbb5ea143a8a869331d58a15bd24b9532d0f52613136bb2b2a";
+/// Canonical manifest of the profile that delegates one Task to an ACP Runtime.
+///
+/// The empty `runtime-tools` inventory means COSH hosts no individual tool for
+/// this profile. Instead, the explicit delegation grants the pinned ACP Runtime
+/// provider-native allow-once decisions for the lifetime of the Task Run.
+pub const DELEGATED_ACP_V1_CANONICAL_MANIFEST: &str = concat!(
+    "cosh.gateway.capability-profile.v1\n",
+    "profile:delegated-acp-v1\n",
+    "target:\n",
+    "workspace/cosh/delegated-acp-v1\n",
+    "runtime-tools:\n",
+    "delegation:\n",
+    "provider-native-allow-once\n",
+);
+/// Pinned SHA-256 digest of [`DELEGATED_ACP_V1_CANONICAL_MANIFEST`].
+pub const DELEGATED_ACP_V1_MANIFEST_DIGEST: &str =
+    "a6978e5eafa5befe62ba606e073fef71057278e75b6408f57318ddd94071a3f4";
 
 const TASK_ONLY_V1_RUNTIME_TOOLS: &[&str] = &[ASK_USER_QUESTION_TOOL];
 const WORKSPACE_CHECKPOINT_V1_RUNTIME_TOOLS: &[&str] =
     &[ASK_USER_QUESTION_TOOL, WORKSPACE_CHECKPOINT_CREATE_TOOL];
+const WORKSPACE_WRITE_V1_RUNTIME_TOOLS: &[&str] = &[ASK_USER_QUESTION_TOOL, WRITE_FILE_TOOL];
+const DELEGATED_ACP_V1_RUNTIME_TOOLS: &[&str] = &[];
 const NO_PROVIDERS: &[CapabilityProviderId] = &[];
 const WS_CKPT_PROVIDER_SET: &[CapabilityProviderId] = &[CapabilityProviderId::WsCkpt];
 
 /// Failure returned when a profile name is not an admitted production profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("unsupported capability profile; expected `task-only-v1` or `workspace-checkpoint-v1`")]
+#[error(
+    "unsupported capability profile; expected `task-only-v1`, `workspace-checkpoint-v1`, `workspace-write-v1`, or `delegated-acp-v1`"
+)]
 pub struct CapabilityProfileParseError;
 
 /// Failure returned when a provider name is not an admitted production provider.
@@ -128,6 +168,10 @@ pub enum GatewayCapabilityProfileId {
     TaskOnlyV1,
     /// Optional profile that additionally admits one governed checkpoint target.
     WorkspaceCheckpointV1,
+    /// Profile that admits only an approval-gated workspace file write.
+    WorkspaceWriteV1,
+    /// Profile that grants a pinned ACP Runtime full provider-native Task authority.
+    DelegatedAcpV1,
 }
 
 impl GatewayCapabilityProfileId {
@@ -137,6 +181,8 @@ impl GatewayCapabilityProfileId {
         match self {
             Self::TaskOnlyV1 => TASK_ONLY_V1_PROFILE,
             Self::WorkspaceCheckpointV1 => WORKSPACE_CHECKPOINT_V1_PROFILE,
+            Self::WorkspaceWriteV1 => WORKSPACE_WRITE_V1_PROFILE,
+            Self::DelegatedAcpV1 => DELEGATED_ACP_V1_PROFILE,
         }
     }
 
@@ -150,6 +196,8 @@ impl GatewayCapabilityProfileId {
         match value {
             TASK_ONLY_V1_PROFILE => Ok(Self::TaskOnlyV1),
             WORKSPACE_CHECKPOINT_V1_PROFILE => Ok(Self::WorkspaceCheckpointV1),
+            WORKSPACE_WRITE_V1_PROFILE => Ok(Self::WorkspaceWriteV1),
+            DELEGATED_ACP_V1_PROFILE => Ok(Self::DelegatedAcpV1),
             _ => Err(CapabilityProfileParseError),
         }
     }
@@ -160,6 +208,8 @@ impl GatewayCapabilityProfileId {
         match self {
             Self::TaskOnlyV1 => GatewayCapabilityProfile::task_only_v1(),
             Self::WorkspaceCheckpointV1 => GatewayCapabilityProfile::workspace_checkpoint_v1(),
+            Self::WorkspaceWriteV1 => GatewayCapabilityProfile::workspace_write_v1(),
+            Self::DelegatedAcpV1 => GatewayCapabilityProfile::delegated_acp_v1(),
         }
     }
 }
@@ -201,6 +251,22 @@ impl GatewayCapabilityProfile {
         }
     }
 
+    /// Returns the profile that admits one approval-gated workspace write tool.
+    #[must_use]
+    pub const fn workspace_write_v1() -> Self {
+        Self {
+            id: GatewayCapabilityProfileId::WorkspaceWriteV1,
+        }
+    }
+
+    /// Returns the profile that delegates one complete Run to a pinned ACP Runtime.
+    #[must_use]
+    pub const fn delegated_acp_v1() -> Self {
+        Self {
+            id: GatewayCapabilityProfileId::DelegatedAcpV1,
+        }
+    }
+
     /// Returns the versioned profile identity.
     #[must_use]
     pub const fn id(self) -> GatewayCapabilityProfileId {
@@ -215,6 +281,8 @@ impl GatewayCapabilityProfile {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
                 WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST
             }
+            GatewayCapabilityProfileId::WorkspaceWriteV1 => WORKSPACE_WRITE_V1_CANONICAL_MANIFEST,
+            GatewayCapabilityProfileId::DelegatedAcpV1 => DELEGATED_ACP_V1_CANONICAL_MANIFEST,
         }
     }
 
@@ -226,6 +294,8 @@ impl GatewayCapabilityProfile {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
                 WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST
             }
+            GatewayCapabilityProfileId::WorkspaceWriteV1 => WORKSPACE_WRITE_V1_MANIFEST_DIGEST,
+            GatewayCapabilityProfileId::DelegatedAcpV1 => DELEGATED_ACP_V1_MANIFEST_DIGEST,
         };
         Digest::parse(digest)
             .unwrap_or_else(|_| unreachable!("reviewed static profile digests are canonical"))
@@ -261,6 +331,8 @@ impl GatewayCapabilityProfile {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
                 WORKSPACE_CHECKPOINT_V1_RUNTIME_TOOLS
             }
+            GatewayCapabilityProfileId::WorkspaceWriteV1 => WORKSPACE_WRITE_V1_RUNTIME_TOOLS,
+            GatewayCapabilityProfileId::DelegatedAcpV1 => DELEGATED_ACP_V1_RUNTIME_TOOLS,
         }
     }
 
@@ -273,7 +345,15 @@ impl GatewayCapabilityProfile {
         match self.id {
             GatewayCapabilityProfileId::TaskOnlyV1 => NO_PROVIDERS,
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => WS_CKPT_PROVIDER_SET,
+            GatewayCapabilityProfileId::WorkspaceWriteV1 => NO_PROVIDERS,
+            GatewayCapabilityProfileId::DelegatedAcpV1 => NO_PROVIDERS,
         }
+    }
+
+    /// Returns whether Task submission grants provider-native allow-once delegation.
+    #[must_use]
+    pub const fn delegates_provider_native(self) -> bool {
+        matches!(self.id, GatewayCapabilityProfileId::DelegatedAcpV1)
     }
 
     /// Verifies a durable or advertised identity against the configured profile.
@@ -330,277 +410,4 @@ impl GatewayCapabilityProfile {
 }
 
 #[cfg(test)]
-mod tests {
-    use sha2::{Digest as _, Sha256};
-
-    use super::*;
-
-    #[test]
-    fn task_only_manifest_and_digest_are_pinned() {
-        let profile = GatewayCapabilityProfile::task_only_v1();
-        let actual_digest = format!("{:x}", Sha256::digest(profile.canonical_manifest()));
-
-        assert_eq!(profile.id().as_str(), TASK_ONLY_V1_PROFILE);
-        assert!(profile
-            .canonical_manifest()
-            .starts_with(CAPABILITY_PROFILE_MANIFEST_DOMAIN));
-        assert_eq!(
-            profile.canonical_manifest(),
-            TASK_ONLY_V1_CANONICAL_MANIFEST
-        );
-        assert_eq!(
-            profile.manifest_digest().as_str(),
-            TASK_ONLY_V1_MANIFEST_DIGEST
-        );
-        assert_eq!(actual_digest, TASK_ONLY_V1_MANIFEST_DIGEST);
-        assert_eq!(profile.runtime_tools(), [ASK_USER_QUESTION_TOOL]);
-        assert_eq!(profile.verify_identity(&profile.identity()), Ok(()));
-        let target = profile.governed_target();
-        assert_eq!(target.kind.as_str(), "workspace");
-        assert_eq!(target.authority.as_str(), "cosh");
-        assert_eq!(target.identifier.as_str(), TASK_ONLY_V1_PROFILE);
-        assert!(profile.canonical_manifest().contains(&format!(
-            "target:\n{}/{}/{}\n",
-            target.kind.as_str(),
-            target.authority.as_str(),
-            target.identifier.as_str(),
-        )));
-    }
-
-    #[test]
-    fn workspace_checkpoint_manifest_and_digest_are_pinned() {
-        let profile = GatewayCapabilityProfile::workspace_checkpoint_v1();
-        let actual_digest = format!("{:x}", Sha256::digest(profile.canonical_manifest()));
-
-        assert_eq!(profile.id().as_str(), WORKSPACE_CHECKPOINT_V1_PROFILE);
-        assert!(profile
-            .canonical_manifest()
-            .starts_with(CAPABILITY_PROFILE_MANIFEST_DOMAIN));
-        assert_eq!(
-            profile.canonical_manifest(),
-            WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST
-        );
-        assert_eq!(
-            profile.manifest_digest().as_str(),
-            WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST
-        );
-        assert_eq!(actual_digest, WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST);
-        assert_eq!(
-            profile.runtime_tools(),
-            [ASK_USER_QUESTION_TOOL, WORKSPACE_CHECKPOINT_CREATE_TOOL]
-        );
-        assert_eq!(profile.providers(), [CapabilityProviderId::WsCkpt]);
-        assert_eq!(profile.verify_identity(&profile.identity()), Ok(()));
-        let target = profile.governed_target();
-        assert_eq!(target.kind.as_str(), "workspace");
-        assert_eq!(target.authority.as_str(), "cosh");
-        assert_eq!(target.identifier.as_str(), WORKSPACE_CHECKPOINT_V1_PROFILE);
-        assert!(profile.canonical_manifest().contains(&format!(
-            "target:\n{}/{}/{}\n",
-            target.kind.as_str(),
-            target.authority.as_str(),
-            target.identifier.as_str(),
-        )));
-        assert!(profile
-            .canonical_manifest()
-            .ends_with(&format!("providers:\n{WS_CKPT_PROVIDER}\n")));
-    }
-
-    #[test]
-    fn optional_profile_never_alters_the_task_only_contract() {
-        let task_only = GatewayCapabilityProfile::task_only_v1();
-        let checkpoint = GatewayCapabilityProfile::workspace_checkpoint_v1();
-
-        // The Task-only manifest is byte-identical to its original revision, so
-        // the private Core v3 wire mirror keeps verifying the pinned digest.
-        assert_eq!(
-            task_only.manifest_digest().as_str(),
-            TASK_ONLY_V1_MANIFEST_DIGEST
-        );
-        assert!(!task_only.canonical_manifest().contains("providers:"));
-        assert_eq!(task_only.providers(), []);
-        assert_eq!(task_only.verify_providers(&[]), Ok(()));
-        assert_ne!(task_only.governed_target(), checkpoint.governed_target());
-        assert_ne!(task_only.manifest_digest(), checkpoint.manifest_digest());
-        assert_eq!(
-            task_only.verify_identity(&checkpoint.identity()),
-            Err(CapabilityProfileVerificationError::ProfileMismatch)
-        );
-        assert_eq!(
-            checkpoint.verify_identity(&task_only.identity()),
-            Err(CapabilityProfileVerificationError::ProfileMismatch)
-        );
-    }
-
-    #[test]
-    fn provider_sets_are_exact_and_never_widened_by_installation() {
-        let task_only = GatewayCapabilityProfile::task_only_v1();
-        let checkpoint = GatewayCapabilityProfile::workspace_checkpoint_v1();
-
-        // A host that happens to run ws-ckpt is not authority for a Task-only
-        // instance; the empty sealed set rejects the installed provider.
-        assert_eq!(
-            task_only.verify_providers(&[CapabilityProviderId::WsCkpt]),
-            Err(CapabilityProfileVerificationError::ProviderSetMismatch)
-        );
-        assert_eq!(
-            checkpoint.verify_providers(&[CapabilityProviderId::WsCkpt]),
-            Ok(())
-        );
-        assert_eq!(
-            checkpoint.verify_providers(&[]),
-            Err(CapabilityProfileVerificationError::ProviderSetMismatch)
-        );
-        assert_eq!(
-            checkpoint
-                .verify_providers(&[CapabilityProviderId::WsCkpt, CapabilityProviderId::WsCkpt]),
-            Err(CapabilityProfileVerificationError::ProviderSetMismatch)
-        );
-    }
-
-    #[test]
-    fn provider_names_are_exact_and_fail_closed() {
-        assert_eq!(
-            CapabilityProviderId::parse(WS_CKPT_PROVIDER),
-            Ok(CapabilityProviderId::WsCkpt)
-        );
-        assert_eq!(CapabilityProviderId::WsCkpt.as_str(), "ws-ckpt");
-        for unknown in ["", "ws_ckpt", "WS-CKPT", "ws-ckpt-v1", "shell"] {
-            assert_eq!(
-                CapabilityProviderId::parse(unknown),
-                Err(CapabilityProviderParseError)
-            );
-        }
-        assert_eq!(
-            serde_json::to_value(CapabilityProviderId::WsCkpt).expect("provider ID serializes"),
-            serde_json::json!(WS_CKPT_PROVIDER)
-        );
-    }
-
-    #[test]
-    fn profile_names_are_exact_and_fail_closed() {
-        assert_eq!(
-            GatewayCapabilityProfileId::parse(TASK_ONLY_V1_PROFILE),
-            Ok(GatewayCapabilityProfileId::TaskOnlyV1)
-        );
-        assert_eq!(
-            GatewayCapabilityProfileId::TaskOnlyV1.profile(),
-            GatewayCapabilityProfile::task_only_v1()
-        );
-        assert_eq!(
-            GatewayCapabilityProfileId::parse(WORKSPACE_CHECKPOINT_V1_PROFILE),
-            Ok(GatewayCapabilityProfileId::WorkspaceCheckpointV1)
-        );
-        assert_eq!(
-            GatewayCapabilityProfileId::WorkspaceCheckpointV1.profile(),
-            GatewayCapabilityProfile::workspace_checkpoint_v1()
-        );
-        for unknown in [
-            "",
-            "task-only",
-            "task-only-v2",
-            "TASK-ONLY-V1",
-            // The contract rejected this provider-shaped name; it must not be
-            // revived as an alias for the capability-shaped profile name.
-            "ws-ckpt-v1",
-            "ws-ckpt",
-            "workspace-checkpoint",
-            "workspace-checkpoint-v2",
-            "WORKSPACE-CHECKPOINT-V1",
-        ] {
-            assert_eq!(
-                GatewayCapabilityProfileId::parse(unknown),
-                Err(CapabilityProfileParseError)
-            );
-        }
-    }
-
-    #[test]
-    fn profile_identity_rejects_digest_drift() {
-        let profile = GatewayCapabilityProfile::task_only_v1();
-        let drifted = GatewayCapabilityProfileIdentity {
-            profile_id: GatewayCapabilityProfileId::TaskOnlyV1,
-            manifest_digest: Digest::parse("0".repeat(64)).expect("test digest is canonical"),
-        };
-
-        assert_eq!(
-            profile.verify_identity(&drifted),
-            Err(CapabilityProfileVerificationError::ManifestDigestMismatch)
-        );
-    }
-
-    #[test]
-    fn runtime_inventory_rejects_missing_or_additional_tools() {
-        let profile = GatewayCapabilityProfile::task_only_v1();
-
-        assert_eq!(
-            profile.verify_runtime_tools(&[ASK_USER_QUESTION_TOOL]),
-            Ok(())
-        );
-        for drifted in [
-            &[][..],
-            &[ASK_USER_QUESTION_TOOL, WORKSPACE_CHECKPOINT_CREATE_TOOL][..],
-            &["ask_user"][..],
-        ] {
-            assert_eq!(
-                profile.verify_runtime_tools(drifted),
-                Err(CapabilityProfileVerificationError::RuntimeToolInventoryMismatch)
-            );
-        }
-    }
-
-    #[test]
-    fn checkpoint_inventory_rejects_missing_extra_and_reordered_tools() {
-        let profile = GatewayCapabilityProfile::workspace_checkpoint_v1();
-
-        assert_eq!(
-            profile
-                .verify_runtime_tools(&[ASK_USER_QUESTION_TOOL, WORKSPACE_CHECKPOINT_CREATE_TOOL]),
-            Ok(())
-        );
-        for drifted in [
-            &[][..],
-            &[ASK_USER_QUESTION_TOOL][..],
-            &[WORKSPACE_CHECKPOINT_CREATE_TOOL][..],
-            &[WORKSPACE_CHECKPOINT_CREATE_TOOL, ASK_USER_QUESTION_TOOL][..],
-            &[
-                ASK_USER_QUESTION_TOOL,
-                WORKSPACE_CHECKPOINT_CREATE_TOOL,
-                "workspace_checkpoint_rollback",
-            ][..],
-            &[ASK_USER_QUESTION_TOOL, "workspace_checkpoint"][..],
-        ] {
-            assert_eq!(
-                profile.verify_runtime_tools(drifted),
-                Err(CapabilityProfileVerificationError::RuntimeToolInventoryMismatch)
-            );
-        }
-    }
-
-    #[test]
-    fn profile_identity_uses_canonical_wire_names() {
-        for (profile, name, digest) in [
-            (
-                GatewayCapabilityProfile::task_only_v1(),
-                TASK_ONLY_V1_PROFILE,
-                TASK_ONLY_V1_MANIFEST_DIGEST,
-            ),
-            (
-                GatewayCapabilityProfile::workspace_checkpoint_v1(),
-                WORKSPACE_CHECKPOINT_V1_PROFILE,
-                WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST,
-            ),
-        ] {
-            let identity = profile.identity();
-            let encoded = serde_json::to_value(&identity).expect("profile identity serializes");
-
-            assert_eq!(encoded["profile_id"], name);
-            assert_eq!(encoded["manifest_digest"], digest);
-            assert_eq!(
-                serde_json::from_value::<GatewayCapabilityProfileIdentity>(encoded)
-                    .expect("profile identity deserializes"),
-                identity
-            );
-        }
-    }
-}
+mod tests;

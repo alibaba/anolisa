@@ -31,12 +31,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AgentRuntimeEvent, ExecutionAuthority, RuntimePermissionDecision, ToolInvocationSnapshot,
-        ToolInvocationStatus, ToolSummary, TurnLimit, TurnOutcome,
+        AgentRuntimeEvent, ExecutionAuthority, RuntimePermissionDecision, RuntimePermissionRef,
+        ToolInvocationSnapshot, ToolInvocationStatus, ToolSummary, TurnLimit, TurnOutcome,
     };
     use crate::{
         common::{BoundedName, BoundedText},
-        ids::{ToolUseId, TurnId},
+        ids::{RequestId, RunId, RuntimeBindingId, ToolUseId, TurnId},
     };
 
     #[test]
@@ -82,5 +82,36 @@ mod tests {
             .expect("provider decision serializes");
         assert_eq!(value["decision"], "provider_native_allow_once");
         assert!(value.get("permit_id").is_none());
+    }
+
+    #[test]
+    fn runtime_native_allow_is_distinct_from_provider_native_allow() {
+        let value = serde_json::to_value(RuntimePermissionDecision::RuntimeNativeAllowOnce)
+            .expect("Runtime decision serializes");
+        assert_eq!(value["decision"], "runtime_native_allow_once");
+        assert_ne!(value["decision"], "provider_native_allow_once");
+        assert!(value.get("permit_id").is_none());
+    }
+
+    #[test]
+    fn legacy_permission_refs_deserialize_without_new_callback_authority() {
+        let legacy = RuntimePermissionRef {
+            binding_id: RuntimeBindingId::new(),
+            runtime_generation: 1,
+            event_sequence: 2,
+            run_id: RunId::new(),
+            turn_id: TurnId::new(),
+            tool_use_id: None,
+            request_id: RequestId::new(),
+            callback: None,
+            core_callback: None,
+        };
+        let value = serde_json::to_value(&legacy).expect("legacy ref serializes");
+        assert!(value.get("callback").is_none());
+
+        let decoded: RuntimePermissionRef =
+            serde_json::from_value(value).expect("legacy ref remains readable");
+        assert!(decoded.callback.is_none());
+        assert!(decoded.core_callback.is_none());
     }
 }

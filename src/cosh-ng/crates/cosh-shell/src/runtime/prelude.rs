@@ -71,8 +71,9 @@ pub(crate) use crate::ui::{
     CommandAssessmentSummaryModel, HealthBannerModel, HelpPanelEntry, HelpPanelGroup,
     HelpPanelModel, HookEntryView, HookEventGroup, HookStatusPanelModel, HookWarningView,
     MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionInputFeedback,
-    QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
-    RecommendationPanelModel, ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
+    QuestionPanelModel, QuestionPanelPresentation, RatatuiInlineRenderer,
+    RecommendationActionPanelModel, RecommendationPanelModel, ToolInvocationCardModel,
+    ToolInvocationDensity, ToolInvocationTone,
 };
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::*;
 
-use super::acp_command::prompt_exit_code;
+use super::acp_command::{abandoned_permission_fields, prompt_exit_code};
+use super::control::verify_expected_workspace;
 
 #[test]
 fn prompt_stop_reasons_map_to_stable_exit_codes() {
@@ -14,6 +15,24 @@ fn prompt_stop_reasons_map_to_stable_exit_codes() {
     ] {
         assert_eq!(prompt_exit_code(reason), EXIT_AGENT);
     }
+}
+
+#[test]
+fn abandoned_permission_report_is_cancelled_and_omits_provider_request_ids() {
+    let fields = abandoned_permission_fields(
+        "provider-session",
+        &[
+            AcpV1RequestId::Number(41),
+            AcpV1RequestId::String("raw-provider-request-string".to_owned()),
+        ],
+    );
+    let encoded = serde_json::to_string(&fields).unwrap();
+
+    assert_eq!(fields["pending_count"], 2);
+    assert_eq!(fields["stop_reason"], "cancelled");
+    assert!(!encoded.contains("41"));
+    assert!(!encoded.contains("raw-provider-request-string"));
+    assert_eq!(prompt_exit_code(AcpV1StopReason::Cancelled), EXIT_CANCELLED);
 }
 
 #[cfg(unix)]
@@ -37,6 +56,42 @@ fn prompt_file_rejects_a_symlink() {
 #[test]
 fn terminal_text_escapes_control_sequences() {
     assert_eq!(terminal_safe("ok\u{1b}[2J\rnext"), "ok\\u{1b}[2J\\rnext");
+}
+
+#[test]
+fn workspace_registration_path_is_lexically_normalized() {
+    assert_eq!(
+        super::serve::normalize_absolute_workspace(Path::new("/work/project/.")).unwrap(),
+        Path::new("/work/project")
+    );
+    assert_eq!(
+        super::serve::normalize_absolute_workspace(Path::new("/work/tmp/../project")).unwrap(),
+        Path::new("/work/project")
+    );
+    assert!(super::serve::normalize_absolute_workspace(Path::new("/../../project")).is_err());
+}
+
+#[test]
+fn task_submit_fails_if_the_confirmed_workspace_changes() {
+    let workspace = cosh_gateway_contracts::common::WorkspaceRef {
+        scope_digest: cosh_gateway_contracts::common::Digest::parse(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap(),
+        display_name: None,
+    };
+
+    verify_expected_workspace(
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        &workspace,
+    )
+    .unwrap();
+    let error = verify_expected_workspace(
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        &workspace,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Profile(_)));
 }
 
 #[test]
@@ -71,7 +126,7 @@ fn task_event_page_is_bounded_by_clap() {
 }
 
 #[test]
-fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
+fn task_submit_defaults_to_typed_core_auto_allow_all() {
     let defaults = Cli::try_parse_from([
         "cosh-gateway",
         "task",
@@ -87,26 +142,25 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
     else {
         panic!("expected task submit command");
     };
-    assert_eq!(defaults.runtime, "core");
-    assert_eq!(
-        defaults.runtime_profile,
-        GATEWAY_BROKERED_CORE_RUNTIME_PROFILE
-    );
-    assert_eq!(
-        task_only_target(),
-        GatewayCapabilityProfile::task_only_v1().governed_target()
-    );
+    assert!(matches!(defaults.runtime, TaskRuntimeArg::Core));
+    assert!(matches!(defaults.checkpoint, CheckpointArg::Auto));
+    assert!(matches!(
+        defaults.approval_policy,
+        ApprovalPolicyArg::AllowAll
+    ));
 
     let explicit = Cli::try_parse_from([
         "cosh-gateway",
         "task",
         "submit",
         "--idempotency-key",
-        "explicit-acp-key",
+        "explicit-codex-key",
         "--runtime",
-        "acp",
-        "--runtime-profile",
         "codex",
+        "--checkpoint",
+        "on",
+        "--approval-policy",
+        "allow-all",
     ])
     .unwrap();
     let Command::Task(TaskArgs {
@@ -116,8 +170,63 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
     else {
         panic!("expected explicit task submit command");
     };
-    assert_eq!(explicit.runtime, "acp");
-    assert_eq!(explicit.runtime_profile, "codex");
+    assert!(matches!(explicit.runtime, TaskRuntimeArg::Codex));
+    assert!(matches!(explicit.checkpoint, CheckpointArg::On));
+    assert!(matches!(
+        explicit.approval_policy,
+        ApprovalPolicyArg::AllowAll
+    ));
+    assert!(Cli::try_parse_from([
+        "cosh-gateway",
+        "task",
+        "submit",
+        "--idempotency-key",
+        "raw-profile-key",
+        "--runtime-profile",
+        "codex",
+    ])
+    .is_err());
+}
+
+#[test]
+fn task_submit_rejects_a_noncanonical_expected_workspace_digest() {
+    assert!(Cli::try_parse_from([
+        "cosh-gateway",
+        "task",
+        "submit",
+        "--idempotency-key",
+        "stable-submit-key",
+        "--expected-workspace-digest",
+        "NOT-A-DIGEST",
+    ])
+    .is_err());
+}
+
+#[test]
+fn task_capabilities_is_a_first_class_command() {
+    let cli =
+        Cli::try_parse_from(["cosh-gateway", "task", "--output", "jsonl", "capabilities"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Task(TaskArgs {
+            output: Output::Jsonl,
+            command: TaskCommand::Capabilities,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn task_list_has_a_small_bounded_default() {
+    let cli = Cli::try_parse_from(["cosh-gateway", "task", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Task(TaskArgs {
+            command: TaskCommand::List(TaskListArgs { limit: 20 }),
+            ..
+        })
+    ));
+    assert!(Cli::try_parse_from(["cosh-gateway", "task", "list", "--limit", "65"]).is_err());
 }
 
 #[test]

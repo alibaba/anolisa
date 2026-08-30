@@ -98,12 +98,14 @@ pub enum ProviderPermissionDispatchDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPermissionDispatchState {
-    /// Approval resolution committed, but no provider response has started.
+    /// Approval resolution committed and zero response bytes have been written.
     Prepared,
-    /// Dispatch intent committed before writing to the provider transport.
-    Started,
-    /// The provider transport accepted the one-shot response.
-    Delivered,
+    /// The non-replayable boundary committed before the first response byte.
+    WriteStarted,
+    /// The live transport write returned; this does not prove provider acknowledgement.
+    Written,
+    /// Zero bytes were written, but the original provider session cannot be recovered.
+    Abandoned,
     /// Restart or transport failure made delivery indeterminate.
     Unknown,
 }
@@ -219,6 +221,15 @@ pub struct ExecutionRecord {
     pub updated_at_ms: u64,
 }
 
+/// Started brokered effect plus the exact request needed for read-only recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokeredExecutionRecoveryCandidate {
+    /// Started durable execution.
+    pub execution: ExecutionRecord,
+    /// Original request including its provider-owned opaque binding.
+    pub request: BrokeredRequestRecord,
+}
+
 /// Availability of the typed result associated with an execution row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -294,6 +305,8 @@ pub struct BrokeredRequestRecord {
     pub target_identity_digest: Digest,
     /// Exact Runtime and renewable Run-lease fence.
     pub runtime_fence: RuntimeExecutionFence,
+    /// Provider-owned versioned admission binding, absent for legacy rows.
+    pub provider_binding: Option<BoundedOpaque>,
     /// Optional approval created with this request.
     pub approval_id: Option<ApprovalId>,
     /// Durable creation timestamp.
@@ -603,7 +616,9 @@ pub struct RecoveryReport {
     pub approvals_expired: u64,
     /// Unexpired pending approvals cancelled because stdio cannot reattach.
     pub approvals_cancelled: u64,
-    /// Prepared or started provider responses made non-replayable by restart.
+    /// Zero-byte provider responses abandoned with their non-reattachable sessions.
+    pub permission_dispatches_abandoned: u64,
+    /// Started or written provider responses made non-replayable by restart.
     pub permission_dispatches_unknown: u64,
     /// Started brokered callbacks made permanently non-replayable by restart.
     pub brokered_dispatches_unknown: u64,

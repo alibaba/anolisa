@@ -11,8 +11,8 @@ use cosh_gateway_contracts::ids::{
 };
 use cosh_gateway_contracts::runtime::RuntimeInputRequest;
 use cosh_gateway_contracts::task::{
-    CancelReason, CancellationStage, ExecutionOutcome, RuntimeUpdate, SuspensionCode, TaskEvent,
-    TaskEventEnvelope, TaskEventKind, TaskState, UncertaintyCode,
+    ApprovalAbandonCause, CancelReason, CancellationStage, ExecutionOutcome, RuntimeUpdate,
+    SuspensionCode, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskState, UncertaintyCode,
 };
 
 use super::{AggregateError, PendingInputIdentity, RunOutcome, TaskAggregate};
@@ -29,7 +29,7 @@ const STATES: [TaskState; 9] = [
     TaskState::Cancelled,
 ];
 
-const EVENT_KINDS: [TaskEventKind; 21] = [
+const EVENT_KINDS: [TaskEventKind; 22] = [
     TaskEventKind::TaskSubmitted,
     TaskEventKind::TaskQueued,
     TaskEventKind::RunStarted,
@@ -39,6 +39,7 @@ const EVENT_KINDS: [TaskEventKind; 21] = [
     TaskEventKind::InputSubmitted,
     TaskEventKind::ApprovalRequested,
     TaskEventKind::ApprovalResolved,
+    TaskEventKind::ApprovalAbandoned,
     TaskEventKind::ExecutionPlanned,
     TaskEventKind::ExecutionResultRecorded,
     TaskEventKind::ExecutionUncertain,
@@ -219,6 +220,10 @@ fn prepare_event(fixture: &mut Fixture, kind: TaskEventKind) -> TaskEvent {
             approval_id: fixture.approval_id.clone(),
             decision: ApprovalDecision::Approve,
         },
+        TaskEventKind::ApprovalAbandoned => TaskEvent::ApprovalAbandoned {
+            approval_id: fixture.approval_id.clone(),
+            cause: ApprovalAbandonCause::ProviderCancelled,
+        },
         TaskEventKind::ExecutionPlanned => TaskEvent::ExecutionPlanned {
             execution_id: ExecutionId::new(),
             permit_id: PermitId::new(),
@@ -298,6 +303,8 @@ fn expected(state: TaskState, kind: TaskEventKind) -> bool {
             TaskEventKind::RunStarted
                 | TaskEventKind::CancellationRequested
                 | TaskEventKind::RunCancelled
+                | TaskEventKind::RunSuspended
+                | TaskEventKind::RunFailed
                 | TaskEventKind::TaskCancelled
         ),
         TaskState::Running => matches!(
@@ -319,6 +326,7 @@ fn expected(state: TaskState, kind: TaskEventKind) -> bool {
         TaskState::WaitingApproval => matches!(
             kind,
             TaskEventKind::ApprovalResolved
+                | TaskEventKind::ApprovalAbandoned
                 | TaskEventKind::CancellationRequested
                 | TaskEventKind::RunCancelled
                 | TaskEventKind::RunFailed
@@ -376,7 +384,7 @@ fn every_task_state_event_pair_has_an_explicit_transition_result() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 189);
+    assert_eq!(checked, 198);
 }
 
 #[test]
@@ -501,6 +509,18 @@ fn approval_input_and_suspend_boundaries_fail_closed() {
     let unknown = TaskEvent::ApprovalResolved {
         approval_id: ApprovalId::new(),
         decision: ApprovalDecision::Approve,
+    };
+    let before = waiting_approval.aggregate.clone();
+    let unknown = envelope(&waiting_approval.aggregate, unknown);
+    assert_eq!(
+        waiting_approval.aggregate.apply(&unknown),
+        Err(AggregateError::ApprovalNotPending)
+    );
+    assert_eq!(waiting_approval.aggregate, before);
+
+    let unknown = TaskEvent::ApprovalAbandoned {
+        approval_id: ApprovalId::new(),
+        cause: ApprovalAbandonCause::ProviderCancelled,
     };
     let before = waiting_approval.aggregate.clone();
     let unknown = envelope(&waiting_approval.aggregate, unknown);

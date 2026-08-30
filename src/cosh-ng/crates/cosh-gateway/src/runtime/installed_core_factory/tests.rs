@@ -52,9 +52,25 @@ fn admitted(
     core: &Path,
     script: &Path,
 ) -> (InstalledBrokeredCoreRuntimePortFactory, ScheduledRun) {
+    admitted_with_profile(
+        root,
+        core,
+        script,
+        GatewayCapabilityProfile::task_only_v1(),
+        GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
+    )
+}
+
+fn admitted_with_profile(
+    root: &TempDir,
+    core: &Path,
+    script: &Path,
+    profile: GatewayCapabilityProfile,
+    runtime_profile: &str,
+) -> (InstalledBrokeredCoreRuntimePortFactory, ScheduledRun) {
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
-    let expected_target = GatewayCapabilityProfile::task_only_v1().governed_target();
+    let expected_target = profile.governed_target();
     let installation = InstallationId::new();
     let actors = LocalOsActorResolver::new(installation.clone(), 1000);
     let actor = actors.actor_ref().clone();
@@ -81,12 +97,19 @@ fn admitted(
         run_id: RunId::new(),
         runtime: RuntimeSelector {
             runtime: BoundedName::new("core").unwrap(),
-            profile: Some(BoundedName::new(GATEWAY_BROKERED_CORE_RUNTIME_PROFILE).unwrap()),
+            profile: Some(BoundedName::new(runtime_profile).unwrap()),
         },
         intent: BoundedText::new("create a checkpoint").unwrap(),
         target: expected_target,
-        workspace: workspace_ref,
-        capability_profile: GatewayCapabilityProfile::task_only_v1().identity(),
+        workspace: workspace_ref.clone(),
+        capability_profile: profile.identity(),
+        launch: cosh_gateway_contracts::task::TaskLaunchSpecV1::new(
+            BoundedText::new("create a checkpoint").unwrap(),
+            cosh_gateway_contracts::task::TaskRuntime::Core,
+            workspace_ref,
+            cosh_gateway_contracts::task::CheckpointPolicy::Off,
+            cosh_gateway_contracts::task::ApprovalPolicy::Interactive,
+        ),
         lease_generation: 9,
     };
     (factory, run)
@@ -145,6 +168,100 @@ fn factory_rejects_runtime_profile_and_actor_substitution_before_launch() {
         "runtime_actor_invalid"
     );
     assert!(!marker.exists());
+}
+
+#[test]
+fn checkpoint_profile_requires_the_exact_runtime_selector_and_manifest() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join("launch.marker");
+    let script = executable(root.path(), "fake-core.sh", &marker);
+    let core = root.path().join("cosh-core");
+    symlink("/bin/sh", &core).unwrap();
+    let (_, mut run) = admitted(&root, &core, &script);
+    let checkpoint = GatewayCapabilityProfile::workspace_checkpoint_v1();
+    run.target = checkpoint.governed_target();
+    run.capability_profile = checkpoint.identity();
+    run.runtime.profile = Some(BoundedName::new(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE).unwrap());
+
+    assert_eq!(
+        admitted_execution_profile(&run).unwrap(),
+        GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE
+    );
+    run.runtime.profile = Some(BoundedName::new("gateway-brokered-checkpoint-v1").unwrap());
+    assert!(admitted_execution_profile(&run).is_err());
+    run.runtime.profile = Some(BoundedName::new(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE).unwrap());
+    run.capability_profile.manifest_digest = Digest::parse("b".repeat(64)).unwrap();
+    assert!(admitted_execution_profile(&run).is_err());
+}
+
+#[test]
+fn factory_maps_the_checkpoint_selector_to_the_private_core_launch_profile() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join("launch.marker");
+    let script = executable(root.path(), "fake-core.sh", &marker);
+    let core = root.path().join("cosh-core");
+    symlink("/bin/sh", &core).unwrap();
+    let (mut factory, run) = admitted_with_profile(
+        &root,
+        &core,
+        &script,
+        GatewayCapabilityProfile::workspace_checkpoint_v1(),
+        GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
+    );
+
+    let port = factory.create(&run).unwrap();
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(marker).unwrap(),
+        "--headless --execution-profile gateway-brokered-checkpoint-v1|"
+    );
+    drop(port);
+}
+
+#[test]
+fn workspace_write_profile_requires_exact_selector_manifest_and_private_argv() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join("launch.marker");
+    let script = executable(root.path(), "fake-core.sh", &marker);
+    let core = root.path().join("cosh-core");
+    symlink("/bin/sh", &core).unwrap();
+    let (mut factory, mut run) = admitted_with_profile(
+        &root,
+        &core,
+        &script,
+        GatewayCapabilityProfile::workspace_write_v1(),
+        GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE,
+    );
+
+    assert_eq!(
+        admitted_execution_profile(&run).unwrap(),
+        GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE
+    );
+    run.runtime.profile = Some(BoundedName::new("gateway-brokered-workspace-write-v1").unwrap());
+    assert!(admitted_execution_profile(&run).is_err());
+    run.runtime.profile =
+        Some(BoundedName::new(GATEWAY_WORKSPACE_WRITE_CORE_RUNTIME_PROFILE).unwrap());
+    run.capability_profile.manifest_digest = Digest::parse("b".repeat(64)).unwrap();
+    assert!(admitted_execution_profile(&run).is_err());
+    run.capability_profile = GatewayCapabilityProfile::workspace_write_v1().identity();
+
+    let port = factory.create(&run).unwrap();
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(marker).unwrap(),
+        "--headless --execution-profile gateway-brokered-workspace-write-v1|"
+    );
+    drop(port);
 }
 
 #[test]

@@ -146,6 +146,17 @@ fn provider_permission(request: &CapabilityRequest) -> RuntimePermissionRef {
         turn_id: TurnId::new(),
         tool_use_id: Some(ToolUseId::new()),
         request_id: request.request_id.clone(),
+        callback: Some(
+            cosh_gateway_contracts::runtime::ProviderPermissionCallbackV2 {
+                provider_session_digest: digest('1'),
+                provider_request_id_digest: digest('2'),
+                provider_tool_call_id_digest: digest('3'),
+                ordered_option_set_digest: digest('4'),
+                callback_payload_digest: digest('5'),
+                normalized_operation_digest: request.operation_digest.clone(),
+            },
+        ),
+        core_callback: None,
     }
 }
 
@@ -257,23 +268,13 @@ fn provider_native_pending_records_observation_binding_without_permit() {
             &lease,
         )
         .unwrap();
-    store
-        .record_runtime_sequence(
-            &binding.binding_id,
-            &binding.runtime_instance_id,
-            binding.runtime_generation,
-            permission.event_sequence,
-            7,
-            &lease,
-        )
-        .unwrap();
-
     let pending = DurableApprovalCoordinator::new(&mut store)
         .record_provider_pending(
             &command(&actor_id, "provider-pending", 'c', 10),
             &request,
             &approval,
             &permission,
+            &binding,
             &lease,
         )
         .unwrap();
@@ -291,6 +292,7 @@ fn approval_creates_no_authority_until_explicit_allow() {
     let approval = approval(&request);
     let (operation, target_identity_digest, runtime_fence) =
         brokered_binding(&mut store, &actor_id, &request);
+    let provider_binding = BoundedOpaque::new("checkpoint-binding-v2").unwrap();
     let mut coordinator = DurableApprovalCoordinator::new(&mut store);
     let pending = coordinator
         .record_pending(
@@ -301,18 +303,17 @@ fn approval_creates_no_authority_until_explicit_allow() {
                 operation: &operation,
                 target_identity_digest: &target_identity_digest,
                 runtime_fence: &runtime_fence,
+                provider_binding: Some(&provider_binding),
             },
         )
         .unwrap();
     assert_eq!(pending.state, ApprovalState::Pending);
-    assert_eq!(
-        coordinator
-            .store
-            .load_brokered_request(&request.request_id)
-            .unwrap()
-            .operation,
-        operation
-    );
+    let stored = coordinator
+        .store
+        .load_brokered_request(&request.request_id)
+        .unwrap();
+    assert_eq!(stored.operation, operation);
+    assert_eq!(stored.provider_binding, Some(provider_binding));
     let delivery_kind = BoundedName::new("brokered_approval_request").unwrap();
     let delivery = coordinator
         .store
@@ -370,6 +371,7 @@ fn denial_is_durable_and_never_issues_a_permit() {
                 operation: &operation,
                 target_identity_digest: &target_identity_digest,
                 runtime_fence: &runtime_fence,
+                provider_binding: None,
             },
         )
         .unwrap();
@@ -414,6 +416,7 @@ fn changed_approval_binding_fails_before_storage() {
             operation: &operation,
             target_identity_digest: &target_identity_digest,
             runtime_fence: &runtime_fence,
+            provider_binding: None,
         },
     );
     assert!(matches!(result, Err(DurableApprovalError::BindingMismatch)));

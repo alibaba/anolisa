@@ -64,6 +64,8 @@ impl ScheduledAgentRuntimeHandle {
                 if self.turn_started
                     && request.run_id() == &self.run_id
                     && request.turn_id() == &self.turn_id
+                    && self.pending_permission.is_none()
+                    && self.pending_brokered.is_none()
                     && self.pending_input.is_none() =>
             {
                 self.pending_input = Some(request.request_id().clone());
@@ -77,12 +79,17 @@ impl ScheduledAgentRuntimeHandle {
                 tool_use_id,
                 request,
                 summary,
+                callback,
             } if self.turn_started
                 && turn_id == self.turn_id
                 && request.task_id == self.task_id
                 && request.run_id == self.run_id
                 && request.actor.actor_id == self.actor_id
-                && request.target == self.target =>
+                && request.target == self.target
+                && callback.normalized_operation_digest == request.operation_digest
+                && self.pending_permission.is_none()
+                && self.pending_brokered.is_none()
+                && self.pending_input.is_none() =>
             {
                 let permission = RuntimePermissionRef {
                     binding_id: self.binding_id.clone(),
@@ -92,12 +99,72 @@ impl ScheduledAgentRuntimeHandle {
                     turn_id,
                     tool_use_id,
                     request_id: request.request_id.clone(),
+                    callback: Some(callback),
+                    core_callback: None,
                 };
                 self.pending_permission = Some(permission.clone());
                 RuntimePoll::PermissionRequested {
                     permission,
                     request: Box::new(request),
                     summary,
+                }
+            }
+            AgentRuntimeEvent::CoreExecutionPermissionRequested {
+                turn_id,
+                tool_use_id,
+                request,
+                summary,
+                callback,
+            } if self.turn_started
+                && turn_id == self.turn_id
+                && request.task_id == self.task_id
+                && request.run_id == self.run_id
+                && request.actor.actor_id == self.actor_id
+                && request.target == self.target
+                && callback.normalized_operation_digest == request.operation_digest
+                && self.pending_permission.is_none()
+                && self.pending_brokered.is_none()
+                && self.pending_input.is_none() =>
+            {
+                let permission = RuntimePermissionRef {
+                    binding_id: self.binding_id.clone(),
+                    runtime_generation: self.binding.runtime_generation,
+                    event_sequence: self.last_sequence,
+                    run_id: self.run_id.clone(),
+                    turn_id,
+                    tool_use_id: Some(tool_use_id),
+                    request_id: request.request_id.clone(),
+                    callback: None,
+                    core_callback: Some(callback),
+                };
+                self.pending_permission = Some(permission.clone());
+                RuntimePoll::PermissionRequested {
+                    permission,
+                    request: Box::new(request),
+                    summary,
+                }
+            }
+            AgentRuntimeEvent::ExecutionPermissionsAbandoned {
+                turn_id,
+                request_ids,
+            } if self.turn_started
+                && turn_id == self.turn_id
+                && request_ids.len() == 1
+                && self.pending_permission.as_ref().is_some_and(|permission| {
+                    request_ids.first() == Some(&permission.request_id)
+                }) =>
+            {
+                let permission = self
+                    .pending_permission
+                    .take()
+                    .unwrap_or_else(|| unreachable!("guard requires a pending permission"));
+                self.expected_cancellation =
+                    Some(RuntimeCancellationCause::ProviderPermissionAbandoned {
+                        permission: permission.clone(),
+                    });
+                RuntimePoll::PermissionAbandoned {
+                    sequence: self.last_sequence,
+                    permission,
                 }
             }
             AgentRuntimeEvent::BrokeredExecutionRequested {
@@ -156,34 +223,52 @@ impl ScheduledAgentRuntimeHandle {
     }
 
     fn settle_turn(&mut self, outcome: TurnOutcome) -> RuntimePoll {
-        let poll = match outcome {
-            TurnOutcome::Completed => RuntimePoll::Succeeded,
-            TurnOutcome::LimitReached { .. } => RuntimePoll::Failed(contract_error(
+        let expected_cancellation = self.expected_cancellation.take();
+        let poll = match (outcome, expected_cancellation) {
+            (
+                TurnOutcome::Cancelled,
+                Some(
+                    cause @ (RuntimeCancellationCause::ProviderPermissionDenied { .. }
+                    | RuntimeCancellationCause::ProviderPermissionAbandoned { .. }),
+                ),
+            ) => RuntimePoll::Cancelled { cause },
+            (outcome, Some(RuntimeCancellationCause::ProviderPermissionAbandoned { .. }))
+                if !matches!(outcome, TurnOutcome::Cancelled) =>
+            {
+                RuntimePoll::Failed(contract_error(
+                    "runtime_permission_abandonment_terminal_invalid",
+                    ErrorCategory::Internal,
+                    false,
+                    "The Runtime abandoned a permission callback without cancelling the turn",
+                ))
+            }
+            (TurnOutcome::Completed, _) => RuntimePoll::Succeeded,
+            (TurnOutcome::LimitReached { .. }, _) => RuntimePoll::Failed(contract_error(
                 "runtime_turn_limit_reached",
                 ErrorCategory::RuntimeUnavailable,
                 false,
                 "The Agent turn stopped after reaching a configured limit",
             )),
-            TurnOutcome::Refused => RuntimePoll::Failed(contract_error(
+            (TurnOutcome::Refused, _) => RuntimePoll::Failed(contract_error(
                 "runtime_turn_refused",
                 ErrorCategory::RuntimeUnavailable,
                 false,
                 "The Agent refused the scheduled task",
             )),
-            TurnOutcome::Cancelled => RuntimePoll::Failed(contract_error(
+            (TurnOutcome::Cancelled, None) => RuntimePoll::Failed(contract_error(
                 "runtime_turn_cancelled_unsolicited",
                 ErrorCategory::Cancelled,
                 false,
                 "The Agent cancelled the turn without a durable cancellation request",
             )),
-            TurnOutcome::Failed { error } => RuntimePoll::Failed(error),
+            (TurnOutcome::Failed { error }, _) => RuntimePoll::Failed(error),
         };
         match poll {
             RuntimePoll::Succeeded => match self.close() {
                 Ok(()) => poll,
                 Err(error) => RuntimePoll::Failed(error),
             },
-            RuntimePoll::Failed(_) => {
+            RuntimePoll::Failed(_) | RuntimePoll::Cancelled { .. } => {
                 // Preserve the known turn result; close diagnostics are
                 // separately governed and cannot make that result less known.
                 let _ = self.close();
@@ -193,9 +278,9 @@ impl ScheduledAgentRuntimeHandle {
             | RuntimePoll::Observed { .. }
             | RuntimePoll::Update { .. }
             | RuntimePoll::PermissionRequested { .. }
+            | RuntimePoll::PermissionAbandoned { .. }
             | RuntimePoll::BrokeredExecutionRequested { .. }
-            | RuntimePoll::InputRequested { .. }
-            | RuntimePoll::Cancelled => {
+            | RuntimePoll::InputRequested { .. } => {
                 unreachable!("turn settlement must be terminal")
             }
         }

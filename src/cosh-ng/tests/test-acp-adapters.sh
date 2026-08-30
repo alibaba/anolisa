@@ -64,7 +64,7 @@ JS
   ln -s "../$scope/$package/dist/index.js" "$prefix/node_modules/.bin/$command_name"
 }
 
-codex_version="1.2.0"
+codex_version="1.6.2"
 [[ "${FAKE_BAD_CODEX_VERSION:-0}" == 1 ]] && codex_version="9.9.9"
 create_package @agentclientprotocol codex-acp "$codex_version" codex-acp
 create_package @agentclientprotocol claude-agent-acp 0.66.0 claude-agent-acp
@@ -115,13 +115,35 @@ case "$1" in
     ;;
   run)
     cat >/dev/null
-    printf '%s\n' \
-      '{"event":"initialized"}' \
-      '{"event":"session_opened"}' \
-      '{"event":"session_update","text":"never echoed"}' \
-      '{"event":"session_update","text":"never persisted"}' \
-      '{"event":"prompt_finished"}' \
-      '{"event":"terminal"}'
+    case "${COSH_ACP_FAKE_SCENARIO:-real}" in
+      typed_error)
+        printf '%s\n' \
+          '{"event":"initialized"}' \
+          '{"event":"session_opened"}' \
+          '{"event":"session_update","text":"partial"}' \
+          '{"event":"request_failed","code":-32000}' \
+          '{"event":"error","code":"agent_incomplete","message":"failed"}'
+        exit 1
+        ;;
+      rpc_error)
+        printf '%s\n' \
+          '{"event":"initialized"}' \
+          '{"event":"session_opened"}' \
+          '{"event":"session_update","text":"partial"}' \
+          '{"event":"request_failed","code":-32603}' \
+          '{"event":"error","code":"agent_incomplete","message":"failed"}'
+        exit 1
+        ;;
+      *)
+        printf '%s\n' \
+          '{"event":"initialized"}' \
+          '{"event":"session_opened"}' \
+          '{"event":"session_update","text":"never echoed"}' \
+          '{"event":"session_update","text":"never persisted"}' \
+          '{"event":"prompt_finished"}' \
+          '{"event":"terminal"}'
+        ;;
+    esac
     ;;
   *) exit 93 ;;
 esac

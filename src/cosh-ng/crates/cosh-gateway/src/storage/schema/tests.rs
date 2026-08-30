@@ -23,6 +23,7 @@ fn migration_is_repeatable_and_enables_all_tables() {
     assert_eq!(
         tables,
         [
+            "approval_checkpoint_barriers",
             "approvals",
             "brokered_execution_results",
             "brokered_requests",
@@ -35,6 +36,7 @@ fn migration_is_repeatable_and_enables_all_tables() {
             "legacy_runtime_start_recoveries",
             "outbox",
             "permits",
+            "pre_runtime_baselines",
             "provider_permission_dispatches",
             "run_leases",
             "runtime_bindings",
@@ -43,6 +45,7 @@ fn migration_is_repeatable_and_enables_all_tables() {
             "schema_migrations",
             "security_audit_proofs",
             "task_events",
+            "task_snapshot_switches",
             "tasks"
         ]
     );
@@ -72,7 +75,10 @@ fn existing_v1_database_migrates_without_rewriting_v1() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(
+        versions,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    );
     let v1_checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=1",
@@ -107,7 +113,7 @@ fn existing_v8_database_adds_private_runtime_input_tables() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 15);
     let tables = connection
         .prepare(
             "SELECT name FROM sqlite_schema
@@ -122,6 +128,121 @@ fn existing_v8_database_adds_private_runtime_input_tables() {
         tables,
         ["runtime_input_dispatches", "runtime_input_requests"]
     );
+}
+
+#[test]
+fn existing_v10_database_migrates_provider_dispatch_states_without_regranting_authority() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    migrate_to_for_test(&mut connection, 10).unwrap();
+
+    let actor = "actor-00000000-0000-0000-0000-000000000001";
+    let task = "task-00000000-0000-0000-0000-000000000001";
+    let run = "run-00000000-0000-0000-0000-000000000001";
+    let approval = "approval-00000000-0000-0000-0000-000000000001";
+    let request = "request-00000000-0000-0000-0000-000000000001";
+    connection
+        .execute(
+            "INSERT INTO tasks(
+                 task_id, owner_actor_id, target_ref, revision, state,
+                 snapshot_json, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 'test', 1, 'succeeded', '{}', 1, 1)",
+            params![task, actor],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO approvals(
+                 approval_id, request_id, actor_id, task_id, run_id, target_json,
+                 operation_digest, input_digest, state, revision, expires_at_ms,
+                 created_at_ms, updated_at_ms, permission_ref_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, '{}', ?6, ?6, 'pending', 1, 100, 1, 1, '{}')",
+            params![approval, request, actor, task, run, "0".repeat(64)],
+        )
+        .unwrap();
+    for (suffix, state) in [("-started", "started"), ("-delivered", "delivered")] {
+        let approval_id = format!("{approval}{suffix}");
+        connection
+            .execute(
+                "INSERT INTO approvals(
+                     approval_id, request_id, actor_id, task_id, run_id, target_json,
+                     operation_digest, input_digest, state, revision, expires_at_ms,
+                     created_at_ms, updated_at_ms, permission_ref_json)
+                 SELECT ?1, request_id || ?2, actor_id, task_id, run_id, target_json,
+                        operation_digest, input_digest, state, revision, expires_at_ms,
+                        created_at_ms, updated_at_ms, permission_ref_json
+                 FROM approvals WHERE approval_id=?3",
+                params![approval_id, suffix, approval],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO provider_permission_dispatches(
+                     approval_id, actor_id, task_id, run_id, permission_ref_json,
+                     decision, state, revision, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, '{}', 'allow_once', ?5, 2, 1, 1)",
+                params![approval_id, actor, task, run, state],
+            )
+            .unwrap();
+    }
+
+    migrate(&mut connection).unwrap();
+
+    let states = connection
+        .prepare("SELECT state FROM provider_permission_dispatches ORDER BY approval_id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(states, ["written", "write_started"]);
+}
+
+#[test]
+fn existing_v9_database_adds_provider_recovery_binding() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    migrate_to_for_test(&mut connection, 9).unwrap();
+
+    let before = columns(&connection, "brokered_requests");
+    assert!(!before.iter().any(|column| column == "provider_binding"));
+
+    migrate(&mut connection).unwrap();
+
+    let after = columns(&connection, "brokered_requests");
+    assert!(after.iter().any(|column| column == "provider_binding"));
+}
+
+#[test]
+fn existing_v12_database_adds_nullable_pre_runtime_provider_binding() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    migrate_to_for_test(&mut connection, 12).unwrap();
+    assert!(!columns(&connection, "pre_runtime_baselines")
+        .iter()
+        .any(|column| column == "binding_json"));
+
+    migrate(&mut connection).unwrap();
+
+    assert!(columns(&connection, "pre_runtime_baselines")
+        .iter()
+        .any(|column| column == "binding_json"));
+}
+
+fn columns(connection: &Connection, table: &str) -> Vec<String> {
+    connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 #[test]

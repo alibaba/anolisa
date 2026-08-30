@@ -1,4 +1,3 @@
-
 fn require_task_owner(
     transaction: &rusqlite::Connection,
     task_id: &TaskId,
@@ -247,8 +246,21 @@ fn require_provider_permission_context(
     expected_task_state: TaskState,
 ) -> Result<(), StoreError> {
     validate_permission_binding(approval, expected_permission)?;
+    let callback_operation_digest = match (
+        &expected_permission.callback,
+        &expected_permission.core_callback,
+    ) {
+        (Some(callback), None) => &callback.normalized_operation_digest,
+        (None, Some(callback)) => &callback.normalized_operation_digest,
+        _ => {
+            return Err(conflict(
+                "live Runtime Permission must have exactly one callback",
+            ))
+        }
+    };
     if approval.actor_id != command.actor_id
         || approval.permission.as_ref() != Some(expected_permission)
+        || *callback_operation_digest != approval.operation_digest
         || lease.task_id != approval.task_id
         || lease.run_id != approval.run_id
         || lease.generation != expected_permission.runtime_generation

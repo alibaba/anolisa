@@ -23,7 +23,10 @@ use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{
-    ClientControlCapabilities, InputMessage, OutputMessage, ShellContext, ShellControlRequest,
+    ClientControlCapabilities, ControlResponseBody, HostExecutedCheckpointCreateOutcome,
+    HostExecutedCheckpointCreateResult, HostExecutedCheckpointError,
+    HostExecutedCheckpointErrorOutcome, InputMessage, OutputMessage, ShellContext,
+    ShellControlRequest,
 };
 use crate::provider::{
     ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
@@ -294,7 +297,18 @@ impl CoshCore {
         };
 
         if self.execution_profile.is_brokered() {
-            return Outcome::Deny;
+            let workspace_write = self.execution_profile.writes_workspace()
+                && tool.kind() == ToolKind::FileEdit
+                && tool_name == "write_file";
+            let hosted_checkpoint = self.execution_profile.hosts_checkpoint()
+                && tool.kind() == ToolKind::HostedSideEffect
+                && tool_name == "workspace_checkpoint_create"
+                && params.as_object().is_some_and(serde_json::Map::is_empty);
+            return if workspace_write || hosted_checkpoint {
+                Outcome::RequireApproval
+            } else {
+                Outcome::Deny
+            };
         }
 
         let mode = self.config.agent.approval_mode;
@@ -502,7 +516,9 @@ impl CoshCore {
                         "prompt approval timed out before reaching a decision surface (request_id={request_id}); nothing was executed and the turn ends here so a late decision cannot split state"
                     ));
                 }
-                ApprovalResult::Interrupted | ApprovalResult::HostExecutedShell { .. } => {
+                ApprovalResult::Interrupted
+                | ApprovalResult::HostExecutedShell { .. }
+                | ApprovalResult::HostExecutedCheckpoint { .. } => {
                     return Ok(AgentTurnOutcome::Completed);
                 }
             }
@@ -1411,8 +1427,11 @@ impl CoshCore {
                             let approval_wait_ms = approval_start.elapsed().as_millis() as u64;
                             let (approval_status, approval_decision) =
                                 approval_audit_outcome(&approval_result);
-                            if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. })
-                            {
+                            if !matches!(
+                                &approval_result,
+                                ApprovalResult::HostExecutedShell { .. }
+                                    | ApprovalResult::HostExecutedCheckpoint { .. }
+                            ) {
                                 self.audit.record_approval_resolved(
                                     approval_scope,
                                     &tc.name,
@@ -1456,6 +1475,10 @@ impl CoshCore {
                                         output: llm_content,
                                         is_error,
                                     }
+                                }
+                                ApprovalResult::HostExecutedCheckpoint { result } => {
+                                    self.metrics.approval_allow += 1;
+                                    result
                                 }
                                 ApprovalResult::Denied(reason) => {
                                     self.metrics.approval_deny += 1;
@@ -1659,8 +1682,11 @@ impl CoshCore {
                                 .await;
                             let (approval_status, approval_decision) =
                                 approval_audit_outcome(&approval_result);
-                            if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. })
-                            {
+                            if !matches!(
+                                &approval_result,
+                                ApprovalResult::HostExecutedShell { .. }
+                                    | ApprovalResult::HostExecutedCheckpoint { .. }
+                            ) {
                                 self.audit.record_approval_resolved(
                                     approval_scope,
                                     &tc.name,
@@ -1697,6 +1723,9 @@ impl CoshCore {
                                         output: llm_content,
                                         is_error,
                                     };
+                                }
+                                ApprovalResult::HostExecutedCheckpoint { .. } => {
+                                    // Sandbox bypass can only resolve a legacy shell tool.
                                 }
                                 // #1940: same fail-closed contract as the
                                 // policy approval above — a timed-out bypass
@@ -1798,7 +1827,10 @@ impl CoshCore {
         params: serde_json::Value,
         ctx: &ToolContext,
     ) -> ToolResult {
-        if self.execution_profile.is_brokered() {
+        let is_workspace_write = self.execution_profile.writes_workspace()
+            && name == "write_file"
+            && self.tools.get(name).map(|tool| tool.kind()) == Some(ToolKind::FileEdit);
+        if self.execution_profile.is_brokered() && !is_workspace_write {
             return ToolResult::error(format!(
                 "tool {name} cannot execute inside cosh-core under the gateway brokered profile"
             ));
@@ -2166,6 +2198,77 @@ impl CoshCore {
                                 exit_code,
                             };
                         }
+                        Some("host_executed_checkpoint_create") => {
+                            if !self.execution_profile.hosts_checkpoint() {
+                                return ApprovalResult::Denied(Some(
+                                    "unknown response".to_string(),
+                                ));
+                            }
+                            if accepted_tool_kind != Some(ToolKind::HostedSideEffect)
+                                || response_has_unrelated_checkpoint_fields(
+                                    &response.response,
+                                    false,
+                                )
+                            {
+                                return ApprovalResult::Denied(Some(
+                                    "typed checkpoint result is not valid for this request"
+                                        .to_string(),
+                                ));
+                            }
+                            let Some(result) = response.response.checkpoint_result else {
+                                return ApprovalResult::Denied(Some(
+                                    "typed checkpoint response missing checkpointResult"
+                                        .to_string(),
+                                ));
+                            };
+                            let result =
+                                match serde_json::from_value(result) {
+                                    Ok(result) => result,
+                                    Err(_) => return ApprovalResult::Denied(Some(
+                                        "typed checkpoint response has an invalid checkpointResult"
+                                            .to_string(),
+                                    )),
+                                };
+                            return match hosted_checkpoint_result(result) {
+                                Ok(result) => ApprovalResult::HostExecutedCheckpoint { result },
+                                Err(reason) => ApprovalResult::Denied(Some(reason)),
+                            };
+                        }
+                        Some("host_executed_checkpoint_error") => {
+                            if !self.execution_profile.hosts_checkpoint() {
+                                return ApprovalResult::Denied(Some(
+                                    "unknown response".to_string(),
+                                ));
+                            }
+                            if accepted_tool_kind != Some(ToolKind::HostedSideEffect)
+                                || response_has_unrelated_checkpoint_fields(
+                                    &response.response,
+                                    true,
+                                )
+                            {
+                                return ApprovalResult::Denied(Some(
+                                    "typed checkpoint error is not valid for this request"
+                                        .to_string(),
+                                ));
+                            }
+                            let Some(error) = response.response.checkpoint_error else {
+                                return ApprovalResult::Denied(Some(
+                                    "typed checkpoint response missing checkpointError".to_string(),
+                                ));
+                            };
+                            let error =
+                                match serde_json::from_value(error) {
+                                    Ok(error) => error,
+                                    Err(_) => return ApprovalResult::Denied(Some(
+                                        "typed checkpoint response has an invalid checkpointError"
+                                            .to_string(),
+                                    )),
+                                };
+                            return match hosted_checkpoint_error(error) {
+                                Ok(result) => ApprovalResult::HostExecutedCheckpoint { result },
+                                Err(reason) => ApprovalResult::Denied(Some(reason)),
+                            };
+                        }
                         _ => return ApprovalResult::Denied(Some("unknown response".to_string())),
                     }
                 }
@@ -2280,12 +2383,94 @@ fn control_transport_turn_error(
     }
 }
 
+fn response_has_unrelated_checkpoint_fields(
+    response: &ControlResponseBody,
+    expects_error: bool,
+) -> bool {
+    response.result.is_some()
+        || !response.unknown_fields.is_empty()
+        || response.tool_use_id.is_some()
+        || response.updated_permissions.is_some()
+        || response.answer.is_some()
+        || response.selected_options.is_some()
+        || response.provider_id.is_some()
+        || response.provider_type.is_some()
+        || response.values.is_some()
+        || response.persist.is_some()
+        || response.message.is_some()
+        || if expects_error {
+            response.checkpoint_result.is_some()
+        } else {
+            response.checkpoint_error.is_some()
+        }
+}
+
+fn hosted_checkpoint_result(
+    result: HostExecutedCheckpointCreateResult,
+) -> Result<ToolResult, String> {
+    validate_checkpoint_id(&result.checkpoint_id)?;
+    match result.outcome {
+        HostExecutedCheckpointCreateOutcome::Created { snapshot_id } => {
+            validate_bounded_gateway_text(&snapshot_id, 1_024, "snapshot_id")?;
+            Ok(ToolResult::success(format!(
+                "Created checkpoint {} as snapshot {}.",
+                result.checkpoint_id, snapshot_id
+            )))
+        }
+        HostExecutedCheckpointCreateOutcome::Skipped { reason } => {
+            validate_bounded_gateway_text(&reason, 4_096, "checkpoint skip reason")?;
+            Ok(ToolResult::success(format!(
+                "Checkpoint {} was safely skipped: {}",
+                result.checkpoint_id, reason
+            )))
+        }
+    }
+}
+
+fn hosted_checkpoint_error(error: HostExecutedCheckpointError) -> Result<ToolResult, String> {
+    validate_bounded_gateway_text(&error.code, 128, "checkpoint error code")?;
+    validate_bounded_gateway_text(&error.message, 4_096, "checkpoint error message")?;
+    match error.outcome {
+        HostExecutedCheckpointErrorOutcome::Failed => Ok(ToolResult::error(format!(
+            "Checkpoint execution failed [{}]: {}",
+            error.code, error.message
+        ))),
+        HostExecutedCheckpointErrorOutcome::Uncertain => Ok(ToolResult::error(format!(
+            "Checkpoint execution is uncertain [{}]: {} Do not retry without Gateway reconciliation.",
+            error.code, error.message
+        ))),
+    }
+}
+
+fn validate_checkpoint_id(value: &str) -> Result<(), String> {
+    let body = value
+        .strip_prefix("ckp_")
+        .ok_or_else(|| "typed checkpoint result has an invalid checkpoint_id".to_string())?;
+    let id = uuid::Uuid::parse_str(body)
+        .map_err(|_| "typed checkpoint result has an invalid checkpoint_id".to_string())?;
+    if id.hyphenated().to_string() != body {
+        return Err("typed checkpoint result has an invalid checkpoint_id".to_string());
+    }
+    Ok(())
+}
+
+fn validate_bounded_gateway_text(value: &str, max_bytes: usize, field: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > max_bytes || value.contains('\0') {
+        Err(format!("typed checkpoint result has an invalid {field}"))
+    } else {
+        Ok(())
+    }
+}
+
 enum ApprovalResult {
     Allowed,
     Denied(Option<String>),
     HostExecutedShell {
         llm_content: String,
         exit_code: Option<i32>,
+    },
+    HostExecutedCheckpoint {
+        result: ToolResult,
     },
     Interrupted,
     /// #1940 residual guard: the wait exceeded the last-resort deadline,
@@ -2369,9 +2554,9 @@ fn hook_outcome(decision: &HookDecision) -> AuditOutcomeStatus {
 
 fn approval_audit_outcome(approval: &ApprovalResult) -> (AuditOutcomeStatus, &'static str) {
     match approval {
-        ApprovalResult::Allowed | ApprovalResult::HostExecutedShell { .. } => {
-            (AuditOutcomeStatus::Allowed, "allow")
-        }
+        ApprovalResult::Allowed
+        | ApprovalResult::HostExecutedShell { .. }
+        | ApprovalResult::HostExecutedCheckpoint { .. } => (AuditOutcomeStatus::Allowed, "allow"),
         ApprovalResult::Denied(_) => (AuditOutcomeStatus::Denied, "deny"),
         ApprovalResult::TimedOut => (AuditOutcomeStatus::Denied, "timeout"),
         ApprovalResult::Interrupted => (AuditOutcomeStatus::Cancelled, "interrupted"),

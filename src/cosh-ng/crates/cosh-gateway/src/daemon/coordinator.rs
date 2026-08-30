@@ -2,7 +2,7 @@
 pub struct TaskCoordinator {
     store: SqliteTaskStore,
     installation_id: InstallationId,
-    expected_profile: GatewayCapabilityProfile,
+    launch_catalog: TaskLaunchCatalog,
 }
 
 impl TaskCoordinator {
@@ -29,10 +29,28 @@ impl TaskCoordinator {
     ) -> Result<Self, GatewayDaemonError> {
         let mut store = SqliteTaskStore::open(database_path)?;
         let installation_id = store.bind_installation_id(requested_installation_id.as_ref())?;
+        let test_workspace = WorkspaceRef {
+            scope_digest: sha256_digest(b"cosh.gateway.test.workspace.v1"),
+            display_name: None,
+        };
         Ok(Self {
             store,
             installation_id,
-            expected_profile,
+            launch_catalog: TaskLaunchCatalog::for_legacy_profile(test_workspace, expected_profile),
+        })
+    }
+
+    fn open_for_launch_catalog(
+        database_path: impl AsRef<Path>,
+        requested_installation_id: Option<InstallationId>,
+        launch_catalog: TaskLaunchCatalog,
+    ) -> Result<Self, GatewayDaemonError> {
+        let mut store = SqliteTaskStore::open(database_path)?;
+        let installation_id = store.bind_installation_id(requested_installation_id.as_ref())?;
+        Ok(Self {
+            store,
+            installation_id,
+            launch_catalog,
         })
     }
 
@@ -42,13 +60,72 @@ impl TaskCoordinator {
         workspace: &WorkspaceRef,
         request: SubmitTask,
     ) -> Result<TaskView, GatewayDaemonError> {
+        let capability_profile = self
+            .launch_catalog
+            .legacy_admission(&request.target, &request.runtime)
+            .ok_or_else(|| {
+                GatewayDaemonError::Protocol(
+                    "Task target or Runtime is not admitted by this Gateway catalog".to_owned(),
+                )
+            })?;
+        let task_runtime = if request.runtime.runtime.as_str() == "core" {
+            TaskRuntime::Core
+        } else {
+            TaskRuntime::Codex
+        };
+        let launch = TaskLaunchSpecV1::new(
+            request.intent.clone(),
+            task_runtime,
+            workspace.clone(),
+            CheckpointPolicy::Off,
+            if capability_profile == GatewayCapabilityProfile::delegated_acp_v1() {
+                ApprovalPolicy::AllowAll
+            } else {
+                ApprovalPolicy::Interactive
+            },
+        );
+        self.commit_submission(
+            actor,
+            request.idempotency_key,
+            launch,
+            request.target,
+            request.runtime,
+            capability_profile,
+        )
+    }
+
+    fn submit_launch_admitted(
+        &mut self,
+        actor: &ActorRef,
+        catalog: &TaskLaunchCatalog,
+        request: SubmitLaunch,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        let admission = catalog.admission(&request.launch)?;
+        self.commit_submission(
+            actor,
+            request.idempotency_key,
+            request.launch,
+            admission.target,
+            admission.runtime,
+            admission.profile,
+        )
+    }
+
+    fn commit_submission(
+        &mut self,
+        actor: &ActorRef,
+        idempotency_key: IdempotencyKey,
+        launch: TaskLaunchSpecV1,
+        target: TargetRef,
+        runtime: RuntimeSelector,
+        capability_profile: GatewayCapabilityProfile,
+    ) -> Result<TaskView, GatewayDaemonError> {
         let actor_id = &actor.actor_id;
         let task_id = TaskId::new();
         let run_id = RunId::new();
         let committed_at_ms = now_ms()?;
-        let intent_digest = sha256_digest(request.intent.as_str().as_bytes());
-        let command_digest =
-            digest_json(&("submit", &request.intent, &request.target, &request.runtime))?;
+        let intent_digest = sha256_digest(launch.goal.as_str().as_bytes());
+        let command_digest = digest_json(&("submit_launch", &launch, &target, &runtime))?;
         let submitted = self.event(
             actor_id,
             &task_id,
@@ -57,7 +134,7 @@ impl TaskCoordinator {
             committed_at_ms,
             TaskEvent::TaskSubmitted {
                 intent_digest,
-                target: request.target,
+                target,
             },
         );
         let queued = self.event(
@@ -68,30 +145,42 @@ impl TaskCoordinator {
             committed_at_ms,
             TaskEvent::TaskQueued {
                 run_id: run_id.clone(),
-                runtime: request.runtime.clone(),
+                runtime: runtime.clone(),
             },
         );
+        let baseline_id = if launch.checkpoint == CheckpointPolicy::Off {
+            None
+        } else {
+            Some(CheckpointId::new())
+        };
         let start_intent = scheduler::RuntimeStartIntent {
             schema_version: scheduler::RUNTIME_START_SCHEMA_VERSION,
             actor: actor.clone(),
             task_id: task_id.clone(),
             run_id,
-            runtime: request.runtime,
-            intent: request.intent,
+            runtime,
+            intent: launch.goal.clone(),
             target: submitted_target(&submitted)?,
-            workspace: workspace.clone(),
-            capability_profile: self.expected_profile.identity(),
+            workspace: launch.workspace.clone(),
+            capability_profile: capability_profile.identity(),
+            launch,
+            baseline_id,
+        };
+        let delivery_kind = if start_intent.baseline_id.is_some() {
+            scheduler::pre_runtime_checkpoint_delivery_kind()
+        } else {
+            scheduler::runtime_start_delivery_kind()
         };
         let outbox = OutboxIntent {
             delivery_id: DeliveryId::new(),
             event_id: queued.header.message_id.clone(),
-            delivery_kind: scheduler::runtime_start_delivery_kind(),
+            delivery_kind,
             payload: serde_json::to_value(start_intent)?,
             next_attempt_at_ms: committed_at_ms,
         };
         let outcome = self.store.commit_task(&TaskCommit {
             actor_id: actor_id.clone(),
-            idempotency_key: request.idempotency_key,
+            idempotency_key,
             command_digest,
             expected_revision: Some(0),
             events: vec![submitted, queued],
@@ -101,7 +190,7 @@ impl TaskCoordinator {
         let task_id = receipt_task_id(&outcome);
         let task = self.store.load_task(task_id)?;
         authorize(&task, actor_id)?;
-        Ok(TaskView::from(&task))
+        self.task_view(&task)
     }
 
     #[cfg(test)]
@@ -127,7 +216,23 @@ impl TaskCoordinator {
     fn get(&self, actor_id: &ActorId, task_id: &TaskId) -> Result<TaskView, GatewayDaemonError> {
         let task = self.store.load_task(task_id)?;
         authorize(&task, actor_id)?;
-        Ok(TaskView::from(&task))
+        self.task_view(&task)
+    }
+
+    fn list(&self, actor_id: &ActorId, limit: u16) -> Result<TaskListPage, GatewayDaemonError> {
+        let tasks = self
+            .store
+            .load_tasks_for_owner(actor_id, limit)?
+            .iter()
+            .map(|task| self.task_view(task))
+            .collect::<Result<Vec<_>, _>>()?;
+        let page = TaskListPage { tasks };
+        if serde_json::to_vec(&page)?.len() > MAX_GATEWAY_FRAME_BYTES.saturating_sub(4096) {
+            return Err(GatewayDaemonError::Protocol(
+                "Task list exceeds the response byte budget".to_owned(),
+            ));
+        }
+        Ok(page)
     }
 
     fn events(
@@ -275,7 +380,7 @@ impl TaskCoordinator {
         )? {
             let task = self.store.load_task(&receipt.task_id)?;
             authorize(&task, &actor.actor_id)?;
-            return Ok(TaskView::from(&task));
+            return self.task_view(&task);
         }
 
         let current = self.store.load_task(&request.task_id)?;
@@ -288,6 +393,16 @@ impl TaskCoordinator {
                 "only the exact active non-cancelled suspended Run may be retried".to_owned(),
             ));
         }
+        if self
+            .store
+            .load_pre_runtime_baseline(&request.task_id)?
+            .is_some_and(|baseline| baseline.state == PreRuntimeBaselineState::Unknown)
+        {
+            return Err(GatewayDaemonError::Protocol(
+                "a Run suspended by uncertain checkpoint creation cannot be retried without exact provider evidence"
+                    .to_owned(),
+            ));
+        }
 
         let payload = self.store.load_runtime_start_intent_for_retry(
             &actor.actor_id,
@@ -295,7 +410,7 @@ impl TaskCoordinator {
             &request.previous_run_id,
         )?;
         let mut start_intent =
-            scheduler::decode_runtime_start_intent(payload, self.expected_profile)?;
+            scheduler::decode_runtime_start_intent(payload, &self.launch_catalog)?;
         if start_intent.actor != *actor
             || start_intent.task_id != request.task_id
             || start_intent.run_id != request.previous_run_id
@@ -347,7 +462,7 @@ impl TaskCoordinator {
             &request.previous_run_id,
         )?;
         let task = self.store.load_task(receipt_task_id(&outcome))?;
-        Ok(TaskView::from(&task))
+        self.task_view(&task)
     }
 
     fn event(
@@ -375,6 +490,40 @@ impl TaskCoordinator {
             event,
         }
     }
+
+    fn task_view(&self, task: &TaskAggregate) -> Result<TaskView, GatewayDaemonError> {
+        let mut view = TaskView::from(task);
+        if let Some((launch, baseline_id)) = self.store.load_task_launch_spec(task.task_id())? {
+            view.launch = Some(TaskLaunchDescriptorV1::from_spec(
+                sha256_digest(launch.goal.as_str().as_bytes()),
+                &launch,
+            ));
+            view.baseline = match self.store.load_pre_runtime_baseline(task.task_id())? {
+                Some(baseline) => Some(baseline),
+                None => baseline_id.map(|baseline_id| PreRuntimeBaselineView {
+                    baseline_id,
+                    policy: launch.checkpoint,
+                    state: PreRuntimeBaselineState::Pending,
+                    evidence: None,
+                    reason: None,
+                }),
+            };
+        }
+        Ok(view)
+    }
+
+}
+
+include!("coordinator/snapshot.rs");
+
+fn require_task_snapshot_terminal(state: TaskState) -> Result<(), GatewayDaemonError> {
+    if matches!(state, TaskState::Succeeded | TaskState::Failed | TaskState::Cancelled) {
+        Ok(())
+    } else {
+        Err(GatewayDaemonError::Protocol(
+            "Task snapshots can be switched only after the Task is terminal".to_owned(),
+        ))
+    }
 }
 
 fn submitted_target(event: &TaskEventEnvelope) -> Result<TargetRef, GatewayDaemonError> {
@@ -386,105 +535,4 @@ fn submitted_target(event: &TaskEventEnvelope) -> Result<TargetRef, GatewayDaemo
     }
 }
 
-struct DaemonTaskPorts<'a> {
-    coordinator: &'a mut TaskCoordinator,
-    scheduler: &'a mut Option<TaskScheduler<Box<dyn RuntimeFactory>>>,
-}
-
-impl TaskCommandPort for DaemonTaskPorts<'_> {
-    fn submit(
-        &mut self,
-        actor: &ActorRef,
-        workspace: &WorkspaceRef,
-        request: SubmitTask,
-    ) -> Result<TaskView, GatewayDaemonError> {
-        self.coordinator.submit_admitted(actor, workspace, request)
-    }
-
-    fn cancel(
-        &mut self,
-        actor_id: &ActorId,
-        request: CancelTask,
-    ) -> Result<TaskView, GatewayDaemonError> {
-        self.coordinator.cancel(actor_id, request)
-    }
-
-    fn retry(
-        &mut self,
-        actor: &ActorRef,
-        target: &TargetRef,
-        workspace: &WorkspaceRef,
-        runtime: &RuntimeSelector,
-        request: RetryTask,
-    ) -> Result<TaskView, GatewayDaemonError> {
-        self.coordinator
-            .retry_admitted(actor, target, workspace, runtime, request)
-    }
-
-    fn resolve_approval(
-        &mut self,
-        actor_id: &ActorId,
-        request: ResolveApproval,
-    ) -> Result<TaskView, GatewayDaemonError> {
-        let scheduler = self.scheduler.as_mut().ok_or_else(|| {
-            GatewayDaemonError::Protocol("Gateway scheduler is not attached".to_owned())
-        })?;
-        match scheduler.resolve_approval(
-            actor_id,
-            request.idempotency_key,
-            &request.approval_id,
-            request.decision,
-            now_ms()?,
-        )? {
-            SchedulerTick::Started(view)
-            | SchedulerTick::Progressed(view)
-            | SchedulerTick::Settled(view) => Ok(view),
-            SchedulerTick::Idle => Err(GatewayDaemonError::Protocol(
-                "approval resolution made no durable progress".to_owned(),
-            )),
-        }
-    }
-
-    fn append_input(
-        &mut self,
-        actor_id: &ActorId,
-        request: AppendTaskInput,
-    ) -> Result<TaskView, GatewayDaemonError> {
-        let scheduler = self.scheduler.as_mut().ok_or_else(|| {
-            GatewayDaemonError::Protocol("Gateway scheduler is not attached".to_owned())
-        })?;
-        match scheduler.resolve_input(
-            actor_id,
-            request.idempotency_key,
-            &request.task_id,
-            &request.input_request_id,
-            request.response,
-            request.expected_revision,
-            now_ms()?,
-        )? {
-            SchedulerTick::Started(view)
-            | SchedulerTick::Progressed(view)
-            | SchedulerTick::Settled(view) => Ok(view),
-            SchedulerTick::Idle => Err(GatewayDaemonError::Protocol(
-                "input append made no durable progress".to_owned(),
-            )),
-        }
-    }
-}
-
-impl TaskProjectionPort for DaemonTaskPorts<'_> {
-    fn get(&self, actor_id: &ActorId, task_id: &TaskId) -> Result<TaskView, GatewayDaemonError> {
-        self.coordinator.get(actor_id, task_id)
-    }
-
-    fn events(
-        &self,
-        actor_id: &ActorId,
-        task_id: &TaskId,
-        after_revision: Option<u64>,
-        limit: u16,
-    ) -> Result<TaskEventPage, GatewayDaemonError> {
-        self.coordinator
-            .events(actor_id, task_id, after_revision, limit)
-    }
-}
+include!("coordinator/ports.rs");

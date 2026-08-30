@@ -2577,6 +2577,7 @@ uninstall_cosh_ng() {
     local bin
 
     stop_systemd_service 'cosh-gateway@*.service'
+    stop_systemd_service 'cosh-gateway-acp@*.service'
 
     for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
         if $DRY_RUN; then

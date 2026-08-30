@@ -11,6 +11,18 @@ use crate::config::ApprovalMode;
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 /// Exact private protocol version for the Gateway-owned execution profile.
 pub const BROKERED_CONTROL_PROTOCOL_VERSION: u32 = 3;
+/// Exact private protocol version for the Gateway-owned checkpoint profile.
+pub const BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION: u32 = 4;
+/// Exact private protocol version for the approval-gated workspace-write profile.
+pub const BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION: u32 = 5;
+/// Exact private launch name for the task-only brokered profile.
+pub(crate) const GATEWAY_BROKERED_V1_EXECUTION_PROFILE: &str = "gateway_brokered_v1";
+/// Exact private launch name for the checkpoint-enabled brokered profile.
+pub(crate) const GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE: &str =
+    "gateway_brokered_checkpoint_v1";
+/// Exact private launch name for the workspace-write brokered profile.
+pub(crate) const GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE: &str =
+    "gateway_brokered_workspace_write_v1";
 
 // =====================================================================
 // Auth types (used by CoreControlRequest::AuthRequired)
@@ -198,6 +210,10 @@ pub struct ControlResponseBody {
     pub behavior: Option<String>,
     pub message: Option<String>,
     pub result: Option<HostExecutedShellResult>,
+    #[serde(default, rename = "checkpointResult")]
+    pub checkpoint_result: Option<Value>,
+    #[serde(default, rename = "checkpointError")]
+    pub checkpoint_error: Option<Value>,
     #[serde(rename = "toolUseID")]
     pub tool_use_id: Option<String>,
     #[serde(default, rename = "updatedPermissions")]
@@ -210,6 +226,41 @@ pub struct ControlResponseBody {
     #[serde(default)]
     pub values: Option<HashMap<String, String>>,
     pub persist: Option<bool>,
+    #[serde(default, flatten)]
+    pub unknown_fields: HashMap<String, Value>,
+}
+
+/// Typed successful result returned only by the Gateway checkpoint target.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostExecutedCheckpointCreateResult {
+    pub checkpoint_id: String,
+    pub outcome: HostExecutedCheckpointCreateOutcome,
+}
+
+/// Target-reported outcome for a hosted checkpoint creation.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostExecutedCheckpointCreateOutcome {
+    Created { snapshot_id: String },
+    Skipped { reason: String },
+}
+
+/// Typed known-failure or uncertain result returned by the Gateway target.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostExecutedCheckpointError {
+    pub outcome: HostExecutedCheckpointErrorOutcome,
+    pub code: String,
+    pub message: String,
+}
+
+/// Stable terminal classification for a hosted checkpoint error.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostExecutedCheckpointErrorOutcome {
+    Failed,
+    Uncertain,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -331,6 +382,9 @@ pub struct CoreControlCapabilities {
     /// sends receipts to a core that understands them; older or mock
     /// providers without this capability never see receipt lines.
     pub can_handle_approval_receipt: bool,
+    /// Core accepts the typed checkpoint terminal result on private v4.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub can_handle_hosted_checkpoint_create: bool,
     /// Brokered control can suspend one side-effect-free question for Gateway resolution.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub can_handle_brokered_ask_user: bool,
@@ -570,6 +624,8 @@ impl OutputMessage {
                         can_handle_host_executed_shell_tool_result: execution_profile.is_none(),
                         can_handle_shell_evidence_tool,
                         can_handle_approval_receipt: true,
+                        can_handle_hosted_checkpoint_create: execution_profile
+                            == Some(GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE),
                         can_handle_brokered_ask_user: execution_profile.is_some(),
                     }),
                     error: None,
@@ -1200,6 +1256,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_typed_checkpoint_terminal_responses() {
+        let created = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-4","response":{"behavior":"host_executed_checkpoint_create","checkpointResult":{"checkpoint_id":"ckp_123e4567-e89b-12d3-a456-426614174000","outcome":{"status":"created","snapshot_id":"snap-1"}}}}}"#;
+        let message: InputMessage = serde_json::from_str(created).unwrap();
+        let InputMessage::ControlResponse { response } = message else {
+            panic!("expected checkpoint response");
+        };
+        let checkpoint_result: HostExecutedCheckpointCreateResult = serde_json::from_value(
+            response
+                .response
+                .checkpoint_result
+                .expect("checkpoint result"),
+        )
+        .unwrap();
+        assert!(matches!(
+            checkpoint_result,
+            HostExecutedCheckpointCreateResult {
+                outcome: HostExecutedCheckpointCreateOutcome::Created { ref snapshot_id },
+                ..
+            } if snapshot_id == "snap-1"
+        ));
+
+        let uncertain = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-5","response":{"behavior":"host_executed_checkpoint_error","checkpointError":{"outcome":"uncertain","code":"checkpoint_unknown","message":"Exact evidence was not available"}}}}"#;
+        let message: InputMessage = serde_json::from_str(uncertain).unwrap();
+        let InputMessage::ControlResponse { response } = message else {
+            panic!("expected checkpoint error");
+        };
+        let checkpoint_error: HostExecutedCheckpointError = serde_json::from_value(
+            response
+                .response
+                .checkpoint_error
+                .expect("checkpoint error"),
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint_error,
+            HostExecutedCheckpointError {
+                outcome: HostExecutedCheckpointErrorOutcome::Uncertain,
+                code: "checkpoint_unknown".to_string(),
+                message: "Exact evidence was not available".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn serialize_system_init() {
         let msg = OutputMessage::system_init(
             "sess-1",
@@ -1289,6 +1389,89 @@ mod tests {
     }
 
     #[test]
+    fn serialize_checkpoint_initialize_ack_is_v4_and_profile_bound() {
+        let capability_profile = BrokeredCapabilityProfileIdentity::workspace_checkpoint_v1();
+        let msg = OutputMessage::initialize_success_for_profile(
+            "init-checkpoint",
+            BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION,
+            Some(GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE),
+            Some(capability_profile.clone()),
+            Some(vec![
+                "ask_user_question".to_string(),
+                "workspace_checkpoint_create".to_string(),
+            ]),
+            false,
+        );
+        let value = serde_json::to_value(msg).unwrap();
+        let response = &value["response"]["response"];
+        assert_eq!(
+            response["protocol_version"],
+            BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            response["execution_profile"],
+            GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE
+        );
+        assert_eq!(
+            response["capability_profile"],
+            serde_json::json!(capability_profile)
+        );
+        assert_eq!(
+            response["runtime_tools"],
+            serde_json::json!(["ask_user_question", "workspace_checkpoint_create"])
+        );
+        assert_eq!(
+            response["capabilities"]["can_handle_hosted_checkpoint_create"],
+            true
+        );
+        assert_eq!(
+            response["capabilities"]["can_handle_brokered_ask_user"],
+            true
+        );
+    }
+
+    #[test]
+    fn serialize_workspace_write_initialize_ack_is_v5_and_profile_bound() {
+        let capability_profile = BrokeredCapabilityProfileIdentity::workspace_write_v1();
+        let msg = OutputMessage::initialize_success_for_profile(
+            "init-workspace-write",
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION,
+            Some(GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE),
+            Some(capability_profile.clone()),
+            Some(vec![
+                "ask_user_question".to_string(),
+                "write_file".to_string(),
+            ]),
+            false,
+        );
+        let value = serde_json::to_value(msg).unwrap();
+        let response = &value["response"]["response"];
+        assert_eq!(
+            response["protocol_version"],
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            response["execution_profile"],
+            GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE
+        );
+        assert_eq!(
+            response["capability_profile"],
+            serde_json::json!(capability_profile)
+        );
+        assert_eq!(
+            response["runtime_tools"],
+            serde_json::json!(["ask_user_question", "write_file"])
+        );
+        assert!(response["capabilities"]
+            .get("can_handle_hosted_checkpoint_create")
+            .is_none());
+        assert_eq!(
+            response["capabilities"]["can_handle_brokered_ask_user"],
+            true
+        );
+    }
+
+    #[test]
     fn private_wire_dual_version_corpus_matches_core_types() {
         let corpus: Value = serde_json::from_str(include_str!(
             "../tests/fixtures/cosh-private-wire-dual-version.json"
@@ -1320,6 +1503,64 @@ mod tests {
             serde_json::to_value(brokered_ack).unwrap(),
             corpus["gateway_brokered_v3"]["initialize_ack"]
         );
+
+        let checkpoint_ack = OutputMessage::initialize_success_for_profile(
+            "gateway-init-v4",
+            BROKERED_CHECKPOINT_CONTROL_PROTOCOL_VERSION,
+            Some(GATEWAY_BROKERED_CHECKPOINT_V1_EXECUTION_PROFILE),
+            Some(BrokeredCapabilityProfileIdentity::workspace_checkpoint_v1()),
+            Some(vec![
+                "ask_user_question".to_string(),
+                "workspace_checkpoint_create".to_string(),
+            ]),
+            false,
+        );
+        assert_eq!(
+            serde_json::to_value(checkpoint_ack).unwrap(),
+            corpus["gateway_brokered_checkpoint_v4"]["initialize_ack"]
+        );
+
+        let workspace_write_ack = OutputMessage::initialize_success_for_profile(
+            "gateway-init-v5",
+            BROKERED_WORKSPACE_WRITE_CONTROL_PROTOCOL_VERSION,
+            Some(GATEWAY_BROKERED_WORKSPACE_WRITE_V1_EXECUTION_PROFILE),
+            Some(BrokeredCapabilityProfileIdentity::workspace_write_v1()),
+            Some(vec![
+                "ask_user_question".to_string(),
+                "write_file".to_string(),
+            ]),
+            false,
+        );
+        assert_eq!(
+            serde_json::to_value(workspace_write_ack).unwrap(),
+            corpus["gateway_brokered_workspace_write_v5"]["initialize_ack"]
+        );
+
+        let checkpoint_created: InputMessage = serde_json::from_value(
+            corpus["gateway_brokered_checkpoint_v4"]["checkpoint_created"].clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            checkpoint_created,
+            InputMessage::ControlResponse { response }
+                if response.request_id == "checkpoint-request-1"
+                    && response.response.behavior.as_deref()
+                        == Some("host_executed_checkpoint_create")
+                    && response.response.checkpoint_result.is_some()
+        ));
+
+        let checkpoint_uncertain: InputMessage = serde_json::from_value(
+            corpus["gateway_brokered_checkpoint_v4"]["checkpoint_uncertain"].clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            checkpoint_uncertain,
+            InputMessage::ControlResponse { response }
+                if response.request_id == "checkpoint-request-2"
+                    && response.response.behavior.as_deref()
+                        == Some("host_executed_checkpoint_error")
+                    && response.response.checkpoint_error.is_some()
+        ));
 
         let ask_user_request = OutputMessage::ControlRequest {
             request_id: "question-1".to_string(),

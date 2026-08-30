@@ -1,4 +1,4 @@
-pub(super) const RUNTIME_START_SCHEMA_VERSION: u16 = 3;
+pub(super) const RUNTIME_START_SCHEMA_VERSION: u16 = 4;
 const DEFAULT_LEASE_DURATION_MS: u64 = 180_000;
 const DEFAULT_LEASE_RENEWAL_MARGIN_MS: u64 = 60_000;
 const DEFAULT_RUNTIME_OPERATION_TIMEOUT_MS: u64 = 70_000;
@@ -6,6 +6,10 @@ const DEFAULT_RUNTIME_INPUT_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 
 pub(super) fn runtime_start_delivery_kind() -> BoundedName {
     BoundedName::new("runtime_start").unwrap_or_else(|_| unreachable!())
+}
+
+pub(super) fn pre_runtime_checkpoint_delivery_kind() -> BoundedName {
+    BoundedName::new("pre_runtime_checkpoint").unwrap_or_else(|_| unreachable!())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +24,22 @@ pub(super) struct RuntimeStartIntent {
     pub(super) target: TargetRef,
     pub(super) workspace: WorkspaceRef,
     pub(super) capability_profile: GatewayCapabilityProfileIdentity,
+    pub(super) launch: TaskLaunchSpecV1,
+    pub(super) baseline_id: Option<CheckpointId>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeStartIntentV3 {
+    schema_version: u16,
+    actor: ActorRef,
+    task_id: TaskId,
+    run_id: RunId,
+    runtime: RuntimeSelector,
+    intent: BoundedText,
+    target: TargetRef,
+    workspace: WorkspaceRef,
+    capability_profile: GatewayCapabilityProfileIdentity,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,17 +62,43 @@ struct RuntimeStartIntentHeader {
 
 pub(super) fn decode_runtime_start_intent(
     value: serde_json::Value,
-    expected_profile: GatewayCapabilityProfile,
+    launch_catalog: &TaskLaunchCatalog,
 ) -> Result<RuntimeStartIntent, GatewayDaemonError> {
-    let header = serde_json::from_value::<RuntimeStartIntentHeader>(value.clone()).map_err(
-        |error| {
+    let header =
+        serde_json::from_value::<RuntimeStartIntentHeader>(value.clone()).map_err(|error| {
             GatewayDaemonError::Protocol(format!(
                 "runtime start intent has no valid schema version: {error}"
             ))
-        },
-    )?;
-    let intent = match header.schema_version {
+        })?;
+    let source_schema_version = header.schema_version;
+    let intent = match source_schema_version {
         RUNTIME_START_SCHEMA_VERSION => serde_json::from_value::<RuntimeStartIntent>(value)?,
+        3 => {
+            let legacy = serde_json::from_value::<RuntimeStartIntentV3>(value)?;
+            if legacy.schema_version != 3 {
+                return Err(GatewayDaemonError::Protocol(
+                    "runtime start v3 decoder observed another schema".to_owned(),
+                ));
+            }
+            let launch = legacy_launch_spec(
+                &legacy.intent,
+                &legacy.runtime,
+                &legacy.workspace,
+            );
+            RuntimeStartIntent {
+                schema_version: RUNTIME_START_SCHEMA_VERSION,
+                launch,
+                actor: legacy.actor,
+                task_id: legacy.task_id,
+                run_id: legacy.run_id,
+                runtime: legacy.runtime,
+                intent: legacy.intent,
+                target: legacy.target,
+                workspace: legacy.workspace,
+                capability_profile: legacy.capability_profile,
+                baseline_id: None,
+            }
+        }
         2 => {
             let legacy = serde_json::from_value::<RuntimeStartIntentV2>(value)?;
             if legacy.schema_version != 2 {
@@ -69,6 +115,11 @@ pub(super) fn decode_runtime_start_intent(
                         .to_owned(),
                 ));
             }
+            let launch = legacy_launch_spec(
+                &legacy.intent,
+                &legacy.runtime,
+                &legacy.workspace,
+            );
             RuntimeStartIntent {
                 schema_version: RUNTIME_START_SCHEMA_VERSION,
                 actor: legacy.actor,
@@ -79,6 +130,8 @@ pub(super) fn decode_runtime_start_intent(
                 target: legacy.target,
                 workspace: legacy.workspace,
                 capability_profile: legacy_profile.identity(),
+                launch,
+                baseline_id: None,
             }
         }
         version if version > RUNTIME_START_SCHEMA_VERSION => {
@@ -92,17 +145,58 @@ pub(super) fn decode_runtime_start_intent(
             )))
         }
     };
-    expected_profile
-        .verify_identity(&intent.capability_profile)
-        .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
-    if intent.target != expected_profile.governed_target()
-        || !is_task_only_runtime(&intent.runtime)
+    if !launch_catalog.admits_identity(&intent.runtime, &intent.target, &intent.capability_profile)
     {
         return Err(GatewayDaemonError::Protocol(
-            "runtime start intent does not match the task-only capability profile".to_owned(),
+            "runtime start intent is not admitted by the Gateway launch catalog".to_owned(),
+        ));
+    }
+    if intent.launch.goal != intent.intent || intent.launch.workspace != intent.workspace {
+        return Err(GatewayDaemonError::Protocol(
+            "runtime start intent launch data does not match its delivery fields".to_owned(),
+        ));
+    }
+    if source_schema_version == RUNTIME_START_SCHEMA_VERSION {
+        let routed_runtime = match intent.runtime.runtime.as_str() {
+            "core" => TaskRuntime::Core,
+            "acp" => TaskRuntime::Codex,
+            _ => {
+                return Err(GatewayDaemonError::Protocol(
+                    "runtime start v4 has no provider-neutral Runtime route".to_owned(),
+                ));
+            }
+        };
+        if intent.launch.runtime != routed_runtime {
+            return Err(GatewayDaemonError::Protocol(
+                "runtime start v4 launch choice does not match its exact Runtime route".to_owned(),
+            ));
+        }
+    }
+    if (intent.launch.checkpoint == CheckpointPolicy::Off) != intent.baseline_id.is_none() {
+        return Err(GatewayDaemonError::Protocol(
+            "runtime start intent baseline identity does not match its checkpoint policy"
+                .to_owned(),
         ));
     }
     Ok(intent)
+}
+
+fn legacy_launch_spec(
+    intent: &BoundedText,
+    runtime: &RuntimeSelector,
+    workspace: &WorkspaceRef,
+) -> TaskLaunchSpecV1 {
+    TaskLaunchSpecV1::new(
+        intent.clone(),
+        if runtime.runtime.as_str() == "core" {
+            TaskRuntime::Core
+        } else {
+            TaskRuntime::Codex
+        },
+        workspace.clone(),
+        CheckpointPolicy::Off,
+        ApprovalPolicy::Interactive,
+    )
 }
 
 fn is_task_only_runtime(runtime: &RuntimeSelector) -> bool {
@@ -129,6 +223,8 @@ pub struct ScheduledRun {
     pub workspace: WorkspaceRef,
     /// Capability identity durably selected when this Run was admitted.
     pub capability_profile: GatewayCapabilityProfileIdentity,
+    /// Immutable versioned launch data selected for this Task.
+    pub launch: TaskLaunchSpecV1,
     /// Current Run-lease generation.
     pub lease_generation: u64,
 }
@@ -159,6 +255,13 @@ pub enum RuntimePoll {
         /// Provider-facing operation description sanitized for actor review.
         summary: ToolSummary,
     },
+    /// The Runtime abandoned the exact provider permission callback.
+    PermissionAbandoned {
+        /// Monotonic Runtime event sequence carrying the abandonment.
+        sequence: u64,
+        /// Callback identity that must still match the durable pending approval.
+        permission: RuntimePermissionRef,
+    },
     /// A COSH-owned typed operation is paused before durable takeover.
     BrokeredExecutionRequested {
         /// Exact callback identity fenced to the active Runtime generation.
@@ -181,8 +284,26 @@ pub enum RuntimePoll {
     Succeeded,
     /// The Runtime completed with a safe bounded failure.
     Failed(ContractError),
-    /// The Runtime acknowledged an earlier cancellation request.
-    Cancelled,
+    /// The Runtime ended a turn for a previously established cancellation cause.
+    Cancelled {
+        /// Exact cause established before the terminal event was accepted.
+        cause: RuntimeCancellationCause,
+    },
+}
+
+/// Runtime-local evidence that makes a cancelled terminal expected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCancellationCause {
+    /// The actor denied the exact provider-native operation.
+    ProviderPermissionDenied {
+        /// Callback whose durable denial preceded the provider response.
+        permission: RuntimePermissionRef,
+    },
+    /// The provider cancelled while the exact callback was still pending.
+    ProviderPermissionAbandoned {
+        /// Callback that was durably closed before accepting cancellation.
+        permission: RuntimePermissionRef,
+    },
 }
 
 /// Active provider-neutral Runtime owned by the scheduler.
@@ -352,6 +473,7 @@ struct ActiveRun {
     binding_closed: bool,
     task_settled: bool,
     pending_permission: Option<PendingPermission>,
+    expected_provider_terminal: Option<ExpectedProviderTerminal>,
     pending_brokered: Option<PendingBrokered>,
     pending_input: Option<RuntimeInputRequestRecord>,
     handle: Box<dyn RuntimeHandle>,
@@ -361,6 +483,18 @@ struct ActiveRun {
 struct PendingPermission {
     permission: RuntimePermissionRef,
     approval: ApprovalRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExpectedProviderTerminal {
+    Denied {
+        approval_id: ApprovalId,
+        permission: RuntimePermissionRef,
+    },
+    Abandoned {
+        approval_id: ApprovalId,
+        permission: RuntimePermissionRef,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +521,7 @@ pub struct TaskScheduler<F> {
     config: ValidatedSchedulerConfig,
     factory: F,
     brokered_driver: Box<dyn BrokeredExecutionDriver>,
+    checkpoint_driver: Option<Box<dyn PreRuntimeCheckpointDriver>>,
     active: Option<ActiveRun>,
     shutting_down: bool,
     #[cfg(test)]

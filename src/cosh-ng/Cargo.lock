@@ -741,6 +741,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosh-gateway-app"
+version = "0.21.1"
+dependencies = [
+ "bincode",
+ "clap",
+ "cosh-gateway",
+ "cosh-gateway-contracts",
+ "cosh-platform",
+ "cosh-types",
+ "nix 0.29.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cosh-gateway-contracts"
 version = "0.22.2"
 dependencies = [

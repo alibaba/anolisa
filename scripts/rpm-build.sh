@@ -839,6 +839,11 @@ build_cosh_ng() {
         err "cosh-ng spec must render, install, and own ${gateway_unit}"
         return 1
     fi
+    if grep -Fq "packaging/systemd/cosh-gateway-acp@.service.in" "$spec_in" \
+        || grep -Fqx "%{_unitdir}/cosh-gateway-acp@.service" "$spec_in"; then
+        err "cosh-ng spec must not ship the retired split ACP Gateway unit"
+        return 1
+    fi
     local tarball_name="${pkg_name}-${version}.tar.gz"
 
     local spec_file

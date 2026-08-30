@@ -69,11 +69,11 @@ fn launch_driver(args: &ProfileArgs) -> Result<(AcpSessionDriver, PathBuf), CliE
     let workspace = resolved.workspace().to_path_buf();
     let config = AcpSessionDriverConfig::new(
         resolved.launch_spec(),
-        AcpV1ClientConfig::new(
+        resolved.bind_client_config(AcpV1ClientConfig::new(
             "cosh-gateway",
             env!("CARGO_PKG_VERSION"),
             MAX_ACP_FRAME_BYTES,
-        ),
+        )),
         resolved.workspace(),
     );
     let driver =
@@ -192,6 +192,16 @@ fn handle_observation(
                 .map_err(|error| CliError::Runtime(error.to_string()))?;
             report("permission_decided", json!({"decision":decision_name}))?;
         }
+        AcpV1Observation::PromptCancelledWithPendingPermissions {
+            session_id,
+            request_ids,
+        } => {
+            report(
+                "permission_callbacks_abandoned",
+                abandoned_permission_fields(&session_id, &request_ids),
+            )?;
+            return Ok(Some(prompt_exit_code(AcpV1StopReason::Cancelled)));
+        }
         AcpV1Observation::PromptFinished {
             session_id,
             stop_reason,
@@ -227,6 +237,17 @@ fn handle_observation(
         }
     }
     Ok(None)
+}
+
+pub(super) fn abandoned_permission_fields(
+    session_id: &str,
+    request_ids: &[AcpV1RequestId],
+) -> Value {
+    json!({
+        "session_id": session_id,
+        "pending_count": request_ids.len(),
+        "stop_reason": "cancelled",
+    })
 }
 
 pub(super) fn prompt_exit_code(stop_reason: AcpV1StopReason) -> u8 {

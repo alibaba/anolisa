@@ -6,12 +6,188 @@ use crate::{
     capability::{ApprovalDecision, ApprovalRequest},
     common::{
         ActorRef, BoundedName, BoundedText, ContentPart, ContractHeader, ContractSchema, Digest,
-        IdempotencyKey, RuntimeBindingRef, RuntimeSelector, TargetRef,
+        IdempotencyKey, RuntimeBindingRef, RuntimeSelector, TargetRef, WorkspaceRef,
     },
     error::ContractError,
     ids::{ApprovalId, ExecutionId, InputRequestId, PermitId, RunId, TaskId},
     runtime::RuntimeInputRequest,
 };
+
+/// Exact schema version of [`TaskLaunchSpecV1`].
+pub const TASK_LAUNCH_SPEC_V1: u16 = 1;
+
+/// Runtime family selected for one durable Task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRuntime {
+    /// COSH Core with Gateway-brokered capability execution.
+    Core,
+    /// Codex connected through the Agent Client Protocol.
+    Codex,
+}
+
+/// Pre-Runtime workspace baseline policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointPolicy {
+    /// Create a baseline when available and durably record an explicit skip otherwise.
+    Auto,
+    /// Require a proven baseline before starting the Runtime.
+    On,
+    /// Start the Runtime without creating a baseline.
+    Off,
+}
+
+/// Approval policy durably selected for one Task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    /// Resolve supported operations automatically while retaining durable audit events.
+    AllowAll,
+    /// Require an authenticated actor decision.
+    ///
+    /// This variant remains for legacy clients; new interactive launch surfaces default
+    /// to [`Self::AllowAll`].
+    Interactive,
+}
+
+/// Strict version-one durable launch description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskLaunchSpecV1 {
+    /// Must equal [`TASK_LAUNCH_SPEC_V1`].
+    pub schema_version: u16,
+    /// Bounded user goal delivered to the selected Runtime.
+    pub goal: BoundedText,
+    /// Provider-neutral Runtime family.
+    pub runtime: TaskRuntime,
+    /// Canonical workspace identity admitted by the Gateway catalog.
+    pub workspace: WorkspaceRef,
+    /// Pre-Runtime checkpoint behavior.
+    pub checkpoint: CheckpointPolicy,
+    /// Durable approval behavior.
+    pub approval: ApprovalPolicy,
+}
+
+impl TaskLaunchSpecV1 {
+    /// Creates a version-one launch description.
+    #[must_use]
+    pub const fn new(
+        goal: BoundedText,
+        runtime: TaskRuntime,
+        workspace: WorkspaceRef,
+        checkpoint: CheckpointPolicy,
+        approval: ApprovalPolicy,
+    ) -> Self {
+        Self {
+            schema_version: TASK_LAUNCH_SPEC_V1,
+            goal,
+            runtime,
+            workspace,
+            checkpoint,
+            approval,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskLaunchSpecV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireLaunchSpec {
+            schema_version: u16,
+            goal: BoundedText,
+            runtime: TaskRuntime,
+            workspace: WorkspaceRef,
+            checkpoint: CheckpointPolicy,
+            approval: ApprovalPolicy,
+        }
+
+        let wire = WireLaunchSpec::deserialize(deserializer)?;
+        if wire.schema_version != TASK_LAUNCH_SPEC_V1 {
+            return Err(de::Error::custom(format!(
+                "unsupported Task launch schema {}; expected {TASK_LAUNCH_SPEC_V1}",
+                wire.schema_version
+            )));
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            goal: wire.goal,
+            runtime: wire.runtime,
+            workspace: wire.workspace,
+            checkpoint: wire.checkpoint,
+            approval: wire.approval,
+        })
+    }
+}
+
+/// Safe version-one launch projection that omits the private Runtime goal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskLaunchDescriptorV1 {
+    /// Must equal [`TASK_LAUNCH_SPEC_V1`].
+    pub schema_version: u16,
+    /// SHA-256 digest of the private goal retained for correlation and audit.
+    pub goal_digest: Digest,
+    /// Provider-neutral Runtime family.
+    pub runtime: TaskRuntime,
+    /// Canonical workspace identity admitted by the Gateway catalog.
+    pub workspace: WorkspaceRef,
+    /// Pre-Runtime checkpoint behavior.
+    pub checkpoint: CheckpointPolicy,
+    /// Durable approval behavior.
+    pub approval: ApprovalPolicy,
+}
+
+impl TaskLaunchDescriptorV1 {
+    /// Projects safe launch metadata from a full durable launch description.
+    #[must_use]
+    pub fn from_spec(goal_digest: Digest, launch: &TaskLaunchSpecV1) -> Self {
+        Self {
+            schema_version: TASK_LAUNCH_SPEC_V1,
+            goal_digest,
+            runtime: launch.runtime,
+            workspace: launch.workspace.clone(),
+            checkpoint: launch.checkpoint,
+            approval: launch.approval,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskLaunchDescriptorV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireLaunchDescriptor {
+            schema_version: u16,
+            goal_digest: Digest,
+            runtime: TaskRuntime,
+            workspace: WorkspaceRef,
+            checkpoint: CheckpointPolicy,
+            approval: ApprovalPolicy,
+        }
+
+        let wire = WireLaunchDescriptor::deserialize(deserializer)?;
+        if wire.schema_version != TASK_LAUNCH_SPEC_V1 {
+            return Err(de::Error::custom(format!(
+                "unsupported Task launch descriptor schema {}; expected {TASK_LAUNCH_SPEC_V1}",
+                wire.schema_version
+            )));
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            goal_digest: wire.goal_digest,
+            runtime: wire.runtime,
+            workspace: wire.workspace,
+            checkpoint: wire.checkpoint,
+            approval: wire.approval,
+        })
+    }
+}
 
 /// Opaque cursor used to resume a Task event attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -256,6 +432,8 @@ pub enum TaskEventKind {
     ApprovalRequested,
     /// Approval was resolved.
     ApprovalResolved,
+    /// Approval became impossible to deliver without an actor decision.
+    ApprovalAbandoned,
     /// A governed execution was planned.
     ExecutionPlanned,
     /// A governed execution completed.
@@ -280,6 +458,14 @@ pub enum TaskEventKind {
     TaskFailed,
     /// The Task was cancelled.
     TaskCancelled,
+}
+
+/// Non-decision reason that closes a pending approval interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAbandonCause {
+    /// The provider cancelled the callback before accepting a response.
+    ProviderCancelled,
 }
 
 /// Immutable fact in a Task lifecycle.
@@ -344,6 +530,13 @@ pub enum TaskEvent {
         approval_id: ApprovalId,
         /// Actor decision.
         decision: ApprovalDecision,
+    },
+    /// A pending approval became undeliverable without an actor decision.
+    ApprovalAbandoned {
+        /// Pending approval whose provider callback disappeared.
+        approval_id: ApprovalId,
+        /// Typed reason no decision could be delivered.
+        cause: ApprovalAbandonCause,
     },
     /// A permit was bound to an execution identity.
     ExecutionPlanned {
@@ -431,6 +624,7 @@ impl TaskEvent {
             Self::InputSubmitted { .. } => TaskEventKind::InputSubmitted,
             Self::ApprovalRequested { .. } => TaskEventKind::ApprovalRequested,
             Self::ApprovalResolved { .. } => TaskEventKind::ApprovalResolved,
+            Self::ApprovalAbandoned { .. } => TaskEventKind::ApprovalAbandoned,
             Self::ExecutionPlanned { .. } => TaskEventKind::ExecutionPlanned,
             Self::ExecutionResultRecorded { .. } => TaskEventKind::ExecutionResultRecorded,
             Self::ExecutionUncertain { .. } => TaskEventKind::ExecutionUncertain,

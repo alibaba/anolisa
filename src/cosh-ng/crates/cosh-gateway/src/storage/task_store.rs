@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cosh_gateway_contracts::common::{
     BoundedName, BoundedOpaque, ContractHeader, ContractSchema, Correlation, Digest, IdempotencyKey,
 };
-use cosh_gateway_contracts::ids::{ActorId, DeliveryId, MessageId, RunId, TaskId};
+use cosh_gateway_contracts::ids::{ActorId, CheckpointId, DeliveryId, MessageId, RunId, TaskId};
 use cosh_gateway_contracts::task::{
     CancelReason, CancellationStage, TaskEvent, TaskEventEnvelope, TaskState,
 };
@@ -14,6 +14,7 @@ use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::daemon::{TaskSnapshotKind, TaskSnapshotSwitchView, TaskSnapshotView};
 use crate::task::TaskAggregate;
 
 use super::{SqliteTaskStore, StoreError};
@@ -113,6 +114,9 @@ pub enum CommitOutcome {
 // one namespace keeps those helpers private rather than creating a wider API.
 include!("task_store/legacy_recovery.rs");
 include!("task_store/outbox.rs");
+include!("task_store/baseline.rs");
+include!("task_store/approval_checkpoint.rs");
+include!("task_store/snapshot.rs");
 include!("task_store/commit.rs");
 include!("task_store/task_load.rs");
 include!("task_store/guard_helpers.rs");

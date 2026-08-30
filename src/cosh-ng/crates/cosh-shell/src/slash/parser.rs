@@ -34,6 +34,7 @@ pub(super) enum SlashCommand<'a> {
     Skills(Option<&'a str>, Option<&'a str>),
     Mcp(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Session(&'a str),
+    Task(&'a str),
     Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
 }
 
@@ -53,7 +54,7 @@ impl<'a> SlashCommand<'a> {
         // Most parser-owned commands split arguments on whitespace, so quotes
         // would silently produce wrong tokens. `/extensions` is the exception:
         // it forwards its raw argument string to a quote-aware tokenizer.
-        let supports_quoted_arguments = token == "/extensions";
+        let supports_quoted_arguments = matches!(token, "/extensions" | "/task");
         if parser_owned_command(token) && !supports_quoted_arguments && input.contains(['\'', '"'])
         {
             return Err(SlashParseError::QuotedArgumentsUnsupported);
@@ -114,6 +115,9 @@ impl<'a> SlashCommand<'a> {
             "/session" => Some(Self::Session(
                 input.strip_prefix("/session").unwrap_or_default().trim(),
             )),
+            "/task" => Some(Self::Task(
+                input.strip_prefix("/task").unwrap_or_default().trim(),
+            )),
             // Compatibility alias: `/new` routes to the same session parser and
             // dispatch as `/session new`. Stripping only the leading slash
             // keeps the `new` keyword (and any extra tokens) in the arguments,
@@ -168,6 +172,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/skills"
             | "/mcp"
             | "/session"
+            | "/task"
             | "/new"
             | "/resume"
             | "/recommendations"
@@ -301,6 +306,16 @@ mod tests {
                 ),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn task_goal_preserves_quoted_natural_language() {
+        match SlashCommand::parse(r#"/task update the "serde" dependency"#) {
+            Ok(Some(SlashCommand::Task(goal))) => {
+                assert_eq!(goal, r#"update the "serde" dependency"#)
+            }
+            _ => panic!("quoted Task goal did not parse"),
         }
     }
 

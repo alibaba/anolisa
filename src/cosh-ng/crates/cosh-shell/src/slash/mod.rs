@@ -25,3 +25,9 @@ pub(super) mod skills;
 #[cfg(test)]
 mod skills_tests;
 pub(super) mod status;
+pub(super) mod task;
+
+pub(crate) use task::{
+    pending_task_form_capture, pending_task_snapshot_capture, render_task_form_actions,
+    render_task_snapshot_actions, TaskFormState, TaskSnapshotState,
+};

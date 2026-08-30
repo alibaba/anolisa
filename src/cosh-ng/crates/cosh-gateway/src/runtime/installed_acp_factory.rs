@@ -137,10 +137,10 @@ impl fmt::Debug for ResolvedWorkspace {
     }
 }
 
-/// Maps one exact trusted target to one canonical local workspace.
+/// Maps a closed set of exact trusted targets to one canonical local workspace.
 #[derive(Clone)]
 pub struct TrustedWorkspaceResolver {
-    target: TargetRef,
+    targets: Vec<TargetRef>,
     workspace: ResolvedWorkspace,
 }
 
@@ -151,6 +151,23 @@ impl TrustedWorkspaceResolver {
     ///
     /// Rejects relative, unavailable, or non-directory workspace configuration.
     pub fn new(target: TargetRef, workspace: impl AsRef<Path>) -> Result<Self, ContractError> {
+        Self::new_for_targets([target], workspace)
+    }
+
+    /// Canonicalizes one workspace for a closed set of exact target identities.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty target set or relative, unavailable, or non-directory
+    /// workspace configuration.
+    pub fn new_for_targets(
+        targets: impl IntoIterator<Item = TargetRef>,
+        workspace: impl AsRef<Path>,
+    ) -> Result<Self, ContractError> {
+        let targets = targets.into_iter().collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Err(workspace_error());
+        }
         let configured = workspace.as_ref();
         if !configured.is_absolute() {
             return Err(workspace_error());
@@ -169,7 +186,7 @@ impl TrustedWorkspaceResolver {
             display_name: None,
         };
         Ok(Self {
-            target,
+            targets,
             workspace: ResolvedWorkspace {
                 directory,
                 reference,
@@ -183,7 +200,7 @@ impl TrustedWorkspaceResolver {
     ///
     /// Rejects target kind, authority, or identifier substitution.
     pub fn resolve(&self, target: &TargetRef) -> Result<ResolvedWorkspace, ContractError> {
-        if target == &self.target {
+        if self.targets.iter().any(|candidate| candidate == target) {
             Ok(self.workspace.clone())
         } else {
             Err(contract_error(
@@ -206,7 +223,7 @@ impl fmt::Debug for TrustedWorkspaceResolver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TrustedWorkspaceResolver")
-            .field("target", &self.target)
+            .field("targets", &self.targets)
             .field("workspace", &self.workspace)
             .finish()
     }
@@ -351,11 +368,11 @@ impl AgentRuntimePortFactory for InstalledAcpRuntimePortFactory {
         let config = AcpAgentRuntimeConfig {
             session: AcpSessionDriverConfig::new(
                 resolved.launch_spec(),
-                AcpV1ClientConfig::new(
+                resolved.bind_client_config(AcpV1ClientConfig::new(
                     "cosh-gateway",
                     env!("CARGO_PKG_VERSION"),
                     MAX_ACP_FRAME_BYTES,
-                ),
+                )),
                 resolved.workspace(),
             ),
             workspace: workspace.reference().clone(),

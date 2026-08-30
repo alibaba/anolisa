@@ -146,6 +146,11 @@ impl AcpAgentRuntime {
             .ok_or(AgentRuntimePortError::IdentityMismatch)?;
         let selected = match decision {
             RuntimePermissionDecision::ProviderNativeAllowOnce => pending.allow_once,
+            RuntimePermissionDecision::RuntimeNativeAllowOnce => {
+                return Err(AgentRuntimePortError::Unsupported {
+                    operation: "runtime-native permission decision",
+                });
+            }
             RuntimePermissionDecision::Deny { .. } => pending.reject_once,
         };
         let missing_one_shot = selected.is_none();
@@ -255,7 +260,19 @@ impl AcpAgentRuntime {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(AgentRuntimePortError::Transport);
+                    self.settle(AgentRuntimeEvent::TransportFailed {
+                        error: safe_error(
+                            "acp_transport_failed",
+                            ErrorCategory::Transport,
+                            false,
+                            "The ACP runtime transport failed",
+                        ),
+                    });
+                    return self
+                        .events
+                        .pop_front()
+                        .ok_or(AgentRuntimePortError::Terminal)
+                        .and_then(|event| self.deliver(event));
                 }
             }
         }
@@ -271,72 +288,46 @@ impl AcpAgentRuntime {
                 self.map_update(&update)
             }
             AcpV1Observation::PermissionRequested(request) => {
-                self.require_session(&request.session_id)?;
+                self.map_permission_requested(request)
+            }
+            AcpV1Observation::PromptCancelledWithPendingPermissions {
+                session_id,
+                request_ids,
+            } => {
+                self.require_session(&session_id)?;
                 let turn_id = self
                     .active_turn
-                    .clone()
+                    .take()
                     .ok_or(AgentRuntimePortError::Protocol)?;
-                let tool_call_id = request
-                    .tool_call
-                    .get("toolCallId")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or(AgentRuntimePortError::Protocol)?;
-                let mut tool_update = request.tool_call.clone();
-                tool_update
-                    .as_object_mut()
-                    .ok_or(AgentRuntimePortError::Protocol)?
-                    .insert(
-                        "sessionUpdate".to_owned(),
-                        serde_json::Value::String("tool_call_update".to_owned()),
-                    );
-                self.tools
-                    .observe(&request.session_id, &turn_id, &tool_update)
-                    .map_err(|_| AgentRuntimePortError::Protocol)?;
-                let tool_snapshot = self
-                    .tools
-                    .snapshot(&request.session_id, &turn_id, tool_call_id)
-                    .ok_or(AgentRuntimePortError::Protocol)?;
-                let mut canonical_request = request.clone();
-                canonical_request.tool_call = tool_snapshot.tool_call;
-                let context = AcpPermissionContext {
-                    actor: self.config.identity.actor.clone(),
-                    task_id: self.config.identity.task_id.clone(),
-                    run_id: self.config.identity.run_id.clone(),
-                };
-                let normalized = self.normalizer.normalize(&canonical_request, &context)?;
-                if normalized.task_id != context.task_id
-                    || normalized.run_id != context.run_id
-                    || normalized.actor != context.actor
-                    || self.permissions.contains_key(&normalized.request_id)
-                {
+                let mut abandoned = Vec::with_capacity(request_ids.len());
+                for provider_request_id in request_ids {
+                    let request_id = self
+                        .permissions
+                        .iter()
+                        .find_map(|(request_id, pending)| {
+                            (pending.acp_request_id == provider_request_id)
+                                .then(|| request_id.clone())
+                        })
+                        .ok_or(AgentRuntimePortError::IdentityMismatch)?;
+                    self.permissions.remove(&request_id);
+                    abandoned.push(request_id);
+                }
+                if !self.permissions.is_empty() {
                     return Err(AgentRuntimePortError::IdentityMismatch);
                 }
-                let allow_once = request
-                    .options
-                    .iter()
-                    .find(|o| o.kind == AcpV1PermissionOptionKind::AllowOnce)
-                    .map(|o| o.option_id.clone());
-                let reject_once = request
-                    .options
-                    .iter()
-                    .find(|o| o.kind == AcpV1PermissionOptionKind::RejectOnce)
-                    .map(|o| o.option_id.clone());
-                self.permissions.insert(
-                    normalized.request_id.clone(),
-                    PendingPermission {
-                        acp_request_id: request.request_id,
-                        allow_once,
-                        reject_once,
-                    },
-                );
-                Ok(Some(self.event(
-                    AgentRuntimeEvent::ExecutionPermissionRequested {
-                        turn_id,
-                        tool_use_id: Some(tool_snapshot.projection.tool_use_id),
-                        summary: tool_snapshot.projection.summary,
-                        request: normalized,
-                    },
-                )))
+                self.tools.release_turn(&session_id, &turn_id);
+                self.state = PortState::SessionOpen;
+                let abandoned_event =
+                    self.event(AgentRuntimeEvent::ExecutionPermissionsAbandoned {
+                        turn_id: turn_id.clone(),
+                        request_ids: abandoned,
+                    });
+                let cancelled = self.event(AgentRuntimeEvent::Completed {
+                    turn_id,
+                    outcome: TurnOutcome::Cancelled,
+                });
+                self.events.push_back(cancelled);
+                Ok(Some(abandoned_event))
             }
             AcpV1Observation::PromptFinished {
                 session_id,
@@ -430,6 +421,9 @@ impl AcpAgentRuntime {
                 })))
             }
             Some("tool_call" | "tool_call_update") => {
+                if !self.permissions.is_empty() {
+                    return Err(AgentRuntimePortError::Protocol);
+                }
                 let session_id = self
                     .provider_session
                     .clone()

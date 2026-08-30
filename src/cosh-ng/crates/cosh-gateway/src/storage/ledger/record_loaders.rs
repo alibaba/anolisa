@@ -80,7 +80,7 @@ fn load_brokered_request(
         .query_row(
             "SELECT approval_id, actor_id, task_id, run_id, request_json, operation_json,
                     typed_operation_digest, operation_digest, input_digest,
-                    target_identity_digest, runtime_fence_json, created_at_ms
+                    target_identity_digest, runtime_fence_json, provider_binding, created_at_ms
              FROM brokered_requests WHERE request_id=?1",
             params![request_id.as_str()],
             |row| {
@@ -96,7 +96,8 @@ fn load_brokered_request(
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
                     row.get::<_, String>(10)?,
-                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, i64>(12)?,
                 ))
             },
         )
@@ -109,6 +110,11 @@ fn load_brokered_request(
     let target_identity_digest = Digest::parse(row.9)
         .map_err(|_| corrupt("invalid brokered request target identity digest"))?;
     let runtime_fence = serde_json::from_str::<RuntimeExecutionFence>(&row.10)?;
+    let provider_binding = row
+        .11
+        .map(BoundedOpaque::new)
+        .transpose()
+        .map_err(|_| corrupt("invalid brokered provider binding"))?;
     if request.request_id != *request_id
         || request.actor.actor_id.as_str() != row.1
         || request.task_id.as_str() != row.2
@@ -127,8 +133,9 @@ fn load_brokered_request(
         typed_operation_digest,
         target_identity_digest,
         runtime_fence,
+        provider_binding,
         approval_id: row.0.map(|value| parse_id(&value)).transpose()?,
-        created_at_ms: unsigned(row.11, "brokered request creation")?,
+        created_at_ms: unsigned(row.12, "brokered request creation")?,
     })
 }
 
@@ -140,8 +147,8 @@ fn insert_brokered_request(
         "INSERT INTO brokered_requests(
              request_id, approval_id, actor_id, task_id, run_id, request_json,
              operation_json, typed_operation_digest, operation_digest, input_digest,
-             target_identity_digest, runtime_fence_json, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             target_identity_digest, runtime_fence_json, provider_binding, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             record.request.request_id.as_str(),
             record.approval_id.as_ref().map(ApprovalId::as_str),
@@ -155,6 +162,7 @@ fn insert_brokered_request(
             record.request.input_digest.as_str(),
             record.target_identity_digest.as_str(),
             serde_json::to_string(&record.runtime_fence)?,
+            record.provider_binding.as_ref().map(BoundedOpaque::as_str),
             integer(record.created_at_ms, "brokered request timestamp")?,
         ],
     )?;

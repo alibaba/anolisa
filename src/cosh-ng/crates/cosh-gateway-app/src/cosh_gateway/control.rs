@@ -26,21 +26,39 @@ pub(super) fn task(args: TaskArgs, reporter: &Reporter) -> Result<u8, CliError> 
     let socket = daemon_socket_path(args.socket.as_ref())?;
     let client = LocalGatewayClient::new(socket);
     let result = match args.command {
+        TaskCommand::Capabilities => client.capabilities(RequestId::new()),
         TaskCommand::Submit(command) => {
-            let request = SubmitTask {
+            let capabilities = match client
+                .capabilities(RequestId::new())
+                .map_err(|error| CliError::Daemon(error.to_string()))?
+            {
+                GatewayResult::Capabilities(capabilities) => capabilities,
+                _ => {
+                    return Err(CliError::Daemon(
+                        "Gateway returned an invalid capabilities response".to_owned(),
+                    ));
+                }
+            };
+            verify_expected_workspace(
+                command.expected_workspace_digest.as_deref(),
+                &capabilities.default_workspace,
+            )?;
+            let request = SubmitLaunch {
                 request_id: RequestId::new(),
                 idempotency_key: IdempotencyKey::new(command.idempotency_key)
                     .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-                intent: BoundedText::new(read_intent(command.intent_file.as_ref())?)
-                    .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-                target: task_only_target(),
-                runtime: RuntimeSelector {
-                    runtime: bounded_name(command.runtime)?,
-                    profile: Some(bounded_name(command.runtime_profile)?),
-                },
+                launch: TaskLaunchSpecV1::new(
+                    BoundedText::new(read_intent(command.intent_file.as_ref())?)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                    command.runtime.into(),
+                    capabilities.default_workspace,
+                    command.checkpoint.into(),
+                    command.approval_policy.into(),
+                ),
             };
-            client.submit(request)
+            client.submit_launch(request)
         }
+        TaskCommand::List(command) => client.list(RequestId::new(), command.limit),
         TaskCommand::Get(command) => client.get(RequestId::new(), parse_task(&command.task_id)?),
         TaskCommand::Events(command) => client.events(
             RequestId::new(),
@@ -97,18 +115,78 @@ pub(super) fn task(args: TaskArgs, reporter: &Reporter) -> Result<u8, CliError> 
                 expected_revision: command.expected_revision,
             })
         }
+        TaskCommand::Snapshot(command) => match command.command {
+            TaskSnapshotCommand::List(command) => {
+                client.task_snapshots(RequestId::new(), parse_task(&command.task_id)?)
+            }
+            TaskSnapshotCommand::Preview(command) => client.preview_task_snapshot(
+                RequestId::new(),
+                InspectTaskSnapshot {
+                    task_id: parse_task(&command.task_id)?,
+                    snapshot_id: CheckpointId::parse(&command.snapshot_id)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                },
+            ),
+            TaskSnapshotCommand::Diff(command) => client.diff_task_snapshot(
+                RequestId::new(),
+                InspectTaskSnapshot {
+                    task_id: parse_task(&command.task_id)?,
+                    snapshot_id: CheckpointId::parse(&command.snapshot_id)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                },
+            ),
+            TaskSnapshotCommand::Switch(command) => {
+                client.switch_task_snapshot(SwitchTaskSnapshot {
+                    request_id: RequestId::new(),
+                    idempotency_key: IdempotencyKey::new(command.idempotency_key)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                    task_id: parse_task(&command.task_id)?,
+                    snapshot_id: CheckpointId::parse(&command.snapshot_id)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                    preview_digest: Digest::parse(command.preview_digest)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                    expected_revision: command.expected_revision,
+                })
+            }
+        },
     }
     .map_err(|error| CliError::Daemon(error.to_string()))?;
     report_gateway_result(reporter, result)?;
     Ok(0)
 }
 
+pub(super) fn verify_expected_workspace(
+    expected: Option<&str>,
+    actual: &cosh_gateway_contracts::common::WorkspaceRef,
+) -> Result<(), CliError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = cosh_gateway_contracts::common::Digest::parse(expected)
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    if actual.scope_digest != expected {
+        return Err(CliError::Profile(
+            "Gateway canonical workspace changed after Task confirmation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn report_gateway_result(reporter: &Reporter, result: GatewayResult) -> Result<(), CliError> {
     match result {
         GatewayResult::Pong => reporter.event("daemon_pong", json!({})),
+        GatewayResult::Capabilities(capabilities) => reporter.event(
+            "task_capabilities",
+            serde_json::to_value(capabilities)
+                .map_err(|error| CliError::Daemon(error.to_string()))?,
+        ),
         GatewayResult::Task(task) => reporter.event(
             "task",
             serde_json::to_value(task).map_err(|error| CliError::Daemon(error.to_string()))?,
+        ),
+        GatewayResult::Tasks(tasks) => reporter.event(
+            "tasks",
+            serde_json::to_value(tasks).map_err(|error| CliError::Daemon(error.to_string()))?,
         ),
         GatewayResult::Events(events) => reporter.event(
             "task_events",
@@ -130,15 +208,19 @@ fn report_gateway_result(reporter: &Reporter, result: GatewayResult) -> Result<(
             "approval_resolved",
             serde_json::to_value(task).map_err(|error| CliError::Daemon(error.to_string()))?,
         ),
+        GatewayResult::TaskSnapshots(snapshots) => reporter.event(
+            "task_snapshots",
+            serde_json::to_value(snapshots).map_err(|error| CliError::Daemon(error.to_string()))?,
+        ),
+        GatewayResult::TaskSnapshotPreview(preview) => reporter.event(
+            "task_snapshot_preview",
+            serde_json::to_value(preview).map_err(|error| CliError::Daemon(error.to_string()))?,
+        ),
+        GatewayResult::TaskSnapshotSwitched(switched) => reporter.event(
+            "task_snapshot_switched",
+            serde_json::to_value(switched).map_err(|error| CliError::Daemon(error.to_string()))?,
+        ),
     }
-}
-
-fn bounded_name(value: String) -> Result<BoundedName, CliError> {
-    BoundedName::new(value).map_err(|error| CliError::InvalidInput(error.to_string()))
-}
-
-pub(super) fn task_only_target() -> TargetRef {
-    GatewayCapabilityProfile::task_only_v1().governed_target()
 }
 
 fn parse_task(value: &str) -> Result<TaskId, CliError> {

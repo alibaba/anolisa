@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-const PROTOCOL_VERSION: u64 = 1;
+const PROTOCOL_VERSION: u64 = 2;
 const REGEN_ENV: &str = "UPDATE_WIRE_GOLDENS";
 
 #[derive(Serialize, Deserialize)]
@@ -86,6 +86,16 @@ fn request_case_name(value: &local::WsCkptRequest) -> &'static str {
         local::WsCkptRequest::ResetWorkspacePolicy { .. } => "request/reset_workspace_policy",
         local::WsCkptRequest::PatchWorkspacePolicy { .. } => "request/patch_workspace_policy",
         local::WsCkptRequest::RollbackPreview { .. } => "request/rollback_preview",
+        local::WsCkptRequest::WorkspaceIdentityV2 { .. } => "request/workspace_identity_v2",
+        local::WsCkptRequest::GuardedCheckpointV2 { .. } => "request/guarded_checkpoint_v2",
+        local::WsCkptRequest::CheckpointEvidenceV2 { .. } => "request/checkpoint_evidence_v2",
+        local::WsCkptRequest::GuardedRollbackPreviewV2 { .. } => {
+            "request/guarded_rollback_preview_v2"
+        }
+        local::WsCkptRequest::GuardedRollbackV2 { .. } => "request/guarded_rollback_v2",
+        local::WsCkptRequest::GuardedRollbackEvidenceV2 { .. } => {
+            "request/guarded_rollback_evidence_v2"
+        }
     }
 }
 
@@ -126,6 +136,27 @@ fn response_case_name(value: &local::WsCkptResponse) -> &'static str {
         local::WsCkptResponse::WorkspacePolicyOk { .. } => "response/workspace_policy_ok",
         local::WsCkptResponse::ConfigOverviewOk { .. } => "response/config_overview_ok",
         local::WsCkptResponse::RollbackPreviewOk { .. } => "response/rollback_preview_ok",
+        local::WsCkptResponse::WorkspaceIdentityV2Ok { .. } => "response/workspace_identity_v2_ok",
+        local::WsCkptResponse::GuardedCheckpointV2Ok { .. } => "response/guarded_checkpoint_v2_ok",
+        local::WsCkptResponse::CheckpointEvidenceV2Ok { .. } => {
+            "response/checkpoint_evidence_v2_ok"
+        }
+        local::WsCkptResponse::GuardedCheckpointV2Rejected { .. } => {
+            "response/guarded_checkpoint_v2_rejected"
+        }
+        local::WsCkptResponse::GuardedRollbackPreviewV2Ok { .. } => {
+            "response/guarded_rollback_preview_v2_ok"
+        }
+        local::WsCkptResponse::GuardedRollbackV2Ok { .. } => "response/guarded_rollback_v2_ok",
+        local::WsCkptResponse::GuardedRollbackV2Uncertain { .. } => {
+            "response/guarded_rollback_v2_uncertain"
+        }
+        local::WsCkptResponse::GuardedRollbackEvidenceV2Ok { .. } => {
+            "response/guarded_rollback_evidence_v2_ok"
+        }
+        local::WsCkptResponse::GuardedRollbackV2Rejected { .. } => {
+            "response/guarded_rollback_v2_rejected"
+        }
     }
 }
 
@@ -193,6 +224,44 @@ fn request_cases() -> Vec<(&'static str, local::WsCkptRequest)> {
             workspace: "/ws".into(),
             to: None,
             num_ancestors: Some(3),
+        },
+        local::WsCkptRequest::WorkspaceIdentityV2 {
+            registration_path: "/ws".into(),
+        },
+        local::WsCkptRequest::GuardedCheckpointV2 {
+            ws_id: "ws-abcdef".into(),
+            expected_generation: local::WorkspaceGenerationTokenV2::from_bytes([0x11; 32]),
+            checkpoint_id: "ckp_1".into(),
+            operation_digest: [0x22; 32],
+            message: Some("message".into()),
+            metadata: Some("{\"k\":1}".into()),
+            pin: true,
+        },
+        local::WsCkptRequest::CheckpointEvidenceV2 {
+            ws_id: "ws-abcdef".into(),
+            expected_generation: local::WorkspaceGenerationTokenV2::from_bytes([0x11; 32]),
+            checkpoint_id: "ckp_1".into(),
+            operation_digest: [0x22; 32],
+        },
+        local::WsCkptRequest::GuardedRollbackPreviewV2 {
+            registered_path: "/ws".into(),
+            ws_id: "ws-abcdef".into(),
+            expected_generation: local::WorkspaceGenerationTokenV2::from_bytes([0x11; 32]),
+            target_snapshot_id: "ckp_1".into(),
+        },
+        local::WsCkptRequest::GuardedRollbackV2 {
+            registered_path: "/ws".into(),
+            ws_id: "ws-abcdef".into(),
+            expected_generation: local::WorkspaceGenerationTokenV2::from_bytes([0x11; 32]),
+            target_snapshot_id: "ckp_1".into(),
+            expected_diff_digest: [0x33; 32],
+            operation_id: "ckp_2".into(),
+            operation_digest: [0x44; 32],
+        },
+        local::WsCkptRequest::GuardedRollbackEvidenceV2 {
+            ws_id: "ws-abcdef".into(),
+            operation_id: "ckp_2".into(),
+            operation_digest: [0x44; 32],
         },
     ];
     samples
@@ -277,6 +346,36 @@ fn local_config() -> local::ConfigReport {
     }
 }
 
+fn guarded_evidence() -> local::GuardedCheckpointEvidenceV2 {
+    local::GuardedCheckpointEvidenceV2 {
+        ws_id: "ws-abcdef".into(),
+        registered_path: "/ws".into(),
+        generation: local::WorkspaceGenerationTokenV2::from_bytes([0x33; 32]),
+        checkpoint_id: "ckp_1".into(),
+        operation_digest: [0x44; 32],
+        caller_uid: 1000,
+        outcome: local::GuardedCheckpointOutcomeV2::Created {
+            snapshot_id: "ckp_1".into(),
+        },
+    }
+}
+
+fn guarded_rollback_evidence(
+    outcome: local::GuardedRollbackOutcomeV2,
+) -> local::GuardedRollbackEvidenceV2 {
+    local::GuardedRollbackEvidenceV2 {
+        ws_id: "ws-abcdef".into(),
+        registered_path: "/ws".into(),
+        expected_generation: local::WorkspaceGenerationTokenV2::from_bytes([0x11; 32]),
+        target_snapshot_id: "ckp_1".into(),
+        expected_diff_digest: [0x33; 32],
+        operation_id: "ckp_2".into(),
+        operation_digest: [0x44; 32],
+        caller_uid: 1000,
+        outcome,
+    }
+}
+
 fn response_cases() -> Vec<(&'static str, local::WsCkptResponse)> {
     let samples = vec![
         local::WsCkptResponse::InitOk { ws_id: "id".into() },
@@ -347,11 +446,138 @@ fn response_cases() -> Vec<(&'static str, local::WsCkptResponse)> {
             to: "s1".into(),
             changes: vec![local_change()],
         },
+        local::WsCkptResponse::WorkspaceIdentityV2Ok {
+            protocol_version: local::GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+            ws_id: "ws-abcdef".into(),
+            registered_path: "/ws".into(),
+            generation: local::WorkspaceGenerationTokenV2::from_bytes([0x33; 32]),
+        },
+        local::WsCkptResponse::GuardedCheckpointV2Ok {
+            evidence: guarded_evidence(),
+        },
+        local::WsCkptResponse::CheckpointEvidenceV2Ok {
+            evidence: Some(guarded_evidence()),
+        },
+        local::WsCkptResponse::GuardedCheckpointV2Rejected {
+            code: local::GuardedCheckpointRejectionCodeV2::GenerationMismatch,
+            message: "generation mismatch".into(),
+        },
+        local::WsCkptResponse::GuardedRollbackPreviewV2Ok {
+            protocol_version: local::GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+            registered_path: "/ws".into(),
+            ws_id: "ws-abcdef".into(),
+            generation: local::WorkspaceGenerationTokenV2::from_bytes([0x11; 32]),
+            target_snapshot_id: "ckp_1".into(),
+            diff_digest: [0x33; 32],
+            changes: vec![local_change()],
+            caller_uid: 1000,
+        },
+        local::WsCkptResponse::GuardedRollbackV2Ok {
+            evidence: guarded_rollback_evidence(local::GuardedRollbackOutcomeV2::Succeeded {
+                resulting_generation: local::WorkspaceGenerationTokenV2::from_bytes([0x55; 32]),
+            }),
+        },
+        local::WsCkptResponse::GuardedRollbackV2Uncertain {
+            evidence: guarded_rollback_evidence(local::GuardedRollbackOutcomeV2::Unknown {
+                reason: "completion unproven".into(),
+            }),
+        },
+        local::WsCkptResponse::GuardedRollbackEvidenceV2Ok {
+            evidence: Some(guarded_rollback_evidence(
+                local::GuardedRollbackOutcomeV2::Started,
+            )),
+        },
+        local::WsCkptResponse::GuardedRollbackV2Rejected {
+            code: local::GuardedRollbackRejectionCodeV2::DiffMismatch,
+            message: "live diff changed".into(),
+        },
     ];
     samples
         .into_iter()
         .map(|value| (response_case_name(&value), value))
         .collect()
+}
+
+fn rejection_cases() -> Vec<(&'static str, local::GuardedCheckpointRejectionCodeV2)> {
+    use local::GuardedCheckpointRejectionCodeV2 as Code;
+    vec![
+        ("rejection/daemon_not_ready", Code::DaemonNotReady),
+        (
+            "rejection/peer_credentials_unavailable",
+            Code::PeerCredentialsUnavailable,
+        ),
+        (
+            "rejection/invalid_registration_path",
+            Code::InvalidRegistrationPath,
+        ),
+        ("rejection/invalid_workspace_id", Code::InvalidWorkspaceId),
+        ("rejection/invalid_checkpoint_id", Code::InvalidCheckpointId),
+        ("rejection/invalid_metadata", Code::InvalidMetadata),
+        ("rejection/workspace_not_found", Code::WorkspaceNotFound),
+        ("rejection/generation_mismatch", Code::GenerationMismatch),
+        ("rejection/operation_conflict", Code::OperationConflict),
+        ("rejection/write_lock_conflict", Code::WriteLockConflict),
+        ("rejection/caller_mismatch", Code::CallerMismatch),
+        (
+            "rejection/evidence_capacity_reached",
+            Code::EvidenceCapacityReached,
+        ),
+    ]
+}
+
+fn rollback_rejection_cases() -> Vec<(&'static str, local::GuardedRollbackRejectionCodeV2)> {
+    use local::GuardedRollbackRejectionCodeV2 as Code;
+    vec![
+        ("rollback_rejection/daemon_not_ready", Code::DaemonNotReady),
+        (
+            "rollback_rejection/peer_credentials_unavailable",
+            Code::PeerCredentialsUnavailable,
+        ),
+        (
+            "rollback_rejection/invalid_registration_path",
+            Code::InvalidRegistrationPath,
+        ),
+        (
+            "rollback_rejection/invalid_workspace_id",
+            Code::InvalidWorkspaceId,
+        ),
+        (
+            "rollback_rejection/invalid_snapshot_id",
+            Code::InvalidSnapshotId,
+        ),
+        (
+            "rollback_rejection/invalid_operation_id",
+            Code::InvalidOperationId,
+        ),
+        (
+            "rollback_rejection/workspace_not_found",
+            Code::WorkspaceNotFound,
+        ),
+        (
+            "rollback_rejection/snapshot_not_found",
+            Code::SnapshotNotFound,
+        ),
+        (
+            "rollback_rejection/generation_mismatch",
+            Code::GenerationMismatch,
+        ),
+        ("rollback_rejection/diff_mismatch", Code::DiffMismatch),
+        (
+            "rollback_rejection/operation_conflict",
+            Code::OperationConflict,
+        ),
+        (
+            "rollback_rejection/write_lock_conflict",
+            Code::WriteLockConflict,
+        ),
+        ("rollback_rejection/caller_mismatch", Code::CallerMismatch),
+        (
+            "rollback_rejection/evidence_capacity_reached",
+            Code::EvidenceCapacityReached,
+        ),
+        ("rollback_rejection/cwd_occupied", Code::CwdOccupied),
+        ("rollback_rejection/cwd_scan_failed", Code::CwdScanFailed),
+    ]
 }
 
 fn encode_cases<T: Serialize>(cases: &[(&'static str, T)]) -> Vec<FixtureCase> {
@@ -392,10 +618,14 @@ fn checkpoint_wire_matches_golden_fixture() {
     let requests = request_cases();
     let errors = error_cases();
     let responses = response_cases();
+    let rejections = rejection_cases();
+    let rollback_rejections = rollback_rejection_cases();
 
     let mut expected = encode_cases(&requests);
     expected.extend(encode_cases(&errors));
     expected.extend(encode_cases(&responses));
+    expected.extend(encode_cases(&rejections));
+    expected.extend(encode_cases(&rollback_rejections));
 
     let unique: BTreeSet<&str> = expected.iter().map(|case| case.name.as_str()).collect();
     assert_eq!(unique.len(), expected.len(), "duplicate case names");
@@ -449,5 +679,11 @@ fn checkpoint_wire_matches_golden_fixture() {
     }
     for (name, _) in &responses {
         assert_decode_reencode::<local::WsCkptResponse>(name, fixture_hex(name));
+    }
+    for (name, _) in &rejections {
+        assert_decode_reencode::<local::GuardedCheckpointRejectionCodeV2>(name, fixture_hex(name));
+    }
+    for (name, _) in &rollback_rejections {
+        assert_decode_reencode::<local::GuardedRollbackRejectionCodeV2>(name, fixture_hex(name));
     }
 }

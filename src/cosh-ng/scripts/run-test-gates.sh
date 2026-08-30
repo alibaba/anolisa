@@ -115,7 +115,10 @@ run_raw_packaging() {
     packaging/raw/package.sh \
     packaging/raw/assets/bin/cosh \
     packaging/raw/assets/bin/cosh-switch \
+    scripts/managed-task-dev.sh \
+    tests/test-managed-task-dev.sh \
     tests/test-package-raw.sh
+  bash tests/test-managed-task-dev.sh
   bash tests/test-package-raw.sh
 }
 

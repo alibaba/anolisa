@@ -1,5 +1,22 @@
 impl<F: RuntimeFactory> TaskScheduler<F> {
-    /// Resolves the only provider-native approval currently held by this worker.
+    /// Resolves an approval only when its Task binding matches the caller.
+    pub fn resolve_approval_for_task(
+        &mut self,
+        actor_id: &ActorId,
+        idempotency_key: IdempotencyKey,
+        task_id: &TaskId,
+        approval_id: &ApprovalId,
+        decision: ApprovalDecision,
+        now_ms: u64,
+    ) -> Result<SchedulerTick, GatewayDaemonError> {
+        let approval = self.coordinator.store.load_approval_record(approval_id)?;
+        if approval.actor_id != *actor_id || approval.task_id != *task_id {
+            return Err(GatewayDaemonError::Unauthorized);
+        }
+        self.resolve_approval(actor_id, idempotency_key, approval_id, decision, now_ms)
+    }
+
+    /// Resolves the only Runtime Permission approval currently held by this worker.
     pub fn resolve_approval(
         &mut self,
         actor_id: &ActorId,
@@ -27,9 +44,22 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         let expected_revision = approval_resolution_revision(&approval, decision)?;
         let permission = approval.permission.clone().ok_or_else(|| {
             GatewayDaemonError::Protocol(
-                "approval is not bound to a provider-native callback".to_owned(),
+                "approval is not bound to a Runtime Permission callback".to_owned(),
             )
         })?;
+        let allow_decision = match (
+            permission.callback.is_some(),
+            permission.core_callback.is_some(),
+        ) {
+            (true, false) => RuntimePermissionDecision::ProviderNativeAllowOnce,
+            (false, true) => RuntimePermissionDecision::RuntimeNativeAllowOnce,
+            _ => {
+                return Err(GatewayDaemonError::Protocol(
+                    "live Runtime Permission must have exactly one callback binding".to_owned(),
+                ))
+            }
+        };
+        let expects_provider_denial = permission.callback.is_some();
         let resolution_command = LedgerCommand {
             actor_id: actor_id.clone(),
             idempotency_key,
@@ -76,13 +106,15 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             {
                 return Err(GatewayDaemonError::Unauthorized);
             }
-            if dispatch.state == ProviderPermissionDispatchState::Delivered {
+            if dispatch.state == ProviderPermissionDispatchState::Written {
                 let task = self.coordinator.store.load_task(&approval.task_id)?;
                 return Ok(SchedulerTick::Progressed(TaskView::from(&task)));
             }
             if matches!(
                 dispatch.state,
-                ProviderPermissionDispatchState::Started | ProviderPermissionDispatchState::Unknown
+                ProviderPermissionDispatchState::WriteStarted
+                    | ProviderPermissionDispatchState::Abandoned
+                    | ProviderPermissionDispatchState::Unknown
             ) {
                 self.coordinator
                     .store
@@ -146,6 +178,9 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 "approval is no longer resolvable".to_owned(),
             ));
         }
+        if decision == ApprovalDecision::Approve {
+            self.ensure_approval_checkpoint_barrier(&approval, now_ms)?;
+        }
         let prepared = self.coordinator.store.resolve_provider_permission(
             &resolution_command,
             approval_id,
@@ -170,11 +205,13 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             return Err(GatewayDaemonError::Unauthorized);
         }
         match prepared.state {
-            ProviderPermissionDispatchState::Delivered => {
+            ProviderPermissionDispatchState::Written => {
                 let task = self.coordinator.store.load_task(&task_id)?;
                 return Ok(SchedulerTick::Progressed(TaskView::from(&task)));
             }
-            ProviderPermissionDispatchState::Started | ProviderPermissionDispatchState::Unknown => {
+            ProviderPermissionDispatchState::WriteStarted
+            | ProviderPermissionDispatchState::Abandoned
+            | ProviderPermissionDispatchState::Unknown => {
                 return self.fail_unknown_provider_dispatch(
                     runtime_lost_error(
                         "provider_permission_replay_unknown",
@@ -186,15 +223,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             ProviderPermissionDispatchState::Prepared => {}
         }
         let task = self.coordinator.store.load_task(&task_id)?;
-        let view = if task.state() == TaskState::WaitingApproval {
-            self.coordinator.record_approval_resolved(
-                &lease,
-                approval_id,
-                decision,
-                prepared.permission.event_sequence,
-                now_ms,
-            )?
-        } else if task.state() == TaskState::Running {
+        let view = if task.state() == TaskState::Running {
             TaskView::from(&task)
         } else {
             return self.fail_unknown_provider_dispatch(
@@ -225,10 +254,10 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             }
         };
         let runtime_decision = match decision {
-            ApprovalDecision::Approve => RuntimePermissionDecision::ProviderNativeAllowOnce,
+            ApprovalDecision::Approve => allow_decision,
             ApprovalDecision::Deny => RuntimePermissionDecision::Deny {
                 code: DenialCode::ApprovalDenied,
-                safe_message: BoundedText::new("The provider-native operation was denied")
+                safe_message: BoundedText::new("The Runtime operation was denied")
                     .unwrap_or_else(|_| unreachable!()),
             },
         };
@@ -264,10 +293,16 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 dispatched_at_ms,
             );
         }
-        self.active
-            .as_mut()
-            .ok_or_else(no_active_run)?
-            .pending_permission = None;
+        let active = self.active.as_mut().ok_or_else(no_active_run)?;
+        active.pending_permission = None;
+        active.expected_provider_terminal = match (decision, expects_provider_denial) {
+            (ApprovalDecision::Deny, true) => Some(ExpectedProviderTerminal::Denied {
+                approval_id: approval_id.clone(),
+                permission,
+            }),
+            (ApprovalDecision::Deny | ApprovalDecision::Approve, false)
+            | (ApprovalDecision::Approve, true) => None,
+        };
         Ok(SchedulerTick::Progressed(view))
     }
 
@@ -302,5 +337,4 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         }
         self.finish_failed(error, refreshed_now_ms(now_ms)?)
     }
-
 }

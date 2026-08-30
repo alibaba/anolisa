@@ -333,6 +333,7 @@ fn fixture() -> Fixture {
             }),
             &permit.target_identity_digest,
             &permit.runtime_fence,
+            None,
         )
         .unwrap();
     store

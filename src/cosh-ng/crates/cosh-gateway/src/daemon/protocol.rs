@@ -1,19 +1,4 @@
-/// Configuration for one per-user local Gateway daemon.
-#[derive(Debug, Clone)]
-pub struct GatewayDaemonConfig {
-    /// Absolute Unix socket path inside a private directory.
-    pub socket_path: PathBuf,
-    /// Absolute SQLite state path.
-    pub database_path: PathBuf,
-    /// Durable identity shared by events in this database.
-    pub installation_id: Option<InstallationId>,
-    /// Closed capability profile selected by trusted daemon configuration.
-    pub capability_profile: GatewayCapabilityProfile,
-    /// Canonical workspace projection resolved from trusted daemon config.
-    pub workspace: WorkspaceRef,
-    /// Exact installed Runtime kind and profile admitted by this daemon instance.
-    pub runtime: RuntimeSelector,
-}
+include!("protocol/launch.rs");
 
 /// Validated fields used to create and queue one Task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +15,18 @@ pub struct SubmitTask {
     pub target: TargetRef,
     /// Runtime selected for the first queued Run.
     pub runtime: RuntimeSelector,
+}
+
+/// Validated fields used to launch one catalog-selected durable Task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitLaunch {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Strict versioned Task launch data.
+    pub launch: TaskLaunchSpecV1,
 }
 
 /// Validated fields used to request Task cancellation.
@@ -96,6 +93,99 @@ pub struct ResolveApproval {
     pub decision: ApprovalDecision,
 }
 
+/// Approval resolution whose Task binding is checked before mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveApprovalForTask {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Task that must own the approval.
+    pub task_id: TaskId,
+    /// Durable approval awaiting this decision.
+    pub approval_id: ApprovalId,
+    /// Human decision dispatched once to the bound operation.
+    pub decision: ApprovalDecision,
+}
+
+/// Exact Task-owned snapshot selected for a read-only operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectTaskSnapshot {
+    /// Owning managed Task.
+    pub task_id: TaskId,
+    /// Complete checkpoint identity; prefixes are rejected by parsing.
+    pub snapshot_id: CheckpointId,
+}
+
+/// Recovery-protected switch to one exact Task-owned snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchTaskSnapshot {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Owning managed Task.
+    pub task_id: TaskId,
+    /// Complete Task-owned target checkpoint.
+    pub snapshot_id: CheckpointId,
+    /// Preview digest displayed during the caller's confirmation step.
+    pub preview_digest: Digest,
+    /// Rejects a switch if the Task projection changed after preview.
+    pub expected_revision: u64,
+}
+
+/// Task-scoped list of proven-created checkpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSnapshotList {
+    /// Owning managed Task.
+    pub task_id: TaskId,
+    /// Current Task lifecycle state.
+    pub state: TaskState,
+    /// Current Task revision.
+    pub revision: u64,
+    /// Canonical admitted workspace.
+    pub workspace: WorkspaceRef,
+    /// Checkpoints in durable creation order.
+    pub snapshots: Vec<TaskSnapshotView>,
+}
+
+/// Read-only preview of one exact Task-owned checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSnapshotPreview {
+    /// Owning managed Task.
+    pub task_id: TaskId,
+    /// Current Task lifecycle state.
+    pub state: TaskState,
+    /// Current Task revision.
+    pub revision: u64,
+    /// Canonical admitted workspace.
+    pub workspace: WorkspaceRef,
+    /// Exact target checkpoint.
+    pub snapshot_id: CheckpointId,
+    /// Ordered provider changes against the live workspace.
+    pub changes: Vec<TaskSnapshotChange>,
+    /// Digest that must be confirmed before switching.
+    pub preview_digest: Digest,
+}
+
+/// Durable result of one recovery-protected Task snapshot switch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSnapshotSwitchView {
+    /// Owning managed Task.
+    pub task_id: TaskId,
+    /// Exact selected target.
+    pub snapshot_id: CheckpointId,
+    /// Recovery point created immediately before the switch.
+    pub recovery_snapshot_id: CheckpointId,
+    /// Provider head replaced by the switch.
+    pub from: BoundedOpaque,
+    /// Exact provider target returned after the switch.
+    pub to: CheckpointId,
+}
+
 /// Safe Task projection returned to an authorized local client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
@@ -109,6 +199,12 @@ pub struct TaskView {
     pub active_run_id: Option<RunId>,
     /// Immutable governed target.
     pub target: TargetRef,
+    /// Safe launch choices for Tasks submitted through the launch API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<TaskLaunchDescriptorV1>,
+    /// Honest pre-Runtime baseline state, when checkpointing was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<PreRuntimeBaselineView>,
 }
 
 impl From<&TaskAggregate> for TaskView {
@@ -119,6 +215,8 @@ impl From<&TaskAggregate> for TaskView {
             state: task.state(),
             active_run_id: task.active_run_id().cloned(),
             target: task.target().clone(),
+            launch: None,
+            baseline: None,
         }
     }
 }
@@ -136,14 +234,25 @@ pub struct TaskEventPage {
     pub has_more: bool,
 }
 
+/// Bounded newest-first page of Tasks owned by the authenticated local actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskListPage {
+    /// Authorized Task projections ordered by durable update time, then ID.
+    pub tasks: Vec<TaskView>,
+}
+
 /// Successful local Gateway response payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum GatewayResult {
     /// Daemon accepted an authenticated ping.
     Pong,
+    /// Safe Runtime, workspace, checkpoint, and authority capabilities.
+    Capabilities(GatewayCapabilities),
     /// Current authorized Task projection.
     Task(TaskView),
+    /// Bounded authorized Task projections.
+    Tasks(TaskListPage),
     /// Bounded immutable event page.
     Events(TaskEventPage),
     /// Projection after a cancellation commit or replay.
@@ -154,6 +263,12 @@ pub enum GatewayResult {
     Retried(TaskView),
     /// Projection after an input response was durably appended and dispatched.
     InputAppended(TaskView),
+    /// Proven-created checkpoints owned by one authorized Task.
+    TaskSnapshots(TaskSnapshotList),
+    /// Read-only preview or diff of one Task-owned checkpoint.
+    TaskSnapshotPreview(TaskSnapshotPreview),
+    /// Recovery-protected Task snapshot switch result.
+    TaskSnapshotSwitched(TaskSnapshotSwitchView),
 }
 
 /// Local daemon or client failure.
@@ -209,10 +324,24 @@ enum GatewayRequest {
         #[serde(flatten)]
         request: SubmitTask,
     },
+    SubmitLaunch {
+        api_version: String,
+        #[serde(flatten)]
+        request: SubmitLaunch,
+    },
+    Capabilities {
+        api_version: String,
+        request_id: RequestId,
+    },
     Get {
         api_version: String,
         request_id: RequestId,
         task_id: TaskId,
+    },
+    List {
+        api_version: String,
+        request_id: RequestId,
+        limit: u16,
     },
     Events {
         api_version: String,
@@ -231,6 +360,11 @@ enum GatewayRequest {
         #[serde(flatten)]
         request: ResolveApproval,
     },
+    ResolveApprovalForTask {
+        api_version: String,
+        #[serde(flatten)]
+        request: ResolveApprovalForTask,
+    },
     Retry {
         api_version: String,
         #[serde(flatten)]
@@ -241,19 +375,49 @@ enum GatewayRequest {
         #[serde(flatten)]
         request: AppendTaskInput,
     },
+    ListTaskSnapshots {
+        api_version: String,
+        request_id: RequestId,
+        task_id: TaskId,
+    },
+    PreviewTaskSnapshot {
+        api_version: String,
+        request_id: RequestId,
+        #[serde(flatten)]
+        request: InspectTaskSnapshot,
+    },
+    DiffTaskSnapshot {
+        api_version: String,
+        request_id: RequestId,
+        #[serde(flatten)]
+        request: InspectTaskSnapshot,
+    },
+    SwitchTaskSnapshot {
+        api_version: String,
+        #[serde(flatten)]
+        request: SwitchTaskSnapshot,
+    },
 }
 
 impl GatewayRequest {
     fn request_id(&self) -> &RequestId {
         match self {
             Self::Ping { request_id, .. }
+            | Self::Capabilities { request_id, .. }
             | Self::Get { request_id, .. }
+            | Self::List { request_id, .. }
             | Self::Events { request_id, .. } => request_id,
             Self::Submit { request, .. } => &request.request_id,
+            Self::SubmitLaunch { request, .. } => &request.request_id,
             Self::Cancel { request, .. } => &request.request_id,
             Self::Retry { request, .. } => &request.request_id,
             Self::ResolveApproval { request, .. } => &request.request_id,
+            Self::ResolveApprovalForTask { request, .. } => &request.request_id,
             Self::AppendInput { request, .. } => &request.request_id,
+            Self::ListTaskSnapshots { request_id, .. }
+            | Self::PreviewTaskSnapshot { request_id, .. }
+            | Self::DiffTaskSnapshot { request_id, .. } => request_id,
+            Self::SwitchTaskSnapshot { request, .. } => &request.request_id,
         }
     }
 
@@ -261,12 +425,20 @@ impl GatewayRequest {
         match self {
             Self::Ping { api_version, .. }
             | Self::Submit { api_version, .. }
+            | Self::SubmitLaunch { api_version, .. }
+            | Self::Capabilities { api_version, .. }
             | Self::Get { api_version, .. }
+            | Self::List { api_version, .. }
             | Self::Events { api_version, .. }
             | Self::Cancel { api_version, .. }
             | Self::Retry { api_version, .. }
             | Self::AppendInput { api_version, .. }
             | Self::ResolveApproval { api_version, .. } => api_version,
+            Self::ResolveApprovalForTask { api_version, .. }
+            | Self::ListTaskSnapshots { api_version, .. }
+            | Self::PreviewTaskSnapshot { api_version, .. }
+            | Self::DiffTaskSnapshot { api_version, .. }
+            | Self::SwitchTaskSnapshot { api_version, .. } => api_version,
         }
     }
 }
@@ -282,7 +454,7 @@ struct GatewayResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum GatewayResponseOutcome {
-    Ok { result: GatewayResult },
+    Ok { result: Box<GatewayResult> },
     Error { error: GatewayErrorBody },
 }
 

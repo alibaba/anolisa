@@ -5,13 +5,11 @@ pub struct GatewayDaemon {
     socket_path: PathBuf,
     socket_identity: (u64, u64),
     owner_uid: u32,
-    capability_profile: GatewayCapabilityProfile,
-    admitted_target: TargetRef,
-    admitted_workspace: WorkspaceRef,
-    admitted_runtime: RuntimeSelector,
+    launch_catalog: TaskLaunchCatalog,
     database_path: PathBuf,
     scheduler: Option<TaskScheduler<Box<dyn RuntimeFactory>>>,
     runtime_containment: Option<VerifiedRuntimeContainment>,
+    task_snapshot_driver: Option<Box<dyn TaskSnapshotDriver>>,
 }
 
 impl GatewayDaemon {
@@ -21,21 +19,13 @@ impl GatewayDaemon {
     ///
     /// Returns a fail-closed path, storage, socket, or already-running error.
     pub fn bind(config: GatewayDaemonConfig) -> Result<Self, GatewayDaemonError> {
-        let admitted_target = config.capability_profile.governed_target();
-        if config.capability_profile != GatewayCapabilityProfile::task_only_v1()
-            || !supported_daemon_runtime(&config.runtime)
-        {
-            return Err(GatewayDaemonError::Protocol(
-                "daemon capability profile or Runtime selector is not supported".to_owned(),
-            ));
-        }
         let owner_uid = Uid::effective().as_raw();
         prepare_socket_path(&config.socket_path, owner_uid)?;
         let database_path = config.database_path.clone();
-        let coordinator = TaskCoordinator::open_for_capability_profile(
+        let coordinator = TaskCoordinator::open_for_launch_catalog(
             &database_path,
             config.installation_id,
-            config.capability_profile,
+            config.launch_catalog.clone(),
         )?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
@@ -47,13 +37,11 @@ impl GatewayDaemon {
             socket_path: config.socket_path,
             socket_identity: (metadata.dev(), metadata.ino()),
             owner_uid,
-            capability_profile: config.capability_profile,
-            admitted_target,
-            admitted_workspace: config.workspace,
-            admitted_runtime: config.runtime,
+            launch_catalog: config.launch_catalog,
             database_path,
             scheduler: None,
             runtime_containment: None,
+            task_snapshot_driver: None,
         })
     }
 
@@ -116,7 +104,9 @@ impl GatewayDaemon {
             Ok(result) => GatewayResponse {
                 api_version: GATEWAY_API_VERSION.to_owned(),
                 request_id: Some(request_id),
-                outcome: GatewayResponseOutcome::Ok { result },
+                outcome: GatewayResponseOutcome::Ok {
+                    result: Box::new(result),
+                },
             },
             Err(error) => error_response(Some(request_id), &error),
         };
@@ -129,26 +119,23 @@ impl GatewayDaemon {
         request: GatewayRequest,
     ) -> Result<GatewayResult, GatewayDaemonError> {
         let admission = TaskAdmission {
-            target: &self.admitted_target,
-            workspace: &self.admitted_workspace,
-            runtime: &self.admitted_runtime,
+            catalog: &self.launch_catalog,
         };
         let mut ports = DaemonTaskPorts {
             coordinator: &mut self.coordinator,
             scheduler: &mut self.scheduler,
+            task_snapshot_driver: &mut self.task_snapshot_driver,
         };
         handler::dispatch(actor, request, admission, &mut ports)
     }
 }
 
-fn supported_daemon_runtime(runtime: &RuntimeSelector) -> bool {
-    matches!(
-        (
-            runtime.runtime.as_str(),
-            runtime.profile.as_ref().map(BoundedName::as_str)
-        ),
-        ("core", Some("gateway-brokered-v1"))
-    )
+#[cfg(test)]
+fn supported_daemon_runtime(
+    profile: GatewayCapabilityProfile,
+    runtime: &RuntimeSelector,
+) -> bool {
+    runtime_matches_capability_profile(profile, runtime)
 }
 
 impl Drop for GatewayDaemon {

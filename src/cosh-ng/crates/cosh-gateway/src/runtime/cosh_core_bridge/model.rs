@@ -81,6 +81,22 @@ impl CoshCoreBridgeConfig {
         self.brokered_context = Some(context);
         self
     }
+
+    /// Selects the fail-closed Gateway-brokered checkpoint profile.
+    #[must_use]
+    pub fn gateway_brokered_checkpoint(mut self, context: CoshCoreBrokeredContext) -> Self {
+        self.execution_profile = CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1;
+        self.brokered_context = Some(context);
+        self
+    }
+
+    /// Selects the fail-closed Gateway-brokered workspace-write profile.
+    #[must_use]
+    pub fn gateway_brokered_workspace_write(mut self, context: CoshCoreBrokeredContext) -> Self {
+        self.execution_profile = CoshCoreExecutionProfile::GatewayBrokeredWorkspaceWriteV1;
+        self.brokered_context = Some(context);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,14 +133,34 @@ pub struct CoshCoreBridge {
     pending_events: VecDeque<RuntimeEventEnvelope>,
     sequence: u64,
     current_message: Option<RuntimeMessageId>,
-    tool_ids: BTreeMap<String, ToolUseId>,
+    tool_ids: BTreeMap<String, ObservedToolUse>,
     active_turn: Option<TurnId>,
     prompt_deadline: Option<Instant>,
     terminal_delivered: bool,
     pending_input: Option<PendingInputRequest>,
+    pending_permission: Option<PendingCorePermission>,
+    pending_brokered: Option<PendingBrokeredRequest>,
 }
 
 struct PendingInputRequest {
     private_request_id: String,
     request: RuntimeInputRequest,
+}
+
+struct ObservedToolUse {
+    tool_use_id: ToolUseId,
+    name: BoundedName,
+}
+
+struct PendingCorePermission {
+    private_request_id: String,
+    request_id: RequestId,
+    callback: CorePermissionCallbackV1,
+}
+
+struct PendingBrokeredRequest {
+    private_request_id: String,
+    request_id: RequestId,
+    operation: BrokeredOperation,
+    acknowledged: bool,
 }

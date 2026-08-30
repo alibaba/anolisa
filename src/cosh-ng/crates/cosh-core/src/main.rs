@@ -146,9 +146,20 @@ async fn run() {
             || args.allowed_tools.is_some()
             || args.tools.is_some())
     {
-        eprintln!(
-            "[cosh-core] gateway-brokered-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
-        );
+        match args.execution_profile {
+            cli::ExecutionProfile::GatewayBrokeredV1 => eprintln!(
+                "[cosh-core] gateway-brokered-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
+            ),
+            cli::ExecutionProfile::GatewayBrokeredCheckpointV1 => eprintln!(
+                "[cosh-core] gateway-brokered-checkpoint-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
+            ),
+            cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1 => eprintln!(
+                "[cosh-core] gateway-brokered-workspace-write-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
+            ),
+            cli::ExecutionProfile::Legacy => unreachable!(
+                "legacy execution cannot enter the brokered launch validation branch"
+            ),
+        }
         std::process::exit(2);
     }
     if args.is_session_control() {

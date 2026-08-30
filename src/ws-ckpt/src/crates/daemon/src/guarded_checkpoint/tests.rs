@@ -1,7 +1,7 @@
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tempfile::TempDir;
@@ -9,18 +9,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use ws_ckpt_common::backend::{BackendType, EnvironmentStatus, GcResult, StorageBackend};
 use ws_ckpt_common::{
-    decode_payload, encode_frame, DaemonConfig, GuardedCheckpointOutcomeV2,
-    GuardedCheckpointRejectionCodeV2, Request, Response, SnapshotIndex, WorkspaceGenerationTokenV2,
-    WorkspaceInfo, GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2,
+    decode_payload, encode_frame, ChangeType, DaemonConfig, DiffEntry, GuardedCheckpointOutcomeV2,
+    GuardedCheckpointRejectionCodeV2, GuardedRollbackOutcomeV2, GuardedRollbackRejectionCodeV2,
+    Request, Response, SnapshotIndex, SnapshotMeta, WorkspaceGenerationTokenV2, WorkspaceInfo,
+    GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2,
 };
 
-use super::{checkpoint, checkpoint_evidence, index_with_evidence_slot, workspace_identity};
+use super::{
+    checkpoint, checkpoint_evidence, index_with_evidence_slot, rollback, rollback_diff_digest,
+    rollback_evidence, rollback_preview, workspace_identity,
+};
 use crate::dispatcher;
 use crate::state::DaemonState;
 
 const WS_ID: &str = "ws-abcdef";
 const CHECKPOINT_ID: &str = "checkpoint-1";
+const TARGET_ID: &str = "target-snapshot-full-id";
+const OPERATION_ID: &str = "switch-operation-1";
 const DIGEST: [u8; 32] = [9; 32];
+const OPERATION_DIGEST: [u8; 32] = [11; 32];
 
 struct TestBackend {
     data_root: PathBuf,
@@ -29,6 +36,11 @@ struct TestBackend {
     bootstrap_calls: AtomicUsize,
     generation_calls: AtomicUsize,
     create_calls: AtomicUsize,
+    diff_calls: AtomicUsize,
+    rollback_calls: AtomicUsize,
+    rollback_error: Mutex<Option<String>>,
+    current_diff: Mutex<Vec<DiffEntry>>,
+    diff_after_first: Mutex<Option<Vec<DiffEntry>>>,
 }
 
 impl TestBackend {
@@ -40,6 +52,15 @@ impl TestBackend {
             bootstrap_calls: AtomicUsize::new(0),
             generation_calls: AtomicUsize::new(0),
             create_calls: AtomicUsize::new(0),
+            diff_calls: AtomicUsize::new(0),
+            rollback_calls: AtomicUsize::new(0),
+            rollback_error: Mutex::new(None),
+            current_diff: Mutex::new(vec![DiffEntry {
+                path: "1.txt".to_string(),
+                change_type: ChangeType::Deleted,
+                detail: None,
+            }]),
+            diff_after_first: Mutex::new(None),
         }
     }
 }
@@ -68,7 +89,11 @@ impl StorageBackend for TestBackend {
     }
 
     async fn rollback(&self, _: &str, _: &str) -> anyhow::Result<PathBuf> {
-        anyhow::bail!("unused test backend operation")
+        self.rollback_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(message) = self.rollback_error.lock().unwrap().clone() {
+            anyhow::bail!(message);
+        }
+        Ok(self.data_root.clone())
     }
 
     async fn delete_snapshot(&self, _: &str, _: &str) -> anyhow::Result<()> {
@@ -85,7 +110,13 @@ impl StorageBackend for TestBackend {
         _: &str,
         _: Option<&str>,
     ) -> anyhow::Result<Vec<ws_ckpt_common::DiffEntry>> {
-        anyhow::bail!("unused test backend operation")
+        let call = self.diff_calls.fetch_add(1, Ordering::SeqCst);
+        if call > 0 {
+            if let Some(changes) = self.diff_after_first.lock().unwrap().clone() {
+                return Ok(changes);
+            }
+        }
+        Ok(self.current_diff.lock().unwrap().clone())
     }
 
     async fn cleanup_snapshots(&self, _: &str, _: &[String]) -> anyhow::Result<Vec<String>> {
@@ -158,6 +189,24 @@ impl Fixture {
             workspace_path,
         }
     }
+
+    async fn add_target_snapshot(&self) {
+        let workspace = self.state.get_by_wsid(WS_ID).expect("registered workspace");
+        let mut workspace = workspace.write().await;
+        workspace.index.snapshots.insert(
+            TARGET_ID.to_string(),
+            SnapshotMeta {
+                message: Some("target".to_string()),
+                metadata: None,
+                pinned: true,
+                created_at: chrono::Utc::now(),
+                missing: false,
+                parent_id: None,
+                child_ids: vec![],
+            },
+        );
+        workspace.index.head = Some(TARGET_ID.to_string());
+    }
 }
 
 fn assert_rejected(response: Response, expected: GuardedCheckpointRejectionCodeV2) {
@@ -165,6 +214,44 @@ fn assert_rejected(response: Response, expected: GuardedCheckpointRejectionCodeV
         Response::GuardedCheckpointV2Rejected { code, .. } => assert_eq!(code, expected),
         other => panic!("expected guarded rejection {expected:?}, got {other:?}"),
     }
+}
+
+fn assert_rollback_rejected(response: Response, expected: GuardedRollbackRejectionCodeV2) {
+    match response {
+        Response::GuardedRollbackV2Rejected { code, .. } => assert_eq!(code, expected),
+        other => panic!("expected guarded rollback rejection {expected:?}, got {other:?}"),
+    }
+}
+
+async fn preview_digest(fixture: &Fixture, caller_uid: u32) -> [u8; 32] {
+    match rollback_preview(
+        &fixture.state,
+        Some(caller_uid),
+        fixture.workspace_path.to_str().expect("utf8 path"),
+        WS_ID,
+        fixture.backend.generation,
+        TARGET_ID,
+    )
+    .await
+    {
+        Response::GuardedRollbackPreviewV2Ok { diff_digest, .. } => diff_digest,
+        other => panic!("expected guarded rollback preview, got {other:?}"),
+    }
+}
+
+async fn switch(fixture: &Fixture, caller_uid: u32, diff_digest: [u8; 32]) -> Response {
+    rollback(
+        &fixture.state,
+        Some(caller_uid),
+        fixture.workspace_path.to_str().expect("utf8 path"),
+        WS_ID,
+        fixture.backend.generation,
+        TARGET_ID,
+        diff_digest,
+        OPERATION_ID,
+        OPERATION_DIGEST,
+    )
+    .await
 }
 
 async fn create_checkpoint(fixture: &Fixture, caller_uid: u32) -> Response {
@@ -381,7 +468,7 @@ async fn listener_binds_kernel_peer_uid_for_guarded_round_trip() {
             assert_eq!(evidence.caller_uid, nix::unistd::geteuid().as_raw());
             assert!(matches!(
                 evidence.outcome,
-                GuardedCheckpointOutcomeV2::Skipped { .. }
+                GuardedCheckpointOutcomeV2::Created { .. }
             ));
         }
         other => panic!("expected guarded response, got {other:?}"),
@@ -392,28 +479,28 @@ async fn listener_binds_kernel_peer_uid_for_guarded_round_trip() {
 }
 
 #[tokio::test]
-async fn skipped_checkpoint_publishes_only_after_durable_save() {
+async fn empty_workspace_checkpoint_is_created_and_published_after_durable_save() {
     let fixture = Fixture::new(false);
     let response = create_checkpoint(&fixture, 1000).await;
     match response {
         Response::GuardedCheckpointV2Ok { evidence } => assert!(matches!(
             evidence.outcome,
-            GuardedCheckpointOutcomeV2::Skipped { .. }
+            GuardedCheckpointOutcomeV2::Created { .. }
         )),
-        other => panic!("expected skipped evidence, got {other:?}"),
+        other => panic!("expected created evidence, got {other:?}"),
     }
-    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 1);
     let workspace = fixture.state.get_by_wsid(WS_ID).expect("registered");
+    let workspace = workspace.read().await;
+    assert!(workspace.index.snapshots.contains_key(CHECKPOINT_ID));
     assert!(workspace
-        .read()
-        .await
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
 }
 
 #[tokio::test]
-async fn skipped_save_failure_does_not_publish_evidence_in_memory() {
+async fn empty_workspace_save_failure_does_not_publish_evidence_in_memory() {
     let fixture = Fixture::new(false);
     std::fs::create_dir_all(
         fixture
@@ -426,15 +513,15 @@ async fn skipped_save_failure_does_not_publish_evidence_in_memory() {
     std::fs::write(fixture.state.index_dir(WS_ID), "not a directory")
         .expect("create index path obstruction");
 
-    assert_rejected(
+    assert!(matches!(
         create_checkpoint(&fixture, 1000).await,
-        GuardedCheckpointRejectionCodeV2::DaemonNotReady,
-    );
-    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 0);
+        Response::Error { .. }
+    ));
+    assert_eq!(fixture.backend.create_calls.load(Ordering::SeqCst), 1);
     let workspace = fixture.state.get_by_wsid(WS_ID).expect("registered");
+    let workspace = workspace.read().await;
+    assert!(!workspace.index.snapshots.contains_key(CHECKPOINT_ID));
     assert!(!workspace
-        .read()
-        .await
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
@@ -729,4 +816,260 @@ async fn post_backend_save_failure_does_not_publish_created_evidence_in_memory()
         .index
         .governed_evidence
         .contains_key(CHECKPOINT_ID));
+}
+
+#[tokio::test]
+async fn guarded_rollback_succeeds_with_exact_preview_and_durable_bindings() {
+    let fixture = Fixture::new(true);
+    fixture.add_target_snapshot().await;
+    let digest = preview_digest(&fixture, 1000).await;
+
+    let response = switch(&fixture, 1000, digest).await;
+    let evidence = match response {
+        Response::GuardedRollbackV2Ok { evidence } => evidence,
+        other => panic!("expected guarded rollback success, got {other:?}"),
+    };
+    assert_eq!(evidence.ws_id, WS_ID);
+    assert_eq!(
+        evidence.registered_path,
+        fixture.workspace_path.to_string_lossy()
+    );
+    assert_eq!(evidence.expected_generation, fixture.backend.generation);
+    assert_eq!(evidence.target_snapshot_id, TARGET_ID);
+    assert_eq!(evidence.expected_diff_digest, digest);
+    assert_eq!(evidence.operation_id, OPERATION_ID);
+    assert_eq!(evidence.operation_digest, OPERATION_DIGEST);
+    assert_eq!(evidence.caller_uid, 1000);
+    assert!(matches!(
+        evidence.outcome,
+        GuardedRollbackOutcomeV2::Succeeded { .. }
+    ));
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        switch(&fixture, 1000, digest).await,
+        Response::GuardedRollbackV2Ok { .. }
+    ));
+    assert_eq!(
+        fixture.backend.rollback_calls.load(Ordering::SeqCst),
+        1,
+        "an exact replay must return evidence without invoking rollback again"
+    );
+    assert!(matches!(
+        rollback_evidence(
+            &fixture.state,
+            Some(1000),
+            WS_ID,
+            OPERATION_ID,
+            OPERATION_DIGEST,
+        )
+        .await,
+        Response::GuardedRollbackEvidenceV2Ok { evidence: Some(_) }
+    ));
+}
+
+#[tokio::test]
+async fn mutation_after_preview_rejects_guarded_rollback_before_backend() {
+    let fixture = Fixture::new(true);
+    fixture.add_target_snapshot().await;
+    *fixture.backend.diff_after_first.lock().unwrap() = Some(vec![DiffEntry {
+        path: "2.txt".to_string(),
+        change_type: ChangeType::Added,
+        detail: Some("mutated after preview".to_string()),
+    }]);
+    let digest = preview_digest(&fixture, 1000).await;
+
+    assert_rollback_rejected(
+        switch(&fixture, 1000, digest).await,
+        GuardedRollbackRejectionCodeV2::DiffMismatch,
+    );
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 0);
+    let workspace = fixture
+        .state
+        .get_by_wsid(WS_ID)
+        .expect("registered workspace");
+    assert!(!workspace
+        .read()
+        .await
+        .index
+        .guarded_rollbacks
+        .contains_key(OPERATION_ID));
+}
+
+#[tokio::test]
+async fn guarded_rollback_rejects_wrong_generation_digest_and_full_id() {
+    let fixture = Fixture::new(true);
+    fixture.add_target_snapshot().await;
+    let digest = preview_digest(&fixture, 1000).await;
+
+    assert_rollback_rejected(
+        rollback(
+            &fixture.state,
+            Some(1000),
+            fixture.workspace_path.to_str().expect("utf8 path"),
+            WS_ID,
+            WorkspaceGenerationTokenV2::from_bytes([8; 32]),
+            TARGET_ID,
+            digest,
+            "wrong-generation",
+            OPERATION_DIGEST,
+        )
+        .await,
+        GuardedRollbackRejectionCodeV2::GenerationMismatch,
+    );
+    assert_rollback_rejected(
+        rollback(
+            &fixture.state,
+            Some(1000),
+            fixture.workspace_path.to_str().expect("utf8 path"),
+            WS_ID,
+            fixture.backend.generation,
+            TARGET_ID,
+            [0xff; 32],
+            "wrong-digest",
+            OPERATION_DIGEST,
+        )
+        .await,
+        GuardedRollbackRejectionCodeV2::DiffMismatch,
+    );
+    assert_rollback_rejected(
+        rollback(
+            &fixture.state,
+            Some(1000),
+            fixture.workspace_path.to_str().expect("utf8 path"),
+            WS_ID,
+            fixture.backend.generation,
+            "target-snapshot",
+            digest,
+            "prefix-target",
+            OPERATION_DIGEST,
+        )
+        .await,
+        GuardedRollbackRejectionCodeV2::SnapshotNotFound,
+    );
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn guarded_rollback_evidence_is_bound_to_kernel_peer_uid() {
+    let fixture = Fixture::new(true);
+    fixture.add_target_snapshot().await;
+    let digest = preview_digest(&fixture, 1000).await;
+    assert!(matches!(
+        switch(&fixture, 1000, digest).await,
+        Response::GuardedRollbackV2Ok { .. }
+    ));
+
+    assert_rollback_rejected(
+        switch(&fixture, 1001, digest).await,
+        GuardedRollbackRejectionCodeV2::CallerMismatch,
+    );
+    assert_rollback_rejected(
+        rollback_evidence(
+            &fixture.state,
+            Some(1001),
+            WS_ID,
+            OPERATION_ID,
+            OPERATION_DIGEST,
+        )
+        .await,
+        GuardedRollbackRejectionCodeV2::CallerMismatch,
+    );
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn uncertain_guarded_rollback_is_durable_and_never_replayed() {
+    let fixture = Fixture::new(true);
+    fixture.add_target_snapshot().await;
+    *fixture.backend.rollback_error.lock().unwrap() =
+        Some("backend completion is unknown".to_string());
+    let digest = preview_digest(&fixture, 1000).await;
+
+    let first = switch(&fixture, 1000, digest).await;
+    match first {
+        Response::GuardedRollbackV2Uncertain { evidence } => assert!(matches!(
+            evidence.outcome,
+            GuardedRollbackOutcomeV2::Unknown { .. }
+        )),
+        other => panic!("expected uncertain guarded rollback, got {other:?}"),
+    }
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        switch(&fixture, 1000, digest).await,
+        Response::GuardedRollbackV2Uncertain { .. }
+    ));
+    assert_eq!(
+        fixture.backend.rollback_calls.load(Ordering::SeqCst),
+        1,
+        "an uncertain operation must never invoke the backend again"
+    );
+    assert!(matches!(
+        rollback_evidence(
+            &fixture.state,
+            Some(1000),
+            WS_ID,
+            OPERATION_ID,
+            OPERATION_DIGEST,
+        )
+        .await,
+        Response::GuardedRollbackEvidenceV2Ok {
+            evidence: Some(ws_ckpt_common::GuardedRollbackEvidenceV2 {
+                outcome: GuardedRollbackOutcomeV2::Unknown { .. },
+                ..
+            })
+        }
+    ));
+
+    let loaded = crate::index_store::load(&fixture.state.index_dir(WS_ID))
+        .await
+        .expect("load durable rollback evidence");
+    let restarted = Arc::new(DaemonState::new(
+        DaemonConfig {
+            socket_path: fixture._temp.path().join("rollback-restarted.sock"),
+            ..DaemonConfig::default()
+        },
+        fixture.backend.clone(),
+        fixture._temp.path().join("rollback-restarted-state"),
+    ));
+    restarted.register_workspace(WS_ID.to_string(), fixture.workspace_path.clone(), loaded);
+    assert!(matches!(
+        rollback(
+            &restarted,
+            Some(1000),
+            fixture.workspace_path.to_str().expect("utf8 path"),
+            WS_ID,
+            fixture.backend.generation,
+            TARGET_ID,
+            digest,
+            OPERATION_ID,
+            OPERATION_DIGEST,
+        )
+        .await,
+        Response::GuardedRollbackV2Uncertain { .. }
+    ));
+    assert_eq!(fixture.backend.rollback_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn guarded_rollback_diff_digest_is_order_independent_and_content_sensitive() {
+    let first = DiffEntry {
+        path: "b.txt".to_string(),
+        change_type: ChangeType::Modified,
+        detail: Some("old -> new".to_string()),
+    };
+    let second = DiffEntry {
+        path: "a.txt".to_string(),
+        change_type: ChangeType::Deleted,
+        detail: None,
+    };
+    assert_eq!(
+        rollback_diff_digest(&[first.clone(), second.clone()]),
+        rollback_diff_digest(&[second.clone(), first.clone()])
+    );
+    assert_ne!(
+        rollback_diff_digest(&[first, second.clone()]),
+        rollback_diff_digest(&[second])
+    );
 }

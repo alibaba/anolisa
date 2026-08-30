@@ -105,6 +105,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/task",
+            usage: "/task [list|show [task-id]|snapshots [task-id]|snapshot <preview|diff|switch> <task-id> <snapshot-id>|<goal>]",
+            summary_id: MessageId::HelpSummaryTask,
+            group: Some("Tasks"),
+            scope: "task",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/new",
             usage: "/new",
             summary_id: MessageId::HelpSummarySession,

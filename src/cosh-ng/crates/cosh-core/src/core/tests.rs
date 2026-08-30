@@ -1594,6 +1594,185 @@ fn brokered_profile_denies_the_removed_checkpoint_tool() {
         .any(|name| name == "workspace_checkpoint_create"));
 }
 
+#[test]
+fn checkpoint_profile_only_brokers_an_empty_typed_request() {
+    let core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(MockProvider::text_only("")),
+        ToolRegistry::gateway_brokered_checkpoint_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1,
+    );
+
+    assert_eq!(
+        core.classify_tool("workspace_checkpoint_create", &serde_json::json!({})),
+        Outcome::RequireApproval
+    );
+    assert_eq!(
+        core.classify_tool(
+            "workspace_checkpoint_create",
+            &serde_json::json!({"checkpoint_id": "runtime-chosen"}),
+        ),
+        Outcome::Deny
+    );
+    assert_eq!(
+        core.tool_names(),
+        vec!["ask_user_question", "workspace_checkpoint_create"]
+    );
+}
+
+#[test]
+fn workspace_write_profile_only_approves_the_exact_file_tool() {
+    let core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(MockProvider::text_only("")),
+        ToolRegistry::gateway_brokered_workspace_write_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1,
+    );
+
+    assert_eq!(
+        core.classify_tool(
+            "write_file",
+            &serde_json::json!({"path": "1.txt", "content": "one"}),
+        ),
+        Outcome::RequireApproval
+    );
+    for forbidden in ["shell", "edit", "read_file", "workspace_checkpoint_create"] {
+        assert_eq!(
+            core.classify_tool(forbidden, &serde_json::json!({})),
+            Outcome::Deny
+        );
+    }
+    assert_eq!(core.tool_names(), vec!["ask_user_question", "write_file"]);
+}
+
+#[tokio::test]
+async fn workspace_write_profile_executes_only_after_allow() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "write-call".to_string(),
+                name: "write_file".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"path":"1.txt","content":"one"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![GenerateEvent::MessageEnd],
+    ]);
+    let mut core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(provider),
+        ToolRegistry::gateway_brokered_workspace_write_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1,
+    );
+    core.project_root = dir.path().to_path_buf();
+    core.workspace = crate::tool::SessionWorkspace::new(dir.path());
+    let input = r#"{"type":"approval_receipt","request_id":"req-0"}
+{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"allow"}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let mut output = Vec::new();
+
+    core.handle_user_message("create 1.txt", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains(r#""subtype":"can_use_tool""#));
+    assert!(output.contains(r#""tool_name":"write_file""#));
+    let content = std::fs::read_to_string(dir.path().join("1.txt"))
+        .unwrap_or_else(|error| panic!("{error}; tool transcript: {:?}", core.messages));
+    assert_eq!(content, "one");
+}
+
+#[tokio::test]
+async fn workspace_write_profile_denial_leaves_workspace_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "write-call".to_string(),
+                name: "write_file".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"path":"1.txt","content":"one"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![GenerateEvent::MessageEnd],
+    ]);
+    let mut core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(provider),
+        ToolRegistry::gateway_brokered_workspace_write_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1,
+    );
+    core.project_root = dir.path().to_path_buf();
+    core.workspace = crate::tool::SessionWorkspace::new(dir.path());
+    let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"deny","message":"not approved"}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let mut output = Vec::new();
+
+    core.handle_user_message("create 1.txt", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    assert!(!dir.path().join("1.txt").exists());
+}
+
+#[tokio::test]
+async fn workspace_write_profile_rejects_an_approved_external_path() {
+    let parent = tempfile::tempdir().unwrap();
+    let workspace = parent.path().join("workspace");
+    let outside = parent.path().join("outside.txt");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(&outside, "sentinel").unwrap();
+    let arguments = serde_json::json!({"path": outside, "content": "changed"}).to_string();
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "write-call".to_string(),
+                name: "write_file".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: arguments,
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![GenerateEvent::MessageEnd],
+    ]);
+    let mut core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(provider),
+        ToolRegistry::gateway_brokered_workspace_write_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredWorkspaceWriteV1,
+    );
+    core.project_root = workspace.clone();
+    core.workspace = crate::tool::SessionWorkspace::new(&workspace);
+    let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"allow"}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let mut output = Vec::new();
+
+    core.handle_user_message("write outside", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "sentinel");
+}
+
 #[tokio::test]
 async fn brokered_profile_rejects_a_checkpoint_execution_result() {
     let core = make_core_with_profile(
@@ -1610,6 +1789,112 @@ async fn brokered_profile_rejects_a_checkpoint_execution_result() {
     assert!(matches!(
         result,
         ApprovalResult::Denied(Some(reason)) if reason == "unknown response"
+    ));
+}
+
+#[tokio::test]
+async fn checkpoint_profile_accepts_only_typed_terminal_results() {
+    let core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(MockProvider::text_only("")),
+        ToolRegistry::gateway_brokered_checkpoint_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1,
+    );
+    let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_checkpoint_create","checkpointResult":{"checkpoint_id":"ckp_123e4567-e89b-12d3-a456-426614174000","outcome":{"status":"created","snapshot_id":"snap-1"}}}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", Some(ToolKind::HostedSideEffect), &mut reader)
+        .await;
+    assert!(matches!(
+        result,
+        ApprovalResult::HostExecutedCheckpoint { result }
+            if !result.is_error
+                && result.output.contains("ckp_123e4567-e89b-12d3-a456-426614174000")
+                && result.output.contains("snap-1")
+    ));
+
+    let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_checkpoint_error","checkpointError":{"outcome":"uncertain","code":"checkpoint_unknown","message":"Exact evidence was not available"}}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let result = core
+        .wait_for_approval("expected-id", Some(ToolKind::HostedSideEffect), &mut reader)
+        .await;
+    assert!(matches!(
+        result,
+        ApprovalResult::HostExecutedCheckpoint { result }
+            if result.is_error
+                && result.output.contains("uncertain")
+                && result.output.contains("checkpoint_unknown")
+                && result
+                    .output
+                    .contains("Do not retry without Gateway reconciliation.")
+    ));
+
+    let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_checkpoint_create","checkpointResult":{"checkpoint_id":"not-a-checkpoint-id","outcome":{"status":"created","snapshot_id":"snap-1"}}}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let result = core
+        .wait_for_approval("expected-id", Some(ToolKind::HostedSideEffect), &mut reader)
+        .await;
+    assert!(matches!(result, ApprovalResult::Denied(Some(_))));
+
+    let input = r#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_checkpoint_create","checkpointResult":{"checkpoint_id":"ckp_123e4567-e89b-12d3-a456-426614174000","outcome":{"status":"created","snapshot_id":"snap-1"}},"hiddenAuthority":"forbidden"}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let result = core
+        .wait_for_approval("expected-id", Some(ToolKind::HostedSideEffect), &mut reader)
+        .await;
+    assert!(matches!(result, ApprovalResult::Denied(Some(_))));
+}
+
+#[tokio::test]
+async fn checkpoint_profile_never_executes_the_hosted_tool_locally() {
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "checkpoint-call".to_string(),
+                name: "workspace_checkpoint_create".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: "{}".to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![GenerateEvent::MessageEnd],
+    ]);
+    let mut core = CoshCore::new_with_profile(
+        CoreConfig::default(),
+        Box::new(provider),
+        ToolRegistry::gateway_brokered_checkpoint_v1(),
+        crate::cli::ExecutionProfile::GatewayBrokeredCheckpointV1,
+    );
+    let input = r#"{"type":"approval_receipt","request_id":"req-0"}
+{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"host_executed_checkpoint_create","checkpointResult":{"checkpoint_id":"ckp_123e4567-e89b-12d3-a456-426614174000","outcome":{"status":"skipped","reason":"An exact checkpoint already exists"}}}}}
+"#;
+    let mut reader = BufReader::new(input.as_bytes()).lines();
+    let mut output = Vec::new();
+
+    core.handle_user_message("checkpoint", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let messages = String::from_utf8(output).unwrap();
+    assert!(messages.contains(r#""subtype":"can_use_tool""#));
+    assert!(messages.contains(r#""tool_name":"workspace_checkpoint_create""#));
+    let tool_result = core
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .unwrap();
+    assert!(matches!(
+        &tool_result.content,
+        crate::provider::MessageContent::Text(content)
+            if content.contains("safely skipped")
     ));
 }
 

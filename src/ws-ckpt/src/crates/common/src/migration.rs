@@ -234,6 +234,7 @@ mod tests {
             snapshots: HashMap::new(),
             head: None,
             governed_evidence: HashMap::new(),
+            guarded_rollbacks: HashMap::new(),
         }
     }
 

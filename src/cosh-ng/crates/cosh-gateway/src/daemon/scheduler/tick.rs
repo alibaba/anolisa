@@ -14,11 +14,17 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             return Ok(SchedulerTick::Idle);
         }
 
+        if let Some(tick) = self.process_pre_runtime_checkpoint(now_ms)? {
+            return Ok(tick);
+        }
+
         let lease_deadline = deadline(now_ms, self.config.lease_duration_ms)?;
-        if let Some(view) =
-            self.coordinator
-                .recover_expired_active_run(&self.worker_id, now_ms, lease_deadline)?
-        {
+        if let Some(view) = self.coordinator.recover_expired_active_run(
+            self.brokered_driver.as_mut(),
+            &self.worker_id,
+            now_ms,
+            lease_deadline,
+        )? {
             return Ok(SchedulerTick::Settled(view));
         }
         let (claim, intent, lease) =
@@ -43,6 +49,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             target: intent.target,
             workspace: intent.workspace,
             capability_profile: intent.capability_profile,
+            launch: intent.launch,
             lease_generation: lease.generation,
         };
         match self.factory.open(&scheduled) {
@@ -97,6 +104,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                         binding_closed: false,
                         task_settled: false,
                         pending_permission: None,
+                        expected_provider_terminal: None,
                         pending_brokered: None,
                         pending_input: None,
                         handle,
@@ -121,6 +129,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                     binding_closed: false,
                     task_settled: false,
                     pending_permission: None,
+                    expected_provider_terminal: None,
                     pending_brokered: None,
                     pending_input: None,
                     handle,
@@ -179,7 +188,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             .abort_error
             .clone()
         {
-            let result = self
+            let _ = self
                 .active
                 .as_mut()
                 .ok_or_else(no_active_run)?
@@ -187,12 +196,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 .shutdown(CancelReason::RuntimeShutdown);
             let stopped_at_ms = refreshed_now_ms(now_ms)?;
             self.require_active_lease_time(stopped_at_ms)?;
-            return match result {
-                Ok(()) => self.finish_failed(abort_error, stopped_at_ms),
-                Err(_) => Err(GatewayDaemonError::Protocol(
-                    "Runtime shutdown after an earlier failure was not acknowledged".to_owned(),
-                )),
-            };
+            return self.finish_failed(abort_error, stopped_at_ms);
         }
         self.coordinator.request_runtime_shutdown(
             &self.active.as_ref().ok_or_else(no_active_run)?.lease,
@@ -209,13 +213,10 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         self.require_active_lease_time(stopped_at_ms)?;
         match result {
             Ok(()) => self.finish_cancelled(stopped_at_ms),
-            Err(error) => {
-                self.active.as_mut().ok_or_else(no_active_run)?.abort_error = Some(error);
-                Err(GatewayDaemonError::Protocol(
-                    "Runtime shutdown was not acknowledged".to_owned(),
-                ))
-            }
+            // The daemon is already shutting down and will never poll this
+            // handle again. Persist the observed Runtime failure and release
+            // its lease so restart cannot strand or replay the Run.
+            Err(error) => self.finish_failed(error, stopped_at_ms),
         }
     }
-
 }

@@ -6,14 +6,26 @@
 //! Runtime scheduling is isolated in the sibling `scheduler` module so the
 //! private transport remains independent from provider-specific adapters.
 
+mod checkpoint;
 mod handler;
 mod scheduler;
 mod scheduler_attachment;
 
+pub use checkpoint::{
+    ApprovalCheckpointCreateResult, ApprovalCheckpointEvidence, ApprovalCheckpointPrepareResult,
+    ApprovalCheckpointReconcileResult, ApprovalCheckpointRecord, ApprovalCheckpointRequest,
+    ApprovalCheckpointState, PreRuntimeBaselineState, PreRuntimeBaselineView,
+    PreRuntimeCheckpointBinding, PreRuntimeCheckpointCreateResult, PreRuntimeCheckpointDriver,
+    PreRuntimeCheckpointEvidence, PreRuntimeCheckpointReconcileRequest,
+    PreRuntimeCheckpointReconcileResult, PreRuntimeCheckpointRequest, TaskSnapshotChange,
+    TaskSnapshotDriver, TaskSnapshotKind, TaskSnapshotProviderPreview, TaskSnapshotProviderRequest,
+    TaskSnapshotProviderSwitch, TaskSnapshotProviderSwitchResult, TaskSnapshotView,
+};
 pub use scheduler::{
-    BrokeredApprovalContext, BrokeredApprovalPlan, BrokeredExecutionDriver, BrokeredResolution,
-    BrokeredResolutionContext, BrokeredResolutionSource, RuntimeFactory, RuntimeHandle,
-    RuntimePoll, ScheduledRun, SchedulerTick, StartedRuntime, TaskScheduler, TaskSchedulerConfig,
+    BrokeredApprovalContext, BrokeredApprovalPlan, BrokeredExecutionDriver,
+    BrokeredRecoveryContext, BrokeredResolution, BrokeredResolutionContext,
+    BrokeredResolutionSource, RuntimeCancellationCause, RuntimeFactory, RuntimeHandle, RuntimePoll,
+    ScheduledRun, SchedulerTick, StartedRuntime, TaskScheduler, TaskSchedulerConfig,
 };
 
 use std::fs::{self, FileType, Metadata};
@@ -30,13 +42,15 @@ use cosh_gateway_contracts::common::{
     Correlation, Digest, IdempotencyKey, RuntimeSelector, TargetRef, WorkspaceRef,
 };
 use cosh_gateway_contracts::ids::{
-    ActorId, ApprovalId, DeliveryId, InputRequestId, InstallationId, MessageId, RequestId, RunId,
-    TaskId,
+    ActorId, ApprovalId, CheckpointId, DeliveryId, InputRequestId, InstallationId, MessageId,
+    RequestId, RunId, TaskId,
 };
 use cosh_gateway_contracts::profile::GatewayCapabilityProfile;
 use cosh_gateway_contracts::runtime::RuntimeInputResponse;
 use cosh_gateway_contracts::task::{
-    CancelReason, CancellationStage, TaskEvent, TaskEventEnvelope, TaskState,
+    ApprovalPolicy, CancelReason, CancellationStage, CheckpointPolicy, TaskEvent,
+    TaskEventEnvelope, TaskLaunchDescriptorV1, TaskLaunchSpecV1, TaskRuntime, TaskState,
+    TASK_LAUNCH_SPEC_V1,
 };
 use nix::sys::socket::getsockopt;
 use nix::unistd::Uid;

@@ -15,6 +15,7 @@ pub mod shell_evidence;
 pub mod skill;
 pub mod todo;
 mod web_fetch;
+mod workspace_checkpoint_create;
 mod workspace_fs;
 pub mod write_file;
 
@@ -323,6 +324,25 @@ impl ToolRegistry {
         registry
     }
 
+    /// Returns the closed checkpoint inventory for Gateway brokered v4.
+    ///
+    /// The hosted declaration has no local effect path. It can only suspend a
+    /// provider call until the private Gateway wire returns a typed result.
+    pub(crate) fn gateway_brokered_checkpoint_v1() -> Self {
+        let mut registry = Self::gateway_brokered_v1();
+        registry.register(Box::new(
+            workspace_checkpoint_create::WorkspaceCheckpointCreateTool,
+        ));
+        registry
+    }
+
+    /// Returns the closed approval-gated workspace-write inventory for v5.
+    pub(crate) fn gateway_brokered_workspace_write_v1() -> Self {
+        let mut registry = Self::gateway_brokered_v1();
+        registry.register(Box::new(write_file::WriteFileTool));
+        registry
+    }
+
     pub fn with_shell_evidence(mut self) -> Self {
         self.register(Box::new(
             read_file::ReadFileTool::with_shell_evidence_tool_guidance(),
@@ -519,6 +539,43 @@ mod tests {
         assert!(!registry.contains("workspace_checkpoint_create"));
         for legacy_side_effect in ["shell", "write_file", "edit", "save_memory"] {
             assert!(!registry.contains(legacy_side_effect));
+        }
+    }
+
+    #[test]
+    fn checkpoint_brokered_inventory_is_explicit_and_hosted() {
+        let registry = ToolRegistry::gateway_brokered_checkpoint_v1();
+
+        assert_eq!(
+            registry.names(),
+            vec!["ask_user_question", "workspace_checkpoint_create"]
+        );
+        assert_eq!(
+            registry.get("workspace_checkpoint_create").map(Tool::kind),
+            Some(ToolKind::HostedSideEffect)
+        );
+        for forbidden_local_effect in ["shell", "write_file", "edit", "save_memory"] {
+            assert!(!registry.contains(forbidden_local_effect));
+        }
+    }
+
+    #[test]
+    fn workspace_write_inventory_is_explicit_and_local() {
+        let registry = ToolRegistry::gateway_brokered_workspace_write_v1();
+
+        assert_eq!(registry.names(), vec!["ask_user_question", "write_file"]);
+        assert_eq!(
+            registry.get("write_file").map(Tool::kind),
+            Some(ToolKind::FileEdit)
+        );
+        for forbidden_tool in [
+            "shell",
+            "edit",
+            "read_file",
+            "save_memory",
+            "workspace_checkpoint_create",
+        ] {
+            assert!(!registry.contains(forbidden_tool));
         }
     }
 

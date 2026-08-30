@@ -285,6 +285,8 @@ mod tests {
             behavior: Some("deny".to_string()),
             message: None,
             result: None,
+            checkpoint_result: None,
+            checkpoint_error: None,
             tool_use_id: None,
             updated_permissions: None,
             answer: None,
@@ -293,6 +295,7 @@ mod tests {
             provider_type: None,
             values: None,
             persist: None,
+            unknown_fields: HashMap::new(),
         };
         assert!(parse_auth_response(&body).is_none());
     }
@@ -303,6 +306,8 @@ mod tests {
             behavior: None,
             message: None,
             result: None,
+            checkpoint_result: None,
+            checkpoint_error: None,
             tool_use_id: None,
             updated_permissions: None,
             answer: None,
@@ -314,6 +319,7 @@ mod tests {
                 "sk-xxx".to_string(),
             )])),
             persist: Some(true),
+            unknown_fields: HashMap::new(),
         };
         let response = parse_auth_response(&body).expect("auth response");
         assert_eq!(response.provider_id, "dashscope");

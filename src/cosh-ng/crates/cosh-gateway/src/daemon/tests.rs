@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cosh_gateway_contracts::common::{
-    BoundedName, BoundedOpaque, BoundedText, IdempotencyKey, RuntimeBindingRef,
+    BoundedName, BoundedOpaque, BoundedText, IdempotencyKey, RuntimeBindingRef, MAX_TEXT_BYTES,
 };
 use cosh_gateway_contracts::error::{ContractError, ErrorCategory};
 use cosh_gateway_contracts::external::{ExternalRef, ExternalRefKind};
@@ -57,17 +57,165 @@ fn private_tempdir() -> TempDir {
 }
 
 fn daemon_config(socket_path: PathBuf, database_path: PathBuf) -> GatewayDaemonConfig {
+    let workspace = WorkspaceRef {
+        scope_digest: sha256_digest(b"cosh.gateway.test.workspace.v1"),
+        display_name: None,
+    };
     GatewayDaemonConfig {
         socket_path,
         database_path,
         installation_id: None,
-        capability_profile: GatewayCapabilityProfile::task_only_v1(),
-        workspace: WorkspaceRef {
-            scope_digest: sha256_digest(b"cosh.gateway.test.workspace.v1"),
-            display_name: None,
-        },
-        runtime: brokered_core_runtime(),
+        launch_catalog: TaskLaunchCatalog::new(
+            workspace.clone(),
+            LaunchReadiness::Ready,
+            LaunchReadiness::unavailable(BoundedText::new("Codex is not configured").unwrap()),
+            LaunchReadiness::unavailable(
+                BoundedText::new("checkpoint provider is not configured").unwrap(),
+            ),
+        ),
     }
+}
+
+fn delegated_daemon_config(socket_path: PathBuf, database_path: PathBuf) -> GatewayDaemonConfig {
+    let workspace = WorkspaceRef {
+        scope_digest: sha256_digest(b"cosh.gateway.test.delegated-workspace.v1"),
+        display_name: None,
+    };
+    GatewayDaemonConfig {
+        socket_path,
+        database_path,
+        installation_id: None,
+        launch_catalog: TaskLaunchCatalog::new(
+            workspace.clone(),
+            LaunchReadiness::unavailable(BoundedText::new("Core is not configured").unwrap()),
+            LaunchReadiness::Ready,
+            LaunchReadiness::unavailable(
+                BoundedText::new("checkpoint provider is not configured").unwrap(),
+            ),
+        ),
+    }
+}
+
+#[test]
+fn local_capabilities_and_submit_launch_use_the_sealed_catalog() {
+    let root = private_tempdir();
+    let socket_path = private_directory(&root, "runtime").join("gateway.sock");
+    let database_path = root.path().join("gateway.db");
+    let config = daemon_config(socket_path.clone(), database_path);
+    let workspace = config.launch_catalog.default_workspace().clone();
+    let mut daemon = GatewayDaemon::bind(config).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server = std::thread::spawn(move || daemon.serve_until(&server_shutdown));
+    let client = LocalGatewayClient::new(socket_path);
+
+    let GatewayResult::Capabilities(capabilities) = client.capabilities(RequestId::new()).unwrap()
+    else {
+        panic!("capability request must return the launch catalog")
+    };
+    assert_eq!(capabilities.default_workspace, workspace);
+    assert_eq!(capabilities.default_approval, ApprovalPolicy::AllowAll);
+    assert_eq!(capabilities.runtimes[0].runtime, TaskRuntime::Core);
+    assert_eq!(capabilities.runtimes[0].readiness, LaunchReadiness::Ready);
+    assert_eq!(
+        capabilities.runtimes[0].security,
+        RuntimeSecurityPosture {
+            delegated_local_authority: true,
+            gateway_brokered_effects: false,
+            checkpoint_is_baseline_only: false,
+        }
+    );
+    assert!(matches!(
+        capabilities.runtimes[1].readiness,
+        LaunchReadiness::Unavailable { .. }
+    ));
+
+    let launch = TaskLaunchSpecV1::new(
+        BoundedText::new("inspect the failed service").unwrap(),
+        TaskRuntime::Core,
+        workspace,
+        CheckpointPolicy::Off,
+        ApprovalPolicy::AllowAll,
+    );
+    let GatewayResult::Task(task) = client
+        .submit_launch(SubmitLaunch {
+            request_id: RequestId::new(),
+            idempotency_key: IdempotencyKey::new("sealed-launch").unwrap(),
+            launch: launch.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("launch submission must return its Task")
+    };
+    assert_eq!(
+        task.launch,
+        Some(TaskLaunchDescriptorV1::from_spec(
+            sha256_digest(launch.goal.as_str().as_bytes()),
+            &launch,
+        ))
+    );
+    assert_eq!(task.state, TaskState::Queued);
+    assert_eq!(task.target.identifier.as_str(), "workspace-write-v1");
+
+    shutdown.store(true, Ordering::Relaxed);
+    server.join().unwrap().unwrap();
+}
+
+#[test]
+fn task_list_omits_private_goals_and_stays_compact() {
+    let root = private_tempdir();
+    let socket_path = private_directory(&root, "runtime").join("gateway.sock");
+    let database_path = root.path().join("gateway.db");
+    let config = daemon_config(socket_path.clone(), database_path);
+    let workspace = config.launch_catalog.default_workspace().clone();
+    let mut daemon = GatewayDaemon::bind(config).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server = std::thread::spawn(move || daemon.serve_until(&server_shutdown));
+    let client = LocalGatewayClient::new(socket_path);
+    let sentinel = "PRIVATE_GOAL_SENTINEL_";
+    let private_goal = format!("{sentinel}{}", "x".repeat(MAX_TEXT_BYTES - sentinel.len()));
+
+    for index in 0..20 {
+        let launch = TaskLaunchSpecV1::new(
+            BoundedText::new(private_goal.clone()).unwrap(),
+            TaskRuntime::Core,
+            workspace.clone(),
+            CheckpointPolicy::Off,
+            ApprovalPolicy::AllowAll,
+        );
+        let GatewayResult::Task(task) = client
+            .submit_launch(SubmitLaunch {
+                request_id: RequestId::new(),
+                idempotency_key: IdempotencyKey::new(format!("compact-list-{index}")).unwrap(),
+                launch,
+            })
+            .unwrap()
+        else {
+            panic!("launch submission must return its Task")
+        };
+        assert!(task.launch.is_some());
+    }
+
+    let GatewayResult::Tasks(page) = client.list(RequestId::new(), 20).unwrap() else {
+        panic!("list must return Task projections")
+    };
+    let json = serde_json::to_vec(&page).unwrap();
+    assert_eq!(page.tasks.len(), 20);
+    assert!(!json
+        .windows(sentinel.len())
+        .any(|window| window == sentinel.as_bytes()));
+    assert!(
+        json.len() < 64 * 1024,
+        "safe list projection is unexpectedly large"
+    );
+    assert!(page.tasks.iter().all(|task| task
+        .launch
+        .as_ref()
+        .is_some_and(|launch| launch.goal_digest == sha256_digest(private_goal.as_bytes()))));
+
+    shutdown.store(true, Ordering::Relaxed);
+    server.join().unwrap().unwrap();
 }
 
 struct FakeFactory {
@@ -287,6 +435,24 @@ fn gateway_wire_v1_matches_frozen_golden_corpus() {
 }
 
 #[test]
+fn task_bound_approval_is_an_append_only_v1_command() {
+    let request = GatewayRequest::ResolveApprovalForTask {
+        api_version: GATEWAY_API_VERSION.to_owned(),
+        request: ResolveApprovalForTask {
+            request_id: RequestId::new(),
+            idempotency_key: IdempotencyKey::new("bound-approval").unwrap(),
+            task_id: TaskId::new(),
+            approval_id: ApprovalId::new(),
+            decision: ApprovalDecision::Approve,
+        },
+    };
+    let value = serde_json::to_value(request).unwrap();
+    assert_eq!(value["command"], "resolve_approval_for_task");
+    assert_eq!(value["api_version"], "cosh.gateway.v1");
+    assert!(value.get("task_id").is_some());
+}
+
+#[test]
 fn stable_actor_identity_depends_on_peer_uid() {
     let installation = InstallationId::new();
     let first = actor_id_for_uid(&installation, 1000).unwrap();
@@ -308,12 +474,48 @@ fn coordinator_replays_submit_and_hides_foreign_tasks() {
     let first = coordinator.submit(&owner, request.clone()).unwrap();
     let replay = coordinator.submit(&owner, request).unwrap();
     assert_eq!(first, replay);
+    assert_eq!(
+        coordinator.list(&owner, 64).unwrap().tasks,
+        vec![first.clone()]
+    );
+    assert!(coordinator
+        .list(
+            &actor_id_for_uid(&coordinator.installation_id, 1001).unwrap(),
+            64,
+        )
+        .unwrap()
+        .tasks
+        .is_empty());
     assert!(matches!(
         coordinator.get(
             &actor_id_for_uid(&coordinator.installation_id, 1001).unwrap(),
             &first.task_id
         ),
         Err(GatewayDaemonError::Store(StoreError::TaskNotFound))
+    ));
+}
+
+#[test]
+fn task_list_rejects_a_row_owner_diverging_from_events() {
+    let root = private_tempdir();
+    let database_path = root.path().join("gateway.db");
+    let mut coordinator =
+        TaskCoordinator::open(&database_path, Some(InstallationId::new())).unwrap();
+    let owner = actor_id_for_uid(&coordinator.installation_id, 1000).unwrap();
+    coordinator
+        .submit(&owner, submit("list-owner-corruption"))
+        .unwrap();
+    let forged = actor_id_for_uid(&coordinator.installation_id, 1001).unwrap();
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET owner_actor_id=?1",
+            rusqlite::params![forged.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        coordinator.list(&forged, 64),
+        Err(GatewayDaemonError::Store(StoreError::Corrupt { .. }))
     ));
 }
 
@@ -390,12 +592,12 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
         )
         .unwrap()
         .unwrap();
-    let original_identity = scheduler::decode_runtime_start_intent(
-        submitted_candidate.payload,
-        GatewayCapabilityProfile::task_only_v1(),
-    )
-    .unwrap()
-    .capability_profile;
+    let decode_catalog =
+        daemon_config(root.path().join("decode.sock"), database_path.clone()).launch_catalog;
+    let original_identity =
+        scheduler::decode_runtime_start_intent(submitted_candidate.payload, &decode_catalog)
+            .unwrap()
+            .capability_profile;
     let retryable = ContractError::new(
         "runtime_busy",
         ErrorCategory::RuntimeUnavailable,
@@ -438,9 +640,9 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
     let retried = coordinator
         .retry_admitted(
             &actor,
-            &config.capability_profile.governed_target(),
-            &config.workspace,
-            &config.runtime,
+            &GatewayCapabilityProfile::task_only_v1().governed_target(),
+            config.launch_catalog.default_workspace(),
+            &brokered_core_runtime(),
             retry.clone(),
         )
         .unwrap();
@@ -455,20 +657,17 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
         )
         .unwrap()
         .unwrap();
-    let retry_intent = scheduler::decode_runtime_start_intent(
-        retry_candidate.payload,
-        GatewayCapabilityProfile::task_only_v1(),
-    )
-    .unwrap();
+    let retry_intent =
+        scheduler::decode_runtime_start_intent(retry_candidate.payload, &decode_catalog).unwrap();
     assert_eq!(retry_intent.run_id, next_run_id);
     assert_eq!(retry_intent.capability_profile, original_identity);
     assert_eq!(
         coordinator
             .retry_admitted(
                 &actor,
-                &config.capability_profile.governed_target(),
-                &config.workspace,
-                &config.runtime,
+                &GatewayCapabilityProfile::task_only_v1().governed_target(),
+                config.launch_catalog.default_workspace(),
+                &brokered_core_runtime(),
                 retry.clone(),
             )
             .unwrap(),
@@ -480,9 +679,9 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.capability_profile.governed_target(),
-            &config.workspace,
-            &config.runtime,
+            &GatewayCapabilityProfile::task_only_v1().governed_target(),
+            config.launch_catalog.default_workspace(),
+            &brokered_core_runtime(),
             conflicting,
         ),
         Err(GatewayDaemonError::Store(StoreError::IdempotencyConflict))
@@ -572,9 +771,9 @@ fn retry_waits_for_crash_window_lease_recovery_before_queueing() {
     };
     let blocked = coordinator.retry_admitted(
         &actor,
-        &admission.capability_profile.governed_target(),
-        &admission.workspace,
-        &admission.runtime,
+        &GatewayCapabilityProfile::task_only_v1().governed_target(),
+        admission.launch_catalog.default_workspace(),
+        &brokered_core_runtime(),
         retry.clone(),
     );
     assert!(
@@ -622,9 +821,9 @@ fn retry_waits_for_crash_window_lease_recovery_before_queueing() {
     let retried = coordinator
         .retry_admitted(
             &actor,
-            &admission.capability_profile.governed_target(),
-            &admission.workspace,
-            &admission.runtime,
+            &GatewayCapabilityProfile::task_only_v1().governed_target(),
+            admission.launch_catalog.default_workspace(),
+            &brokered_core_runtime(),
             retry,
         )
         .unwrap();
@@ -673,9 +872,9 @@ fn terminal_tasks_are_never_reopened_by_retry() {
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.capability_profile.governed_target(),
-            &config.workspace,
-            &config.runtime,
+            &GatewayCapabilityProfile::task_only_v1().governed_target(),
+            config.launch_catalog.default_workspace(),
+            &brokered_core_runtime(),
             RetryTask {
                 request_id: RequestId::new(),
                 idempotency_key: IdempotencyKey::new("forbidden-terminal-retry").unwrap(),
@@ -711,9 +910,9 @@ fn terminal_tasks_are_never_reopened_by_retry() {
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.capability_profile.governed_target(),
-            &config.workspace,
-            &config.runtime,
+            &GatewayCapabilityProfile::task_only_v1().governed_target(),
+            config.launch_catalog.default_workspace(),
+            &brokered_core_runtime(),
             RetryTask {
                 request_id: RequestId::new(),
                 idempotency_key: IdempotencyKey::new("forbidden-succeeded-retry").unwrap(),
@@ -745,9 +944,9 @@ fn terminal_tasks_are_never_reopened_by_retry() {
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.capability_profile.governed_target(),
-            &config.workspace,
-            &config.runtime,
+            &GatewayCapabilityProfile::task_only_v1().governed_target(),
+            config.launch_catalog.default_workspace(),
+            &brokered_core_runtime(),
             RetryTask {
                 request_id: RequestId::new(),
                 idempotency_key: IdempotencyKey::new("forbidden-cancelled-retry").unwrap(),
@@ -899,6 +1098,11 @@ fn local_client_controls_durable_task_through_authenticated_socket() {
         panic!("replay must return a Task")
     };
     assert_eq!(replay.task_id, task.task_id);
+
+    let GatewayResult::Tasks(tasks) = client.list(RequestId::new(), 64).unwrap() else {
+        panic!("list must return authorized Tasks")
+    };
+    assert_eq!(tasks.tasks, vec![task.clone()]);
 
     let GatewayResult::Events(page) = client
         .events(RequestId::new(), task.task_id.clone(), None, 1)
@@ -1221,13 +1425,24 @@ fn daemon_admission_accepts_only_the_exact_brokered_core_selector() {
     let admitted = brokered_core_runtime();
     request.runtime = admitted.clone();
 
-    assert!(supported_daemon_runtime(&admitted));
-    assert!(handler::validate_submission_admission(&request, &request.target, &admitted).is_ok());
+    assert!(supported_daemon_runtime(
+        GatewayCapabilityProfile::task_only_v1(),
+        &admitted
+    ));
+    let catalog = daemon_config(
+        PathBuf::from("/tmp/unused-gateway.sock"),
+        PathBuf::from("/tmp/unused-gateway.db"),
+    )
+    .launch_catalog;
+    assert!(handler::validate_submission_admission(&request, &catalog).is_ok());
 
     request.runtime = acp_runtime();
-    assert!(!supported_daemon_runtime(&request.runtime));
+    assert!(!supported_daemon_runtime(
+        GatewayCapabilityProfile::task_only_v1(),
+        &request.runtime
+    ));
     assert!(matches!(
-        handler::validate_submission_admission(&request, &request.target, &admitted),
+        handler::validate_submission_admission(&request, &catalog),
         Err(GatewayDaemonError::Protocol(_))
     ));
 }
@@ -1256,19 +1471,18 @@ fn task_handler_has_no_execution_or_persistence_dependencies() {
 }
 
 #[test]
-fn bind_rejects_acp_before_listener_or_database_mutation() {
+fn bind_accepts_an_acp_only_launch_catalog() {
     let root = private_tempdir();
     let socket_dir = private_directory(&root, "runtime");
     let socket_path = socket_dir.join("gateway.sock");
     let database_path = root.path().join("gateway.db");
-    let mut config = daemon_config(socket_path.clone(), database_path.clone());
-    config.runtime = acp_runtime();
+    let config = delegated_daemon_config(socket_path.clone(), database_path.clone());
 
     let result = GatewayDaemon::bind(config);
 
-    assert!(matches!(result, Err(GatewayDaemonError::Protocol(_))));
-    assert!(!socket_path.exists());
-    assert!(!database_path.exists());
+    assert!(result.is_ok());
+    assert!(socket_path.exists());
+    assert!(database_path.exists());
 }
 
 #[test]
@@ -1280,6 +1494,25 @@ fn bind_accepts_the_exact_brokered_core_selector() {
 
     let daemon = GatewayDaemon::bind(daemon_config(socket_path.clone(), database_path.clone()))
         .expect("the exact brokered Core selector must be admitted");
+
+    assert!(socket_path.exists());
+    assert!(database_path.exists());
+    drop(daemon);
+    assert!(!socket_path.exists());
+}
+
+#[test]
+fn bind_accepts_the_exact_delegated_acp_selector() {
+    let root = private_tempdir();
+    let socket_dir = private_directory(&root, "runtime");
+    let socket_path = socket_dir.join("gateway.sock");
+    let database_path = root.path().join("gateway.db");
+
+    let daemon = GatewayDaemon::bind(delegated_daemon_config(
+        socket_path.clone(),
+        database_path.clone(),
+    ))
+    .expect("the exact delegated ACP selector must be admitted");
 
     assert!(socket_path.exists());
     assert!(database_path.exists());

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default socket path for ws-ckpt daemon.
 pub const DEFAULT_SOCKET_PATH: &str = "/run/ws-ckpt/ws-ckpt.sock";
+/// Exact protocol version implemented by the guarded checkpoint API.
+pub const GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2: u16 = 2;
 
 // ===========================================================================
 // Wire protocol types (must match ws-ckpt-common exactly)
@@ -78,6 +80,50 @@ pub enum WsCkptRequest {
         workspace: String,
         to: Option<String>,
         num_ancestors: Option<u32>,
+    },
+    /// Resolves the stable identity of an already-registered workspace.
+    WorkspaceIdentityV2 {
+        registration_path: String,
+    },
+    /// Creates a checkpoint under an atomic workspace-generation fence.
+    GuardedCheckpointV2 {
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: String,
+        operation_digest: [u8; 32],
+        message: Option<String>,
+        metadata: Option<String>,
+        pin: bool,
+    },
+    /// Queries exact durable evidence for one guarded operation.
+    CheckpointEvidenceV2 {
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: String,
+        operation_digest: [u8; 32],
+    },
+    /// Previews an exact rollback target under workspace and generation fences.
+    GuardedRollbackPreviewV2 {
+        registered_path: String,
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        target_snapshot_id: String,
+    },
+    /// Atomically revalidates the preview and switches to its exact target.
+    GuardedRollbackV2 {
+        registered_path: String,
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        target_snapshot_id: String,
+        expected_diff_digest: [u8; 32],
+        operation_id: String,
+        operation_digest: [u8; 32],
+    },
+    /// Queries durable evidence for one guarded rollback operation.
+    GuardedRollbackEvidenceV2 {
+        ws_id: String,
+        operation_id: String,
+        operation_digest: [u8; 32],
     },
 }
 
@@ -153,6 +199,54 @@ pub enum WsCkptResponse {
         to: String,
         changes: Vec<DiffEntry>,
     },
+    /// Stable identity returned for an already-registered workspace.
+    WorkspaceIdentityV2Ok {
+        protocol_version: u16,
+        ws_id: String,
+        registered_path: String,
+        generation: WorkspaceGenerationTokenV2,
+    },
+    /// Durable evidence returned after a guarded checkpoint request.
+    GuardedCheckpointV2Ok {
+        evidence: GuardedCheckpointEvidenceV2,
+    },
+    /// Exact evidence lookup result; absence is represented by `None`.
+    CheckpointEvidenceV2Ok {
+        evidence: Option<GuardedCheckpointEvidenceV2>,
+    },
+    /// A guarded request rejected before checkpoint backend execution.
+    GuardedCheckpointV2Rejected {
+        code: GuardedCheckpointRejectionCodeV2,
+        message: String,
+    },
+    /// Exact rollback preview produced for a guarded caller.
+    GuardedRollbackPreviewV2Ok {
+        protocol_version: u16,
+        registered_path: String,
+        ws_id: String,
+        generation: WorkspaceGenerationTokenV2,
+        target_snapshot_id: String,
+        diff_digest: [u8; 32],
+        changes: Vec<DiffEntry>,
+        caller_uid: u32,
+    },
+    /// Durable proof that a guarded rollback completed.
+    GuardedRollbackV2Ok {
+        evidence: GuardedRollbackEvidenceV2,
+    },
+    /// Durable proof that a guarded rollback may have started.
+    GuardedRollbackV2Uncertain {
+        evidence: GuardedRollbackEvidenceV2,
+    },
+    /// Durable evidence lookup for one guarded rollback operation.
+    GuardedRollbackEvidenceV2Ok {
+        evidence: Option<GuardedRollbackEvidenceV2>,
+    },
+    /// A guarded rollback rejected before backend execution.
+    GuardedRollbackV2Rejected {
+        code: GuardedRollbackRejectionCodeV2,
+        message: String,
+    },
 }
 
 /// Error codes from ws-ckpt daemon.
@@ -172,6 +266,128 @@ pub enum WsCkptErrorCode {
     DiskSpaceInsufficient,
     CwdOccupied,
     CwdScanFailed,
+}
+
+/// Opaque identity of one live writable-subvolume generation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkspaceGenerationTokenV2([u8; 32]);
+
+impl WorkspaceGenerationTokenV2 {
+    /// Constructs a token from its exact fixed-width wire representation.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the exact fixed-width wire representation.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Consumes the token and returns its wire representation.
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for WorkspaceGenerationTokenV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorkspaceGenerationTokenV2(<opaque>)")
+    }
+}
+
+/// Terminal outcome durably bound to one guarded checkpoint operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardedCheckpointOutcomeV2 {
+    /// The backend created this snapshot.
+    Created { snapshot_id: String },
+    /// The daemon intentionally skipped backend creation.
+    Skipped { reason: String },
+}
+
+/// Durable proof binding a caller operation to one workspace generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardedCheckpointEvidenceV2 {
+    pub ws_id: String,
+    pub registered_path: String,
+    pub generation: WorkspaceGenerationTokenV2,
+    pub checkpoint_id: String,
+    pub operation_digest: [u8; 32],
+    pub caller_uid: u32,
+    pub outcome: GuardedCheckpointOutcomeV2,
+}
+
+/// Reasons a guarded request can be rejected before checkpoint backend execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardedCheckpointRejectionCodeV2 {
+    DaemonNotReady,
+    PeerCredentialsUnavailable,
+    InvalidRegistrationPath,
+    InvalidWorkspaceId,
+    InvalidCheckpointId,
+    InvalidMetadata,
+    WorkspaceNotFound,
+    GenerationMismatch,
+    OperationConflict,
+    WriteLockConflict,
+    CallerMismatch,
+    EvidenceCapacityReached,
+}
+
+/// Outcome durably bound to one guarded rollback operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardedRollbackOutcomeV2 {
+    /// The operation intent is durable and backend execution may have started.
+    Started,
+    /// The backend and index update both completed durably.
+    Succeeded {
+        resulting_generation: WorkspaceGenerationTokenV2,
+    },
+    /// Backend execution may have taken effect, but completion is unproven.
+    Unknown { reason: String },
+}
+
+/// Durable proof binding a caller operation to one exact guarded rollback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardedRollbackEvidenceV2 {
+    pub ws_id: String,
+    pub registered_path: String,
+    pub expected_generation: WorkspaceGenerationTokenV2,
+    pub target_snapshot_id: String,
+    pub expected_diff_digest: [u8; 32],
+    pub operation_id: String,
+    pub operation_digest: [u8; 32],
+    pub caller_uid: u32,
+    pub outcome: GuardedRollbackOutcomeV2,
+}
+
+/// Reasons a guarded rollback can be rejected before backend execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardedRollbackRejectionCodeV2 {
+    DaemonNotReady,
+    PeerCredentialsUnavailable,
+    InvalidRegistrationPath,
+    InvalidWorkspaceId,
+    InvalidSnapshotId,
+    InvalidOperationId,
+    WorkspaceNotFound,
+    SnapshotNotFound,
+    GenerationMismatch,
+    DiffMismatch,
+    OperationConflict,
+    WriteLockConflict,
+    CallerMismatch,
+    EvidenceCapacityReached,
+    CwdOccupied,
+    CwdScanFailed,
+}
+
+/// Stable registered-workspace identity used to bind guarded requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceIdentityV2 {
+    pub protocol_version: u16,
+    pub ws_id: String,
+    pub registered_path: String,
+    pub generation: WorkspaceGenerationTokenV2,
 }
 
 // ===========================================================================
@@ -452,6 +668,28 @@ pub struct CkptDeleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CkptDiffResult {
     pub changes: Vec<DiffEntry>,
+}
+
+/// Result of previewing a rollback without changing the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CkptRollbackPreviewResult {
+    /// Exact snapshot selected as the rollback target.
+    pub to: String,
+    /// Ordered file changes that rollback would apply.
+    pub changes: Vec<DiffEntry>,
+}
+
+/// Exact guarded rollback preview bound to one workspace generation and caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CkptGuardedRollbackPreviewV2 {
+    pub protocol_version: u16,
+    pub registered_path: String,
+    pub ws_id: String,
+    pub generation: WorkspaceGenerationTokenV2,
+    pub target_snapshot_id: String,
+    pub diff_digest: [u8; 32],
+    pub changes: Vec<DiffEntry>,
+    pub caller_uid: u32,
 }
 
 /// Result of a cleanup operation.
@@ -743,6 +981,62 @@ mod tests {
                     num_ancestors: None,
                 },
             ),
+            (
+                19,
+                WsCkptRequest::WorkspaceIdentityV2 {
+                    registration_path: "/ws".into(),
+                },
+            ),
+            (
+                20,
+                WsCkptRequest::GuardedCheckpointV2 {
+                    ws_id: "ws-abc123".into(),
+                    expected_generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    checkpoint_id: "ckp_1".into(),
+                    operation_digest: [2; 32],
+                    message: None,
+                    metadata: None,
+                    pin: true,
+                },
+            ),
+            (
+                21,
+                WsCkptRequest::CheckpointEvidenceV2 {
+                    ws_id: "ws-abc123".into(),
+                    expected_generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    checkpoint_id: "ckp_1".into(),
+                    operation_digest: [2; 32],
+                },
+            ),
+            (
+                22,
+                WsCkptRequest::GuardedRollbackPreviewV2 {
+                    registered_path: "/ws".into(),
+                    ws_id: "ws-abc123".into(),
+                    expected_generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    target_snapshot_id: "ckp_1".into(),
+                },
+            ),
+            (
+                23,
+                WsCkptRequest::GuardedRollbackV2 {
+                    registered_path: "/ws".into(),
+                    ws_id: "ws-abc123".into(),
+                    expected_generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    target_snapshot_id: "ckp_1".into(),
+                    expected_diff_digest: [3; 32],
+                    operation_id: "ckp_2".into(),
+                    operation_digest: [4; 32],
+                },
+            ),
+            (
+                24,
+                WsCkptRequest::GuardedRollbackEvidenceV2 {
+                    ws_id: "ws-abc123".into(),
+                    operation_id: "ckp_2".into(),
+                    operation_digest: [4; 32],
+                },
+            ),
         ];
 
         for (expected_idx, req) in &variants {
@@ -753,6 +1047,67 @@ mod tests {
                 "WsCkptRequest variant index mismatch: expected {}, got {}",
                 expected_idx, variant_idx
             );
+        }
+    }
+
+    #[test]
+    fn guarded_rollback_response_variants_keep_append_only_wire_indices() {
+        let evidence = GuardedRollbackEvidenceV2 {
+            ws_id: "ws-abc123".into(),
+            registered_path: "/ws".into(),
+            expected_generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+            target_snapshot_id: "ckp_1".into(),
+            expected_diff_digest: [2; 32],
+            operation_id: "ckp_2".into(),
+            operation_digest: [3; 32],
+            caller_uid: 1000,
+            outcome: GuardedRollbackOutcomeV2::Started,
+        };
+        let responses = [
+            (
+                21,
+                WsCkptResponse::GuardedRollbackPreviewV2Ok {
+                    protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+                    registered_path: "/ws".into(),
+                    ws_id: "ws-abc123".into(),
+                    generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    target_snapshot_id: "ckp_1".into(),
+                    diff_digest: [2; 32],
+                    changes: Vec::new(),
+                    caller_uid: 1000,
+                },
+            ),
+            (
+                22,
+                WsCkptResponse::GuardedRollbackV2Ok {
+                    evidence: evidence.clone(),
+                },
+            ),
+            (
+                23,
+                WsCkptResponse::GuardedRollbackV2Uncertain {
+                    evidence: evidence.clone(),
+                },
+            ),
+            (
+                24,
+                WsCkptResponse::GuardedRollbackEvidenceV2Ok {
+                    evidence: Some(evidence),
+                },
+            ),
+            (
+                25,
+                WsCkptResponse::GuardedRollbackV2Rejected {
+                    code: GuardedRollbackRejectionCodeV2::DiffMismatch,
+                    message: "changed".into(),
+                },
+            ),
+        ];
+
+        for (expected_idx, response) in responses {
+            let encoded = bincode::serialize(&response).unwrap();
+            let actual = u32::from_le_bytes(encoded[..4].try_into().unwrap());
+            assert_eq!(actual, expected_idx);
         }
     }
 

@@ -327,6 +327,16 @@ impl TaskAggregate {
                     self.run_outcome = RunOutcome::Active;
                 }
             }
+            TaskEvent::ApprovalAbandoned { approval_id, .. } => {
+                self.require_state(event, &[TaskState::WaitingApproval])?;
+                if !self.pending_approvals.remove(approval_id) {
+                    return Err(AggregateError::ApprovalNotPending);
+                }
+                if self.pending_approvals.is_empty() {
+                    self.state = TaskState::Running;
+                    self.run_outcome = RunOutcome::Active;
+                }
+            }
             TaskEvent::ExecutionPlanned { execution_id, .. } => {
                 self.require_active(event)?;
                 if !self.planned_executions.insert(execution_id.clone()) {
@@ -394,9 +404,17 @@ impl TaskAggregate {
                 self.pending_input = None;
             }
             TaskEvent::RunSuspended { run_id, .. } => {
-                self.require_state(event, &[TaskState::Running, TaskState::WaitingInput])?;
+                self.require_state(
+                    event,
+                    &[
+                        TaskState::Queued,
+                        TaskState::Running,
+                        TaskState::WaitingInput,
+                    ],
+                )?;
                 self.require_run(run_id)?;
-                if (self.state == TaskState::Running && self.run_outcome != RunOutcome::Active)
+                if (self.state == TaskState::Queued && self.run_outcome != RunOutcome::None)
+                    || (self.state == TaskState::Running && self.run_outcome != RunOutcome::Active)
                     || (self.state == TaskState::WaitingInput
                         && self.run_outcome != RunOutcome::Suspended)
                     || !self.planned_executions.is_empty()
@@ -418,6 +436,7 @@ impl TaskAggregate {
                 self.require_state(
                     event,
                     &[
+                        TaskState::Queued,
                         TaskState::Running,
                         TaskState::WaitingApproval,
                         TaskState::WaitingInput,
@@ -425,7 +444,8 @@ impl TaskAggregate {
                     ],
                 )?;
                 self.require_run(run_id)?;
-                if (self.state == TaskState::Running && self.run_outcome != RunOutcome::Active)
+                if (self.state == TaskState::Queued && self.run_outcome != RunOutcome::None)
+                    || (self.state == TaskState::Running && self.run_outcome != RunOutcome::Active)
                     || (matches!(
                         self.state,
                         TaskState::WaitingApproval | TaskState::WaitingInput | TaskState::Suspended

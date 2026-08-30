@@ -35,7 +35,10 @@ impl RuntimeHandle for ScheduledAgentRuntimeHandle {
                 "The Runtime handle is already terminal",
             ));
         }
-        if self.pending_permission.is_some()
+        if self
+            .pending_permission
+            .as_ref()
+            .is_some_and(|permission| permission.core_callback.is_some())
             || self.pending_brokered.is_some()
             || self.pending_input.is_some()
         {
@@ -88,6 +91,15 @@ impl RuntimeHandle for ScheduledAgentRuntimeHandle {
                 "The provider permission response does not match the pending callback",
             ));
         }
+        if permission.callback.is_some() == permission.core_callback.is_some() {
+            return Err(contract_error(
+                "runtime_permission_callback_invalid",
+                ErrorCategory::Conflict,
+                false,
+                "The provider permission response does not carry exactly one callback fence",
+            ));
+        }
+        let denied = matches!(&decision, RuntimePermissionDecision::Deny { .. });
         self.port
             .dispatch(
                 AgentRuntimeCommand::ResolvePermission {
@@ -98,6 +110,13 @@ impl RuntimeHandle for ScheduledAgentRuntimeHandle {
             )
             .map_err(map_port_error)?;
         self.pending_permission = None;
+        self.expected_cancellation = if denied && permission.callback.is_some() {
+            Some(RuntimeCancellationCause::ProviderPermissionDenied {
+                permission: permission.clone(),
+            })
+        } else {
+            None
+        };
         Ok(())
     }
 
