@@ -21,12 +21,7 @@ pub(super) fn finish_auth_configuration<W: std::io::Write>(
         },
     )?;
 
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        writeln!(output)?;
-        write!(output, "cosh-osc$ ")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
+    crate::slash::prompt::write_shell_prompt(state, output)?;
 
     output.flush()
 }

@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use super::PromptEpochExchange;
+
 /// Monotonic counter shared between the input relay and the PTY output loop.
 ///
 /// The relay bumps it *before* writing user bytes to the PTY master, so any
@@ -10,17 +12,25 @@ use std::sync::Arc;
 /// bump. The output loop compares snapshots against this counter to expire
 /// stale prompt-replay state without depending on channel drain timing.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct UserPtyInputGeneration(Arc<AtomicU64>);
+pub(crate) struct UserPtyInputGeneration {
+    counter: Arc<AtomicU64>,
+    prompt_epoch: PromptEpochExchange,
+}
 
 impl UserPtyInputGeneration {
     /// Records one batch of user bytes about to reach the PTY; returns the
     /// new generation.
     pub(crate) fn bump(&self) -> u64 {
-        self.0.fetch_add(1, Ordering::SeqCst) + 1
+        self.prompt_epoch.claim_before_user_write();
+        self.counter.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     pub(crate) fn current(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
+        self.counter.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn prompt_epoch_exchange(&self) -> PromptEpochExchange {
+        self.prompt_epoch.clone()
     }
 }
 
@@ -131,6 +141,20 @@ mod tests {
         assert_eq!(generation.current(), 0);
         assert_eq!(shared.bump(), 1);
         assert_eq!(generation.current(), 1);
+    }
+
+    #[test]
+    fn bump_claims_ready_prompt_before_advancing_generation() {
+        let generation = UserPtyInputGeneration::default();
+        let exchange = generation.prompt_epoch_exchange();
+        let epoch = exchange.open();
+        exchange.publish(epoch, b"prompt$ ");
+
+        assert_eq!(generation.bump(), 1);
+        assert_eq!(
+            exchange.take_claimed(epoch).as_deref(),
+            Some(b"prompt$ ".as_slice())
+        );
     }
 
     #[test]

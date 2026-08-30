@@ -7,6 +7,7 @@ mod event_store;
 mod handoff_claim;
 mod handoff_echo;
 mod marker_sequence;
+mod prompt_epoch;
 mod routing;
 mod slash_guard_echo;
 mod transcript_store;
@@ -88,7 +89,9 @@ pub(super) struct OscParser {
     last_prompt_display: Vec<u8>,
     capture_prompt_display: bool,
     prompt_ready_display_start: Option<usize>,
-    prompt_ready_display_starts: Vec<usize>,
+    prompt_presentation_display_starts: Vec<usize>,
+    prompt_epoch_exchange: Option<crate::raw_input::PromptEpochExchange>,
+    prompt_epoch: Option<u64>,
     /// #1932: the soft-newline upgrade submitted a synthetic empty line so
     /// bash repaints PS1; its visually blank accept echo is dropped at the
     /// matching prompt boundary instead of surfacing as a blank line.
@@ -483,11 +486,12 @@ impl OscParser {
 
     fn mark_prompt_ready(&mut self, prompt_cwd: Option<String>) {
         self.shell_prompt_cwd.set(prompt_cwd.clone());
+        self.open_prompt_epoch();
         if !self.display.is_full() {
             self.start_prompt_display_capture();
         }
         self.prompt_ready_display_start = Some(self.display.position());
-        self.prompt_ready_display_starts
+        self.prompt_presentation_display_starts
             .push(self.display.position());
         self.main_prompt_gate.set_at_prompt(true);
         if let Some(control) = &self.assistance_control {
@@ -687,8 +691,8 @@ impl OscParser {
         std::mem::take(&mut self.intervention_display_cuts)
     }
 
-    pub(super) fn drain_prompt_ready_display_starts(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.prompt_ready_display_starts)
+    pub(super) fn drain_prompt_presentation_display_starts(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.prompt_presentation_display_starts)
     }
 
     /// Arms the one-shot blank-echo drop for the synthetic PS1 repaint

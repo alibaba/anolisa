@@ -190,7 +190,8 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     }
                     *native_candidate_echoed_len = candidate_display_columns(&input);
                 } else {
-                    write!(output, "\r\x1b[2K{prompt}")?;
+                    write!(output, "\r\x1b[2K")?;
+                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
                         write_inline_hint(output, &hint)?;
@@ -205,7 +206,8 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     output.write_all(&input)?;
                     *native_candidate_echoed_len = 0;
                 } else {
-                    write!(output, "\r\x1b[2K{prompt}")?;
+                    write!(output, "\r\x1b[2K")?;
+                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                     output.write_all(&input)?;
                 }
                 writeln!(output)?;
@@ -258,7 +260,8 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     write!(output, "\x1b[K")?;
                     *native_candidate_echoed_len = 0;
                 } else {
-                    write!(output, "\r\x1b[2K{prompt}")?;
+                    write!(output, "\r\x1b[2K")?;
+                    prompt_presentation.write_replayed_prompt(output, prompt.as_bytes())?;
                 }
                 output.flush()?;
             }

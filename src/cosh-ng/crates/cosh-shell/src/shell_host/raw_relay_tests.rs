@@ -110,6 +110,82 @@ fn feed_shell_ready(parser: &mut OscParser) {
     parser.feed(&marker).expect("feed precmd");
 }
 
+fn feed_enhanced_prompt_ready(parser: &mut OscParser) {
+    parser
+        .feed(
+            b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\",\"prompt_ready\":true}\x07",
+        )
+        .expect("feed enhanced prompt ready");
+}
+
+#[test]
+fn prompt_snapshot_publishes_only_after_pty_is_drained() {
+    for (name, drained, expected) in [
+        ("not-drained", false, b"".as_slice()),
+        ("drained", true, b"prompt> ".as_slice()),
+    ] {
+        let mut parser = parser_for_test(name);
+        let generation = UserPtyInputGeneration::default();
+        parser.set_prompt_epoch_exchange(generation.prompt_epoch_exchange());
+        feed_enhanced_prompt_ready(&mut parser);
+        parser.feed(b"prompt> ").expect("feed prompt");
+
+        publish_prompt_snapshot_if_drained(&parser, drained);
+        generation.bump();
+        parser
+            .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07")
+            .expect("arm slash guard");
+
+        assert_eq!(
+            parser
+                .pending_slash_guard_prompt_for_test()
+                .expect("pending slash guard"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn buffered_pty_output_stays_before_queued_candidate_redraw() {
+    let mut parser = parser_for_test("buffered-output-before-redraw");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    let mut display_start = 0usize;
+    let mut echoed = 0usize;
+    let mut prompt_presentation = PromptPresentation::new(false);
+
+    parser
+        .feed(b"BACKGROUND\r\n")
+        .expect("feed buffered PTY output");
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+            input: b"/cancel".to_vec(),
+            hint: None,
+        })
+        .expect("queue candidate redraw");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write older PTY output");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("draw queued candidate");
+
+    assert_eq!(output, b"BACKGROUND\r\n\r\x1b[2Kprompt> /cancel");
+}
+
 #[test]
 fn capture_ack_generation_expires_at_terminal_event() {
     let mut parser = parser_for_test("capture-ack-lifecycle");
@@ -343,6 +419,47 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
     assert_eq!(echoed, 2);
     assert!(!output.windows(3).any(|window| window == b"\x1b[s"));
     assert!(!output.windows(3).any(|window| window == b"\x1b[u"));
+}
+
+#[test]
+fn isolated_candidate_repaints_keep_prompt_presentation_owner() {
+    let mut parser = parser_for_test("candidate-prompt-owner");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    let mut echoed = 0usize;
+    let prompt_presentation = PromptPresentation::new(true);
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+            input: "你好".as_bytes().to_vec(),
+            hint: None,
+        })
+        .expect("queue candidate redraw");
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateCommit(
+            "你好".as_bytes().to_vec(),
+        ))
+        .expect("queue candidate commit");
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("draw isolated candidate states");
+
+    assert_eq!(
+        String::from_utf8(output).expect("utf8 output"),
+        "\r\x1b[2K◇ prompt> 你好\r\x1b[2K◇ prompt> 你好\n\r\x1b[2K◇ prompt> "
+    );
 }
 
 // A wrapped hint tail would land below the erase-to-EOL reach of the next

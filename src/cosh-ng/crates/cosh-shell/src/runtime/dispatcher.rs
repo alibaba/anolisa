@@ -578,7 +578,7 @@ fn render_soft_newline_tip<W: Write>(
 
 fn render_owned_shell_prompt<W: Write>(
     state: &mut InlineState,
-    output: &mut W,
+    _output: &mut W,
 ) -> std::io::Result<()> {
     if state.agent_run.active.is_some()
         || state.shell_exited
@@ -598,13 +598,11 @@ fn render_owned_shell_prompt<W: Write>(
         return Ok(());
     }
 
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        let prompt = std::env::var("COSH_POC_PS1").unwrap_or_else(|_| "cosh-osc$ ".to_string());
-        write!(output, "{prompt}")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
-    output.flush()?;
+    // PromptPresentation owns the out-of-band input marker. Even an isolated
+    // shell must restore through the PTY relay instead of writing PS1 here,
+    // otherwise this synthetic repaint bypasses that single presentation
+    // owner and leaves one editable prompt undecorated.
+    state.trigger_pty_prompt = true;
     state.agent_run.needs_prompt_after_run = false;
     Ok(())
 }

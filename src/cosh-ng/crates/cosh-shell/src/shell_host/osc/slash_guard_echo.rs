@@ -41,6 +41,7 @@ pub(super) struct SlashGuardResolution {
     pub(super) prefix: Vec<u8>,
     pub(super) suffix: Vec<u8>,
     pub(super) insert_command: bool,
+    pub(super) presentation_start_in_prefix: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -53,11 +54,17 @@ pub(super) struct PendingSlashGuardEcho {
     // Used only to avoid duplicating a direct submission that Readline had
     // already painted exactly; any dirty-redisplay mismatch is reconstructed.
     before_arm: Vec<u8>,
+    prompt_before_input: Vec<u8>,
 }
 
 impl PendingSlashGuardEcho {
     pub(super) fn new(before_arm: &[u8]) -> Self {
+        Self::new_with_prompt(before_arm, &[])
+    }
+
+    fn new_with_prompt(before_arm: &[u8], prompt_before_input: &[u8]) -> Self {
         let retained_from = before_arm.len().saturating_sub(MAX_PENDING_BYTES);
+        let prompt_retained_from = prompt_before_input.len().saturating_sub(MAX_PENDING_BYTES);
         Self {
             line: Vec::new(),
             lines: 0,
@@ -65,7 +72,13 @@ impl PendingSlashGuardEcho {
             redraw_suppressed: false,
             suppressed_redraw: None,
             before_arm: before_arm[retained_from..].to_vec(),
+            prompt_before_input: prompt_before_input[prompt_retained_from..].to_vec(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn prompt_before_input_for_test(&self) -> &[u8] {
+        &self.prompt_before_input
     }
 
     pub(super) fn filter<'a>(slot: &mut Option<Self>, data: &'a [u8]) -> Cow<'a, [u8]> {
@@ -148,6 +161,8 @@ impl PendingSlashGuardEcho {
             .is_some_and(|before_ending| {
                 Self::proves_painted_command(before_ending, command, &redraw.prefix)
             });
+        let presentation_start_in_prefix =
+            pending.presentation_start_in_prefix(&redraw.prefix, command);
         let mut suffix = redraw.line_ending;
         suffix.extend_from_slice(&redraw.deferred);
         suffix.extend_from_slice(&pending.line);
@@ -155,7 +170,23 @@ impl PendingSlashGuardEcho {
             prefix: redraw.prefix,
             suffix,
             insert_command,
+            presentation_start_in_prefix,
         })
+    }
+
+    fn presentation_start_in_prefix(&self, prefix: &[u8], command: &[u8]) -> Option<usize> {
+        let start = prefix
+            .iter()
+            .rposition(|byte| *byte == b'\r')
+            .map_or(0, |index| index + 1);
+        let candidate = &prefix[start..];
+        let direct_prompt_matches = self
+            .before_arm
+            .strip_suffix(b"\r\x1b[K\r")
+            .and_then(|before| before.strip_suffix(command))
+            .is_some_and(|before_prompt| before_prompt.ends_with(candidate));
+        let stable_prompt_matches = self.prompt_before_input.ends_with(candidate);
+        (!candidate.is_empty() && (stable_prompt_matches || direct_prompt_matches)).then_some(start)
     }
 
     fn proves_painted_command(before_ending: &[u8], command: &[u8], prefix: &[u8]) -> bool {
@@ -209,6 +240,36 @@ impl PendingSlashGuardEcho {
     }
 
     fn unique_static_guard_start(body: &[u8]) -> Option<usize> {
+        if let Some(start) = Self::unique_unwrapped_static_guard_start(body) {
+            return Some(start);
+        }
+        if !body.contains(&b'\r') {
+            return None;
+        }
+        // Bash 4.4 can insert either a bare CR or `previous byte, CR,
+        // previous byte` when Readline wraps the static guard. Match against
+        // the same exact bounded command after collapsing only those repaint
+        // bytes, then map the proven start back without changing the display.
+        let mut unwrapped = Vec::with_capacity(body.len());
+        let mut original_offsets = Vec::with_capacity(body.len());
+        let mut index = 0;
+        while index < body.len() {
+            if body[index] == b'\r' {
+                index += 1;
+                if unwrapped.last().copied() == body.get(index).copied() {
+                    index += 1;
+                }
+                continue;
+            }
+            unwrapped.push(body[index]);
+            original_offsets.push(index);
+            index += 1;
+        }
+        let unwrapped_start = Self::unique_unwrapped_static_guard_start(&unwrapped)?;
+        original_offsets.get(unwrapped_start).copied()
+    }
+
+    fn unique_unwrapped_static_guard_start(body: &[u8]) -> Option<usize> {
         // Readline may replace the omitted left side with '<'. Require the
         // remaining suffix to be long, exact, and the only guard-shaped text;
         // ambiguity fails open so unrelated terminal output is never deleted.
@@ -285,7 +346,11 @@ impl OscParser {
     pub(super) fn handle_slash_guard_marker(&mut self, marker: &Marker) -> io::Result<bool> {
         if marker.event == "slash_guard" {
             self.flush_pending_slash_guard_echo()?;
-            let pending = PendingSlashGuardEcho::new(self.last_prompt_display());
+            let prompt_before_input = self.take_claimed_prompt_snapshot();
+            let pending = PendingSlashGuardEcho::new_with_prompt(
+                self.last_prompt_display(),
+                prompt_before_input.as_deref().unwrap_or_default(),
+            );
             self.pending_slash_guard_echo = Some(pending);
             return Ok(true);
         }
@@ -317,7 +382,12 @@ impl OscParser {
         else {
             return self.flush_pending_slash_guard_echo();
         };
+        let prefix_base = self.display.position();
         self.append_passthrough(&resolution.prefix)?;
+        if let Some(start) = resolution.presentation_start_in_prefix {
+            self.prompt_presentation_display_starts
+                .push(prefix_base + start);
+        }
         if resolution.insert_command {
             self.append_display_only(command.as_bytes())?;
         }
@@ -335,6 +405,10 @@ impl OscParser {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "slash_guard_echo_presentation_tests.rs"]
+mod presentation_tests;
 
 #[cfg(test)]
 mod tests {

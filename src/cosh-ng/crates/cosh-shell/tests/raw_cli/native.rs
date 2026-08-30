@@ -1,5 +1,95 @@
 use super::*;
 
+fn initial_prompt_line_prefix<'a>(visible: &'a str, prompt: &str) -> &'a str {
+    let prompt_start = visible.find(prompt).expect("initial enhanced prompt");
+    visible[..prompt_start]
+        .rsplit(['\r', '\n'])
+        .next()
+        .unwrap_or_default()
+}
+
+#[test]
+fn initial_assisted_prompt_prefix_requires_exactly_one_symbol() {
+    let prompt = "enhanced-owner$ ";
+
+    assert_eq!(
+        initial_prompt_line_prefix("◇ enhanced-owner$ ", prompt),
+        "◇ "
+    );
+    assert_ne!(initial_prompt_line_prefix("enhanced-owner$ ", prompt), "◇ ");
+    assert_ne!(
+        initial_prompt_line_prefix("◇ ◇ enhanced-owner$ ", prompt),
+        "◇ "
+    );
+}
+
+#[test]
+fn raw_cli_isolated_card_and_candidate_redraws_keep_one_assisted_prefix_per_prompt() {
+    let prompt = "isolated-owner$ ";
+    let home = temp_shell_home("prompt-owner-isolation-values");
+    fs::write(home.join(".bashrc"), format!("PS1='{prompt}'\n")).unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    for isolated in ["1", "false"] {
+        for width in ["74", "80", "200"] {
+            let output = run_raw_cli_with_args_env_and_delayed_input(
+                "fake",
+                &["--shell", "bash"],
+                &[
+                    ("HOME", &home_str),
+                    ("COSH_POC_PS1", prompt),
+                    ("COSH_SHELL_INTEGRATION", "enhanced"),
+                    ("COSH_SHELL_ISOLATED", isolated),
+                    ("COSH_SHELL_STARTUP_BANNER", "0"),
+                    ("COSH_SHELL_LANG", "en-US"),
+                    ("COSH_SHELL_WIDTH", width),
+                ],
+                vec![
+                    ("你".as_bytes().to_vec(), Duration::from_millis(300)),
+                    (b"\x15".to_vec(), Duration::from_millis(300)),
+                    (
+                        b"?? hold test slow agent\n".to_vec(),
+                        Duration::from_millis(300),
+                    ),
+                    (b"/cancel\n".to_vec(), Duration::from_millis(1_000)),
+                    (
+                        b"echo ordinary-control-1\n".to_vec(),
+                        Duration::from_millis(700),
+                    ),
+                    (
+                        b"echo ordinary-control-2\n".to_vec(),
+                        Duration::from_millis(300),
+                    ),
+                    (b"exit\n".to_vec(), Duration::from_millis(300)),
+                ],
+            );
+            let visible = strip_ansi_escape(&output);
+
+            assert!(visible.contains("Agent cancellation requested"), "{output}");
+            assert!(visible.contains("ordinary-control-2"), "{output}");
+            let prompt_count = count_occurrences(&visible, prompt);
+            let expected_prompt_count = if isolated == "1" { 8 } else { 5 };
+            assert_eq!(
+                prompt_count, expected_prompt_count,
+                "{isolated}/{width}: {output}"
+            );
+            assert_eq!(
+                count_occurrences(&visible, &format!("◇ {prompt}")),
+                prompt_count,
+                "{isolated}/{width}: every complete prompt must bind exactly one Assisted prefix: {output}"
+            );
+            assert!(
+                !visible.contains(&format!("◇ ◇ {prompt}")),
+                "{isolated}/{width}: {output}"
+            );
+            assert!(
+                !visible.contains(&format!("◌ {prompt}")),
+                "{isolated}/{width}: {output}"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(home);
+}
+
 #[test]
 fn raw_cli_native_keeps_custom_bash_prompt_undecorated() {
     let home = temp_shell_home("native-custom-prompt");
@@ -46,6 +136,12 @@ fn raw_cli_default_enhanced_assisted_decorates_bash_prompt_without_mutating_ps1(
     );
     let _ = fs::remove_dir_all(&home);
     let visible = strip_ansi_escape(&output);
+
+    assert_eq!(
+        initial_prompt_line_prefix(&visible, "enhanced-owner$ "),
+        "◇ ",
+        "initial prompt must expose the Assisted input owner: {output}"
+    );
 
     assert!(
         count_occurrences(&visible, "◇ enhanced-owner$ ") >= 2,

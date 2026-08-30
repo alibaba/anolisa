@@ -9,6 +9,7 @@ mod event_sender;
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
 mod mode;
+mod prompt_epoch;
 mod pty;
 mod relay;
 mod relay_action;
@@ -19,6 +20,7 @@ pub(crate) use event_parser::redact_extension_setting_value;
 pub(crate) use generation::UserPtyInputGeneration;
 pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
+pub(crate) use prompt_epoch::PromptEpochExchange;
 pub(crate) use pty::{
     foreground_process_group_for_fds, process_group_exists, set_pty_winsize,
     signal_foreground_process_group, signal_process_group, signal_process_group_id, write_all_pty,

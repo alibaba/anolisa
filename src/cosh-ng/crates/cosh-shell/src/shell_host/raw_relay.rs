@@ -53,6 +53,12 @@ const SAVE_CURSOR: &str = "\x1b7";
 const RESTORE_CURSOR: &str = "\x1b8";
 const PTY_READ_BATCH_BYTES: usize = 256 * 1024;
 
+fn publish_prompt_snapshot_if_drained(parser: &OscParser, pty_drained: bool) {
+    if pty_drained {
+        parser.publish_quiescent_prompt_snapshot();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
     master: &mut File,
@@ -169,6 +175,7 @@ where
             output.flush()?;
         }
         let mut batch_bytes = 0usize;
+        let mut pty_drained = false;
         loop {
             match master.read(&mut buffer) {
                 Ok(0) => break,
@@ -289,7 +296,10 @@ where
                         break;
                     }
                 }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    pty_drained = true;
+                    break;
+                }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) if child.try_wait()?.is_some() => {
                     if !advance_eof_shutdown(&mut eof_shutdown)? {
@@ -416,6 +426,7 @@ where
             output.flush()?;
         }
         input_readiness.acknowledge_if_ready(output, input_mode)?;
+        publish_prompt_snapshot_if_drained(parser, pty_drained);
         // The PTY is drained (WouldBlock) at this point: write off
         // submissions a foreground program consumed once the shell has
         // painted a prompt after the last boundary and idles at it. A bare

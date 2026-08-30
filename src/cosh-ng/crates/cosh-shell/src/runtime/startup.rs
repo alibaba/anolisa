@@ -64,12 +64,7 @@ fn restore_startup_prompt<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        write!(output, "cosh-osc$ ")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
-    Ok(())
+    crate::slash::prompt::write_shell_prompt(state, output)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

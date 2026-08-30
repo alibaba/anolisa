@@ -56,9 +56,9 @@ impl PromptPresentation {
     pub(super) fn observe(&mut self, parser: &mut OscParser) {
         if self.enhanced {
             self.pending_starts
-                .extend(parser.drain_prompt_ready_display_starts());
+                .extend(parser.drain_prompt_presentation_display_starts());
         } else {
-            parser.drain_prompt_ready_display_starts();
+            parser.drain_prompt_presentation_display_starts();
         }
     }
 

@@ -362,6 +362,30 @@ mod tests {
     }
 
     #[test]
+    fn completed_agent_run_restores_prompt_through_the_pty_owner() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.agent_run.needs_prompt_after_run = true;
+        let mut output = Vec::new();
+
+        let action = render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state)
+            .expect("restore prompt after agent run");
+
+        assert_eq!(
+            action,
+            RawObserverAction::RestorePrompt {
+                ghost_text: None,
+                ghost_route: Default::default(),
+            }
+        );
+        assert!(
+            output.is_empty(),
+            "runtime must not write a bare PS1 outside PromptPresentation"
+        );
+        assert!(!state.agent_run.needs_prompt_after_run);
+    }
+
+    #[test]
     fn pending_shell_handoff_keeps_raw_passthrough_before_preexec() {
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState::default();

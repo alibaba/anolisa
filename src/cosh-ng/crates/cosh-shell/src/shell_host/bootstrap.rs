@@ -119,7 +119,9 @@ fn start_shell_session(
     if config.integration.uses_markers() {
         command.env("COSH_SESSION_ID", &config.session_id);
     }
-    if !config.native_mode {
+    if config.native_mode {
+        command.env_remove("COSH_SHELL_ISOLATED");
+    } else {
         command
             .env("COSH_HISTFILE", config.work_dir.join("history"))
             .env("COSH_POC_PS1", &config.prompt)

@@ -386,11 +386,14 @@ where
     session
         .parser
         .set_main_prompt_gate(main_prompt_gate.clone());
+    let input_generation = UserPtyInputGeneration::default();
+    session
+        .parser
+        .set_prompt_epoch_exchange(input_generation.prompt_epoch_exchange());
     if let Some(control) = assistance_control.as_ref() {
         session.parser.set_assistance_control(control.clone());
         prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
     }
-
     if config.integration.uses_markers() {
         read_until_streaming_with_presentation(
             &mut session.master,
@@ -408,18 +411,15 @@ where
             },
         )?;
     }
-
     let input_master = session.master.try_clone()?;
     let (input_event_sender, input_event_receiver) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
-    let input_generation = UserPtyInputGeneration::default();
-    // #1721 D16: prompt_ready raises the gate on the output side; submits
-    // and preexec lower it, keeping CJK drafts off PS2/heredoc continuations.
-    // Keep #1718's prompt-gated route behind the bounded Readline guard.
+    // #1721/#1718: prompt_ready raises the gated route; submits lower it.
     let slash_route_enabled = bounded_bash_handoff
         && config.integration.uses_markers()
         && config.slash_via_shell
         && config.native_mode;
+    session.parser.publish_quiescent_prompt_snapshot();
     let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
         RelayWake::new()?.into_parts();
     // Keep the channel open after the driver and completion notifier exit;
