@@ -21,11 +21,6 @@ os = ["linux"]
 arch = ["x86_64", "aarch64"]
 
 [[component.dependencies]]
-name = "openssl1.1"
-kind = "system-package"
-packages = { rpm = "openssl1.1", deb = "libssl1.1" }
-
-[[component.dependencies]]
 name = "bash"
 kind = "system-package"
 probe = "bash --version"

@@ -63,10 +63,65 @@ def verify_build_metadata(
             raise ValueError(f"SHA-256 for {binary.name} does not match build metadata")
 
 
+def elf_needed(blob: bytes) -> list[str]:
+    """Collect the DT_NEEDED names of a 64-bit little-endian ELF binary."""
+    phoff, phentsize, phnum = struct.unpack_from("<Q14xHH", blob, 32)
+    dynamic = None
+    for index in range(phnum):
+        offset = phoff + index * phentsize
+        if offset + 56 > len(blob):
+            raise ValueError("program header table is truncated")
+        p_type, _, p_offset, _, _, p_filesz = struct.unpack_from("<II4Q", blob, offset)
+        if p_type == 2:  # PT_DYNAMIC
+            dynamic = (p_offset, p_filesz)
+            break
+    if dynamic is None:
+        return []
+
+    offset, size = dynamic
+    entries = []
+    strtab = None
+    for position in range(offset, min(offset + size, len(blob)) - 15, 16):
+        tag, value = struct.unpack_from("<qQ", blob, position)
+        if tag == 0:  # DT_NULL
+            break
+        if tag == 1:  # DT_NEEDED
+            entries.append(value)
+        elif tag == 5:  # DT_STRTAB
+            strtab = value
+    if not entries:
+        return []
+    if strtab is None:
+        raise ValueError("DT_NEEDED entries without a string table")
+
+    # DT_STRTAB holds a virtual address; map it back through the loadable
+    # segment that contains it.
+    base = None
+    for index in range(phnum):
+        header_offset = phoff + index * phentsize
+        p_type, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from(
+            "<II4Q", blob, header_offset
+        )
+        if p_type == 1 and p_vaddr <= strtab < p_vaddr + p_filesz:  # PT_LOAD
+            base = p_offset + strtab - p_vaddr
+            break
+    if base is None:
+        raise ValueError("DT_STRTAB is outside every loadable segment")
+
+    names = []
+    for entry in entries:
+        start = base + entry
+        end = blob.find(b"\0", start)
+        if start >= len(blob) or end < 0:
+            raise ValueError("DT_NEEDED name is outside the string table")
+        names.append(blob[start:end].decode("utf-8", "replace"))
+    return names
+
+
 def verify_elf(path: Path, arch: str) -> None:
-    """Verify one 64-bit little-endian ELF binary's architecture."""
-    with path.open("rb") as stream:
-        header = stream.read(64)
+    """Verify one 64-bit little-endian ELF binary's architecture and linkage."""
+    blob = path.read_bytes()
+    header = blob[:64]
     if len(header) < 20 or header[:4] != b"\x7fELF":
         raise ValueError("not an ELF binary")
     if header[4] != 2:
@@ -76,6 +131,17 @@ def verify_elf(path: Path, arch: str) -> None:
     machine = struct.unpack_from("<H", header, 18)[0]
     if machine != ELF_MACHINES[arch]:
         raise ValueError(f"ELF machine {machine} does not match {arch}")
+    if len(blob) >= 64:
+        linked = [
+            name
+            for name in elf_needed(blob)
+            if name.startswith(("libssl.so", "libcrypto.so"))
+        ]
+        if linked:
+            raise ValueError(
+                f"dynamically links OpenSSL ({', '.join(linked)}); "
+                "build with --features cosh-core/vendored-openssl"
+            )
 
 
 def verify_macho(path: Path, arch: str) -> None:

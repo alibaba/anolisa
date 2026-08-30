@@ -167,6 +167,46 @@ if python3 "$ROOT/packaging/raw/verify-binaries.py" \
     exit 1
 fi
 
+OPENSSL_LINKED="$TMP/openssl-linked-cosh-core"
+python3 - "$OPENSSL_LINKED" <<'PY'
+import struct
+import sys
+
+# Minimal ELF carrying DT_NEEDED libssl.so.1.1, as a non-vendored release
+# build of cosh-core does.
+strings = b"\0libssl.so.1.1\0"
+dynamic = struct.pack("<qQqQqQ", 1, 1, 5, 0x1000, 0, 0)
+vaddr = 0x1000
+strtab_offset = 0x1000
+dynamic_offset = strtab_offset + len(strings)
+
+header = bytearray(64)
+header[:6] = b"\x7fELF\x02\x01"
+struct.pack_into("<H", header, 16, 2)
+struct.pack_into("<H", header, 18, 62)
+struct.pack_into("<I", header, 20, 1)
+struct.pack_into("<Q", header, 32, 64)
+struct.pack_into("<HH", header, 54, 56, 2)
+
+load = struct.pack(
+    "<II6Q", 1, 4, strtab_offset, vaddr, vaddr, len(strings), len(strings), 0x1000
+)
+dyn = struct.pack(
+    "<II6Q", 2, 4, dynamic_offset, 0x2000, 0x2000, len(dynamic), len(dynamic), 8
+)
+
+blob = bytearray(header + load + dyn)
+blob.extend(b"\0" * (strtab_offset - len(blob)))
+blob.extend(strings)
+blob.extend(dynamic)
+open(sys.argv[1], "wb").write(bytes(blob))
+PY
+if python3 "$ROOT/packaging/raw/verify-binaries.py" \
+    --os linux --arch x86_64 "$OPENSSL_LINKED" >/dev/null 2>&1; then
+    echo "ERROR: binary dynamically linking OpenSSL was accepted" >&2
+    exit 1
+fi
+
 EXTRA_BUILD="$TMP/extra-build.toml"
 install -p -m 0644 "$LINUX_ARM64/cosh-ng-build.toml" "$EXTRA_BUILD"
 printf 'unexpected-tool = "%064d"\n' 0 >> "$EXTRA_BUILD"
@@ -386,8 +426,8 @@ linux_dependencies = {
 macos_dependencies = {
     dependency["name"]: dependency for dependency in macos["component"]["dependencies"]
 }
-assert "probe" not in linux_dependencies["openssl1.1"]
-assert "openssl1.1" not in macos_dependencies
+for dependencies in (linux_dependencies, macos_dependencies):
+    assert not [name for name in dependencies if "ssl" in name]
 linux_common = dict(linux["component"])
 macos_common = dict(macos["component"])
 for component in (linux_common, macos_common):
@@ -434,9 +474,7 @@ install -d -m 0755 "$MACOS_EXTRACTED"
 tar -xzf "$TMP/out-macos-arm64/$MACOS_ARTIFACT" -C "$MACOS_EXTRACTED"
 cmp "$MACOS_CONTRACT" "$MACOS_EXTRACTED/.anolisa/component.toml"
 test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
-grep -Fq 'name = "openssl1.1"' "$ROOT/.anolisa/component.toml"
-test -z "$(grep -F 'name = "openssl1.1"' \
-    "$ROOT/.anolisa/component.macos.toml" || true)"
+test -z "$(grep -F 'libssl' "$ROOT/.anolisa/component.toml" || true)"
 grep -Fq 'source = "bin/cosh"' "$ROOT/.anolisa/component.toml"
 grep -Fq 'source = "libexec/anolisa/cosh-ng/cosh-shell"' \
     "$ROOT/.anolisa/component.toml"

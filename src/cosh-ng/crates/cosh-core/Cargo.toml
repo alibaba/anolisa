@@ -48,6 +48,10 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 wait-timeout.workspace = true
 
+[features]
+# Prebuilt releases must not inherit the builder image's libssl SONAME.
+vendored-openssl = ["reqwest/native-tls-vendored"]
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }

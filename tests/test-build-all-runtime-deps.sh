@@ -116,20 +116,20 @@ test_manifest_parser_covers_component_dependencies() {
 
     assert_contains "$output" 'cosh|node|language-runtime|node --version|nodejs|nodejs||>=20|'
     assert_contains "$output" 'sec-core|bubblewrap|system-package|bwrap --version|bubblewrap|bubblewrap|||'
-    assert_contains "$output" 'cosh-ng|openssl1.1|system-package||openssl1.1|libssl1.1|||'
+    assert_not_contains "$output" 'libssl1.1'
     assert_contains "$output" 'tokenless|python3|system-package|python3 --version|python3|python3|||'
     assert_contains "$output" 'ws-ckpt|btrfs-progs|system-package|mkfs.btrfs --version|btrfs-progs|btrfs-progs|||'
     assert_contains "$output" 'ws-ckpt|rsync|system-package|rsync --version|rsync|rsync|||'
     assert_contains "$output" 'ws-ckpt|btrfs|platform-capability||||btrfs||5.4'
     assert_contains "$output" 'sight|ebpf-btf|platform-capability||||btf||5.8'
-    [[ "$(wc -l < "$output")" -eq 15 ]] || fail "unexpected manifest dependency count"
+    [[ "$(wc -l < "$output")" -eq 14 ]] || fail "unexpected manifest dependency count"
 
     local source_dependency
-    source_dependency="$(runtime_dependency_for_source_build \
-        'cosh-ng|openssl1.1|system-package||openssl1.1|libssl1.1|||')"
+    COMPONENTS=(cosh-ng)
+    source_dependency="$(source_build_runtime_dependencies)"
     [[ "$source_dependency" == \
         'cosh-ng|openssl|system-package|pkg-config --exists openssl|openssl-devel|libssl-dev|||' ]] || \
-        fail "cosh-ng source dependency was not adapted"
+        fail "cosh-ng source build did not require the host OpenSSL headers"
 
     source_dependency="$(runtime_dependency_for_source_build \
         'sec-core|nodejs|system-package|node --version|nodejs|nodejs||||')"

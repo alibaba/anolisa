@@ -2008,10 +2008,6 @@ runtime_dependency_for_source_build() {
     if [[ "$component" == "sec-core" && "$name" == "systemd" ]]; then
         # Source installs do not install or manage the packaged systemd unit.
         return 0
-    elif [[ "$component" == "cosh-ng" && "$name" == "openssl1.1" ]]; then
-        # The packaged cosh-ng contract targets OpenSSL 1.1, while a source
-        # build links against the host development package.
-        echo 'cosh-ng|openssl|system-package|pkg-config --exists openssl|openssl-devel|libssl-dev|||'
     elif [[ "$component" == "sec-core" && "$name" == "nodejs" ]]; then
         # The manifest only probes runtime presence, while the OpenClaw plugin
         # source build requires the same Node version as copilot-shell.
@@ -2025,6 +2021,11 @@ source_build_runtime_dependencies() {
     local component
     while IFS= read -r component; do
         case "$component" in
+            cosh-ng)
+                # Prebuilt cosh-ng vendors OpenSSL; a source build links
+                # against the host development package.
+                echo 'cosh-ng|openssl|system-package|pkg-config --exists openssl|openssl-devel|libssl-dev|||'
+                ;;
             sight)
                 echo 'sight|node|language-runtime|node --version|nodejs|nodejs||>=20|'
                 ;;
