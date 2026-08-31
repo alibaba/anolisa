@@ -200,10 +200,28 @@ mod tests {
             ),
             PathBuf::from("/logtail_host/proc/123/root/usr/lib/libssl.so.3")
         );
+        // Kept message-free on purpose: assert messages are only evaluated on
+        // failure, which would leave the line permanently uncovered.
         assert_eq!(
             Path::new("/proc/123/root").join("/usr/lib/libssl.so"),
-            PathBuf::from("/usr/lib/libssl.so"),
-            "join() still behaves the way that makes rooted() necessary"
+            PathBuf::from("/usr/lib/libssl.so")
+        );
+    }
+
+    #[test]
+    fn public_accessors_follow_the_current_root() {
+        // Read-only against the process-global root, whatever it is in this
+        // test binary: the accessors must compose under it.
+        let root = proc_root();
+        assert_eq!(proc_pid(42u32), root.join("42"));
+        assert_eq!(proc_pid_entry(42u32, "cmdline"), root.join("42/cmdline"));
+        assert_eq!(proc_pid_entry(42u32, "ns/pid"), root.join("42/ns/pid"));
+
+        let mut expected = root.join("42").into_os_string();
+        expected.push("/root/usr/lib/libssl.so");
+        assert_eq!(
+            proc_pid_rooted(42u32, "/usr/lib/libssl.so"),
+            PathBuf::from(expected)
         );
     }
 

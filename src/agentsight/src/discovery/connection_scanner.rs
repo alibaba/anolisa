@@ -259,4 +259,72 @@ mod tests {
         let unique: Vec<u32> = pids.into_iter().filter(|pid| seen.insert(*pid)).collect();
         assert_eq!(unique, vec![100, 200, 300]);
     }
+
+    #[test]
+    fn resolve_inodes_without_targets_walks_without_matching() {
+        // Empty target set: the procfs walk runs end to end and matches nothing.
+        assert!(resolve_inodes_to_pids(&HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn resolve_inodes_maps_own_sockets_back_to_us() {
+        // Guarantee at least one socket fd exists in this process.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let _stream = std::net::TcpStream::connect(addr).expect("connect");
+        let _accepted = listener.accept().expect("accept");
+
+        // Harvest our own socket inodes through the same fd layout the scanner
+        // walks, then verify the resolver maps them back to this process.
+        let fd_dir = crate::utils::procfs::proc_pid_entry(std::process::id(), "fd");
+        let mut inodes = HashSet::new();
+        for fd in std::fs::read_dir(&fd_dir)
+            .expect("read own fd dir")
+            .flatten()
+        {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            if let Some(inode) = target
+                .to_str()
+                .and_then(|t| t.strip_prefix("socket:["))
+                .and_then(|t| t.strip_suffix(']'))
+                .and_then(|t| t.parse::<u64>().ok())
+            {
+                inodes.insert(inode);
+            }
+        }
+        assert!(
+            !inodes.is_empty(),
+            "the connected stream must yield a socket inode"
+        );
+
+        let map = resolve_inodes_to_pids(&inodes);
+        assert!(!map.is_empty());
+        assert!(map.values().all(|&pid| pid == std::process::id()));
+    }
+
+    #[test]
+    fn scan_finds_own_localhost_connection() {
+        // End-to-end: "localhost" resolves to 127.0.0.1, we hold an established
+        // connection to it, so the scan must resolve our pid through the full
+        // tcp-table -> inode -> pid -> cmdline chain.
+        let https_rules = vec![crate::config::HttpsRule {
+            pattern: "localhost".to_string(),
+        }];
+        let agent_scanner = AgentScanner::from_rules(&[], &https_rules);
+        let scanner = ConnectionScanner::new(&agent_scanner);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let _stream = std::net::TcpStream::connect(addr).expect("connect");
+        let _accepted = listener.accept().expect("accept");
+
+        let results = scanner.scan(&HashSet::new());
+        assert!(
+            results.iter().any(|r| r.pid == std::process::id()),
+            "expected our pid in scan results, got {:?}",
+            results.iter().map(|r| r.pid).collect::<Vec<_>>()
+        );
+    }
 }

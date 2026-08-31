@@ -492,4 +492,31 @@ mod tests {
         let result = scanner.try_match_process(std::process::id());
         assert!(result.is_none());
     }
+
+    #[test]
+    fn test_scan_without_rules_finds_nothing() {
+        let mut scanner = AgentScanner::from_rules(&[], &[]);
+        // Exercises the full procfs walk; with no rules nothing can match.
+        assert!(scanner.scan().is_empty());
+    }
+
+    #[test]
+    fn test_on_dns_event_unreadable_pid_fails_closed() {
+        let https_rules = vec![crate::config::HttpsRule {
+            pattern: "example.com".to_string(),
+        }];
+        let scanner = AgentScanner::from_rules(&[], &https_rules);
+        // The domain matches, but the (impossible) pid's cmdline is unreadable:
+        // deny rules cannot be evaluated, so no attach happens.
+        assert!(scanner.matches_domain("example.com"));
+        assert!(!scanner.on_dns_event(u32::MAX, "example.com"));
+    }
+
+    #[test]
+    fn test_on_process_create_unreadable_pid_matches_nothing() {
+        let mut scanner = AgentScanner::from_rules(&[], &[]);
+        // u32::MAX exceeds the kernel's pid_max, so every procfs read fails;
+        // the short BPF comm forces the comm-read fallback as well.
+        assert!(scanner.on_process_create(u32::MAX, "x").is_none());
+    }
 }

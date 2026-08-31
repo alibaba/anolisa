@@ -140,4 +140,16 @@ mod tests {
         assert_eq!(parse_hex_port("00000000:0050"), Some(80));
         assert_eq!(parse_hex_port("invalid"), None);
     }
+
+    #[test]
+    fn test_collect_socket_inodes_with_live_socket() {
+        // A listener plus a connected stream guarantees at least one socket fd,
+        // so the enumeration over our fd table must find something.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let _stream = std::net::TcpStream::connect(addr).expect("connect");
+
+        let inodes = collect_socket_inodes(std::process::id()).expect("enumerate fds");
+        assert!(!inodes.is_empty());
+    }
 }

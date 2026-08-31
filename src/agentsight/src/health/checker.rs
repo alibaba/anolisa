@@ -587,6 +587,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_read_ppid_current_process() {
+        // Whatever the parent is, our own stat entry parses.
+        assert!(read_ppid(std::process::id()).is_some());
+    }
+
+    #[test]
     fn test_infer_agent_role_gateway_with_ports() {
         let mut map = HashMap::new();
         map.insert(1, "Codex".to_string());

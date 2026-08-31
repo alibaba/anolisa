@@ -2109,6 +2109,44 @@ mod tests {
     }
 
     #[test]
+    fn test_config_procfs_root_is_configurable() {
+        let cfg = agentsight_config_new();
+        assert!(!cfg.is_null());
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from(crate::utils::procfs::DEFAULT_PROC_ROOT)
+        );
+
+        let root = CString::new("/logtail_host/proc").unwrap();
+        unsafe { agentsight_config_set_procfs_root(cfg, root.as_ptr()) };
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from("/logtail_host/proc")
+        );
+
+        // An empty string keeps the previous value.
+        let empty = CString::new("").unwrap();
+        unsafe { agentsight_config_set_procfs_root(cfg, empty.as_ptr()) };
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from("/logtail_host/proc")
+        );
+
+        unsafe { agentsight_config_free(cfg) };
+
+        // Null operands are no-ops, not crashes.
+        let some_path = CString::new("/proc").unwrap();
+        unsafe { agentsight_config_set_procfs_root(std::ptr::null_mut(), some_path.as_ptr()) };
+        let cfg = agentsight_config_new();
+        unsafe { agentsight_config_set_procfs_root(cfg, std::ptr::null()) };
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from(crate::utils::procfs::DEFAULT_PROC_ROOT)
+        );
+        unsafe { agentsight_config_free(cfg) };
+    }
+
+    #[test]
     fn test_security_subscriber_stops_cleanly_when_enforcer_is_unavailable() {
         let (tx, rx) = mpsc::sync_channel(1);
         let running = Arc::new(AtomicBool::new(true));
