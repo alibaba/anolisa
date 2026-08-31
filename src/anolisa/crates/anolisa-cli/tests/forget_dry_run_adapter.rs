@@ -212,6 +212,15 @@ fn forget_dry_run_json_ignores_unrelated_adapter_claim() {
     assert_eq!(value.get("ok"), Some(&Value::Bool(true)), "{value}");
     let data = value.get("data").expect("data");
     assert_eq!(data.get("component").and_then(Value::as_str), Some(TARGET));
+    assert_eq!(
+        data.get("provenance").and_then(Value::as_str),
+        Some("adopted")
+    );
+    assert_eq!(
+        data.get("install_mode").and_then(Value::as_str),
+        Some("system")
+    );
     assert_eq!(data.get("dry_run"), Some(&Value::Bool(true)));
     assert_eq!(data.get("forgotten"), Some(&Value::Bool(false)));
+    assert!(data.get("operation_id").is_none(), "{value}");
 }
