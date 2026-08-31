@@ -7,6 +7,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3] - 2026-08-31
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.11.1 |
+| agentsight | 0.11.2 |
+| tokenless | 0.7.14 |
+| agent-memory | 0.2.6 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.8 |
+| skillfs | 0.4.2 |
+| ws-ckpt | 0.4.5 |
+| cosh-ng | 0.22.2 |
+
+> **Note:** copilot-shell and agent-memory are unchanged since v1.1; they are
+> listed to show the complete stack composition.
+>
+> **Note:** agent-sec-core follows a release-branch flow, so `main` still
+> shows 0.11.0; the shipped 1.3 stack uses the `sec-core/v0.11.1` tag, and
+> the entries below describe behavior on that tag rather than on `main`.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.22.2, added native shell integration with `Shift+Tab` Shell-only switching and card prefixes that mark output ownership, users can run a hook-free shell while still seeing which subsystem produced each line (#2759, #2832)
+- **agent-sec-core**: Updated to v0.11.1, rebuilt the prompt scanner in Rust with updatable rule packs and an optional deep-analysis backend, and narrowed the invisible-character rule, users get faster prompt scanning with far fewer legitimate emoji and multilingual prompts flagged as critical injections (#2409, #2531, #2699, #2900)
+- **agentsight**: Updated to v0.11.2, restores model-traffic capture on its own when it goes stale and now recognizes Bun-built Claude Code, users keep continuous observability without restarting the collector (#2782, #2792)
+- **tokenless**: Updated to v0.7.14, added the unified `tokenless compress` entry point plus net-savings and Retrieve attribution in `stats summary`, adapters make at most one subprocess call and users can read estimated net token savings (#2844, #2885)
+- **ws-ckpt**: Updated to v0.4.5, added k8s sidecar deployment (#2034, #2965) and a guarded checkpoint protocol with identity-fenced snapshots, users can checkpoint containerized workspaces and verify checkpoint state after a crash
+- **skillfs**: Updated to v0.4.2, added Kubernetes sidecar deployment and optional mutual HMAC-SHA256 authentication for control and notify sockets, non-privileged workloads can consume a FUSE skill view across container namespaces (#2057, #2449)
+
+### Updated
+
+- **cosh-ng**: Updated to v0.22.2, added a local gateway control plane exposed through `cosh agent task|doctor|run`, bounded transcript memory and a 32 MB `run_command` output cap, sub-millisecond interactive echo, automatic discovery of system extensions outside the package-managed root, and `/hooks enable|disable` layer disambiguation, and fixed terminal display and input routing (stray marker lines appearing after approved commands and slash commands, batch-pasted slash input, Han prompts containing paths, slash history recall, terminal left in raw mode after interrupts), security and audit gaps (hook-blocked commands running anyway in trust mode, approval batch races, malformed hook output silently passing tool calls through, fabricated exit codes for interrupted `precmd` markers), and packaging issues (RPM uninstall leaving a dangling login shell, gateway startup on systemd 255, `dnf --dry-run` false failures, missed awk `system()` calls in code scanning), users get a native shell with visible output ownership, bounded memory, and an auditable approval path (#2125, #2400, #2402, #2405, #2529, #2599, #2603, #2605, #2622, #2655, #2667, #2682, #2709, #2843, #2880, #2909, #2914, #2917, #2918, #2938, #2943, #2949, #2955, #2968)
+- **agent-sec-core**: Updated to v0.11.1, added SkillFS HMAC peer authentication, an `agent-sec-cli capabilities` subcommand, and explicit `CHECKED`/`PASSED`/`FAILED` counters for `verify`, and stopped read-only system Skills from failing batch scans, placeholder `set-policy`/`rotate-keys` from reporting success, the daemon health check from over-reporting readiness, and non-loopback model service URLs from being accepted, users can audit Skills in cross-container deployments and trust CLI verification results (#2356, #2493, #2875, #2876, #2892, #2893, #2906)
+- **agentsight**: Updated to v0.11.2, added historical agent activity views, semantic session search, a bilingual dashboard, LLM latency metrics, and store size limits, and fixed model-traffic capture that did not recover on its own, missing restart after the collector was killed for memory use, unbounded memory during event bursts, and interruption breakdowns that did not sum to the total, users keep long-running observability with bounded storage and self-healing capture (#2578, #2612, #2644, #2733, #2792, #2796, #2817, #2925)
+- **tokenless**: Updated to v0.7.14, added the `anolisa-tokenless` Python wheel with framework-neutral lifecycles, AgentScope and DeepSeek Harness integrations, Gemini `functionDeclarations` schema compression, and a configurable array tail window, and fixed Codex double compression and inconsistent small-payload TOON handling, agents on more frameworks save tokens and can restore truncated payloads through the runnable command embedded in the marker (#2433, #2507, #2581, #2627, #2663, #2866, #2869, #2885)
+- **anolisa**: Updated to v0.3.8, added verified prebuilt CLI archives for Linux x64/arm64 and macOS arm64, a native DSH adapter driver, container-runtime telemetry, and schema v2 target-based availability, and fixed raw installs expanding `${VAR}` in rendered content, `--quiet` adapter output, `--dry-run` forget and restart previews, and systemd template instances left running after uninstall, users can install a standalone CLI per platform and preview operations without side effects (#2533, #2580, #2603, #2642, #2752, #2762, #2774, #2883, #2903)
+- **os-skills**: Updated to v0.6.3, added the `anolisa-component(os-skills)` RPM capability, users can run `anolisa upgrade` for OS Skills even when the repository component index is unavailable (#2576)
+- **ws-ckpt**: Updated to v0.4.5, added k8s sidecar deployment with a bilingual guide (#2034, #2965) and a guarded checkpoint protocol, and fixed a memory leak that eventually exhausted the daemon (#2554), loop-device checkpoint latency under concurrent IO (up to 5x lower) (#2523), orphaned images and loop devices after a failed bootstrap plus silent startup exits (#1956), `config --global` writes the daemon never loaded (#2813), and intermittent bootstrap failure when all loop devices are in use (#2965), users can checkpoint in containers with lower latency and actionable startup diagnostics
+- **skillfs**: Updated to v0.4.2, added Kubernetes sidecar deployment, mutual HMAC-SHA256 socket authentication, an optional Alibaba Cloud Linux 4 sidecar image, and bounded backoff for startup reconciliation against a late notify daemon, and fixed categorized Skills not being found on flat normal-mode mounts, non-privileged workloads can consume an authenticated Skill view that converges automatically after a daemon restart (#2057, #2449, #2777, #2787, #2790, #2901)
+
+## [1.2] - 2026-08-14
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.10.1 |
+| agentsight | 0.10.1 |
+| tokenless | 0.7.6 |
+| agent-memory | 0.2.6 |
+| os-skills | 0.6.2 |
+| anolisa | 0.2.19 |
+| skillfs | 0.4.0 |
+| ws-ckpt | 0.4.2 |
+| cosh-ng | 0.16.1 |
+
+> **Note:** copilot-shell, agent-memory, skillfs, and ws-ckpt are unchanged
+> since v1.1; they are listed to show the complete stack composition.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.16.1, consolidated one-shot agent requests into `/agent` and converged the cosh-core and cosh-shell runtime paths with explicit protocol negotiation, users get one command for single agent requests and identical behavior from either runtime entry point (#2403, #2441)
+- **agent-sec-core**: Updated to v0.10.1, unified hook policy controls so code scanning, prompt scanning, and observability are independently environment-gated across agent integrations, users can enable each protection per deployment without editing hook scripts (#2141, #2199, #2239)
+- **agentsight**: Updated to v0.10.1, corrected turn boundaries and session continuity across cosh restarts, reclassified pause events as normal completions rather than interruptions (#2320), and added Codex trajectory conversion plus a dashboard that follows the browser locale, users get accurate cross-runtime trajectories in their own language
+- **tokenless**: Updated to v0.7.6, added the OpenCode adapter and moved the Qoder adapter to native plugin and hook conventions, agents on both runtimes get command rewriting plus schema and response compression applied in place of the original tool output
+- **anolisa**: Updated to v0.2.19, added package-family backend mapping for raw installs, adapter change notices after updates, and 2 GiB integrity degradation, administrators can install on minimal RPM/DEB hosts without large components being reported as damaged (#2018, #2271, #2314)
+
+### Updated
+
+- **cosh-ng**: Updated to v0.16.1, added a raw packaging interface with cross-target build validation and portable macOS launchers, and fixed clock-skew input stalls, lenient streaming response decoding, sensitive file writes, raw-mode leaks on exit, predictable temporary paths, first-match-only slash hints, and CJK line wrapping, users get reproducible archives and a shell that wraps East Asian text correctly and leaves no terminal state behind (#2176, #2209, #2211, #2357, #2361, #2410, #2411, #2446)
+- **agent-sec-core**: Updated to v0.10.1, added OpenClaw code-scanner block mode, wider prompt-scan inbound field coverage, read-only Skill analysis, raw Skill directories in ledger checks, manifest authentication before Skill package loading, and session/run filters for events queries, users can block risky code, inspect unpackaged Skills, and query security events by session (#2044, #2132, #2185, #2201, #2242, #2277)
+- **agentsight**: Updated to v0.10.1, added Codex trajectory conversion to ATIF, process attribution on captured model traffic with ids resolved in the observer namespace (#2360), and dashboard localization, and fixed turns closing early when a tool call ended, pause events misclassified as interruptions (#2320), truncated streaming responses, QwenCode trace accuracy, sessions lost across cosh restarts, and unmapped cosh session temporary file writes (#2080), users get accurate cross-runtime trajectories in their browser locale
+- **tokenless**: Updated to v0.7.6, allowed `TOKENLESS_DATA_DIR` to point outside the user home, hard-disabled Tool Ready pre-call checks and blocking, and fixed duplicate JSON Schema stashing, dry-run settings overridden by environment variables, and `retrieve` appending a trailing newline, agents recover stashed content in one retrieval and are no longer blocked by incorrect readiness results (#2380, #2386, #2396, #2399, #2425, #2434, #2487)
+- **anolisa**: Updated to v0.2.19, added adapter change notices after `anolisa update`, Qoder native plugin lifecycle support, Codex hook trust persistence, `OPENCLAW_STATE_DIR` handling, and the standard JSON envelope for legacy commands, and migrated telemetry to `SLS_PROJECT_PREFIX`, users can manage adapters across frameworks and parse every JSON surface the same way (#2018, #2221, #2260, #2281, #2319, #2337)
+- **os-skills**: Updated to v0.6.2, added the `ktuner` skill for deterministic kernel diagnosis, tuning, and rollback, removed legacy OpenClaw and Hermes adapter scripts, and documented authenticated Skill Ledger recovery, users get rule-based tuning advice they can apply and roll back in one step (#1172, #1278, #2185)
+
 ## [1.1] - 2026-08-08
 
 ### Component Versions
