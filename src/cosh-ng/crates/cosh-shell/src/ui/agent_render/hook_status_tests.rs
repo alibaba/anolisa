@@ -6,6 +6,14 @@ use super::{
     HookStatusPanelModel, RatatuiInlineRenderer,
 };
 
+fn shell_entry(name: &str, detail: &str, disabled: bool) -> HookEntryView {
+    HookEntryView {
+        name: name.to_string(),
+        detail: detail.to_string(),
+        disabled,
+    }
+}
+
 fn sample_model() -> HookStatusPanelModel<'static> {
     HookStatusPanelModel {
         title: "Hook status",
@@ -14,30 +22,26 @@ fn sample_model() -> HookStatusPanelModel<'static> {
             "Registered: 2; enabled: 2; disabled: 0.".to_string(),
             "Sources: builtin=2; user=0; project=0.".to_string(),
         ],
+        shell_entries: vec![
+            shell_entry("high-memory-process", "builtin", false),
+            shell_entry("memory-pressure", "builtin", false),
+        ],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(vec![
             HookEventGroup {
                 event: "PreToolUse".to_string(),
                 hooks: vec![
-                    HookEntryView {
-                        name: "skill-ledger".to_string(),
-                        extension: "agent-sec-core".to_string(),
-                        disabled: false,
-                    },
-                    HookEntryView {
-                        name: "pii-checker".to_string(),
-                        extension: "agent-sec-core".to_string(),
-                        disabled: true,
-                    },
+                    shell_entry("skill-ledger", "ext: agent-sec-core", false),
+                    shell_entry("pii-checker", "ext: agent-sec-core", true),
                 ],
             },
             HookEventGroup {
                 event: "Stop".to_string(),
-                hooks: vec![HookEntryView {
-                    name: "observability-hook".to_string(),
-                    extension: "agent-sec-core".to_string(),
-                    disabled: false,
-                }],
+                hooks: vec![shell_entry(
+                    "observability-hook",
+                    "ext: agent-sec-core",
+                    false,
+                )],
             },
         ]),
         omitted_template: "… {count} more hook(s) not shown".to_string(),
@@ -79,6 +83,18 @@ fn hook_status_panel_layers_sections_events_and_entries() {
     assert!(
         lines
             .iter()
+            .any(|line| line.starts_with("│     • high-memory-process (builtin)")),
+        "{text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("│     • memory-pressure (builtin)")),
+        "{text}"
+    );
+    assert!(
+        lines
+            .iter()
             .any(|line| line.starts_with("│     • skill-ledger (ext: agent-sec-core)")),
         "{text}"
     );
@@ -109,7 +125,7 @@ fn hook_status_panel_strips_control_sequences_from_registry_text() {
         event: "Pre\u{1b}[31mToolUse".to_string(),
         hooks: vec![HookEntryView {
             name: "evil\u{1b}[31mred".to_string(),
-            extension: "wipe\u{1b}[2Jext".to_string(),
+            detail: "ext: wipe\u{1b}[2Jext".to_string(),
             disabled: false,
         }],
     }]);
@@ -141,7 +157,7 @@ fn hook_status_panel_strips_control_sequences_from_registry_text() {
 fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
     let long_entry = HookEntryView {
         name: "very-long-hook-name-that-wraps".to_string(),
-        extension: "very-long-extension-name".to_string(),
+        detail: "ext: very-long-extension-name".to_string(),
         disabled: false,
     };
     let model = HookStatusPanelModel {
@@ -151,6 +167,7 @@ fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
             "Registered: 2; enabled: 2; disabled: 0. Sources: builtin=2; user=0; project=0."
                 .to_string(),
         ],
+        shell_entries: vec![],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(vec![HookEventGroup {
             event: "PreToolUse".to_string(),
@@ -200,12 +217,13 @@ fn hook_status_panel_wraps_long_entries_with_hanging_indent_when_narrow() {
         title: "Hook status",
         shell_label: "Shell Hooks",
         shell_lines: vec!["Registered: 2; enabled: 2; disabled: 0.".to_string()],
+        shell_entries: vec![],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(vec![HookEventGroup {
             event: "PreToolUse".to_string(),
             hooks: vec![HookEntryView {
                 name: "very-long-hook-name-that-wraps".to_string(),
-                extension: "very-long-extension-name".to_string(),
+                detail: "ext: very-long-extension-name".to_string(),
                 disabled: false,
             }],
         }]),
@@ -236,7 +254,7 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
             hooks: (0..15)
                 .map(|hook_index| HookEntryView {
                     name: format!("observability-hook-{group_index}-{hook_index}"),
-                    extension: "agent-sec-core".to_string(),
+                    detail: "ext: agent-sec-core".to_string(),
                     disabled: false,
                 })
                 .collect(),
@@ -246,6 +264,7 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
         title: "Hook status",
         shell_label: "Shell Hooks",
         shell_lines: vec!["Registered: 2; enabled: 2; disabled: 0.".to_string()],
+        shell_entries: vec![],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(groups.clone()),
         omitted_template: "… {count} more hook(s) not shown (full list in plain output)"
@@ -281,6 +300,7 @@ fn hook_status_panel_large_registry_truncates_with_marker_and_keeps_footer() {
         title: "Hook status",
         shell_label: "Shell Hooks",
         shell_lines: vec!["Registered: 2; enabled: 2; disabled: 0.".to_string()],
+        shell_entries: vec![],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(groups),
         omitted_template: "… {count} more hook(s) not shown".to_string(),
@@ -300,12 +320,13 @@ fn hook_status_panel_omits_an_entry_that_cannot_fit_atomically() {
         title: "Hook status",
         shell_label: "Shell Hooks",
         shell_lines: vec!["Registered: 1; enabled: 1; disabled: 0.".to_string()],
+        shell_entries: vec![],
         agent_label: "Agent Hooks",
         agent: AgentHooksView::Groups(vec![HookEventGroup {
             event: "PreToolUse".to_string(),
             hooks: vec![HookEntryView {
                 name: "x".repeat(8_000),
-                extension: "agent-sec-core".to_string(),
+                detail: "ext: agent-sec-core".to_string(),
                 disabled: false,
             }],
         }]),

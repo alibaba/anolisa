@@ -1,6 +1,8 @@
-use super::hooks::{group_agent_hooks, render_hooks_command};
+use super::hooks::{group_agent_hooks, render_hooks_command, shell_hook_entries};
+use crate::hooks::engine::{HookSourceInfo, RegisteredHookInfo};
 use crate::hooks::state::{RuntimeHookDisplay, RuntimeHookFinding};
 use crate::runtime::prelude::*;
+use std::path::PathBuf;
 
 #[test]
 fn agent_hooks_group_by_event_in_lifecycle_order() {
@@ -48,7 +50,193 @@ fn agent_hooks_group_by_event_in_lifecycle_order() {
             ("observability-hook", false)
         ]
     );
-    assert_eq!(pre_tool.hooks[0].extension, "agent-sec-core");
+    assert_eq!(pre_tool.hooks[0].detail, "ext: agent-sec-core");
+}
+
+#[test]
+fn shell_hook_entries_order_and_formatting() {
+    let mut state = InlineState::default();
+    state.hooks.disabled.insert("user-hook".to_string());
+
+    let hooks = vec![
+        RegisteredHookInfo {
+            id: "proj-untrusted".to_string(),
+            source: HookSourceInfo::ExternalProject,
+            path: Some(PathBuf::from("/proj/.cosh/hooks/x.sh")),
+            project_root: Some(PathBuf::from("/proj")),
+            trusted: Some(false),
+        },
+        RegisteredHookInfo {
+            id: "builtin-a".to_string(),
+            source: HookSourceInfo::Builtin,
+            path: None,
+            project_root: None,
+            trusted: None,
+        },
+        RegisteredHookInfo {
+            id: "user-hook".to_string(),
+            source: HookSourceInfo::ExternalUser,
+            path: Some(PathBuf::from("/home/x/.cosh/hooks/user-hook.sh")),
+            project_root: None,
+            trusted: None,
+        },
+        RegisteredHookInfo {
+            id: "proj-trusted".to_string(),
+            source: HookSourceInfo::ExternalProject,
+            path: Some(PathBuf::from("/proj/.cosh/hooks/y.sh")),
+            project_root: Some(PathBuf::from("/proj")),
+            trusted: Some(true),
+        },
+    ];
+
+    let entries = shell_hook_entries(&state, &hooks);
+
+    // Order is fixed: builtin, then user, then project; original order kept
+    // within each source.
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0].name, "builtin-a");
+    assert_eq!(entries[0].detail, "builtin");
+    assert!(!entries[0].disabled);
+
+    assert_eq!(entries[1].name, "user-hook");
+    assert_eq!(entries[1].detail, "user: user-hook.sh");
+    assert!(entries[1].disabled);
+
+    assert_eq!(entries[2].name, "proj-untrusted");
+    assert_eq!(entries[2].detail, "project: x.sh, untrusted");
+    assert!(
+        !entries[2].disabled,
+        "untrusted trust state must not imply the disabled marker"
+    );
+
+    assert_eq!(entries[3].name, "proj-trusted");
+    assert_eq!(entries[3].detail, "project: y.sh");
+    assert!(!entries[3].disabled);
+}
+
+#[test]
+fn shell_hook_entries_empty_list() {
+    let state = InlineState::default();
+    assert!(shell_hook_entries(&state, &[]).is_empty());
+}
+
+#[test]
+fn shell_hook_entries_missing_path_fallback() {
+    let state = InlineState::default();
+    let hooks = vec![
+        RegisteredHookInfo {
+            id: "no-path-user".to_string(),
+            source: HookSourceInfo::ExternalUser,
+            path: None,
+            project_root: None,
+            trusted: None,
+        },
+        RegisteredHookInfo {
+            id: "no-path-project".to_string(),
+            source: HookSourceInfo::ExternalProject,
+            path: None,
+            project_root: Some(PathBuf::from("/proj")),
+            trusted: Some(false),
+        },
+    ];
+
+    let entries = shell_hook_entries(&state, &hooks);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].detail, "user: ?");
+    assert_eq!(entries[1].detail, "project: ?, untrusted");
+    // Trust is orthogonal to the disable marker.
+    assert!(!entries[1].disabled);
+}
+
+#[test]
+fn hooks_root_renders_status_with_source_paths_and_trust() {
+    let user_hook = TestHookFixture::new("hooks-status-user");
+    let project_hook = TestHookFixture::new("hooks-status-project");
+    let mut state = InlineState::default();
+    // Session-disable the user hook to cover the session-disable
+    // dimension. The untrusted project hook keeps the baseline
+    // orthogonal semantics: counted as enabled, trust conveyed via
+    // the suffix only.
+    state.hooks.disabled.insert("user-hook".to_string());
+    state.hooks.engine.register_external(ExternalHookConfig {
+        path: user_hook.path.clone(),
+        matcher: HookMatcher {
+            id: "user-hook".to_string(),
+            commands: vec!["echo".to_string()],
+            command_patterns: Vec::new(),
+            command_regex: None,
+            min_output_bytes: None,
+            exit_codes: None,
+            trigger: HookTrigger::OnComplete,
+        },
+        timeout_ms: 1000,
+        source: ExternalHookSource::User,
+        project_root: None,
+        trusted: true,
+    });
+    state.hooks.engine.register_external(ExternalHookConfig {
+        path: project_hook.path.clone(),
+        matcher: HookMatcher {
+            id: "project-hook".to_string(),
+            commands: vec!["echo".to_string()],
+            command_patterns: Vec::new(),
+            command_regex: None,
+            min_output_bytes: None,
+            exit_codes: None,
+            trigger: HookTrigger::OnComplete,
+        },
+        timeout_ms: 1000,
+        source: ExternalHookSource::Project,
+        project_root: Some(project_hook.root.clone()),
+        trusted: false,
+    });
+
+    let rendered = render_hooks_test_command(None, None, None, &mut state);
+
+    assert!(rendered.contains("Hook status"), "{rendered}");
+    assert!(
+        rendered.contains("Registered: 2; enabled: 1; disabled: 1."),
+        "aggregate keeps session-disable-only counting: {rendered}"
+    );
+    assert!(
+        rendered.contains("Sources: builtin=0; user=1; project=1."),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Project trust: trusted=0; untrusted=1."),
+        "{rendered}"
+    );
+    // UX contract: each shell hook entry shows only its script file name
+    // plus trust state — the basename identifies the hook without
+    // leaking home/project directory layout, mirroring how agent-hook
+    // entries show the extension name only. Disable and trust stay
+    // orthogonal: only the session-disabled user hook carries
+    // [disabled], while the untrusted project hook's trust state
+    // lives in its suffix.
+    assert!(
+        rendered.contains("user: project.sh"),
+        "expected user hook file name: {rendered}"
+    );
+    assert!(
+        rendered.contains("project: project.sh, untrusted"),
+        "expected project hook file name and trust state: {rendered}"
+    );
+    assert!(
+        rendered.contains("(user: project.sh) [disabled]"),
+        "session-disabled entry must carry the disabled marker: {rendered}"
+    );
+    assert!(
+        !rendered.contains("untrusted) [disabled]"),
+        "untrusted trust state must not imply the disabled marker: {rendered}"
+    );
+    assert!(
+        !rendered.contains(".cosh/hooks"),
+        "full source paths must not leak into the panel: {rendered}"
+    );
+    assert!(
+        !rendered.contains("hooks-status-user"),
+        "fixture directory name must not leak: {rendered}"
+    );
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub(crate) fn render_hooks_command<W: Write>(
             let i18n = state.i18n();
             let hooks = state.hooks.engine.registered_hook_infos();
             let shell_lines = hooks_status_body(state, &hooks, &i18n);
+            let shell_entries = shell_hook_entries(state, &hooks);
 
             // Agent Hooks section (only available with CoshCore backend)
             let (agent_view, agent_hook_count) =
@@ -64,6 +65,7 @@ pub(crate) fn render_hooks_command<W: Write>(
                     title: i18n.t(MessageId::SlashHooksRegisteredTitle),
                     shell_label: i18n.t(MessageId::SlashHooksShellSection),
                     shell_lines,
+                    shell_entries,
                     agent_label: i18n.t(MessageId::SlashHooksAgentSection),
                     agent: agent_view,
                     omitted_template,
@@ -254,6 +256,9 @@ fn hooks_status_body(
     }
 
     let total = hooks.len();
+    // Aggregate disable counting keeps the baseline session-disable-only
+    // semantics: `enabled` means "not session-disabled", orthogonal to the
+    // trust dimension reported on the project-trust line.
     let disabled = hooks
         .iter()
         .filter(|hook| state.hooks.disabled.contains(hook.id.as_str()))
@@ -312,6 +317,69 @@ fn hooks_status_body(
         ));
     }
     body
+}
+
+/// File name of an external hook script. Only the basename is shown so
+/// entries stay single-line and do not leak home/project directory layout,
+/// mirroring how agent-hook entries identify their source by extension
+/// name only.
+fn hook_file_label(hook: &RegisteredHookInfo) -> String {
+    hook.path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Build per-hook entries for the shell-hooks section. Order is fixed:
+/// builtin hooks first, then user hooks, then project hooks. Within a
+/// source the original registration order is preserved. Entry disable
+/// state mirrors the aggregate's session-disable dimension only; trust
+/// stays orthogonal and is conveyed through the detail suffix, so an
+/// untrusted project hook renders enabled with a ", untrusted" suffix.
+pub(super) fn shell_hook_entries(
+    state: &InlineState,
+    hooks: &[RegisteredHookInfo],
+) -> Vec<HookEntryView> {
+    let mut entries: Vec<(usize, usize, HookEntryView)> = hooks
+        .iter()
+        .enumerate()
+        .map(|(orig_idx, hook)| {
+            let source_rank = match hook.source {
+                HookSourceInfo::Builtin => 0,
+                HookSourceInfo::ExternalUser => 1,
+                HookSourceInfo::ExternalProject => 2,
+            };
+            let detail = match hook.source {
+                HookSourceInfo::Builtin => "builtin".to_string(),
+                HookSourceInfo::ExternalUser => {
+                    format!("user: {}", hook_file_label(hook))
+                }
+                HookSourceInfo::ExternalProject => {
+                    let trusted = hook.trusted == Some(true);
+                    if trusted {
+                        format!("project: {}", hook_file_label(hook))
+                    } else {
+                        format!("project: {}, untrusted", hook_file_label(hook))
+                    }
+                }
+            };
+            // Session-disable only, matching the aggregate counting so the
+            // entry marker and the stats line never disagree.
+            let disabled = state.hooks.disabled.contains(hook.id.as_str());
+            (
+                source_rank,
+                orig_idx,
+                HookEntryView {
+                    name: hook.id.clone(),
+                    detail,
+                    disabled,
+                },
+            )
+        })
+        .collect();
+    entries.sort_by_key(|(rank, orig_idx, _)| (*rank, *orig_idx));
+    entries.into_iter().map(|(_, _, entry)| entry).collect()
 }
 
 fn hooks_usage_body(i18n: &I18n) -> Vec<String> {
@@ -778,13 +846,14 @@ pub(super) fn group_agent_hooks(data: &Value) -> Vec<HookEventGroup> {
             .and_then(|v| v.as_str())
             .unwrap_or("?")
             .to_string();
+        let extension = hook
+            .get("extension")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
         let entry = HookEntryView {
             name: name.to_string(),
-            extension: hook
-                .get("extension")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .to_string(),
+            detail: format!("ext: {extension}"),
             disabled: hook
                 .get("disabled")
                 .and_then(|v| v.as_bool())
