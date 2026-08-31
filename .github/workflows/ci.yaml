@@ -730,8 +730,12 @@ jobs:
       - name: Run tests with coverage
         run: |
           cd src/agentsight
+          # Cap parallelism: full-core parallel compile/link/test of instrumented
+          # binaries has OOM-killed the self-hosted runner mid-step.
+          JOBS=$(( ($(nproc) + 1) / 2 ))
           cargo llvm-cov --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)'
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)' \
+            -j "$JOBS" -- --test-threads="$JOBS"
 
       - name: Generate coverage summary
         if: always()
