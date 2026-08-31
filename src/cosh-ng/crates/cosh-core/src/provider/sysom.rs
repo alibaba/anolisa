@@ -40,6 +40,12 @@ const INSTANCE_ID_CACHE_TTL_SECS: u64 = 3 * 3600;
 const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Read timeout for ECS metadata service.
 const METADATA_READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connect timeout for the SysOM API.
+///
+/// Bounds connection setup so an unreachable endpoint surfaces as a prompt
+/// error instead of stalling on the protocol stack's own timeout, which was
+/// measured at 61 seconds from an ECS with no public egress.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcsAuthChallenge {
@@ -293,8 +299,13 @@ impl SysomProvider {
         let authorization =
             self.sign_request("POST", API_PATH, &sign_headers, &hashed_payload, &creds);
 
-        // Build reqwest request
-        let client = reqwest::Client::new();
+        // Bound connection setup only. No total request timeout: this is a
+        // Server-Sent Events stream whose lifetime is the model's, so a total
+        // timeout would truncate healthy long completions.
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .map_err(|err| format!("failed to build HTTP client: {err}"))?;
         let mut req = client
             .post(&url)
             .header("host", &self.endpoint)
