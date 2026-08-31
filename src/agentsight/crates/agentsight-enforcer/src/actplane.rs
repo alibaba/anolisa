@@ -343,7 +343,14 @@ impl EnforcementBackend for ActPlaneBackend {
         // kernel, so callers can gate APPLY_READY on real enforcement capability
         // rather than a static assumption (closes the silent-false-positive gap).
         let mut capabilities = EnforcementCapabilities::actplane();
-        capabilities.file_delete_guard = self.engine.supports_file_delete_guard();
+        // supports_file_delete_guard() reflects the feature set the loaded profile
+        // reserves, but the enforce_path_unlink / enforce_path_rename LSM hooks are
+        // only attached when BPF-LSM is active at load time. AND in the live LSM
+        // state so a host without an active BPF-LSM reports file_delete_guard=false
+        // (fail-closed) instead of advertising a capability that silently enforces
+        // nothing.
+        capabilities.file_delete_guard =
+            self.engine.supports_file_delete_guard() && ebpf_ifc_engine::bpf_lsm_active();
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),

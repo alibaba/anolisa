@@ -3570,6 +3570,57 @@ mod tests {
     }
 
     #[test]
+    fn write_block_rule_alone_does_not_reserve_file_flow() {
+        // A pure label-conditioned `block unlink/write file "X"` rule is evaluated
+        // synchronously in the LSM hook and must NOT pull in the file-flow dataflow
+        // tracepoints (regression guard for the OP_WRITE feature decoupling).
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_WRITE;
+        cfg.rules[0].effect = EFFECT_BLOCK;
+
+        let features = config_features(&cfg);
+        assert_eq!(
+            features & FEAT_FILE_FLOW,
+            0,
+            "a label-conditioned OP_WRITE block rule must not reserve FEAT_FILE_FLOW"
+        );
+        assert!(
+            features & FEAT_WRITE_RULES != 0,
+            "a label-conditioned OP_WRITE block rule must reserve FEAT_WRITE_RULES"
+        );
+        assert!(
+            features & FEAT_BLOCK_FILE != 0,
+            "a label-conditioned OP_WRITE block rule must reserve FEAT_BLOCK_FILE"
+        );
+    }
+
+    #[test]
+    fn write_block_rule_with_file_source_reserves_file_flow() {
+        // Adding a file taint source (source X = file "...") re-introduces the
+        // dataflow requirement, so FEAT_FILE_FLOW must be reserved again even when
+        // the same OP_WRITE block rule is present.
+        let mut cfg: CConfig = unsafe { std::mem::zeroed() };
+        cfg.n_rules = 1;
+        cfg.rules[0].op = OP_WRITE;
+        cfg.rules[0].effect = EFFECT_BLOCK;
+        cfg.n_updates = 1;
+        cfg.updates[0].op = OP_OPEN; // file taint source
+        cfg.updates[0].m = 3; // TAINT_MATCH_ANY
+        cfg.updates[0].add = 1;
+
+        let features = config_features(&cfg);
+        assert!(
+            features & FEAT_FILE_FLOW != 0,
+            "adding a file taint source must re-reserve FEAT_FILE_FLOW for the config"
+        );
+        assert!(
+            features & FEAT_WRITE_RULES != 0,
+            "the OP_WRITE block rule must still reserve FEAT_WRITE_RULES"
+        );
+    }
+
+    #[test]
     fn block_delta_requires_matching_lsm_hook_profile() {
         let mut cfg: CConfig = unsafe { std::mem::zeroed() };
         cfg.n_rules = 1;
