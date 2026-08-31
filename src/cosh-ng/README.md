@@ -110,6 +110,12 @@ the shell and Core. In enhanced integration, the cosh-core runtime makes
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
 `@path` references.
 
+For `type = "aliyun"`, SysOM automatically prefers a reachable VPC endpoint.
+Set `ai.providers.<id>.sysom_endpoint` to pin an endpoint; `COSH_SYSOM_ENDPOINT`
+takes precedence, and `base_url` does not route SysOM. Only automatic VPC routes
+bypass system proxies; explicit overrides and public fallback retain proxy
+settings. See [provider configuration](../../docs/user-guide/en/user-entrypoint/cosh-ng/core/providers.md).
+
 To run one locally installed ACP adapter without entering the interactive
 Shell, verify it first and then pipe the prompt through stdin:
 

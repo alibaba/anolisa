@@ -24,7 +24,7 @@ fn generate_console_url_uses_region_and_instance_id() {
 #[test]
 fn build_request_preserves_user_provided_secrets() {
     let provider = SysomProvider {
-        endpoint: DEFAULT_ENDPOINT.to_string(),
+        configured_endpoint: String::new(),
         credentials: std::sync::RwLock::new(SysomCredentials {
             access_key_id: "test-id".to_string(),
             access_key_secret: "test-secret".to_string(),
@@ -46,7 +46,7 @@ fn build_request_preserves_user_provided_secrets() {
 
 fn test_provider() -> SysomProvider {
     SysomProvider {
-        endpoint: DEFAULT_ENDPOINT.to_string(),
+        configured_endpoint: String::new(),
         credentials: std::sync::RwLock::new(SysomCredentials {
             access_key_id: "test-id".to_string(),
             access_key_secret: "test-secret".to_string(),

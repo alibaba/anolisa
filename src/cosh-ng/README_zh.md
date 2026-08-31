@@ -103,6 +103,11 @@ bash: hello: command not found
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。
 
+`type = "aliyun"` 时，SysOM 自动优先使用可达的 VPC 端点。
+设置 `ai.providers.<id>.sysom_endpoint` 可固定端点，`COSH_SYSOM_ENDPOINT` 优先级更高，
+`base_url` 不参与 SysOM 选路。仅自动选中的 VPC 路由绕过系统代理，显式覆盖与公网回退
+仍保留代理设置。详见 [provider 配置](../../docs/user-guide/zh/user-entrypoint/cosh-ng/core/providers.md)。
+
 如果要在不进入交互式 Shell 的情况下运行本机已安装的 ACP Adapter，可以先检查
 Adapter，再通过 stdin 发送 prompt。
 

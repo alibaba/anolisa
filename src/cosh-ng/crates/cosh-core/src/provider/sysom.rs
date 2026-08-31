@@ -21,11 +21,11 @@ use super::{ContentGenerator, GenerateConfig, GenerateStream, Message, ToolDecla
 
 use self::stream::sysom_event_stream;
 
+pub mod endpoint;
 mod stream;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const DEFAULT_ENDPOINT: &str = "sysom.cn-hangzhou.aliyuncs.com";
 const API_PATH: &str = "/api/v1/copilot/generate_copilot_stream_response";
 const API_VERSION: &str = "2023-12-30";
 const API_ACTION: &str = "GenerateCopilotStreamResponse";
@@ -63,7 +63,13 @@ struct SysomCredentials {
 
 /// SysOM Provider that connects to Aliyun SysOM API with ACS3-HMAC-SHA256 signing.
 pub struct SysomProvider {
-    endpoint: String,
+    /// Explicit endpoint override from configuration; empty when unset.
+    ///
+    /// The effective host is resolved per request rather than here because
+    /// these constructors are synchronous yet run inside the tokio runtime: a
+    /// blocking reachability probe would occupy a worker thread. Resolution is
+    /// cached process-wide, so the probe still runs at most once.
+    configured_endpoint: String,
     credentials: RwLock<SysomCredentials>,
     is_sts: bool,
     cancelled: Arc<AtomicBool>,
@@ -71,11 +77,16 @@ pub struct SysomProvider {
 }
 
 impl SysomProvider {
-    pub fn new(access_key_id: &str, access_key_secret: &str, security_token: Option<&str>) -> Self {
+    pub fn new(
+        access_key_id: &str,
+        access_key_secret: &str,
+        security_token: Option<&str>,
+        configured_endpoint: &str,
+    ) -> Self {
         let is_sts = security_token.is_some();
         let instance_id = resolve_instance_id();
         Self {
-            endpoint: DEFAULT_ENDPOINT.to_string(),
+            configured_endpoint: configured_endpoint.to_string(),
             credentials: RwLock::new(SysomCredentials {
                 access_key_id: access_key_id.to_string(),
                 access_key_secret: access_key_secret.to_string(),
@@ -87,10 +98,10 @@ impl SysomProvider {
         }
     }
 
-    pub fn from_ecs_ram_role() -> Self {
+    pub fn from_ecs_ram_role(configured_endpoint: &str) -> Self {
         let instance_id = resolve_instance_id();
         Self {
-            endpoint: DEFAULT_ENDPOINT.to_string(),
+            configured_endpoint: configured_endpoint.to_string(),
             credentials: RwLock::new(SysomCredentials {
                 access_key_id: String::new(),
                 access_key_secret: String::new(),
@@ -100,11 +111,6 @@ impl SysomProvider {
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id,
         }
-    }
-
-    pub fn with_endpoint(mut self, endpoint: &str) -> Self {
-        self.endpoint = endpoint.to_string();
-        self
     }
 
     /// Build the JSON request body for the SysOM API.
@@ -269,14 +275,23 @@ impl SysomProvider {
     /// Send a streaming request using current credentials.
     async fn do_streaming_request(&self, body_bytes: &[u8]) -> Result<GenerateStream, String> {
         let creds = self.credentials.read().unwrap().clone();
-        let url = format!("https://{}{}", self.endpoint, API_PATH);
+        let resolved = endpoint::resolve(&self.configured_endpoint).await;
+        tracing::debug!(
+            host = %resolved.host,
+            origin = resolved.origin.as_str(),
+            "sysom endpoint"
+        );
+        let url = format!("{}{}", resolved.base_url(), API_PATH);
+        let host = resolved.host;
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let nonce = Uuid::new_v4().to_string();
         let hashed_payload = hex_sha256(body_bytes);
 
-        // Build headers for signing
+        // `host` feeds the signature, the URL and the wire header alike: the
+        // gateway recomputes the signature from the Host it receives, so the
+        // three must not diverge.
         let mut sign_headers: Vec<(String, String)> = vec![
-            ("host".to_string(), self.endpoint.clone()),
+            ("host".to_string(), host.clone()),
             ("x-acs-version".to_string(), API_VERSION.to_string()),
             ("x-acs-action".to_string(), API_ACTION.to_string()),
             ("x-acs-date".to_string(), timestamp.clone()),
@@ -308,7 +323,7 @@ impl SysomProvider {
             .map_err(|err| format!("failed to build HTTP client: {err}"))?;
         let mut req = client
             .post(&url)
-            .header("host", &self.endpoint)
+            .header("host", &host)
             .header("x-acs-version", API_VERSION)
             .header("x-acs-action", API_ACTION)
             .header("x-acs-date", &timestamp)

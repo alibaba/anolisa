@@ -117,6 +117,14 @@ pub struct ProviderConfig {
     pub auth_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// SysOM API host, honoured only by the `aliyun` provider type.
+    ///
+    /// Separate from `base_url` because that one is OpenAI-compatible and
+    /// defaults to a DashScope address, which is not a SysOM endpoint. Unset,
+    /// the client prefers the VPC proxy when reachable and the public host
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sysom_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -937,6 +945,18 @@ impl CoreConfig {
 
         let provider_cfg = self.ai.providers.get(&provider_name);
 
+        // SysOM's API host, kept deliberately separate from `base_url`.
+        //
+        // `base_url` is an OpenAI-compatible concept: unset it falls back to the
+        // DashScope compatible-mode address below. Feeding that into the SysOM
+        // ACS3 path sent signed traffic to DashScope, so the two no longer share
+        // a field. Empty here means "not configured", which lets the endpoint
+        // resolver fall through to probing the VPC proxy.
+        let sysom_endpoint = provider_cfg
+            .and_then(|p| p.sysom_endpoint.as_deref())
+            .map(expand_env_vars)
+            .unwrap_or_default();
+
         let base_url = provider_cfg
             .and_then(|p| p.base_url.as_deref())
             .map(expand_env_vars)
@@ -986,6 +1006,7 @@ impl CoreConfig {
 
         ResolvedProvider {
             base_url,
+            sysom_endpoint,
             api_key,
             model,
             provider_type,
@@ -1002,6 +1023,12 @@ impl CoreConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedProvider {
     pub base_url: String,
+    /// SysOM API host from this provider's own configuration, or empty.
+    ///
+    /// Never holds an OpenAI-compatible URL: it has no default and no env
+    /// fallback, so an empty value means the endpoint resolver should decide
+    /// between the VPC proxy and the public host on its own.
+    pub sysom_endpoint: String,
     pub api_key: String,
     pub model: String,
     pub provider_type: String,
@@ -1109,6 +1136,12 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
         }
         if let Some(ref url) = provider.base_url {
             preserved.push_str(&format!("base_url = \"{}\"\n", escape_toml_value(url)));
+        }
+        if let Some(ref host) = provider.sysom_endpoint {
+            preserved.push_str(&format!(
+                "sysom_endpoint = \"{}\"\n",
+                escape_toml_value(host)
+            ));
         }
         if let Some(ref key) = provider.api_key {
             preserved.push_str(&format!("api_key = \"{}\"\n", escape_toml_value(key)));
@@ -1431,6 +1464,71 @@ allowed_tools = ["search"]
         assert_eq!(server.command, "");
         assert_eq!(server.url.as_deref(), Some("https://mcp.example.com/mcp"));
         assert_eq!(server.bearer_token.as_deref(), Some("${MCP_TOKEN}"));
+    }
+
+    /// `base_url` must never reach the SysOM endpoint, in any of the shapes
+    /// that used to leak it there.
+    ///
+    /// Each shape is real: absent is a hand-written ECS RAM role profile; empty
+    /// is what `cosh auth` writes for the aliyun template; a compat URL is what
+    /// `settings.json` migration carries in regardless of provider type. All
+    /// must leave `sysom_endpoint` empty so the resolver probes instead of
+    /// signing SysOM traffic for an OpenAI-compatible host.
+    #[test]
+    fn base_url_never_becomes_the_sysom_endpoint() {
+        for base_url_line in [
+            "",
+            r#"base_url = """#,
+            r#"base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1""#,
+            r#"base_url = "https://api.openai.com/v1""#,
+        ] {
+            let toml_str = format!(
+                r#"
+[ai]
+active_provider = "aliyun-ecs"
+
+[ai.providers.aliyun-ecs]
+type = "aliyun"
+auth_source = "ecs_ram_role"
+{base_url_line}
+model = "qwen3.7-plus"
+"#
+            );
+            let config: CoreConfig = toml::from_str(&toml_str).unwrap();
+            let resolved = config.resolve_provider();
+
+            assert_eq!(
+                resolved.sysom_endpoint, "",
+                "base_url leaked into sysom_endpoint for {base_url_line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_sysom_endpoint_is_carried_through() {
+        let toml_str = r#"
+[ai]
+active_provider = "aliyun-ecs"
+
+[ai.providers.aliyun-ecs]
+type = "aliyun"
+auth_source = "ecs_ram_role"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
+model = "qwen3.7-plus"
+"#;
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let resolved = config.resolve_provider();
+
+        assert_eq!(
+            resolved.sysom_endpoint,
+            "https://sysom.cn-shanghai.aliyuncs.com"
+        );
+        // The compat base_url stays intact for the OpenAI-compatible consumers.
+        assert_eq!(
+            resolved.base_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
     }
 
     #[test]
@@ -1812,6 +1910,41 @@ api_key = "sk-user"
         assert_eq!(provider.api_key.as_deref(), Some("sk-user"));
         assert!(provider.base_url.is_none());
         assert!(provider.model.is_none());
+    }
+
+    #[test]
+    fn sysom_endpoint_survives_refresh_persist_and_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[ai]
+active_provider = "aliyun"
+[ai.providers.aliyun]
+type = "aliyun"
+sysom_endpoint = "https://sysom.cn-shanghai.aliyuncs.com"
+"#,
+        )
+        .unwrap();
+        let mut config = CoreConfig::load_from_paths(None, Some(&path), None);
+        let response = crate::auth::AuthResponse {
+            provider_id: "aliyun".to_string(),
+            provider_type: None,
+            values: HashMap::from([
+                ("access_key_id".to_string(), "new-ak".to_string()),
+                ("access_key_secret".to_string(), "new-sk".to_string()),
+            ]),
+            persist: true,
+        };
+        crate::auth::apply_auth_credentials(&mut config, &response).unwrap();
+        persist_config_to_dir(&config, tmp.path()).unwrap();
+        let reloaded = CoreConfig::load_from_paths(None, Some(&path), None).resolve_provider();
+        assert_eq!(
+            reloaded.sysom_endpoint,
+            "https://sysom.cn-shanghai.aliyuncs.com"
+        );
+        assert_eq!(reloaded.access_key_id, "new-ak");
     }
 
     #[test]
