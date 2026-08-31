@@ -91,6 +91,8 @@ pub fn extract_container_id(pid: u32) -> Option<String> {
 /// 2. Docker cgroup v2 — `docker-<64hex>.scope`
 /// 3. Kubernetes       — `/kubepods/.../<64hex>`
 /// 4. containerd       — last path segment is exactly 64 hex chars
+/// 5. Kubernetes with the systemd cgroup driver —
+///    `/kubepods.slice/.../<runtime>-<64hex>.scope` (cri-containerd-…, crio-…)
 pub fn parse_container_id_from_cgroup(content: &str) -> Option<String> {
     for line in content.lines() {
         // The third colon-separated field is the cgroup path.
@@ -146,7 +148,40 @@ fn try_extract_from_path(path: &str) -> Option<String> {
         }
     }
 
+    // 5. Kubernetes with the systemd cgroup driver: the container unit is
+    //    `<runtime>-<64hex>.scope` under kubepods.slice (cri-containerd-…,
+    //    crio-…; podman's libpod-… is covered too). Layouts 3/4 only match a
+    //    bare <64hex> last segment (cgroupfs driver), so strip the ".scope"
+    //    suffix and the runtime prefix (substring after the last dash).
+    //    Gated on container markers so a host systemd unit never matches.
+    if has_container_marker(path) {
+        if let Some(segment) = path.rsplit('/').next() {
+            let bare = segment.strip_suffix(".scope").unwrap_or(segment);
+            if bare.len() > 64 {
+                let candidate = bare.rsplit('-').next().unwrap_or("");
+                if is_64_hex(candidate) {
+                    return Some(candidate.to_string());
+                }
+            }
+        }
+    }
+
     None
+}
+
+/// Container runtime markers that gate the prefixed-scope rule (layout 5).
+const CONTAINER_MARKERS: [&str; 7] = [
+    "kubepods",
+    "containerd",
+    "crio",
+    "docker",
+    "libpod",
+    "podman",
+    "lxc",
+];
+
+fn has_container_marker(path: &str) -> bool {
+    CONTAINER_MARKERS.iter().any(|marker| path.contains(marker))
 }
 
 /// Returns `true` when `s` is exactly 64 hex characters (case-insensitive).
@@ -198,6 +233,54 @@ mod tests {
             id,
             "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
         );
+    }
+
+    #[test]
+    fn kubernetes_containerd_systemd_cgroup_v2() {
+        let content = "0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod27e3a4f0_0000.slice/cri-containerd-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2.scope\n";
+        let id = parse_container_id_from_cgroup(content).unwrap();
+        assert_eq!(
+            id,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
+    }
+
+    #[test]
+    fn kubernetes_containerd_systemd_cgroup_v1() {
+        let content = "11:memory:/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod27e3a4f0_0000.slice/cri-containerd-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2.scope\n";
+        let id = parse_container_id_from_cgroup(content).unwrap();
+        assert_eq!(
+            id,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
+    }
+
+    #[test]
+    fn kubernetes_crio_systemd() {
+        let content = "0::/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod0000.slice/crio-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2.scope\n";
+        let id = parse_container_id_from_cgroup(content).unwrap();
+        assert_eq!(
+            id,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
+    }
+
+    #[test]
+    fn podman_libpod_scope() {
+        let content = "0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2.scope\n";
+        let id = parse_container_id_from_cgroup(content).unwrap();
+        assert_eq!(
+            id,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
+    }
+
+    #[test]
+    fn host_systemd_unit_with_hex_tail_is_not_container() {
+        // No container marker in the path: a host systemd unit whose tail
+        // happens to be 64 hex chars must not be mistaken for a container.
+        let content = "0::/system.slice/weird-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2.scope\n";
+        assert!(parse_container_id_from_cgroup(content).is_none());
     }
 
     #[test]
