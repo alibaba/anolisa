@@ -5,7 +5,7 @@
 //! cross-process transports.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -175,6 +175,28 @@ pub struct RetrieveToolDeclaration {
     pub description: String,
     /// JSON Schema accepted by the tool.
     pub input_schema: Value,
+}
+
+impl RetrieveToolDeclaration {
+    /// Builds the canonical declaration used to publish marker-scoped retrieval.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: "Restore content referenced by a visible Tokenless marker.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "hash_or_marker": {
+                        "type": "string",
+                        "description": "A visible <<tokenless:HASH>> marker or its hash"
+                    }
+                },
+                "required": ["hash_or_marker"],
+                "additionalProperties": false
+            }),
+        }
+    }
 }
 
 /// Result of the BeforeModel lifecycle operation.

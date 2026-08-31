@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -12,16 +13,23 @@ from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 from anolisa_tokenless import (
     Attribution,
-    ModelRequest,
-    RetrievalError,
+    BeforeModelCapabilities,
+    BeforeModelRequest,
+    OutputOptimization,
+    PostToolCapabilities,
+    PostToolRequest,
+    PreToolAction,
+    PreToolCapabilities,
+    PreToolRequest,
+    ResultKind,
     RetrieveRequest,
     TokenlessConfig,
+    TokenlessError,
     TokenlessSdk,
-    ToolCall,
-    ToolResult,
-    ToolStatus,
+    ToolResultStatus,
 )
-from anolisa_tokenless.tool_response import SHELL_TOOLS
+
+from tokenless_agentscope._contracts import ToolContract, build_tool_contracts
 
 
 class _TokenlessToolkit(Toolkit):
@@ -33,7 +41,7 @@ class _TokenlessToolkit(Toolkit):
         self._agent: Any | None = None
         self._session_id: str | None = None
         self.visible_markers: frozenset[str] = frozenset()
-        self.rewritten_calls: set[str] = set()
+        self.output_optimizations: dict[str, OutputOptimization] = {}
         self._retrieve_function: Any | None = None
 
     def bind(self, agent: Any, session_id: str) -> None:
@@ -66,6 +74,7 @@ class _TokenlessToolkit(Toolkit):
                     f"Tool name {name!r} is reserved for Tokenless retrieval"
                 )
         else:
+            self._integration.contract_for(name)
             kwargs["postprocess_func"] = self._wrap_postprocessor(
                 kwargs.get("postprocess_func")
             )
@@ -101,16 +110,30 @@ class _ModelProxy:
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         tools = kwargs.get("tools")
         if tools is not None:
+            retrieve_name = self._integration.config.retrieve_tool_name
+            model_tools = [
+                tool
+                for tool in tools
+                if tool.get("function", {}).get("name") != retrieve_name
+            ]
             prompt = args[0] if args else kwargs.get("prompt", "")
-            request = ModelRequest(
-                tools=tuple(tools),
-                visible_context=json.dumps(prompt, ensure_ascii=False, default=str),
-                attribution=self._integration._attribution(),
-                visible_markers=self._toolkit.visible_markers,
+            transformed = await self._integration.sdk.before_model(
+                BeforeModelRequest(
+                    tools=tuple(model_tools),
+                    visible_context=json.dumps(prompt, ensure_ascii=False, default=str),
+                    retrieve_tool_name=retrieve_name,
+                    capabilities=BeforeModelCapabilities(
+                        replace_tools=True,
+                        publish_retrieve_tool=True,
+                    ),
+                    attribution=self._integration._attribution(),
+                )
             )
-            transformed = await self._integration.sdk.before_model(request)
+            model_tools = list(transformed.tools)
+            if transformed.retrieve_tool is not None:
+                model_tools.append(transformed.retrieve_tool.as_function_tool())
             kwargs = dict(kwargs)
-            kwargs["tools"] = list(transformed.tools)
+            kwargs["tools"] = model_tools
             self._toolkit.visible_markers = transformed.visible_markers
         return await self._model(*args, **kwargs)
 
@@ -127,9 +150,16 @@ class _ModelProxy:
 class TokenlessAgentScope:
     """Stable Tokenless entry point for AgentScope 1.x agents."""
 
-    def __init__(self, config: TokenlessConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: TokenlessConfig | None = None,
+        *,
+        tool_contracts: Mapping[str, ToolContract] | None = None,
+    ) -> None:
         self.config = config or TokenlessConfig()
         self.sdk = TokenlessSdk(self.config)
+        self._tool_contracts = build_tool_contracts(tool_contracts)
+        self._retrieve_declaration = self.sdk.retrieve_tool_declaration()
         self._installed_agent: Any | None = None
         self._session_id: str | None = None
 
@@ -139,7 +169,7 @@ class TokenlessAgentScope:
         retrieve = self._build_retrieve_tool(toolkit)
         toolkit.register_tool_function(
             retrieve,
-            json_schema=self.sdk.retrieve_schema(),
+            json_schema=self._retrieve_declaration.as_function_tool(),
         )
         return toolkit
 
@@ -175,27 +205,47 @@ class TokenlessAgentScope:
         agent.model = _ModelProxy(self, toolkit, agent.model)
         agent.register_instance_hook("pre_acting", "tokenless", self._before_acting)
 
+    def contract_for(self, tool_name: Any) -> ToolContract:
+        """Returns the explicit lifecycle contract for a registered tool."""
+        if not isinstance(tool_name, str) or not tool_name:
+            raise ValueError("registered tool must have a non-empty name")
+        try:
+            return self._tool_contracts[tool_name]
+        except KeyError as error:
+            raise ValueError(
+                f"Tool {tool_name!r} requires an explicit Tokenless ToolContract"
+            ) from error
+
     async def _before_acting(
         self, agent: Any, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
+        if kwargs["tool_call"]["name"] == self.config.retrieve_tool_name:
+            return kwargs
         tool_call = copy.deepcopy(kwargs["tool_call"])
-        inputs = tool_call.get("input") or {}
-        command_field = (
-            "command"
-            if tool_call["name"] in SHELL_TOOLS
-            and isinstance(inputs.get("command"), str)
-            else None
-        )
-        call = ToolCall(
-            tool_call["name"],
-            dict(inputs),
-            self._attribution(tool_call["id"]),
-            command_field=command_field,
-        )
-        transformed = await self.sdk.before_tool_call(call)
-        tool_call["input"] = transformed.arguments
-        if transformed.rewritten:
-            agent.toolkit.rewritten_calls.add(tool_call["id"])
+        contract = self.contract_for(tool_call["name"])
+        arguments = dict(tool_call.get("input") or {})
+        optimization = OutputOptimization.NONE
+        if contract.command_field is not None and self.config.rtk_enabled:
+            transformed = await self.sdk.pre_tool(
+                PreToolRequest(
+                    tool_name=tool_call["name"],
+                    arguments=arguments,
+                    command_field=contract.command_field,
+                    capabilities=PreToolCapabilities(
+                        replace_arguments=True,
+                        block_and_suggest=False,
+                    ),
+                    attribution=self._attribution(tool_call["id"]),
+                )
+            )
+            if transformed.action is PreToolAction.BLOCK_AND_SUGGEST:
+                raise RuntimeError(
+                    "Core returned block_and_suggest without host capability"
+                )
+            arguments = transformed.arguments
+            optimization = transformed.output_optimization
+        tool_call["input"] = arguments
+        agent.toolkit.output_optimizations[tool_call["id"]] = optimization
         return {**kwargs, "tool_call": tool_call}
 
     async def _after_tool(
@@ -206,26 +256,34 @@ class TokenlessAgentScope:
     ) -> ToolResponse:
         if not response.is_last:
             return response
-        status = self._status(response)
-        rewritten = tool_call["id"] in toolkit.rewritten_calls
-        call = ToolCall(
-            tool_call["name"],
-            dict(tool_call.get("input") or {}),
-            self._attribution(tool_call["id"]),
-            rewritten=rewritten,
+        contract = self.contract_for(tool_call["name"])
+        optimization = toolkit.output_optimizations.pop(
+            tool_call["id"], OutputOptimization.NONE
         )
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
         for index, block in enumerate(response.content):
             if block.get("type") != "text":
                 continue
-            transformed = await self.sdk.after_tool_call(
-                ToolResult(call, block.get("text", ""), status)
+            transformed = await self.sdk.post_tool(
+                PostToolRequest(
+                    result_kind=ResultKind.TOOL,
+                    tool_name=tool_call["name"],
+                    content=block.get("text", ""),
+                    status=self._status(response),
+                    content_origin=contract.content_origin,
+                    output_optimization=optimization,
+                    capabilities=PostToolCapabilities(
+                        replace_output=True,
+                        publish_retrieve_tool=True,
+                        replace_with_text=True,
+                    ),
+                    attribution=self._attribution(tool_call["id"]),
+                )
             )
             extra_context = extra_context or transformed.additional_context
-            if transformed.transformed:
-                replacements[index] = TextBlock(type="text", text=transformed.content)
-        toolkit.rewritten_calls.discard(tool_call["id"])
+            if transformed.output != block.get("text", ""):
+                replacements[index] = TextBlock(type="text", text=transformed.output)
         content = [
             replacements.get(index, block)
             for index, block in enumerate(response.content)
@@ -237,20 +295,24 @@ class TokenlessAgentScope:
         return replace(response, content=content)
 
     def _build_retrieve_tool(self, toolkit: _TokenlessToolkit) -> Any:
-        async def retrieve(hash: str) -> ToolResponse:
+        async def retrieve(hash_or_marker: str) -> ToolResponse:
             try:
-                payload = await self.sdk.retrieve(
-                    RetrieveRequest(hash, toolkit.visible_markers, self._attribution())
+                response = await self.sdk.retrieve(
+                    RetrieveRequest(
+                        hash_or_marker,
+                        toolkit.visible_markers,
+                        self._attribution(),
+                    )
                 )
-            except RetrievalError as error:
+            except TokenlessError as error:
                 return ToolResponse(
                     content=[TextBlock(type="text", text=f"Error: {error}")]
                 )
-            return ToolResponse(content=[TextBlock(type="text", text=payload)])
+            return ToolResponse(content=[TextBlock(type="text", text=response.payload)])
 
         retrieve.__name__ = self.config.retrieve_tool_name
         retrieve.__qualname__ = self.config.retrieve_tool_name
-        retrieve.__doc__ = self.sdk.retrieve_schema()["function"]["description"]
+        retrieve.__doc__ = self._retrieve_declaration.description
         return retrieve
 
     def _attribution(self, tool_use_id: str | None = None) -> Attribution:
@@ -261,15 +323,15 @@ class TokenlessAgentScope:
         )
 
     @staticmethod
-    def _status(response: ToolResponse) -> ToolStatus:
+    def _status(response: ToolResponse) -> ToolResultStatus:
         if response.is_interrupted:
-            return ToolStatus.INTERRUPTED
+            return ToolResultStatus.INTERRUPTED
         if response.metadata is not None and response.metadata.get("success") is False:
-            return ToolStatus.ERROR
+            return ToolResultStatus.ERROR
         if any(
             block.get("type") == "text"
             and block.get("text", "").lstrip().startswith("Error:")
             for block in response.content
         ):
-            return ToolStatus.ERROR
-        return ToolStatus.SUCCESS
+            return ToolResultStatus.ERROR
+        return ToolResultStatus.SUCCESS

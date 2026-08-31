@@ -531,12 +531,23 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 .then(env_check::resolve_rtk_path)
                 .flatten()
                 .map(PathBuf::from);
+            let rtk_data_dir = if matches!(&request.request, Request::PreTool(_)) {
+                Some(
+                    database_paths
+                        .data_dir()
+                        .map_err(|error| (error.to_owned(), 1))?
+                        .to_path_buf(),
+                )
+            } else {
+                None
+            };
             let outcome = dispatch_with_store(
                 &request,
                 &EntryOptions {
                     compression_enabled: compression_on,
                     stash_enabled: true,
                     rtk_path,
+                    rtk_data_dir,
                 },
                 stash.as_ref(),
                 recorder.as_ref(),

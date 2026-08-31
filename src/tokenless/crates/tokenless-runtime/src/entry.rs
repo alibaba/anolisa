@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokenless_ccr::{MARKER_PREFIX, MARKER_SUFFIX, StashStore, extract_hash, is_valid_hash};
 use tokenless_compressors::{JsonCompressionConfig, JsonOperation};
 use tokenless_protocol::{
@@ -39,6 +39,8 @@ pub struct EntryOptions {
     pub stash_enabled: bool,
     /// Resolved RTK executable for PreTool.
     pub rtk_path: Option<PathBuf>,
+    /// Resolved state directory propagated to RTK commands.
+    pub rtk_data_dir: Option<PathBuf>,
 }
 
 /// Runtime-only facts used for statistics recording.
@@ -99,6 +101,7 @@ pub fn dispatch_with_store(
                     request,
                     &envelope.attribution,
                     options.rtk_path.as_deref(),
+                    options.rtk_data_dir.as_deref(),
                     RTK_TIMEOUT,
                 )?),
                 None,
@@ -233,7 +236,7 @@ pub(crate) fn before_model_with_store(
     let visible_markers = markers.into_iter().collect::<Vec<_>>();
     let retrieve_tool = if request.capabilities.publish_retrieve_tool && !visible_markers.is_empty()
     {
-        Some(retrieve_tool_declaration(&request.retrieve_tool_name))
+        Some(RetrieveToolDeclaration::new(&request.retrieve_tool_name))
     } else {
         None
     };
@@ -306,36 +309,26 @@ fn collect_markers(value: &Value, markers: &mut BTreeSet<String>) {
     }
 }
 
-fn retrieve_tool_declaration(name: &str) -> RetrieveToolDeclaration {
-    RetrieveToolDeclaration {
-        name: name.to_owned(),
-        description: "Restore content referenced by a visible Tokenless marker.".into(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "hash_or_marker": {
-                    "type": "string",
-                    "description": "A visible <<tokenless:HASH>> marker or its hash"
-                }
-            },
-            "required": ["hash_or_marker"],
-            "additionalProperties": false
-        }),
-    }
-}
-
 pub(crate) fn pre_tool_with_rtk(
     request: &PreToolRequest,
     attribution: &Attribution,
     rtk_path: &Path,
+    data_dir: &Path,
 ) -> Result<PreToolResponse, RuntimeError> {
-    pre_tool_with_optional_rtk(request, attribution, Some(rtk_path), RTK_TIMEOUT)
+    pre_tool_with_optional_rtk(
+        request,
+        attribution,
+        Some(rtk_path),
+        Some(data_dir),
+        RTK_TIMEOUT,
+    )
 }
 
 fn pre_tool_with_optional_rtk(
     request: &PreToolRequest,
     attribution: &Attribution,
     rtk_path: Option<&Path>,
+    data_dir: Option<&Path>,
     timeout: Duration,
 ) -> Result<PreToolResponse, RuntimeError> {
     let Some(arguments) = request.arguments.as_object() else {
@@ -351,12 +344,14 @@ fn pre_tool_with_optional_rtk(
         return Ok(pre_tool_passthrough(request));
     }
     let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
+    let data_dir = data_dir.ok_or(RuntimeError::RtkDataDirectoryUnavailable)?;
 
     let mut child = Command::new(rtk_path);
     child
         .arg("rewrite")
         .arg(command)
         .env("TOKENLESS_AGENT_ID", &attribution.agent_id)
+        .env("TOKENLESS_DATA_DIR", data_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(session_id) = &attribution.session_id {
@@ -407,7 +402,7 @@ fn pre_tool_with_optional_rtk(
     if rewritten.is_empty() || rewritten == command {
         return Ok(pre_tool_passthrough(request));
     }
-    let anchored = anchor_rtk_prefix(rewritten, rtk_path);
+    let anchored = anchor_rtk_prefix(command, rewritten, rtk_path, attribution, data_dir);
     let mut rewritten_arguments = arguments.clone();
     rewritten_arguments.insert(request.command_field.clone(), Value::String(anchored));
     let action = if request.capabilities.replace_arguments {
@@ -430,40 +425,94 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
     }
 }
 
-fn anchor_rtk_prefix(rewritten: &str, rtk_path: &Path) -> String {
+fn anchor_rtk_prefix(
+    original: &str,
+    rewritten: &str,
+    rtk_path: &Path,
+    attribution: &Attribution,
+    data_dir: &Path,
+) -> String {
     let quoted_path = shell_quote(&rtk_path.to_string_lossy());
-    let mut anchored = String::with_capacity(rewritten.len() + quoted_path.len());
+    let prefix = format!(
+        "env TOKENLESS_AGENT_ID={} TOKENLESS_SESSION_ID={} TOKENLESS_TOOL_USE_ID={} TOKENLESS_DATA_DIR={} {}",
+        shell_quote(&attribution.agent_id),
+        shell_quote(attribution.session_id.as_deref().unwrap_or_default()),
+        shell_quote(attribution.tool_use_id.as_deref().unwrap_or_default()),
+        shell_quote(&data_dir.to_string_lossy()),
+        quoted_path,
+    );
+    // RTK can preserve arbitrary configured transparent prefixes before its
+    // wrapper. The first divergence in each rewritten segment locates the
+    // inserted wrapper without replacing `rtk` arguments in that prefix.
+    // Backtick and double-quoted command substitutions are left untouched
+    // because they require the host parser.
+    let original_segments = bare_rtk_offsets_by_segment(original);
+    let rewritten_segments = bare_rtk_offsets_by_segment(rewritten);
+    let mut replacements = Vec::new();
+    for (segment_index, (rewritten_start, tokens)) in rewritten_segments.iter().enumerate() {
+        let original_segment = original_segments.get(segment_index);
+        let original_count = original_segment.map_or(0, |(_, tokens)| tokens.len());
+        if tokens.len() > original_count {
+            let original_start = original_segment.map_or(original.len(), |(start, _)| *start);
+            let original_suffix = &original[original_start..];
+            let rewritten_suffix = &rewritten[*rewritten_start..];
+            let original_trimmed = original_suffix.trim_start();
+            let rewritten_trimmed = rewritten_suffix.trim_start();
+            let common_prefix_len = original_trimmed
+                .bytes()
+                .zip(rewritten_trimmed.bytes())
+                .take_while(|(original, rewritten)| original == rewritten)
+                .count();
+            let insertion_floor = rewritten_start
+                + (rewritten_suffix.len() - rewritten_trimmed.len())
+                + common_prefix_len;
+            replacements.extend(
+                tokens
+                    .iter()
+                    .copied()
+                    .find(|offset| *offset + 3 > insertion_floor),
+            );
+        }
+    }
+
+    let mut anchored = String::with_capacity(rewritten.len() + replacements.len() * prefix.len());
+    let mut copied_until = 0;
+    for offset in replacements {
+        anchored.push_str(&rewritten[copied_until..offset]);
+        anchored.push_str(&prefix);
+        copied_until = offset + 3;
+    }
+    anchored.push_str(&rewritten[copied_until..]);
+    anchored
+}
+
+fn bare_rtk_offsets_by_segment(command: &str) -> Vec<(usize, Vec<usize>)> {
+    let mut segments = Vec::new();
+    let mut segment_start = 0;
+    let mut current_offsets = Vec::new();
     let mut index = 0;
     let mut quote = None;
     let mut escaped = false;
     let mut word_start = true;
-    let mut anchored_in_segment = false;
 
-    // RTK can preserve arbitrary configured transparent prefixes before its
-    // wrapper, so anchor the first bare `rtk` token in each command segment
-    // without interpreting those prefixes. Backtick and double-quoted command
-    // substitutions are left untouched because they require the host parser.
-    while index < rewritten.len() {
-        let Some(ch) = rewritten[index..].chars().next() else {
+    while index < command.len() {
+        let Some(ch) = command[index..].chars().next() else {
             break;
         };
         let width = ch.len_utf8();
 
         if escaped {
-            anchored.push(ch);
             escaped = false;
             index += width;
             continue;
         }
         if ch == '\\' && quote != Some('\'') {
-            anchored.push(ch);
             escaped = true;
             word_start = false;
             index += width;
             continue;
         }
         if let Some(delimiter) = quote {
-            anchored.push(ch);
             if ch == delimiter {
                 quote = None;
             }
@@ -473,43 +522,43 @@ fn anchor_rtk_prefix(rewritten: &str, rtk_path: &Path) -> String {
         if matches!(ch, '\'' | '"' | '`') {
             quote = Some(ch);
             word_start = false;
-            anchored.push(ch);
             index += width;
             continue;
         }
         if ch.is_whitespace() {
             word_start = true;
             if ch == '\n' {
-                anchored_in_segment = false;
+                segments.push((segment_start, current_offsets));
+                segment_start = index + width;
+                current_offsets = Vec::new();
             }
-            anchored.push(ch);
             index += width;
             continue;
         }
         if matches!(ch, '&' | '|' | ';' | '(') {
+            segments.push((segment_start, current_offsets));
+            segment_start = index + width;
+            current_offsets = Vec::new();
             word_start = true;
-            anchored_in_segment = false;
-            anchored.push(ch);
             index += width;
             continue;
         }
-        if word_start && !anchored_in_segment && rewritten[index..].starts_with("rtk") {
-            let next = rewritten[index + 3..].chars().next();
+        if word_start && command[index..].starts_with("rtk") {
+            let next = command[index + 3..].chars().next();
             if next.is_none_or(|value| {
                 value.is_whitespace() || matches!(value, '&' | '|' | ';' | '(' | ')')
             }) {
-                anchored.push_str(&quoted_path);
+                current_offsets.push(index);
                 index += 3;
                 word_start = false;
-                anchored_in_segment = true;
                 continue;
             }
         }
         word_start = false;
-        anchored.push(ch);
         index += width;
     }
-    anchored
+    segments.push((segment_start, current_offsets));
+    segments
 }
 
 fn shell_quote(value: &str) -> String {
@@ -748,6 +797,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use serde_json::json;
     use tempfile::tempdir;
     use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite};
     use tokenless_protocol::{
@@ -761,6 +811,7 @@ mod tests {
             compression_enabled: true,
             stash_enabled: true,
             rtk_path: None,
+            rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),
         }
     }
 
@@ -950,6 +1001,7 @@ mod tests {
             },
             &Attribution::new("test"),
             &rtk,
+            directory.path(),
         )
         .unwrap();
         assert_eq!(response.action, PreToolAction::ReplaceArguments);
@@ -965,33 +1017,106 @@ mod tests {
     #[test]
     fn pre_tool_anchor_preserves_quoted_arguments_and_handles_subshells() {
         let path = Path::new("/opt/tokenless/rtk");
+        let data_dir = Path::new("/tenant/tokenless");
+        let attribution = Attribution {
+            agent_id: "agent".into(),
+            session_id: Some("session".into()),
+            tool_use_id: Some("call".into()),
+        };
+        let prefix = "env TOKENLESS_AGENT_ID=agent TOKENLESS_SESSION_ID=session TOKENLESS_TOOL_USE_ID=call TOKENLESS_DATA_DIR=/tenant/tokenless /opt/tokenless/rtk";
         assert_eq!(
-            anchor_rtk_prefix("rtk grep -E 'foo | rtk bar' src && rtk git status", path),
-            "/opt/tokenless/rtk grep -E 'foo | rtk bar' src && /opt/tokenless/rtk git status"
+            anchor_rtk_prefix(
+                "grep -E 'foo | rtk bar' src && git status",
+                "rtk grep -E 'foo | rtk bar' src && rtk git status",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("{prefix} grep -E 'foo | rtk bar' src && {prefix} git status")
         );
         assert_eq!(
-            anchor_rtk_prefix("echo $(rtk git status)", path),
-            "echo $(/opt/tokenless/rtk git status)"
+            anchor_rtk_prefix(
+                "echo $(git status)",
+                "echo $(rtk git status)",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("echo $({prefix} git status)")
         );
         assert_eq!(
-            anchor_rtk_prefix("echo `rtk git status`", path),
+            anchor_rtk_prefix(
+                "echo `git status`",
+                "echo `rtk git status`",
+                path,
+                &attribution,
+                data_dir,
+            ),
             "echo `rtk git status`"
         );
         assert_eq!(
-            anchor_rtk_prefix("sudo rtk git status", path),
-            "sudo /opt/tokenless/rtk git status"
+            anchor_rtk_prefix(
+                "sudo git status",
+                "sudo rtk git status",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("sudo {prefix} git status")
         );
         assert_eq!(
-            anchor_rtk_prefix("RUST_BACKTRACE=1 rtk cargo test", path),
-            "RUST_BACKTRACE=1 /opt/tokenless/rtk cargo test"
+            anchor_rtk_prefix(
+                "RUST_BACKTRACE=1 cargo test",
+                "RUST_BACKTRACE=1 rtk cargo test",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("RUST_BACKTRACE=1 {prefix} cargo test")
         );
         assert_eq!(
-            anchor_rtk_prefix("sudo noglob rtk git status", path),
-            "sudo noglob /opt/tokenless/rtk git status"
+            anchor_rtk_prefix(
+                "sudo noglob git status",
+                "sudo noglob rtk git status",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("sudo noglob {prefix} git status")
         );
         assert_eq!(
-            anchor_rtk_prefix("shadowenv exec -- rtk git status", path),
-            "shadowenv exec -- /opt/tokenless/rtk git status"
+            anchor_rtk_prefix(
+                "shadowenv exec -- git status",
+                "shadowenv exec -- rtk git status",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("shadowenv exec -- {prefix} git status")
+        );
+        assert_eq!(
+            anchor_rtk_prefix(
+                "git status | grep rtk",
+                "rtk git status | grep rtk",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("{prefix} git status | grep rtk")
+        );
+        assert_eq!(
+            anchor_rtk_prefix(
+                "docker exec rtk git status",
+                "docker exec rtk rtk git status",
+                path,
+                &attribution,
+                data_dir,
+            ),
+            format!("docker exec rtk {prefix} git status")
+        );
+        assert_eq!(
+            anchor_rtk_prefix("rg error", "rtk rg error", path, &attribution, data_dir),
+            format!("{prefix} rg error")
         );
     }
 
@@ -1054,7 +1179,13 @@ mod tests {
             },
         };
         assert!(matches!(
-            pre_tool_with_optional_rtk(&applicable, &Attribution::new("test"), None, RTK_TIMEOUT),
+            pre_tool_with_optional_rtk(
+                &applicable,
+                &Attribution::new("test"),
+                None,
+                None,
+                RTK_TIMEOUT
+            ),
             Err(RuntimeError::RtkUnavailable)
         ));
     }
@@ -1074,21 +1205,26 @@ mod tests {
         for code in [1, 2] {
             let rtk = directory.path().join(format!("rtk-{code}"));
             write_executable(&rtk, &format!("#!/bin/sh\nprintf 'changed'\nexit {code}\n"));
-            let response = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk).unwrap();
+            let response =
+                pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path())
+                    .unwrap();
             assert_eq!(response.action, PreToolAction::Passthrough);
             assert_eq!(response.arguments, request.arguments);
         }
         for (name, output) in [("empty", ""), ("unchanged", "grep error log")] {
             let rtk = directory.path().join(format!("rtk-{name}"));
             write_executable(&rtk, &format!("#!/bin/sh\nprintf '%s' '{output}'\n"));
-            let response = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk).unwrap();
+            let response =
+                pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path())
+                    .unwrap();
             assert_eq!(response.action, PreToolAction::Passthrough);
             assert_eq!(response.arguments, request.arguments);
         }
 
         let rtk = directory.path().join("rtk-3");
         write_executable(&rtk, "#!/bin/sh\nprintf 'optimized command'\nexit 3\n");
-        let response = pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk).unwrap();
+        let response =
+            pre_tool_with_rtk(&request, &Attribution::new("test"), &rtk, directory.path()).unwrap();
         assert_eq!(response.action, PreToolAction::ReplaceArguments);
         assert_eq!(response.output_optimization, OutputOptimization::Rtk);
         assert_eq!(response.arguments["command"], "optimized command");
@@ -1110,28 +1246,32 @@ mod tests {
         let rtk = directory.path().join("rtk-env");
         write_executable(
             &rtk,
-            "#!/bin/sh\nprintf '%s:%s:%s' \"$TOKENLESS_AGENT_ID\" \"$TOKENLESS_SESSION_ID\" \"$TOKENLESS_TOOL_USE_ID\"\n",
+            "#!/bin/sh\nprintf '%s:%s:%s:%s' \"$TOKENLESS_AGENT_ID\" \"$TOKENLESS_SESSION_ID\" \"$TOKENLESS_TOOL_USE_ID\" \"$TOKENLESS_DATA_DIR\"\n",
         );
         let attribution = Attribution {
             agent_id: "agent".into(),
             session_id: Some("session".into()),
             tool_use_id: Some("call".into()),
         };
-        let response = pre_tool_with_rtk(&request, &attribution, &rtk).unwrap();
+        let response = pre_tool_with_rtk(&request, &attribution, &rtk, directory.path()).unwrap();
         assert_eq!(response.action, PreToolAction::BlockAndSuggest);
-        assert_eq!(response.arguments["command"], "agent:session:call");
+        assert_eq!(
+            response.arguments["command"],
+            format!("agent:session:call:{}", directory.path().display())
+        );
 
         let unexpected = directory.path().join("rtk-9");
         write_executable(&unexpected, "#!/bin/sh\nexit 9\n");
         assert!(matches!(
-            pre_tool_with_rtk(&request, &attribution, &unexpected),
+            pre_tool_with_rtk(&request, &attribution, &unexpected, directory.path()),
             Err(RuntimeError::RtkUnexpectedExit { code: 9 })
         ));
         assert!(matches!(
             pre_tool_with_rtk(
                 &request,
                 &attribution,
-                &directory.path().join("missing-rtk")
+                &directory.path().join("missing-rtk"),
+                directory.path(),
             ),
             Err(RuntimeError::RtkSpawn { .. })
         ));
@@ -1156,6 +1296,7 @@ mod tests {
                 &request,
                 &Attribution::new("test"),
                 Some(&rtk),
+                Some(directory.path()),
                 Duration::from_millis(20)
             ),
             Err(RuntimeError::RtkTimeout)
@@ -1183,6 +1324,7 @@ mod tests {
             &request,
             &Attribution::new("test"),
             Some(&rtk),
+            Some(directory.path()),
             Duration::from_secs(1),
         )
         .unwrap();

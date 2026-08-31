@@ -16,6 +16,8 @@ GUIDE_FRAGMENTS=(
     '| 2.0.1'
     'TokenlessAgentScope'
     'TokenlessConfig'
+    'ToolContract'
+    'ContentOrigin'
     'integration.create_toolkit()'
     'integration.install(agent, session_id="conversation-id")'
     'Toolkit(tools=[*application_tools, *integration.tools])'

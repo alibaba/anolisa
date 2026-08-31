@@ -16,9 +16,12 @@ from agentscope.message import TextBlock, ToolCallBlock
 from agentscope.model import ChatResponse
 from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk, Toolkit
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
-_RECOVERY_PAYLOAD = "RECOVERY_SENTINEL=世界\n" + ("内容" * 3_000) + "TRAILING_NEWLINE\n"
+_RECOVERY_PAYLOAD = (
+    "RECOVERY_SENTINEL=世界\n" + ("内容" * 525_000) + "TRAILING_NEWLINE\n"
+)
 _SCHEMA_DESCRIPTION = "SCHEMA_SENTINEL " + ("details " * 200)
 _SHELL_COMMANDS: list[str] = []
 
@@ -162,11 +165,13 @@ async def main() -> None:
         existing_retrieve = ExistingRetrieveTool()
         integration = TokenlessAgentScope(
             TokenlessConfig(
-                mode="aggressive",
                 data_dir=Path(directory),
-                min_chars=0,
                 retrieve_tool_name="tenant_tokenless_retrieve",
             ),
+            tool_contracts={
+                "large_result": ToolContract(ContentOrigin.API_RESPONSE),
+                "tokenless_retrieve": ToolContract(ContentOrigin.API_RESPONSE),
+            },
         )
         middleware_tool = integration.tools[0]
         app_toolkit = Toolkit(tools=[existing_retrieve, *integration.tools])
@@ -215,8 +220,10 @@ async def main() -> None:
         assert len(shell_events) == 2
         assert len(_SHELL_COMMANDS) == 1
         assert str(integration.middleware.sdk._rtk_path) in _SHELL_COMMANDS[0]
+        assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
         assert f"TOKENLESS_SESSION_ID={agent.state.session_id}" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
+        assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
 
         tool_call = ToolCallBlock(id="call-large", name="large_result", input="{}")
         events = [event async for event in agent._acting(tool_call)]
@@ -246,7 +253,7 @@ async def main() -> None:
         retrieve_call = ToolCallBlock(
             id="call-retrieve",
             name="tenant_tokenless_retrieve",
-            input=json.dumps({"hash": marker.group(1).upper()}),
+            input=json.dumps({"hash_or_marker": marker.group(1).upper()}),
         )
         retrieved = [
             event async for event in toolkit.call_tool(retrieve_call, agent.state)

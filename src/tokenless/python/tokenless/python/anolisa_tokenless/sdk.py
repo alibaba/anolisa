@@ -1,70 +1,43 @@
-"""Framework-neutral lifecycle API for complete Tokenless integration."""
+"""Framework-neutral bindings for the four Tokenless lifecycle operations."""
 
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
-import logging
 import os
-import re
-import shlex
-import subprocess
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from anolisa_tokenless._native import TokenlessError, TokenlessRuntime
+from anolisa_tokenless._native import TokenlessRuntime
 from anolisa_tokenless.stats import TokenlessStats
-from anolisa_tokenless.tool_response import TokenlessConfig, ToolResponseCompressor
-
-logger = logging.getLogger(__name__)
-
-_HASH_PATTERN = re.compile(r"^[0-9a-fA-F]{24}$")
-_MARKER_PATTERN = re.compile(r"<<tokenless:([0-9a-fA-F]{24})>>")
-_SEGMENT_OPERATORS = frozenset({"&&", "||", ";", "|", "&"})
-_ENV_ERRORS: tuple[tuple[tuple[str, ...], str, str], ...] = (
-    (
-        ("command not found", "not installed", "cannot execute", "unable to locate"),
-        "ENV_DEPENDENCY_MISSING",
-        "Install the missing dependency or ask the user for guidance.",
-    ),
-    (
-        ("permission denied", "operation not permitted", "eacces", "access denied"),
-        "ENV_PERMISSION",
-        "Check file and directory permissions.",
-    ),
-    (
-        ("no such file or directory", "enoent", "file not found", "does not exist"),
-        "ENV_FILE_MISSING",
-        "Verify the required file or directory path.",
-    ),
-    (
-        (
-            "connection refused",
-            "network is unreachable",
-            "could not resolve host",
-            "etimedout",
-        ),
-        "ENV_NETWORK",
-        "Check DNS, proxy, firewall, and network connectivity.",
-    ),
-    (
-        ("modulenotfounderror", "no module named", "cannot import name"),
-        "ENV_PACKAGE_MISSING",
-        "Install the required package or module.",
-    ),
-)
-
-_RETRIEVE_DESCRIPTION = (
-    "Recover content omitted at a <<tokenless:HASH>> marker. Call this only "
-    "when the omitted content is necessary."
-)
 
 
-class ToolStatus(StrEnum):
+class PreToolAction(StrEnum):
+    """Host action selected by the PreTool service."""
+
+    PASSTHROUGH = "passthrough"
+    REPLACE_ARGUMENTS = "replace_arguments"
+    BLOCK_AND_SUGGEST = "block_and_suggest"
+
+
+class OutputOptimization(StrEnum):
+    """Optimization already applied before PostTool."""
+
+    NONE = "none"
+    RTK = "rtk"
+
+
+class ResultKind(StrEnum):
+    """Whether PostTool is processing an ordinary or Retrieve result."""
+
+    TOOL = "tool"
+    RETRIEVE = "retrieve"
+
+
+class ToolResultStatus(StrEnum):
     """Framework-neutral final state of one tool execution."""
 
     SUCCESS = "success"
@@ -73,9 +46,61 @@ class ToolStatus(StrEnum):
     DENIED = "denied"
 
 
+class ContentOrigin(StrEnum):
+    """Authoritative semantic source of PostTool content."""
+
+    COMMAND_OUTPUT = "command_output"
+    FILE_CONTENT = "file_content"
+    API_RESPONSE = "api_response"
+
+
+class Disposition(StrEnum):
+    """Final PostTool routing or compression decision."""
+
+    APPLIED = "applied"
+    DRY_RUN = "dry_run"
+    PASSTHROUGH = "passthrough"
+    NO_SAVINGS = "no_savings"
+    RECOVERABILITY_UNAVAILABLE = "recoverability_unavailable"
+    TIMEOUT = "timeout"
+    TOOL_ERROR = "tool_error"
+
+
+class ContentType(StrEnum):
+    """Detected PostTool content domain."""
+
+    JSON = "json"
+    SEARCH_RESULTS = "search_results"
+    BUILD_LOG = "build_log"
+    STACK_TRACE = "stack_trace"
+    DIFF = "diff"
+    HTML = "html"
+    TABULAR = "tabular"
+    SOURCE_CODE = "source_code"
+    PLAIN_TEXT = "plain_text"
+    UNKNOWN = "unknown"
+
+
+class AppliedOperation(StrEnum):
+    """Concrete transformations applied by Core."""
+
+    SCHEMA_COMPRESSION = "schema_compression"
+    JSON_CLEANUP = "json_cleanup"
+    JSON_TRUNCATION = "json_truncation"
+    TOON = "toon"
+
+
+class Recoverability(StrEnum):
+    """Recovery state of one emitted result."""
+
+    LOSSLESS = "lossless"
+    RETRIEVABLE = "retrievable"
+    UNRECOVERABLE = "unrecoverable"
+
+
 @dataclass(frozen=True)
 class Attribution:
-    """Stable identifiers used to attribute transformations and retrieval."""
+    """Stable identifiers used to attribute lifecycle operations."""
 
     agent_id: str
     session_id: str
@@ -89,240 +114,295 @@ class Attribution:
 
 
 @dataclass(frozen=True)
-class ModelRequest:
-    """Model-visible tools and context at the pre-model boundary.
+class TokenlessConfig:
+    """State and packaged-resource configuration for the lifecycle SDK."""
 
-    ``visible_markers`` is output state: ``before_model`` replaces any input
-    value with the exact markers visible in the transformed request.
-    """
+    data_dir: str | os.PathLike[str] | None = None
+    retrieve_tool_name: str = "tokenless_retrieve"
+    rtk_enabled: bool = True
 
-    tools: tuple[dict[str, Any], ...]
-    visible_context: str
-    attribution: Attribution
-    visible_markers: frozenset[str] = field(default_factory=frozenset)
+    def __post_init__(self) -> None:
+        if not self.retrieve_tool_name:
+            raise ValueError("retrieve_tool_name must not be empty")
+        if self.data_dir is not None:
+            data_dir = Path(self.data_dir).expanduser()
+            if not data_dir.is_absolute():
+                raise ValueError("data_dir must be an absolute path")
+            object.__setattr__(self, "data_dir", os.fspath(data_dir))
 
 
 @dataclass(frozen=True)
-class ToolCall:
-    """One tool call before framework execution."""
+class BeforeModelCapabilities:
+    """Host capabilities relevant to BeforeModel."""
+
+    replace_tools: bool
+    publish_retrieve_tool: bool
+
+
+@dataclass(frozen=True)
+class BeforeModelRequest:
+    """Model-visible tools and context at the BeforeModel boundary."""
+
+    tools: tuple[Any, ...]
+    visible_context: Any
+    retrieve_tool_name: str
+    capabilities: BeforeModelCapabilities
+    attribution: Attribution
+
+
+@dataclass(frozen=True)
+class RetrieveToolDeclaration:
+    """Canonical declaration for the marker-authorized Retrieve tool."""
 
     name: str
-    arguments: dict[str, Any]
-    attribution: Attribution
-    command_field: str | None = None
-    rewritten: bool = False
+    description: str
+    input_schema: dict[str, Any]
 
-    def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("tool name must not be empty")
-        if self.attribution.tool_use_id is None:
-            raise ValueError("tool_use_id is required for a tool lifecycle")
+    def as_function_tool(self) -> dict[str, Any]:
+        """Returns an OpenAI-compatible function declaration."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
 
 
 @dataclass(frozen=True)
-class ToolResult:
-    """Model-visible final text produced by one tool call."""
+class BeforeModelResponse:
+    """Transformed tools, visible markers, and optional Retrieve declaration."""
 
-    call: ToolCall
-    content: str
-    status: ToolStatus
-    additional_context: str | None = None
-    transformed: bool = False
+    tools: tuple[Any, ...]
+    visible_markers: frozenset[str]
+    retrieve_tool: RetrieveToolDeclaration | None
+
+
+@dataclass(frozen=True)
+class PreToolCapabilities:
+    """Host capabilities relevant to PreTool."""
+
+    replace_arguments: bool
+    block_and_suggest: bool
+
+
+@dataclass(frozen=True)
+class PreToolRequest:
+    """One explicitly identified command field before tool execution."""
+
+    tool_name: str
+    arguments: dict[str, Any]
+    command_field: str
+    capabilities: PreToolCapabilities
+    attribution: Attribution
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "status", ToolStatus(self.status))
+        if not self.tool_name:
+            raise ValueError("tool_name must not be empty")
+        if not self.command_field:
+            raise ValueError("command_field must not be empty")
+        if self.attribution.tool_use_id is None:
+            raise ValueError("tool_use_id is required for PreTool")
+
+
+@dataclass(frozen=True)
+class PreToolResponse:
+    """Arguments, host action, and output-optimization state from Core."""
+
+    arguments: dict[str, Any]
+    action: PreToolAction
+    output_optimization: OutputOptimization
+
+
+@dataclass(frozen=True)
+class PostToolCapabilities:
+    """Host capabilities relevant to PostTool."""
+
+    replace_output: bool
+    publish_retrieve_tool: bool
+    replace_with_text: bool
+
+
+@dataclass(frozen=True)
+class PostToolRequest:
+    """One final model-visible tool result before Core routing."""
+
+    result_kind: ResultKind
+    tool_name: str
+    content: str
+    status: ToolResultStatus
+    content_origin: ContentOrigin
+    output_optimization: OutputOptimization
+    capabilities: PostToolCapabilities
+    attribution: Attribution
+
+    def __post_init__(self) -> None:
+        if not self.tool_name:
+            raise ValueError("tool_name must not be empty")
+        if self.attribution.tool_use_id is None and self.result_kind == ResultKind.TOOL:
+            raise ValueError("tool_use_id is required for PostTool tool results")
+
+
+@dataclass(frozen=True)
+class PostToolResponse:
+    """Core-owned PostTool output and its complete operation metadata."""
+
+    output: str
+    disposition: Disposition
+    content_type: ContentType | None
+    applied_operations: tuple[AppliedOperation, ...]
+    recoverability: Recoverability
+    before_tokens: int
+    after_tokens: int
+    stash_keys: tuple[str, ...]
+    tokenizer_id: str
+    additional_context: str | None
 
 
 @dataclass(frozen=True)
 class RetrieveRequest:
-    """Marker-authorized stash lookup with framework correlation identity."""
+    """Marker-authorized stash lookup with model visibility context."""
 
-    hash: str
+    hash_or_marker: str
     visible_markers: frozenset[str]
     attribution: Attribution
 
 
+@dataclass(frozen=True)
+class RetrieveResponse:
+    """Normalized stash identity and byte-exact recovered payload."""
+
+    hash: str
+    payload: str
+
+
 class TokenlessSdk:
-    """Apply all Tokenless capabilities at four framework lifecycle seams."""
+    """Calls the four Rust lifecycle services without duplicating policy."""
 
     def __init__(self, config: TokenlessConfig | None = None) -> None:
         self.config = config or TokenlessConfig()
         self.runtime = TokenlessRuntime(self.config.data_dir)
-        self._response = ToolResponseCompressor(self.config, runtime=self.runtime)
         self._rtk_path = self._resolve_rtk() if self.config.rtk_enabled else None
         self._stats: TokenlessStats | None = None
 
     @property
     def stats(self) -> TokenlessStats:
-        """Return a lazy query client bound to this SDK's state directory."""
+        """Returns a lazy query client bound to the Runtime state directory."""
         if self._stats is None:
             self._stats = TokenlessStats(self.runtime.data_dir)
         return self._stats
 
-    async def before_model(self, request: ModelRequest) -> ModelRequest:
-        """Compress function schemas and publish retrieve only when usable."""
-        tools: list[dict[str, Any]] = []
-        retrieve_schema = self.retrieve_schema()
-        retrieve_seen = False
-        for tool in request.tools:
-            candidate = copy.deepcopy(tool)
-            if candidate.get("type") != "function":
-                tools.append(candidate)
-                continue
-            function = candidate.get("function")
-            if not isinstance(function, dict) or not isinstance(
-                function.get("name"), str
-            ):
-                raise TypeError(
-                    "function tools require a function object with a string name"
-                )
-            if function["name"] == self.config.retrieve_tool_name:
-                if retrieve_seen or candidate != retrieve_schema:
-                    raise ValueError(
-                        f"Tool name {self.config.retrieve_tool_name!r} is reserved "
-                        "for Tokenless retrieval"
-                    )
-                retrieve_seen = True
-                continue
-            if self.config.schema_compression_enabled:
-                candidate = await self._compress_schema(candidate, request.attribution)
-            tools.append(candidate)
+    async def before_model(self, request: BeforeModelRequest) -> BeforeModelResponse:
+        """Runs the Core BeforeModel service."""
+        response = await asyncio.to_thread(
+            self.runtime._before_model_json,
+            _json_dumps(
+                {
+                    "tools": request.tools,
+                    "visible_context": request.visible_context,
+                    "retrieve_tool_name": request.retrieve_tool_name,
+                    "capabilities": {
+                        "replace_tools": request.capabilities.replace_tools,
+                        "publish_retrieve_tool": request.capabilities.publish_retrieve_tool,
+                    },
+                }
+            ),
+            **_attribution_kwargs(request.attribution),
+        )
+        return _before_model_response(response)
 
-        marker_text = request.visible_context + json.dumps(tools, ensure_ascii=False)
-        markers = self.extract_markers(marker_text)
-        if markers:
-            tools.append(retrieve_schema)
-        return replace(request, tools=tuple(tools), visible_markers=markers)
-
-    async def before_tool_call(self, call: ToolCall) -> ToolCall:
-        """Rewrite an explicitly identified shell-command argument with RTK."""
-        arguments = copy.deepcopy(call.arguments)
-        if not self.config.rtk_enabled or call.name == self.config.retrieve_tool_name:
-            return replace(call, arguments=arguments)
-        if call.command_field is None:
-            return replace(call, arguments=arguments)
-        command = arguments.get(call.command_field)
-        if not isinstance(command, str):
-            raise TypeError(
-                f"command field {call.command_field!r} must contain a string"
-            )
+    async def pre_tool(self, request: PreToolRequest) -> PreToolResponse:
+        """Runs the Core PreTool service with the packaged RTK executable."""
         if self._rtk_path is None:
-            raise RuntimeError("Tokenless RTK path is unavailable")
-        env = os.environ.copy()
-        env.update(self._attribution_env(call.attribution))
-        try:
-            process = await asyncio.to_thread(
-                subprocess.run,
-                [os.fspath(self._rtk_path), "rewrite", command],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=env,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            logger.warning("Tokenless RTK rewrite failed: %s", error)
-            return replace(call, arguments=arguments)
-        if process.returncode not in (0, 3):
-            if process.returncode not in (1, 2):
-                logger.warning(
-                    "Tokenless RTK rewrite exited with %s", process.returncode
-                )
-            return replace(call, arguments=arguments)
-        rewritten = process.stdout.strip()
-        if not rewritten or rewritten == command:
-            return replace(call, arguments=arguments)
-        arguments[call.command_field] = self._anchor_rtk(rewritten, call.attribution)
-        return replace(call, arguments=arguments, rewritten=True)
+            raise RuntimeError("Tokenless RTK is disabled")
+        response = await asyncio.to_thread(
+            self.runtime._pre_tool_json,
+            _json_dumps(
+                {
+                    "tool_name": request.tool_name,
+                    "arguments": request.arguments,
+                    "command_field": request.command_field,
+                    "capabilities": {
+                        "replace_arguments": request.capabilities.replace_arguments,
+                        "block_and_suggest": request.capabilities.block_and_suggest,
+                    },
+                }
+            ),
+            self._rtk_path,
+            **_attribution_kwargs(request.attribution),
+        )
+        value = _json_object(response)
+        arguments = value["arguments"]
+        if not isinstance(arguments, dict):
+            raise TypeError("Core returned non-object PreTool arguments")
+        return PreToolResponse(
+            arguments=arguments,
+            action=PreToolAction(value["action"]),
+            output_optimization=OutputOptimization(value["output_optimization"]),
+        )
 
-    async def after_tool_call(self, result: ToolResult) -> ToolResult:
-        """Transform successful final text or annotate environment failures."""
-        if result.call.name == self.config.retrieve_tool_name:
-            return result
-        if result.status is ToolStatus.ERROR:
-            context = self._classify_environment_error(result.content)
-            return replace(result, additional_context=context)
-        if result.status is not ToolStatus.SUCCESS or result.call.rewritten:
-            return result
+    async def post_tool(self, request: PostToolRequest) -> PostToolResponse:
+        """Runs Core PostTool routing and the JSON-only Pipeline."""
+        response = await asyncio.to_thread(
+            self.runtime._post_tool_json,
+            _json_dumps(
+                {
+                    "result_kind": request.result_kind,
+                    "tool_name": request.tool_name,
+                    "content": request.content,
+                    "status": request.status,
+                    "content_origin": request.content_origin,
+                    "output_optimization": request.output_optimization,
+                    "capabilities": {
+                        "replace_output": request.capabilities.replace_output,
+                        "publish_retrieve_tool": request.capabilities.publish_retrieve_tool,
+                        "replace_with_text": request.capabilities.replace_with_text,
+                    },
+                }
+            ),
+            **_attribution_kwargs(request.attribution),
+        )
+        value = _json_object(response)
+        content_type = value.get("content_type")
+        return PostToolResponse(
+            output=value["output"],
+            disposition=Disposition(value["disposition"]),
+            content_type=(
+                ContentType(content_type) if content_type is not None else None
+            ),
+            applied_operations=tuple(
+                AppliedOperation(item) for item in value["applied_operations"]
+            ),
+            recoverability=Recoverability(value["recoverability"]),
+            before_tokens=value["before_tokens"],
+            after_tokens=value["after_tokens"],
+            stash_keys=tuple(value["stash_keys"]),
+            tokenizer_id=value["tokenizer_id"],
+            additional_context=value.get("additional_context"),
+        )
 
-        content = result.content
-        if self.config.response_compression_enabled:
-            compressed = await self._response.compress_text(
-                content,
-                tool_name=result.call.name,
-                agent_id=result.call.attribution.agent_id,
-                session_id=result.call.attribution.session_id,
-                tool_use_id=result.call.attribution.tool_use_id,
-            )
-            if compressed is not None:
-                content = compressed
-        if (
-            self.config.toon_enabled
-            and not self._response.is_excluded(result.call.name)
-            and self._is_structured_json(content)
-        ):
-            content = await self._compress_toon(content, result.call.attribution)
-        if content == result.content:
-            return result
-        return replace(result, content=content, transformed=True)
+    async def retrieve(self, request: RetrieveRequest) -> RetrieveResponse:
+        """Runs the Core marker-authorized Retrieve service."""
+        response = await asyncio.to_thread(
+            self.runtime._retrieve_authorized_json,
+            _json_dumps(
+                {
+                    "hash_or_marker": request.hash_or_marker,
+                    "visible_markers": sorted(request.visible_markers),
+                }
+            ),
+            **_attribution_kwargs(request.attribution),
+        )
+        value = _json_object(response)
+        return RetrieveResponse(hash=value["hash"], payload=value["payload"])
 
-    async def retrieve(self, request: RetrieveRequest) -> str:
-        """Return a byte-exact payload only for a marker visible to the model."""
-        if _HASH_PATTERN.fullmatch(request.hash) is None:
-            from anolisa_tokenless.tool_response import RetrievalError
-
-            raise RetrievalError(
-                "Invalid Tokenless stash hash; expected exactly 24 hexadecimal characters."
-            )
-        normalized = request.hash.lower()
-        if normalized not in {marker.lower() for marker in request.visible_markers}:
-            from anolisa_tokenless.tool_response import RetrievalError
-
-            raise RetrievalError(
-                "The requested Tokenless marker is not visible in the current model context."
-            )
-        try:
-            return await asyncio.to_thread(self.runtime.retrieve, normalized)
-        except TokenlessError as error:
-            from anolisa_tokenless.tool_response import RetrievalError
-
-            raise RetrievalError(str(error)) from error
-
-    async def _compress_schema(
-        self, tool: dict[str, Any], attribution: Attribution
-    ) -> dict[str, Any]:
-        text = json.dumps(tool, ensure_ascii=False, separators=(",", ":"))
-        try:
-            result = await asyncio.to_thread(
-                self.runtime.compress_schema,
-                text,
-                agent_id=attribution.agent_id,
-                session_id=attribution.session_id,
-                tool_use_id=attribution.tool_use_id,
-            )
-            if result.applied:
-                value = json.loads(result.output)
-                if isinstance(value, dict):
-                    return value
-        except (TokenlessError, ValueError, RecursionError) as error:
-            logger.warning("Tokenless schema compression failed: %s", error)
-        return tool
-
-    async def _compress_toon(self, text: str, attribution: Attribution) -> str:
-        try:
-            result = await asyncio.to_thread(
-                self.runtime.compress_toon,
-                text,
-                agent_id=attribution.agent_id,
-                session_id=attribution.session_id,
-                tool_use_id=attribution.tool_use_id,
-            )
-        except TokenlessError as error:
-            logger.warning("Tokenless TOON compression failed: %s", error)
-            return text
-        if result.applied and len(result.output.encode()) < len(text.encode()):
-            return result.output
-        return text
+    def retrieve_tool_declaration(self) -> RetrieveToolDeclaration:
+        """Returns Core's canonical declaration for the configured Retrieve tool."""
+        value = _json_object(
+            self.runtime._retrieve_tool_declaration_json(self.config.retrieve_tool_name)
+        )
+        return _retrieve_tool_declaration(value)
 
     def _resolve_rtk(self) -> Path:
         resource = files("anolisa_tokenless").joinpath("_bin", "rtk")
@@ -337,125 +417,46 @@ class TokenlessSdk:
             )
         return resource
 
-    def _anchor_rtk(self, command: str, attribution: Attribution) -> str:
-        if self._rtk_path is None:
-            raise RuntimeError("Tokenless RTK path is unavailable")
-        prefix = " ".join(
-            ["env"]
-            + [
-                f"{name}={shlex.quote(value)}"
-                for name, value in self._attribution_env(attribution).items()
-            ]
-            + [shlex.quote(os.fspath(self._rtk_path))]
-        )
-        output: list[str] = []
-        cursor = 0
-        command_start = True
-        while cursor < len(command):
-            char = command[cursor]
-            if char in " \t\r\n":
-                output.append(char)
-                cursor += 1
-                if char in "\r\n":
-                    command_start = True
-                continue
-            if char == "#":
-                end = command.find("\n", cursor)
-                if end == -1:
-                    output.append(command[cursor:])
-                    break
-                output.append(command[cursor:end])
-                cursor = end
-                continue
 
-            pair = command[cursor : cursor + 2]
-            operator = pair if pair in _SEGMENT_OPERATORS else None
-            if operator is None and char in _SEGMENT_OPERATORS:
-                operator = char
-            if operator is not None:
-                output.append(operator)
-                cursor += len(operator)
-                command_start = True
-                continue
+def _attribution_kwargs(attribution: Attribution) -> dict[str, str | None]:
+    return {
+        "agent_id": attribution.agent_id,
+        "session_id": attribution.session_id,
+        "tool_use_id": attribution.tool_use_id,
+    }
 
-            start = cursor
-            quote: str | None = None
-            while cursor < len(command):
-                char = command[cursor]
-                if quote is None:
-                    if char in {"'", '"', "`"}:
-                        quote = char
-                        cursor += 1
-                    elif char == "\\" and cursor + 1 < len(command):
-                        cursor += 2
-                    elif char in " \t\r\n" or char in {";", "&", "|"}:
-                        break
-                    else:
-                        cursor += 1
-                elif char == "\\" and quote != "'" and cursor + 1 < len(command):
-                    cursor += 2
-                elif char == quote:
-                    quote = None
-                    cursor += 1
-                else:
-                    cursor += 1
-            token = command[start:cursor]
-            output.append(prefix if command_start and token == "rtk" else token)
-            command_start = False
-        return "".join(output)
 
-    def _attribution_env(self, attribution: Attribution) -> dict[str, str]:
-        values = {
-            "TOKENLESS_AGENT_ID": attribution.agent_id,
-            "TOKENLESS_SESSION_ID": attribution.session_id,
-            "TOKENLESS_DATA_DIR": self.runtime.data_dir,
-        }
-        if attribution.tool_use_id is not None:
-            values["TOKENLESS_TOOL_USE_ID"] = attribution.tool_use_id
-        return values
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
-    @staticmethod
-    def extract_markers(text: str) -> frozenset[str]:
-        """Extract normalized marker hashes from model-visible text."""
-        return frozenset(match.lower() for match in _MARKER_PATTERN.findall(text))
 
-    def retrieve_schema(self) -> dict[str, Any]:
-        """Return the OpenAI Function Calling schema for marker retrieval."""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.config.retrieve_tool_name,
-                "description": _RETRIEVE_DESCRIPTION,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "hash": {
-                            "type": "string",
-                            "pattern": "^[0-9a-fA-F]{24}$",
-                            "description": (
-                                "The 24-character hash from a "
-                                "<<tokenless:HASH>> marker."
-                            ),
-                        }
-                    },
-                    "required": ["hash"],
-                    "additionalProperties": False,
-                },
-            },
-        }
+def _json_object(value: str) -> dict[str, Any]:
+    decoded = json.loads(value)
+    if not isinstance(decoded, dict):
+        raise TypeError("Core returned a non-object lifecycle response")
+    return decoded
 
-    @staticmethod
-    def _is_structured_json(text: str) -> bool:
-        try:
-            value = json.loads(text)
-        except (ValueError, RecursionError):
-            return False
-        return isinstance(value, (dict, list))
 
-    @staticmethod
-    def _classify_environment_error(text: str) -> str | None:
-        lowered = text.lower()
-        for patterns, category, hint in _ENV_ERRORS:
-            if any(pattern in lowered for pattern in patterns):
-                return f"[tokenless:env] {category}: {hint} Skip retry."
-        return None
+def _retrieve_tool_declaration(value: dict[str, Any]) -> RetrieveToolDeclaration:
+    input_schema = value["input_schema"]
+    if not isinstance(input_schema, dict):
+        raise TypeError("Core returned a non-object Retrieve input schema")
+    return RetrieveToolDeclaration(
+        name=value["name"],
+        description=value["description"],
+        input_schema=input_schema,
+    )
+
+
+def _before_model_response(value: str) -> BeforeModelResponse:
+    decoded = _json_object(value)
+    declaration = decoded.get("retrieve_tool")
+    return BeforeModelResponse(
+        tools=tuple(decoded["tools"]),
+        visible_markers=frozenset(decoded["visible_markers"]),
+        retrieve_tool=(
+            _retrieve_tool_declaration(declaration)
+            if isinstance(declaration, dict)
+            else None
+        ),
+    )

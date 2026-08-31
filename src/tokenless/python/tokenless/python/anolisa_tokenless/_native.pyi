@@ -56,6 +56,41 @@ class TokenlessRuntime:
         stats_enabled: bool = True,
         sls_enabled: bool = False,
     ) -> None: ...
+    def _before_model_json(
+        self,
+        request_json: str,
+        *,
+        agent_id: str = "python",
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> str: ...
+    def _pre_tool_json(
+        self,
+        request_json: str,
+        rtk_path: str | os.PathLike[str],
+        *,
+        agent_id: str = "python",
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> str: ...
+    def _post_tool_json(
+        self,
+        request_json: str,
+        *,
+        agent_id: str = "python",
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> str: ...
+    def _retrieve_authorized_json(
+        self,
+        request_json: str,
+        *,
+        agent_id: str = "python",
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> str: ...
+    @staticmethod
+    def _retrieve_tool_declaration_json(name: str) -> str: ...
     def compress_response(
         self,
         input: str,

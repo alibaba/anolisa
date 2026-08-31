@@ -681,13 +681,16 @@ Installation requires an explicit session identifier.
 
 ```python
 from agentscope.agent import ReActAgent
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 integration = TokenlessAgentScope(
     TokenlessConfig(
-        mode="balanced",
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
+    tool_contracts={
+        "application_tool": ToolContract(ContentOrigin.API_RESPONSE),
+    },
 )
 toolkit = integration.create_toolkit()
 toolkit.register_tool_function(application_tool)
@@ -702,14 +705,17 @@ patch versions.
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 integration = TokenlessAgentScope(
     TokenlessConfig(
-        mode="balanced",
         data_dir="/absolute/path/to/tenant-tokenless-data",
         # retrieve_tool_name="tenant_tokenless_retrieve",
     ),
+    tool_contracts={
+        "application_tool": ToolContract(ContentOrigin.API_RESPONSE),
+    },
 )
 toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
@@ -740,13 +746,15 @@ so that patch release supports direct Agent construction only. The existing
 should use `TokenlessAgentScope` so it does not depend on patch-specific
 Toolkit mutation or automatic Tool collection.
 
-| Mode | Policy |
-|---|---|
-| `conservative` | Compress every non-excluded tool with 1 MiB / 65,536 / depth 32 limits |
-| `balanced` | Skip Read/Glob/Grep; use 65,536 / 128 / depth 8 for Shell and conservative limits elsewhere |
-| `aggressive` | Skip Read/Glob/Grep; use CLI defaults of 4,096 / 32 / depth 8 elsewhere |
+AgentScope supplies explicit contracts for its known shell, file, and API tools.
+Register every custom tool with `ToolContract`: select `COMMAND_OUTPUT`,
+`FILE_CONTENT`, or `API_RESPONSE`, and set `command_field` only for commands
+that may be rewritten by RTK. Unknown custom tools fail during registration or
+at the model boundary rather than guessing from output text. Compression
+thresholds, TOON selection, diagnostics, and retrieval authorization remain in
+Rust Core.
 
-`balanced` is the default. The read-only retrieval Tool is published to the
+The read-only retrieval Tool is published to the
 model only when a marker is visible and accepts only a hash from the exact
 marker set retained for that model call. Pass a different absolute `data_dir`
 to each user or tenant for direct Agents;

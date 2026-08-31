@@ -16,9 +16,12 @@ from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from agentscope.model import ChatModelBase, ChatResponse
 from agentscope.tool import ToolResponse
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
-_RECOVERY_PAYLOAD = "RECOVERY_SENTINEL=世界\n" + ("内容" * 3_000) + "TRAILING_NEWLINE\n"
+_RECOVERY_PAYLOAD = (
+    "RECOVERY_SENTINEL=世界\n" + ("内容" * 525_000) + "TRAILING_NEWLINE\n"
+)
 _SCHEMA_DESCRIPTION = "SCHEMA_SENTINEL " + ("details " * 200)
 _SHELL_COMMANDS: list[str] = []
 
@@ -78,10 +81,9 @@ async def main() -> None:
     ) as directory:
         integration = TokenlessAgentScope(
             TokenlessConfig(
-                mode="aggressive",
                 data_dir=Path(directory),
-                min_chars=0,
             ),
+            tool_contracts={"large_result": ToolContract(ContentOrigin.API_RESPONSE)},
         )
         toolkit = integration.create_toolkit()
         for options in ({}, {"namesake_strategy": "override"}):
@@ -139,8 +141,10 @@ async def main() -> None:
         )
         assert len(_SHELL_COMMANDS) == 1
         assert str(integration.sdk._rtk_path) in _SHELL_COMMANDS[0]
+        assert "TOKENLESS_AGENT_ID=smoke" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_SESSION_ID=smoke-session" in _SHELL_COMMANDS[0]
         assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
+        assert f"TOKENLESS_DATA_DIR={directory}" in _SHELL_COMMANDS[0]
 
         tool_call = ToolUseBlock(
             type="tool_use",
@@ -177,7 +181,7 @@ async def main() -> None:
             type="tool_use",
             id="call-retrieve",
             name="tokenless_retrieve",
-            input={"hash": marker.group(1).upper()},
+            input={"hash_or_marker": marker.group(1).upper()},
         )
         retrieved = [
             chunk async for chunk in await toolkit.call_tool_function(retrieve_call)

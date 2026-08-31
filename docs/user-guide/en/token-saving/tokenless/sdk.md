@@ -85,9 +85,9 @@ required by command rewriting.
 
 ### Complete lifecycle example
 
-This example compresses a model-visible tool schema, compresses a successful tool result, and
-recovers one marker-authorized Stash payload. It disables RTK and TOON so the example focuses on the
-schema/response lifecycle and has no command-execution dependency.
+This example compresses a model-visible tool schema, routes a successful API result through
+PostTool, and recovers one marker-authorized Stash payload. Core owns compression policy and TOON
+selection; the SDK only translates the four lifecycle operations.
 
 ```python
 import asyncio
@@ -97,13 +97,17 @@ from pathlib import Path
 
 from anolisa_tokenless import (
     Attribution,
-    ModelRequest,
+    BeforeModelCapabilities,
+    BeforeModelRequest,
+    ContentOrigin,
+    OutputOptimization,
+    PostToolCapabilities,
+    PostToolRequest,
+    ResultKind,
     RetrieveRequest,
     TokenlessConfig,
     TokenlessSdk,
-    ToolCall,
-    ToolResult,
-    ToolStatus,
+    ToolResultStatus,
 )
 
 
@@ -112,10 +116,7 @@ async def main() -> None:
         sdk = TokenlessSdk(
             TokenlessConfig(
                 data_dir=Path(data_dir),
-                mode="aggressive",
-                min_chars=0,
                 rtk_enabled=False,
-                toon_enabled=False,
             )
         )
         model_attribution = Attribution("my-agent", "session-42")
@@ -128,31 +129,57 @@ async def main() -> None:
             },
         }
 
-        model_request = await sdk.before_model(
-            ModelRequest((tool,), "", model_attribution)
+        model_result = await sdk.before_model(
+            BeforeModelRequest(
+                tools=(tool,),
+                visible_context="",
+                retrieve_tool_name="tokenless_retrieve",
+                capabilities=BeforeModelCapabilities(
+                    replace_tools=True,
+                    publish_retrieve_tool=True,
+                ),
+                attribution=model_attribution,
+            )
         )
-        print([item.get("function", {}).get("name") for item in model_request.tools])
+        print([item.get("function", {}).get("name") for item in model_result.tools])
 
-        call = ToolCall(
-            "api",
-            {},
-            Attribution("my-agent", "session-42", "tool-7"),
-        )
         original = json.dumps(
             {"items": [{"name": "same", "value": index} for index in range(300)]}
         )
-        result = await sdk.after_tool_call(
-            ToolResult(call, original, ToolStatus.SUCCESS)
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="api",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.API_RESPONSE,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(
+                    replace_output=True,
+                    publish_retrieve_tool=True,
+                    replace_with_text=True,
+                ),
+                attribution=Attribution("my-agent", "session-42", "tool-7"),
+            )
         )
-        print(result.transformed, len(original), len(result.content))
+        print(result.disposition, len(original), len(result.output))
 
-        visible_markers = sdk.extract_markers(result.content)
+        next_model = await sdk.before_model(
+            BeforeModelRequest(
+                tools=(),
+                visible_context=result.output,
+                retrieve_tool_name="tokenless_retrieve",
+                capabilities=BeforeModelCapabilities(True, True),
+                attribution=model_attribution,
+            )
+        )
+        visible_markers = next_model.visible_markers
         if visible_markers:
             marker_hash = next(iter(visible_markers))
             recovered = await sdk.retrieve(
                 RetrieveRequest(marker_hash, visible_markers, model_attribution)
             )
-            print(f"recovered {len(recovered)} characters")
+            print(f"recovered {len(recovered.payload)} characters")
 
 
 asyncio.run(main())
@@ -162,9 +189,9 @@ asyncio.run(main())
 use a stable, writable absolute `data_dir`, with a different directory for every tenant or security
 boundary.
 
-The SDK treats lifecycle values as immutable contracts: it copies tool schemas and argument maps
-instead of modifying caller-owned objects. Keep the returned `ModelRequest`, `ToolCall`, and
-`ToolResult`; the original values do not reflect transformations.
+The SDK treats lifecycle values as immutable contracts and does not modify caller-owned schemas,
+arguments, or tool results. Keep each operation response and carry its explicit state into the next
+host boundary.
 
 ### The four lifecycle seams
 
@@ -172,90 +199,94 @@ instead of modifying caller-owned objects. Keep the returned `ModelRequest`, `To
 
 ```python
 request = await sdk.before_model(
-    ModelRequest(tuple(model_tools), visible_context, attribution)
-)
-```
-
-`before_model()` compresses OpenAI Function Calling tools, scans the transformed tools and visible
-context for `<<tokenless:HASH>>` markers, and publishes the configured retrieval schema only when at
-least one marker is visible. The name defaults to `tokenless_retrieve` and is reserved; set a unique
-`retrieve_tool_name` when the application already owns that name.
-
-#### Before a tool call
-
-```python
-call = await sdk.before_tool_call(
-    ToolCall(
-        "shell",
-        {"command": "grep needle large.log"},
-        Attribution("my-agent", "session-42", "tool-8"),
-        command_field="command",
+    BeforeModelRequest(
+        tools=tuple(model_tools),
+        visible_context=visible_context,
+        retrieve_tool_name="tokenless_retrieve",
+        capabilities=BeforeModelCapabilities(True, True),
+        attribution=attribution,
     )
 )
 ```
 
-The SDK considers only the explicitly named `command_field`. If RTK has a rewrite, the returned
-arguments contain the packaged RTK path and per-call attribution environment. Execute the returned
-arguments, and preserve `call.rewritten` when constructing the final `ToolResult`; rewritten calls
-skip result compression because RTK already reduced their output at the source.
+`before_model()` compresses OpenAI Function Calling tools, scans the transformed tools and visible
+context for `<<tokenless:HASH>>` markers, and returns a separate Core-owned Retrieve declaration
+only when at least one marker is visible. The adapter adds that declaration to the host's model
+tools. It must not include a tool with the same name in `request.tools` while publication is enabled.
+
+#### Before a tool call
+
+```python
+call = await sdk.pre_tool(
+    PreToolRequest(
+        tool_name="shell",
+        arguments={"command": "grep needle large.log"},
+        command_field="command",
+        capabilities=PreToolCapabilities(
+            replace_arguments=True,
+            block_and_suggest=False,
+        ),
+        attribution=Attribution("my-agent", "session-42", "tool-8"),
+    )
+)
+```
+
+Core considers only the explicitly named `command_field`. If RTK has a rewrite, the response uses
+`replace_arguments`, contains the packaged RTK path, and reports `output_optimization=rtk`. Execute
+the returned arguments and carry that optimization value into PostTool. A disabled RTK is an
+adapter choice: do not call `pre_tool()` when `TokenlessConfig.rtk_enabled` is false.
 
 #### After a tool call
 
 ```python
-result = await sdk.after_tool_call(
-    ToolResult(call, model_visible_text, ToolStatus.SUCCESS)
+result = await sdk.post_tool(
+    PostToolRequest(
+        result_kind=ResultKind.TOOL,
+        tool_name=tool_name,
+        content=model_visible_text,
+        status=ToolResultStatus.SUCCESS,
+        content_origin=ContentOrigin.API_RESPONSE,
+        output_optimization=call.output_optimization,
+        capabilities=PostToolCapabilities(True, True, True),
+        attribution=attribution,
+    )
 )
 ```
 
-Successful, non-rewritten final text can pass through response compression and then TOON. The SDK
-keeps the original unless the UTF-8 result is strictly smaller. `ERROR` results are not compressed;
-recognized dependency, permission, path, network, and package failures may instead receive
-`additional_context` guidance. `INTERRUPTED` and `DENIED` results pass through.
+Set `content_origin` from the tool's registered contract; do not infer it from result text. Core
+routes Retrieve output, errors, interrupted or denied calls, RTK-optimized output, and ordinary
+successful output. It returns the final output plus disposition, operations, recoverability, token
+counts, Stash keys, and optional diagnostic context. Adapters should pass intermediate streaming
+chunks through and call PostTool only for final model-visible text.
 
 #### Marker-scoped retrieval
 
 ```python
-markers = sdk.extract_markers(model_visible_context)
 payload = await sdk.retrieve(
-    RetrieveRequest(marker_hash, markers, attribution)
+    RetrieveRequest(marker_hash, current_before_model.visible_markers, attribution)
 )
 ```
 
-Retrieval accepts exactly 24 hexadecimal characters and only a hash present in the supplied visible
-marker set. Treat that set as model-call state: recompute it from the actual model-visible context
-instead of accumulating every marker ever seen in a session. Retrieval also requires the same
-Tokenless data directory and an unexpired Stash entry.
+Retrieval accepts a complete marker or 24 hexadecimal characters and authorizes it against the
+exact marker set returned by the current BeforeModel response. Treat that set as model-call state
+instead of accumulating every marker ever seen in a session. `RetrieveResponse.payload` is the
+byte-exact content; adapters must not send it through PostTool again.
 
 ### Configuration
 
 ```python
 config = TokenlessConfig(
-    mode="balanced",
     data_dir="/absolute/path/to/tenant-tokenless-data",
-    min_chars=200,
-    excluded_tools={"read_database"},
     retrieve_tool_name="tokenless_retrieve",
-    schema_compression_enabled=True,
-    response_compression_enabled=True,
-    toon_enabled=True,
     rtk_enabled=True,
 )
 ```
 
-| Mode | Content-retrieval tools | Other tools |
-|------|-------------------------|-------------|
-| `conservative` | Compress | 1 MiB strings, 65,536 array items, depth 32 |
-| `balanced` (default) | Skip | Shell: 65,536 / 128 / depth 8; others use conservative limits |
-| `aggressive` | Skip | 4,096-character strings, 32 array items, depth 8 |
-
 `data_dir` must be absolute and writable. Use a different directory for every tenant or security
-boundary; `TOKENLESS_DATA_DIR` is only a process-wide fallback. `excluded_tools` is added to
-Tokenless's built-in exclusions, and the retrieval tool is always excluded from response
-optimization.
-
-The SDK lifecycle currently uses the schema/response/TOON Runtime operations. The CLI and shared
-Agent hooks additionally expose the content-aware Pipeline, including build/log compression; that
-Pipeline is not a `TokenlessSdk` method yet.
+boundary; `TOKENLESS_DATA_DIR` is only a process-wide fallback. `retrieve_tool_name` selects the
+Core-generated declaration name. `rtk_enabled` controls whether the SDK resolves packaged RTK for
+PreTool. Compression thresholds, content detection, TOON selection, diagnostics, authorization,
+and Stash policy are Core behavior and are not Python configuration.
 
 ### Direct Runtime examples
 
@@ -339,8 +370,8 @@ if marker is not None:
 ```
 
 `retrieve()` accepts either the complete marker or its 24-character hash. Direct Runtime callers
-must decide which markers are authorized for retrieval; `TokenlessSdk.retrieve()` applies the SDK's
-model-visible marker check.
+must decide which markers are authorized for retrieval; `TokenlessSdk.retrieve()` sends the current
+BeforeModel marker set to Core for authorization.
 
 Runtime inputs and outputs are strings. Use each `CompressionResult.output` as the exact downstream
 value, then inspect its `disposition`, token counts, and Stash fields when the caller needs to
@@ -374,8 +405,8 @@ but opening it may create or migrate `stats.db`, so the selected data directory 
 ## Layer 2: AgentScope integration
 
 `anolisa-tokenless-agentscope` maps the framework-neutral lifecycle to AgentScope. Application code
-uses `TokenlessAgentScope` instead of calling `before_model()`, `before_tool_call()`,
-`after_tool_call()`, and `retrieve()` itself. The integration also carries AgentScope session and
+uses `TokenlessAgentScope` instead of calling `before_model()`, `pre_tool()`, `post_tool()`, and
+`retrieve()` itself. The integration also carries AgentScope session and
 tool-call attribution into the generic SDK.
 
 See [AgentScope SDK integration](sdk/agentscope.md) for supported versions, build and installation,

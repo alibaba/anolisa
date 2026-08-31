@@ -53,13 +53,16 @@ added after construction:
 
 ```python
 from agentscope.agent import ReActAgent
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 integration = TokenlessAgentScope(
     TokenlessConfig(
-        mode="balanced",
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
+    tool_contracts={
+        "application_tool": ToolContract(ContentOrigin.API_RESPONSE),
+    },
 )
 toolkit = integration.create_toolkit()
 toolkit.register_tool_function(application_tool)
@@ -75,14 +78,17 @@ Pass the retrieval Tool and middleware when constructing the Toolkit and Agent. 
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 integration = TokenlessAgentScope(
     TokenlessConfig(
-        mode="balanced",
         data_dir="/absolute/path/to/tenant-tokenless-data",
         # retrieve_tool_name="tenant_tokenless_retrieve",
     ),
+    tool_contracts={
+        "application_tool": ToolContract(ContentOrigin.API_RESPONSE),
+    },
 )
 toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
@@ -121,13 +127,16 @@ Set a unique `retrieve_tool_name` in `TokenlessConfig` if the application alread
 `tokenless_retrieve`; App assembly does not expose other tools to its factory for a preflight
 collision check.
 
-Choose a mode according to how much inline truncation the application accepts:
+The integration includes explicit contracts for known AgentScope shell, file, and API tools. Pass a
+`tool_contracts` mapping for every custom tool. `ToolContract` requires one `ContentOrigin`:
+`COMMAND_OUTPUT`, `FILE_CONTENT`, or `API_RESPONSE`. Set `command_field` only on a
+`COMMAND_OUTPUT` contract whose arguments may be rewritten by RTK. Unknown custom tools fail at
+registration in AgentScope 1.x and at the model boundary in AgentScope 2.x; output text is never
+used to guess origin.
 
-| Mode | Read/Glob/Grep | Other tools |
-|------|----------------|-------------|
-| `conservative` | Compress | 1 MiB strings, 65,536 array items, depth 32 |
-| `balanced` (default) | Skip | Shell: 65,536 / 128 / depth 8; others: conservative limits |
-| `aggressive` | Skip | CLI defaults: 4,096 / 32 / depth 8 |
+`TokenlessConfig` contains only `data_dir`, `retrieve_tool_name`, and `rtk_enabled`. Compression
+thresholds, content detection, TOON selection, error diagnosis, marker authorization, and Stash
+policy are owned by Rust Core.
 
 The integration passes intermediate streaming chunks through unchanged, preserves framework
 objects, and transforms only copied call arguments and final model-visible text. Tokenless keeps
@@ -135,8 +144,8 @@ the original whenever an optimization fails or does not make the UTF-8 result st
 `DataBlock` values are never changed.
 
 The integration exposes a retrieval Tool named `tokenless_retrieve` by default. It is published to
-the model only when a marker is visible and accepts only an exact 24-character hexadecimal hash
-retained in that session's marker set. The Tool is permanently excluded from compression.
+the model only when a marker is visible and accepts a complete marker or exact 24-character
+hexadecimal hash retained for that model call. Retrieve output bypasses PostTool.
 
 Pass a separate absolute `data_dir` for every user or tenant. `TOKENLESS_DATA_DIR` is only a
 process-wide fallback and must not be shared by multiple tenants. Retrieval does not work across

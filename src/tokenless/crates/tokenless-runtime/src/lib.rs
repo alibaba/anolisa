@@ -242,6 +242,9 @@ pub enum RuntimeError {
     /// PreTool was requested without a resolved RTK executable.
     #[error("RTK executable is unavailable")]
     RtkUnavailable,
+    /// PreTool was requested without the state directory required by RTK.
+    #[error("RTK state directory is unavailable")]
+    RtkDataDirectoryUnavailable,
     /// RTK could not be started.
     #[error("failed to start RTK at '{}': {source}", path.display())]
     RtkSpawn {
@@ -412,6 +415,7 @@ impl TokenlessRuntime {
             compression_enabled: self.config.compression_enabled,
             stash_enabled: true,
             rtk_path: None,
+            rtk_data_dir: None,
         };
         let outcome = before_model_with_store(request, &options, self.stash_store.as_ref())?;
         record_entry_stats(
@@ -439,7 +443,7 @@ impl TokenlessRuntime {
         attribution: &ProtocolAttribution,
         rtk_path: &Path,
     ) -> Result<PreToolResponse, RuntimeError> {
-        pre_tool_with_rtk(request, attribution, rtk_path)
+        pre_tool_with_rtk(request, attribution, rtk_path, &self.data_dir)
     }
 
     /// Runs PostTool routing and the JSON-only content pipeline.
@@ -456,6 +460,7 @@ impl TokenlessRuntime {
             compression_enabled: self.config.compression_enabled,
             stash_enabled: true,
             rtk_path: None,
+            rtk_data_dir: None,
         };
         let outcome = post_tool_with_store(request, &options, self.stash_store.as_ref())?;
         record_entry_stats(

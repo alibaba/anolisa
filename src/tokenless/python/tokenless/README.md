@@ -1,7 +1,7 @@
 # anolisa-tokenless
 
-Self-contained CPython SDK for schema compression, RTK command rewriting, response compression,
-TOON encoding, and marker-scoped Stash retrieval.
+Self-contained CPython SDK for the BeforeModel, PreTool, PostTool, and marker-authorized Retrieve
+lifecycle operations.
 
 The package is built from the ANOLISA monorepo and supports CPython 3.11 or later on the platform
 targeted by its wheel. The pinned RTK executable is included in the wheel; no Tokenless binary is
@@ -20,11 +20,14 @@ import json
 
 from anolisa_tokenless import (
     Attribution,
+    ContentOrigin,
+    OutputOptimization,
+    PostToolCapabilities,
+    PostToolRequest,
+    ResultKind,
     TokenlessConfig,
     TokenlessSdk,
-    ToolCall,
-    ToolResult,
-    ToolStatus,
+    ToolResultStatus,
 )
 
 
@@ -32,21 +35,23 @@ async def main() -> None:
     sdk = TokenlessSdk(
         TokenlessConfig(
             data_dir="/absolute/path/to/tokenless-data",
-            mode="aggressive",
             rtk_enabled=False,
-            toon_enabled=False,
         )
     )
-    call = ToolCall(
-        "api",
-        {},
-        Attribution("my-agent", "session-42", "tool-7"),
-    )
     original = json.dumps({"items": list(range(300))})
-    result = await sdk.after_tool_call(
-        ToolResult(call, original, ToolStatus.SUCCESS)
+    result = await sdk.post_tool(
+        PostToolRequest(
+            result_kind=ResultKind.TOOL,
+            tool_name="api",
+            content=original,
+            status=ToolResultStatus.SUCCESS,
+            content_origin=ContentOrigin.API_RESPONSE,
+            output_optimization=OutputOptimization.NONE,
+            capabilities=PostToolCapabilities(True, True, True),
+            attribution=Attribution("my-agent", "session-42", "tool-7"),
+        )
     )
-    print(result.content)
+    print(result.output)
 
 
 asyncio.run(main())

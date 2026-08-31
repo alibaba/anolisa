@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the AgentScope 1.x full-lifecycle integration."""
+"""Unit tests for the AgentScope 1.x lifecycle integration."""
 
 from __future__ import annotations
 
@@ -29,24 +29,21 @@ class _CompressionResult:
 class _Runtime:
     def __init__(self, data_dir=None, **_kwargs):
         self.data_dir = str(data_dir or "/tmp/tokenless-test")
-        self.compress_impl = None
-        self.retrieve_impl = None
 
-    def compress_response(self, value: str, **kwargs):
-        if self.compress_impl:
-            return self.compress_impl(value, **kwargs)
-        return _CompressionResult(value, False)
-
-    def compress_schema(self, value: str, **_kwargs):
-        return _CompressionResult(value, False)
-
-    def compress_toon(self, value: str, **_kwargs):
-        return _CompressionResult(value, False)
-
-    def retrieve(self, value: str) -> str:
-        if self.retrieve_impl:
-            return self.retrieve_impl(value)
-        raise _TokenlessError("missing")
+    @staticmethod
+    def _retrieve_tool_declaration_json(name):
+        return json.dumps(
+            {
+                "name": name,
+                "description": "Restore visible Tokenless content.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"hash_or_marker": {"type": "string"}},
+                    "required": ["hash_or_marker"],
+                    "additionalProperties": False,
+                },
+            }
+        )
 
 
 @dataclass
@@ -105,6 +102,7 @@ def _install_stubs() -> None:
 
 
 _install_stubs()
+core = importlib.import_module("anolisa_tokenless")
 api = importlib.import_module("tokenless_agentscope")
 
 
@@ -126,10 +124,30 @@ class _Agent:
         self.hooks[(kind, name)] = hook
 
 
+def _post_response(output: str, additional_context: str | None = None):
+    return core.PostToolResponse(
+        output=output,
+        disposition=core.Disposition.PASSTHROUGH,
+        content_type=core.ContentType.PLAIN_TEXT,
+        applied_operations=(),
+        recoverability=core.Recoverability.LOSSLESS,
+        before_tokens=1,
+        after_tokens=1,
+        stash_keys=(),
+        tokenizer_id="heuristic-v1",
+        additional_context=additional_context,
+    )
+
+
 class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        contracts = {
+            name: api.ToolContract(core.ContentOrigin.API_RESPONSE)
+            for name in ("large_result", "dynamic", "api")
+        }
         self.integration = api.TokenlessAgentScope(
-            api.TokenlessConfig(min_chars=0, rtk_enabled=False)
+            api.TokenlessConfig(rtk_enabled=False),
+            tool_contracts=contracts,
         )
         self.toolkit = self.integration.create_toolkit()
 
@@ -147,38 +165,48 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         self.toolkit.register_tool_function(dynamic)
         registered = self.toolkit.tools["dynamic"]
 
-        def compress(value: str, **kwargs) -> _CompressionResult:
-            self.assertEqual(kwargs["agent_id"], "agent-1")
-            self.assertEqual(kwargs["session_id"], "session-1")
-            self.assertEqual(kwargs["tool_use_id"], "call-1")
-            return _CompressionResult(json.dumps("short"), True)
+        async def post_tool(request):
+            self.assertEqual(request.attribution.agent_id, "agent-1")
+            self.assertEqual(request.attribution.session_id, "session-1")
+            self.assertEqual(request.attribution.tool_use_id, "call-1")
+            self.assertEqual(request.content_origin, core.ContentOrigin.API_RESPONSE)
+            return _post_response("short")
 
-        self.integration.sdk.runtime.compress_impl = compress
+        self.integration.sdk.post_tool = post_tool
         response = await registered.postprocess_func(
             {"name": "dynamic", "id": "call-1", "input": {}},
             _Response([{"type": "text", "text": "long text " * 100}]),
         )
         self.assertEqual(response.content[0]["text"], "short")
 
-    async def test_model_proxy_compresses_tools_and_tracks_markers(self) -> None:
+    async def test_model_proxy_tracks_markers_and_core_retrieve_declaration(
+        self,
+    ) -> None:
         marker = "0123456789abcdef01234567"
 
         async def before_model(request):
-            return type(request)(
-                request.tools,
-                request.visible_context,
-                request.attribution,
-                frozenset({marker}),
+            self.assertNotIn(
+                "tokenless_retrieve",
+                [tool.get("function", {}).get("name") for tool in request.tools],
+            )
+            return core.BeforeModelResponse(
+                tools=request.tools,
+                visible_markers=frozenset({marker}),
+                retrieve_tool=self.integration.sdk.retrieve_tool_declaration(),
             )
 
         self.integration.sdk.before_model = before_model
-        await self.agent.model(
+        _, kwargs = await self.agent.model(
             [],
-            tools=self.toolkit.get_json_schemas()
-            if hasattr(self.toolkit, "get_json_schemas")
-            else [],
+            tools=[
+                registered.json_schema for registered in self.toolkit.tools.values()
+            ],
         )
         self.assertEqual(self.toolkit.visible_markers, frozenset({marker}))
+        self.assertEqual(
+            kwargs["tools"][-1]["function"]["parameters"]["required"],
+            ["hash_or_marker"],
+        )
 
     async def test_pre_acting_preserves_original_call(self) -> None:
         original = {"name": "api", "id": "call-2", "input": {"value": 1}}
@@ -187,15 +215,39 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(result["tool_call"], original)
         self.assertEqual(original["input"], {"value": 1})
 
+    async def test_retrieve_bypasses_pre_acting_contracts(self) -> None:
+        original = {
+            "name": "tokenless_retrieve",
+            "id": "call-retrieve",
+            "input": {"hash_or_marker": "0123456789abcdef01234567"},
+        }
+        kwargs = {"tool_call": original}
+        hook = self.agent.hooks[("pre_acting", "tokenless")]
+
+        self.assertIs(await hook(self.agent, kwargs), kwargs)
+        self.assertNotIn("call-retrieve", self.toolkit.output_optimizations)
+
     async def test_rtk_state_survives_until_the_final_response(self) -> None:
-        async def rewrite(call):
-            return replace(
-                call,
-                arguments={**call.arguments, "command": "rtk grep needle file.txt"},
-                rewritten=True,
+        self.integration.config = replace(self.integration.config, rtk_enabled=True)
+
+        async def pre_tool(request):
+            return core.PreToolResponse(
+                arguments={
+                    **request.arguments,
+                    "command": "rtk grep needle file.txt",
+                },
+                action=core.PreToolAction.REPLACE_ARGUMENTS,
+                output_optimization=core.OutputOptimization.RTK,
             )
 
-        self.integration.sdk.before_tool_call = rewrite
+        observed = []
+
+        async def post_tool(request):
+            observed.append(request)
+            return _post_response(request.content)
+
+        self.integration.sdk.pre_tool = pre_tool
+        self.integration.sdk.post_tool = post_tool
         original = {
             "name": "shell",
             "id": "call-rtk",
@@ -206,35 +258,32 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(original["input"]["command"], "grep needle file.txt")
         self.assertEqual(transformed["input"]["command"], "rtk grep needle file.txt")
-        self.assertIn("call-rtk", self.toolkit.rewritten_calls)
-
-        def fail_compression(_value: str, **_kwargs) -> _CompressionResult:
-            raise AssertionError("RTK output reached response compression")
-
-        self.integration.sdk.runtime.compress_impl = fail_compression
-        partial = _Response(
-            [{"type": "text", "text": "stream"}],
-            is_last=False,
+        self.assertEqual(
+            self.toolkit.output_optimizations["call-rtk"],
+            core.OutputOptimization.RTK,
         )
+
+        partial = _Response([{"type": "text", "text": "stream"}], is_last=False)
         self.assertIs(
             await self.integration._after_tool(self.toolkit, transformed, partial),
             partial,
         )
-        self.assertIn("call-rtk", self.toolkit.rewritten_calls)
+        self.assertIn("call-rtk", self.toolkit.output_optimizations)
 
-        final = _Response(
-            [
-                {
-                    "type": "text",
-                    "text": json.dumps({"items": list(range(100))}),
-                }
-            ]
-        )
+        final = _Response([{"type": "text", "text": "optimized output"}])
         self.assertIs(
             await self.integration._after_tool(self.toolkit, transformed, final),
             final,
         )
-        self.assertNotIn("call-rtk", self.toolkit.rewritten_calls)
+        self.assertEqual(observed[0].output_optimization, core.OutputOptimization.RTK)
+        self.assertNotIn("call-rtk", self.toolkit.output_optimizations)
+
+    def test_unknown_custom_tool_requires_contract(self) -> None:
+        async def unknown():
+            return _Response([])
+
+        with self.assertRaisesRegex(ValueError, "ToolContract"):
+            self.toolkit.register_tool_function(unknown)
 
     def test_retrieve_name_collision_is_rejected(self) -> None:
         original = self.toolkit.tools["tokenless_retrieve"].original_func
@@ -244,12 +293,6 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "reserved"):
             self.toolkit.register_tool_function(tokenless_retrieve)
-        with self.assertRaisesRegex(ValueError, "reserved"):
-            self.toolkit.register_tool_function(
-                lambda: _Response([]),
-                func_name="tokenless_retrieve",
-                namesake_strategy="override",
-            )
         self.assertIs(
             self.toolkit.tools["tokenless_retrieve"].original_func,
             original,

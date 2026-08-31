@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import AsyncGenerator, Callable, Collection
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -16,47 +16,26 @@ from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import ToolBase, ToolChunk, Toolkit, ToolResponse
 from anolisa_tokenless import (
     Attribution,
-    CompressionMode,
-    ModelRequest,
-    RetrievalError,
+    BeforeModelCapabilities,
+    BeforeModelRequest,
+    OutputOptimization,
+    PostToolCapabilities,
+    PostToolRequest,
+    PreToolAction,
+    PreToolCapabilities,
+    PreToolRequest,
+    ResultKind,
     RetrieveRequest,
+    RetrieveToolDeclaration,
     TokenlessConfig,
+    TokenlessError,
     TokenlessSdk,
-    ToolCall,
-    ToolResult,
-    ToolStatus,
+    ToolResultStatus,
 )
-from anolisa_tokenless.tool_response import (
-    AGGRESSIVE_THRESHOLDS,
-    CONSERVATIVE_THRESHOLDS,
-    SHELL_THRESHOLDS,
-    SHELL_TOOLS,
-    SKIP_TOOLS,
-)
+
+from tokenless_agentscope._contracts import ToolContract, build_tool_contracts
 
 _STATE_KEY = "anolisa_tokenless"
-_RETRIEVE_DESCRIPTION = (
-    "Recover content omitted at a <<tokenless:HASH>> marker. Call this only "
-    "when the omitted content is necessary."
-)
-_RETRIEVE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "hash": {
-            "type": "string",
-            "pattern": "^[0-9a-fA-F]{24}$",
-            "description": "The 24-character hash from a <<tokenless:HASH>> marker.",
-        },
-    },
-    "required": ["hash"],
-    "additionalProperties": False,
-}
-
-_SKIP_TOOLS = SKIP_TOOLS
-_SHELL_TOOLS = SHELL_TOOLS
-_CONSERVATIVE_THRESHOLDS = CONSERVATIVE_THRESHOLDS
-_SHELL_THRESHOLDS = SHELL_THRESHOLDS
-_AGGRESSIVE_THRESHOLDS = AGGRESSIVE_THRESHOLDS
 
 
 def _marker_state(
@@ -69,24 +48,37 @@ def _marker_state(
     return session_markers.get(state.session_id, frozenset())
 
 
+def _agent_state(state: Any, session_agents: dict[str, str]) -> str:
+    middle_context = getattr(state, "middle_context", None)
+    if middle_context is not None:
+        return middle_context[_STATE_KEY]["agent_id"]
+    return session_agents[state.session_id]
+
+
 def _set_marker_state(
     state: Any,
     markers: frozenset[str],
+    agent_id: str,
     session_markers: dict[str, frozenset[str]],
+    session_agents: dict[str, str],
 ) -> None:
     middle_context = getattr(state, "middle_context", None)
     if middle_context is not None:
-        middle_context[_STATE_KEY] = {"visible_markers": sorted(markers)}
+        middle_context[_STATE_KEY] = {
+            "visible_markers": sorted(markers),
+            "agent_id": agent_id,
+        }
     else:
         session_markers[state.session_id] = markers
+        session_agents[state.session_id] = agent_id
 
 
 class _RetrieveToolMixin:
     """Shared retrieval behavior across the AgentScope 2.x Tool ABI change."""
 
     name = "tokenless_retrieve"
-    description = _RETRIEVE_DESCRIPTION
-    input_schema: ClassVar[dict[str, Any]] = _RETRIEVE_SCHEMA
+    description = ""
+    input_schema: ClassVar[dict[str, Any]] = {}
     is_concurrency_safe = True
     is_read_only = True
     is_state_injected = True
@@ -97,13 +89,17 @@ class _RetrieveToolMixin:
     def __init__(
         self,
         sdk: TokenlessSdk,
-        name: str,
+        declaration: RetrieveToolDeclaration,
         session_markers: dict[str, frozenset[str]],
+        session_agents: dict[str, str],
     ) -> None:
         super().__init__()
         self._sdk = sdk
-        self.name = name
+        self.name = declaration.name
+        self.description = declaration.description
+        self.input_schema = declaration.input_schema
         self._session_markers = session_markers
+        self._session_agents = session_agents
 
     async def check_permissions(
         self, tool_input: dict[str, Any], context: Any
@@ -114,47 +110,50 @@ class _RetrieveToolMixin:
             message="Tokenless retrieval is a read-only, marker-scoped operation.",
         )
 
-    async def _retrieve(self, hash_value: str, state: Any) -> ToolChunk:
-        attribution = Attribution("agentscope", state.session_id)
+    async def _retrieve(self, hash_or_marker: str, state: Any) -> ToolChunk:
+        attribution = Attribution(
+            _agent_state(state, self._session_agents), state.session_id
+        )
         try:
-            payload = await self._sdk.retrieve(
+            response = await self._sdk.retrieve(
                 RetrieveRequest(
-                    hash_value,
+                    hash_or_marker,
                     _marker_state(state, self._session_markers),
                     attribution,
                 )
             )
-        except RetrievalError as error:
+        except TokenlessError as error:
             return ToolChunk(
                 content=[TextBlock(text=str(error))],
                 state=ToolResultState.ERROR,
             )
-        return ToolChunk(content=[TextBlock(text=payload)])
+        return ToolChunk(content=[TextBlock(text=response.payload)])
 
 
 class _LegacyRetrieveTool(_RetrieveToolMixin, ToolBase):
     """Retrieval tool for AgentScope 2.0.0 through 2.0.2."""
 
-    async def __call__(self, hash: str, _agent_state: Any) -> ToolChunk:
-        return await self._retrieve(hash, _agent_state)
+    async def __call__(self, hash_or_marker: str, _agent_state: Any) -> ToolChunk:
+        return await self._retrieve(hash_or_marker, _agent_state)
 
 
 class _ModernRetrieveTool(_RetrieveToolMixin, ToolBase):
     """Retrieval tool for AgentScope 2.0.3 and later."""
 
-    async def call(self, hash: str, _agent_state: Any) -> ToolChunk:
-        return await self._retrieve(hash, _agent_state)
+    async def call(self, hash_or_marker: str, _agent_state: Any) -> ToolChunk:
+        return await self._retrieve(hash_or_marker, _agent_state)
 
 
 def _new_retrieve_tool(
     sdk: TokenlessSdk,
-    name: str,
+    declaration: RetrieveToolDeclaration,
     session_markers: dict[str, frozenset[str]],
+    session_agents: dict[str, str],
 ) -> ToolBase:
     tool_type = (
         _ModernRetrieveTool if hasattr(ToolBase, "call") else _LegacyRetrieveTool
     )
-    return tool_type(sdk, name, session_markers)
+    return tool_type(sdk, declaration, session_markers, session_agents)
 
 
 class TokenlessMiddleware(MiddlewareBase):
@@ -163,35 +162,32 @@ class TokenlessMiddleware(MiddlewareBase):
     def __init__(
         self,
         *,
-        mode: CompressionMode | str = CompressionMode.BALANCED,
         data_dir: str | os.PathLike[str] | None = None,
-        min_chars: int = 200,
-        excluded_tools: Collection[str] = (),
         retrieve_tool_name: str = "tokenless_retrieve",
+        rtk_enabled: bool = True,
+        tool_contracts: Mapping[str, ToolContract] | None = None,
         _config: TokenlessConfig | None = None,
         _publish_retrieval_tool: bool = True,
     ) -> None:
         config = _config or TokenlessConfig(
-            mode=mode,
             data_dir=data_dir,
-            min_chars=min_chars,
-            excluded_tools=excluded_tools,
             retrieve_tool_name=retrieve_tool_name,
+            rtk_enabled=rtk_enabled,
         )
         self.config = config
-        self.mode = config.mode
         self.data_dir = config.data_dir
-        self.min_chars = config.min_chars
         self.retrieve_tool_name = config.retrieve_tool_name
-        self.excluded_tools = config.excluded_tools
+        self._tool_contracts = build_tool_contracts(tool_contracts)
         self._publish_retrieval_tool = _publish_retrieval_tool
         self.sdk = TokenlessSdk(config)
-        self._runtime = self.sdk.runtime
         self._session_markers: dict[str, frozenset[str]] = {}
+        self._session_agents: dict[str, str] = {}
+        self._retrieve_declaration = self.sdk.retrieve_tool_declaration()
         self._retrieve_tool = _new_retrieve_tool(
             self.sdk,
-            config.retrieve_tool_name,
+            self._retrieve_declaration,
             self._session_markers,
+            self._session_agents,
         )
 
     @property
@@ -227,21 +223,40 @@ class TokenlessMiddleware(MiddlewareBase):
         next_handler: Callable[..., Any],
     ) -> Any:
         """Compress schemas and retain the exact marker authorization set."""
-        request = ModelRequest(
-            tools=tuple(input_kwargs["tools"]),
-            visible_context=json.dumps(
-                input_kwargs["messages"], ensure_ascii=False, default=str
-            ),
-            attribution=Attribution(str(agent.name), agent.state.session_id),
-            visible_markers=_marker_state(agent.state, self._session_markers),
+        tools = []
+        for tool in input_kwargs["tools"]:
+            name = tool.get("function", {}).get("name")
+            if name == self.retrieve_tool_name:
+                continue
+            if name is not None:
+                self.contract_for(name)
+            tools.append(tool)
+        agent_id = str(agent.name)
+        transformed = await self.sdk.before_model(
+            BeforeModelRequest(
+                tools=tuple(tools),
+                visible_context=json.dumps(
+                    input_kwargs["messages"], ensure_ascii=False, default=str
+                ),
+                retrieve_tool_name=self.retrieve_tool_name,
+                capabilities=BeforeModelCapabilities(
+                    replace_tools=True,
+                    publish_retrieve_tool=True,
+                ),
+                attribution=Attribution(agent_id, agent.state.session_id),
+            )
         )
-        transformed = await self.sdk.before_model(request)
         _set_marker_state(
             agent.state,
             transformed.visible_markers,
+            agent_id,
             self._session_markers,
+            self._session_agents,
         )
-        return await next_handler(**{**input_kwargs, "tools": list(transformed.tools)})
+        tools = list(transformed.tools)
+        if transformed.retrieve_tool is not None:
+            tools.append(transformed.retrieve_tool.as_function_tool())
+        return await next_handler(**{**input_kwargs, "tools": tools})
 
     async def on_acting(
         self,
@@ -251,52 +266,90 @@ class TokenlessMiddleware(MiddlewareBase):
     ) -> AsyncGenerator[Any, None]:
         """Rewrite copied calls and transform only their final response."""
         source = input_kwargs["tool_call"]
+        if source.name == self.retrieve_tool_name:
+            async for item in next_handler(**input_kwargs):
+                yield item
+            return
+
+        contract = self.contract_for(source.name)
         arguments = json.loads(source.input)
         if not isinstance(arguments, dict):
             raise TypeError("AgentScope tool input must decode to a JSON object")
-        command_field = (
-            "command"
-            if source.name in SHELL_TOOLS and isinstance(arguments.get("command"), str)
-            else None
-        )
-        call = ToolCall(
-            source.name,
-            arguments,
-            Attribution(str(agent.name), agent.state.session_id, source.id),
-            command_field=command_field,
-        )
-        transformed_call = await self.sdk.before_tool_call(call)
-        forwarded = source.model_copy(
-            update={
-                "input": json.dumps(
-                    transformed_call.arguments,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        attribution = Attribution(str(agent.name), agent.state.session_id, source.id)
+        optimization = OutputOptimization.NONE
+        forwarded = source
+        if contract.command_field is not None and self.config.rtk_enabled:
+            transformed = await self.sdk.pre_tool(
+                PreToolRequest(
+                    tool_name=source.name,
+                    arguments=arguments,
+                    command_field=contract.command_field,
+                    capabilities=PreToolCapabilities(
+                        replace_arguments=True,
+                        block_and_suggest=False,
+                    ),
+                    attribution=attribution,
                 )
-            }
-        )
+            )
+            if transformed.action is PreToolAction.BLOCK_AND_SUGGEST:
+                raise RuntimeError(
+                    "Core returned block_and_suggest without host capability"
+                )
+            optimization = transformed.output_optimization
+            forwarded = source.model_copy(
+                update={
+                    "input": json.dumps(
+                        transformed.arguments,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                }
+            )
         async for item in next_handler(**{**input_kwargs, "tool_call": forwarded}):
             if isinstance(item, ToolResponse):
-                yield await self._after_response(item, transformed_call)
+                yield await self._after_response(
+                    item,
+                    source.name,
+                    contract,
+                    optimization,
+                    attribution,
+                )
             else:
                 yield item
 
     async def _after_response(
-        self, response: ToolResponse, call: ToolCall
+        self,
+        response: ToolResponse,
+        tool_name: str,
+        contract: ToolContract,
+        optimization: OutputOptimization,
+        attribution: Attribution,
     ) -> ToolResponse:
-        status = self._status(response.state)
         replacements: dict[int, TextBlock] = {}
         extra_context: str | None = None
         for index, block in enumerate(response.content):
             if not isinstance(block, TextBlock):
                 continue
-            transformed = await self.sdk.after_tool_call(
-                ToolResult(call, block.text, status)
+            transformed = await self.sdk.post_tool(
+                PostToolRequest(
+                    result_kind=ResultKind.TOOL,
+                    tool_name=tool_name,
+                    content=block.text,
+                    status=self._status(response.state),
+                    content_origin=contract.content_origin,
+                    output_optimization=optimization,
+                    capabilities=PostToolCapabilities(
+                        replace_output=True,
+                        publish_retrieve_tool=True,
+                        replace_with_text=True,
+                    ),
+                    attribution=attribution,
+                )
             )
             extra_context = extra_context or transformed.additional_context
-            if transformed.transformed:
+            if transformed.output != block.text:
                 replacements[index] = block.model_copy(
-                    update={"text": transformed.content}
+                    update={"text": transformed.output}
                 )
         content = [
             replacements.get(index, block)
@@ -308,29 +361,42 @@ class TokenlessMiddleware(MiddlewareBase):
             return response
         return response.model_copy(update={"content": content})
 
-    def _thresholds_for(self, tool_name: str) -> tuple[int, int, int]:
-        return self.sdk._response.thresholds_for(tool_name)
-
-    def _is_excluded(self, tool_name: str) -> bool:
-        return self.sdk._response.is_excluded(tool_name)
+    def contract_for(self, tool_name: Any) -> ToolContract:
+        """Returns the explicit lifecycle contract for a model-visible tool."""
+        if not isinstance(tool_name, str) or not tool_name:
+            raise ValueError("model-visible tool must have a non-empty name")
+        try:
+            return self._tool_contracts[tool_name]
+        except KeyError as error:
+            raise ValueError(
+                f"Tool {tool_name!r} requires an explicit Tokenless ToolContract"
+            ) from error
 
     @staticmethod
-    def _status(state: ToolResultState) -> ToolStatus:
-        mapping = {
-            ToolResultState.SUCCESS: ToolStatus.SUCCESS,
-            ToolResultState.ERROR: ToolStatus.ERROR,
-            ToolResultState.INTERRUPTED: ToolStatus.INTERRUPTED,
-            ToolResultState.DENIED: ToolStatus.DENIED,
-        }
-        return mapping.get(state, ToolStatus.INTERRUPTED)
+    def _status(state: ToolResultState) -> ToolResultStatus:
+        return {
+            ToolResultState.SUCCESS: ToolResultStatus.SUCCESS,
+            ToolResultState.ERROR: ToolResultStatus.ERROR,
+            ToolResultState.INTERRUPTED: ToolResultStatus.INTERRUPTED,
+            ToolResultState.DENIED: ToolResultStatus.DENIED,
+        }[state]
 
 
 class TokenlessAgentScope:
     """Stable Tokenless entry point for AgentScope 2.x applications."""
 
-    def __init__(self, config: TokenlessConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: TokenlessConfig | None = None,
+        *,
+        tool_contracts: Mapping[str, ToolContract] | None = None,
+    ) -> None:
         self.config = config or TokenlessConfig()
-        self.middleware = TokenlessMiddleware(_config=self.config)
+        self._tool_contracts = tool_contracts
+        self.middleware = TokenlessMiddleware(
+            _config=self.config,
+            tool_contracts=tool_contracts,
+        )
 
     @property
     def tools(self) -> list[ToolBase]:
@@ -359,7 +425,13 @@ class TokenlessAgentScope:
                 self.config,
                 data_dir=self._app_data_dir(user_id, agent_id, session_id),
             )
-            return [TokenlessMiddleware(_config=config, _publish_retrieval_tool=False)]
+            return [
+                TokenlessMiddleware(
+                    _config=config,
+                    tool_contracts=self._tool_contracts,
+                    _publish_retrieval_tool=False,
+                )
+            ]
 
         async def tool_factory(
             user_id: str, agent_id: str, session_id: str
@@ -368,7 +440,10 @@ class TokenlessAgentScope:
                 self.config,
                 data_dir=self._app_data_dir(user_id, agent_id, session_id),
             )
-            middleware = TokenlessMiddleware(_config=config)
+            middleware = TokenlessMiddleware(
+                _config=config,
+                tool_contracts=self._tool_contracts,
+            )
             return [middleware.retrieve_tool]
 
         return {

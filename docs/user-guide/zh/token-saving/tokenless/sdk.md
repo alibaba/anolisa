@@ -81,9 +81,9 @@ Pip 会以展开形式安装 Wheel，从而为命令改写提供 Wheel 内置 RT
 
 ### 完整生命周期示例
 
-下面的示例会压缩模型可见工具 Schema、压缩一次成功的工具结果，并恢复一个通过 marker
-授权的 Stash Payload。示例关闭 RTK 与 TOON，以便只展示 Schema/响应生命周期且不依赖
-命令执行。
+下面的示例会压缩模型可见工具 Schema、通过 PostTool 处理一次成功的 API 结果，并恢复
+一个通过 Marker 授权的 Stash Payload。Core 负责压缩策略和 TOON 选择；SDK 只转换四种
+生命周期操作。
 
 ```python
 import asyncio
@@ -93,13 +93,17 @@ from pathlib import Path
 
 from anolisa_tokenless import (
     Attribution,
-    ModelRequest,
+    BeforeModelCapabilities,
+    BeforeModelRequest,
+    ContentOrigin,
+    OutputOptimization,
+    PostToolCapabilities,
+    PostToolRequest,
+    ResultKind,
     RetrieveRequest,
     TokenlessConfig,
     TokenlessSdk,
-    ToolCall,
-    ToolResult,
-    ToolStatus,
+    ToolResultStatus,
 )
 
 
@@ -108,10 +112,7 @@ async def main() -> None:
         sdk = TokenlessSdk(
             TokenlessConfig(
                 data_dir=Path(data_dir),
-                mode="aggressive",
-                min_chars=0,
                 rtk_enabled=False,
-                toon_enabled=False,
             )
         )
         model_attribution = Attribution("my-agent", "session-42")
@@ -124,31 +125,57 @@ async def main() -> None:
             },
         }
 
-        model_request = await sdk.before_model(
-            ModelRequest((tool,), "", model_attribution)
+        model_result = await sdk.before_model(
+            BeforeModelRequest(
+                tools=(tool,),
+                visible_context="",
+                retrieve_tool_name="tokenless_retrieve",
+                capabilities=BeforeModelCapabilities(
+                    replace_tools=True,
+                    publish_retrieve_tool=True,
+                ),
+                attribution=model_attribution,
+            )
         )
-        print([item.get("function", {}).get("name") for item in model_request.tools])
+        print([item.get("function", {}).get("name") for item in model_result.tools])
 
-        call = ToolCall(
-            "api",
-            {},
-            Attribution("my-agent", "session-42", "tool-7"),
-        )
         original = json.dumps(
             {"items": [{"name": "same", "value": index} for index in range(300)]}
         )
-        result = await sdk.after_tool_call(
-            ToolResult(call, original, ToolStatus.SUCCESS)
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="api",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.API_RESPONSE,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(
+                    replace_output=True,
+                    publish_retrieve_tool=True,
+                    replace_with_text=True,
+                ),
+                attribution=Attribution("my-agent", "session-42", "tool-7"),
+            )
         )
-        print(result.transformed, len(original), len(result.content))
+        print(result.disposition, len(original), len(result.output))
 
-        visible_markers = sdk.extract_markers(result.content)
+        next_model = await sdk.before_model(
+            BeforeModelRequest(
+                tools=(),
+                visible_context=result.output,
+                retrieve_tool_name="tokenless_retrieve",
+                capabilities=BeforeModelCapabilities(True, True),
+                attribution=model_attribution,
+            )
+        )
+        visible_markers = next_model.visible_markers
         if visible_markers:
             marker_hash = next(iter(visible_markers))
             recovered = await sdk.retrieve(
                 RetrieveRequest(marker_hash, visible_markers, model_attribution)
             )
-            print(f"recovered {len(recovered)} characters")
+            print(f"recovered {len(recovered.payload)} characters")
 
 
 asyncio.run(main())
@@ -157,8 +184,8 @@ asyncio.run(main())
 `TemporaryDirectory` 让示例可以独立运行，并会在退出时删除状态。生产环境应使用稳定、可写
 的绝对 `data_dir`，并为每个租户或安全边界使用不同目录。
 
-SDK 把生命周期值视为不可变契约：它会复制工具 Schema 和参数 Map，而不会修改调用方持有
-的对象。请使用返回的 `ModelRequest`、`ToolCall` 和 `ToolResult`；原始值不会反映转换结果。
+SDK 把生命周期值视为不可变契约，不修改调用方持有的 Schema、参数或工具结果。请保留
+每个操作的 Response，并把其中的显式状态传递到下一个宿主边界。
 
 ### 四个生命周期接缝
 
@@ -166,86 +193,92 @@ SDK 把生命周期值视为不可变契约：它会复制工具 Schema 和参�
 
 ```python
 request = await sdk.before_model(
-    ModelRequest(tuple(model_tools), visible_context, attribution)
-)
-```
-
-`before_model()` 压缩 OpenAI Function Calling 工具，在转换后的工具和可见 Context 中扫描
-`<<tokenless:HASH>>` marker，并且只在至少一个 marker 可见时发布配置的恢复 Schema。默认
-名称为 `tokenless_retrieve`，且由 Tokenless 保留；应用已经使用该名称时，应设置唯一的
-`retrieve_tool_name`。
-
-#### 工具调用前
-
-```python
-call = await sdk.before_tool_call(
-    ToolCall(
-        "shell",
-        {"command": "grep needle large.log"},
-        Attribution("my-agent", "session-42", "tool-8"),
-        command_field="command",
+    BeforeModelRequest(
+        tools=tuple(model_tools),
+        visible_context=visible_context,
+        retrieve_tool_name="tokenless_retrieve",
+        capabilities=BeforeModelCapabilities(True, True),
+        attribution=attribution,
     )
 )
 ```
 
-SDK 只处理显式指定的 `command_field`。如果 RTK 产生改写，返回参数会包含 Wheel 内置 RTK
-路径和逐调用归属环境变量。应执行返回的参数，并在构造最终 `ToolResult` 时保留
-`call.rewritten`；已改写调用会跳过结果压缩，因为 RTK 已经从源头缩减输出。
+`before_model()` 压缩 OpenAI Function Calling 工具，在转换后的工具和可见 Context 中扫描
+`<<tokenless:HASH>>` Marker，并且只在至少一个 Marker 可见时返回由 Core 生成的独立
+Retrieve 声明。Adapter 把该声明加入宿主的模型工具。启用发布能力时，`request.tools`
+不得包含同名工具。
+
+#### 工具调用前
+
+```python
+call = await sdk.pre_tool(
+    PreToolRequest(
+        tool_name="shell",
+        arguments={"command": "grep needle large.log"},
+        command_field="command",
+        capabilities=PreToolCapabilities(
+            replace_arguments=True,
+            block_and_suggest=False,
+        ),
+        attribution=Attribution("my-agent", "session-42", "tool-8"),
+    )
+)
+```
+
+Core 只处理显式指定的 `command_field`。如果 RTK 产生改写，Response 的 Action 为
+`replace_arguments`，参数包含 Wheel 内置 RTK 路径，并返回 `output_optimization=rtk`。
+应执行返回参数，并把该优化状态传给 PostTool。关闭 RTK 是 Adapter 的选择：
+`TokenlessConfig.rtk_enabled` 为 false 时不要调用 `pre_tool()`。
 
 #### 工具调用后
 
 ```python
-result = await sdk.after_tool_call(
-    ToolResult(call, model_visible_text, ToolStatus.SUCCESS)
+result = await sdk.post_tool(
+    PostToolRequest(
+        result_kind=ResultKind.TOOL,
+        tool_name=tool_name,
+        content=model_visible_text,
+        status=ToolResultStatus.SUCCESS,
+        content_origin=ContentOrigin.API_RESPONSE,
+        output_optimization=call.output_optimization,
+        capabilities=PostToolCapabilities(True, True, True),
+        attribution=attribution,
+    )
 )
 ```
 
-成功且未改写的最终文本可以依次经过响应压缩和 TOON；只有 UTF-8 结果严格更小时才会替换
-原文。`ERROR` 结果不会压缩；已识别的依赖、权限、路径、网络和包错误可能改为获得
-`additional_context` 指引。`INTERRUPTED` 和 `DENIED` 结果原样透传。
+`content_origin` 必须来自工具注册契约，不得从结果文本推断。Core 统一路由 Retrieve 输出、
+错误、中断或拒绝、RTK 已优化输出和普通成功输出，并返回最终内容、Disposition、操作轨迹、
+可恢复性、Token 数量、Stash Key 与可选诊断上下文。Adapter 应透传中间 Streaming Chunk，
+只对最终模型可见文本调用 PostTool。
 
 #### 受 marker 约束的恢复
 
 ```python
-markers = sdk.extract_markers(model_visible_context)
 payload = await sdk.retrieve(
-    RetrieveRequest(marker_hash, markers, attribution)
+    RetrieveRequest(marker_hash, current_before_model.visible_markers, attribution)
 )
 ```
 
-恢复只接受精确的 24 位十六进制字符，并要求 Hash 存在于传入的可见 marker 集合中。该集合
-应当视为单次 Model 调用状态：从真实模型可见 Context 重新计算，不要持续累积 Session 中
-见过的所有 marker。恢复还要求使用相同 Tokenless 数据目录，并且 Stash 条目尚未过期。
+恢复接受完整 Marker 或 24 位十六进制字符，并对照当前 BeforeModel Response 返回的精确
+Marker 集合授权。该集合应被视为一次 Model Call 的状态，不要累计 Session 历史中出现过的
+所有 Marker。`RetrieveResponse.payload` 是 byte-exact 内容，Adapter 不得把它再次送入
+PostTool。
 
 ### 配置
 
 ```python
 config = TokenlessConfig(
-    mode="balanced",
     data_dir="/absolute/path/to/tenant-tokenless-data",
-    min_chars=200,
-    excluded_tools={"read_database"},
     retrieve_tool_name="tokenless_retrieve",
-    schema_compression_enabled=True,
-    response_compression_enabled=True,
-    toon_enabled=True,
     rtk_enabled=True,
 )
 ```
 
-| 模式 | 内容读取类工具 | 其他工具 |
-|------|----------------|----------|
-| `conservative` | 压缩 | 字符串 1 MiB、数组 65,536 项、深度 32 |
-| `balanced`（默认） | 跳过 | Shell：65,536 / 128 / 深度 8；其他使用 conservative 限制 |
-| `aggressive` | 跳过 | 字符串 4,096 字符、数组 32 项、深度 8 |
-
 `data_dir` 必须是可写的绝对路径。每个租户或安全边界应使用不同目录；
-`TOKENLESS_DATA_DIR` 只是进程级回退。`excluded_tools` 会与 Tokenless 内置排除集合合并，恢复
-工具始终排除在响应优化之外。
-
-SDK 生命周期当前使用 Schema/响应/TOON Runtime 操作。CLI 和共享 Agent Hook 还开放了
-content-aware Pipeline，包括 build/log 压缩；该 Pipeline 目前还不是 `TokenlessSdk`
-方法。
+`TOKENLESS_DATA_DIR` 只是进程级回退。`retrieve_tool_name` 选择 Core 生成的声明名称；
+`rtk_enabled` 控制 SDK 是否为 PreTool 解析 Wheel 内置 RTK。压缩阈值、内容检测、TOON 选择、
+诊断、授权和 Stash 策略都属于 Core 行为，不是 Python 配置。
 
 ### Runtime 直接调用示例
 
@@ -329,8 +362,8 @@ if marker is not None:
 ```
 
 `retrieve()` 既可以接收完整 Marker，也可以接收其中 24 个字符的 Hash。直接调用 Runtime
-时，需要由调用方决定允许恢复哪些 Marker；`TokenlessSdk.retrieve()` 会执行 SDK 的模型可见
-Marker 检查。
+时，需要由调用方决定允许恢复哪些 Marker；`TokenlessSdk.retrieve()` 会把当前 BeforeModel
+Marker 集合交给 Core 授权。
 
 Runtime 的输入输出都是字符串。下游应直接使用各个 `CompressionResult.output`；需要了解
 输入是否以及如何变化时，再检查它的 `disposition`、Token 数量和 Stash 字段。
@@ -363,8 +396,8 @@ Token 数量是估算值，并且只有产生正向节省的操作才会记录�
 ## 第二层：AgentScope 集成
 
 `anolisa-tokenless-agentscope` 把通用 SDK 生命周期映射到 AgentScope。应用代码使用
-`TokenlessAgentScope`，不需要自行调用 `before_model()`、`before_tool_call()`、
-`after_tool_call()` 和 `retrieve()`。该集成还会把 AgentScope Session 与 Tool Call 归属传入
+`TokenlessAgentScope`，不需要自行调用 `before_model()`、`pre_tool()`、`post_tool()` 和
+`retrieve()`。该集成还会把 AgentScope Session 与 Tool Call 归属传入
 通用 SDK。
 
 支持版本、构建安装、1.x/2.x/App 完整示例、配置、恢复边界和验证见

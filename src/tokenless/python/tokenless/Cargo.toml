@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }
+serde.workspace = true
 serde_json.workspace = true
+tokenless-protocol = { path = "../../crates/tokenless-protocol" }
 tokenless-runtime = { path = "../../crates/tokenless-runtime" }
 tokenless-stats = { path = "../../crates/tokenless-stats" }

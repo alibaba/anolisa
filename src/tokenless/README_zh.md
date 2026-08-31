@@ -300,13 +300,16 @@ MCP 工具都会获得相同的生命周期处理。安装时必须显式提供 
 
 ```python
 from agentscope.agent import ReActAgent
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 integration = TokenlessAgentScope(
     TokenlessConfig(
-        mode="balanced",
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
+    tool_contracts={
+        "application_tool": ToolContract(ContentOrigin.API_RESPONSE),
+    },
 )
 toolkit = integration.create_toolkit()
 toolkit.register_tool_function(application_tool)
@@ -320,14 +323,17 @@ AgentScope 2.x 在构造阶段接收恢复 Tool 和中间件；该方式从 2.0.
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+from anolisa_tokenless import ContentOrigin
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
 integration = TokenlessAgentScope(
     TokenlessConfig(
-        mode="balanced",
         data_dir="/absolute/path/to/tenant-tokenless-data",
         # retrieve_tool_name="tenant_tokenless_retrieve",
     ),
+    tool_contracts={
+        "application_tool": ToolContract(ContentOrigin.API_RESPONSE),
+    },
 )
 toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
@@ -354,17 +360,16 @@ AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此�
 直接构造 Agent。原有 `TokenlessMiddleware` 2.x API 继续保留兼容；新代码应使用
 `TokenlessAgentScope`，避免依赖特定补丁版本的 Toolkit 动态修改或 Tool 自动收集行为。
 
-| 模式 | 策略 |
-|---|---|
-| `conservative` | 所有未排除工具使用 1 MiB / 65,536 / 深度 32 限制 |
-| `balanced` | 跳过 Read/Glob/Grep；Shell 使用 65,536 / 128 / 深度 8，其他采用 conservative 限制 |
-| `aggressive` | 跳过 Read/Glob/Grep；其他采用 CLI 默认的 4,096 / 32 / 深度 8 |
+AgentScope 为已知的 Shell、文件和 API 工具提供显式契约。每个自定义工具都必须注册
+`ToolContract`：从 `COMMAND_OUTPUT`、`FILE_CONTENT` 或 `API_RESPONSE` 中选择来源，
+并且只为可能由 RTK 改写的命令设置 `command_field`。未知自定义工具会在注册阶段或
+Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值、TOON 选择、诊断和 Retrieve
+授权都保留在 Rust Core。
 
-默认模式为 `balanced`。只有模型当前可见 marker 时才会向模型发布只读恢复 Tool，
-并且它只接受本次模型调用保留的精确 marker 集合中的 hash。直接构造 Agent 时，每个
-用户或租户必须显式传入不同的绝对 `data_dir`；省略 `data_dir` 时，
-`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用有明确生命周期策略，否则保留默认
-一小时 stash TTL，且不要依赖跨节点恢复。
+只在模型当前可见 Marker 时才会发布只读 Retrieve Tool，并且它只接受本次模型调用保留
+的精确 Marker 集合中的 Hash。直接构造 Agent 时，每个用户或租户必须显式传入不同的
+绝对 `data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用
+有明确生命周期策略，否则保留默认一小时 Stash TTL，且不要依赖跨节点恢复。
 
 两个 AgentScope Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、
 环境错误提示和逐调用归属。原生 Wheel 内置 RTK 并直接链接 TOON，不搜索系统可执行文件。

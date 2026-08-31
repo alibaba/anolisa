@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the AgentScope 2.x full-lifecycle middleware."""
+"""Unit tests for the AgentScope 2.x lifecycle middleware."""
 
 from __future__ import annotations
 
@@ -31,36 +31,21 @@ class _CompressionResult:
 class _Runtime:
     def __init__(self, data_dir=None, **_kwargs):
         self.data_dir = str(data_dir or "/tmp/tokenless-test")
-        self.compress_impl = None
-        self.schema_impl = None
-        self.toon_impl = None
-        self.retrieve_impl = None
 
-    def compress_response(self, value, **kwargs):
-        return (
-            self.compress_impl(value, **kwargs)
-            if self.compress_impl
-            else _CompressionResult(value, False)
+    @staticmethod
+    def _retrieve_tool_declaration_json(name):
+        return json.dumps(
+            {
+                "name": name,
+                "description": "Restore visible Tokenless content.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"hash_or_marker": {"type": "string"}},
+                    "required": ["hash_or_marker"],
+                    "additionalProperties": False,
+                },
+            }
         )
-
-    def compress_schema(self, value, **kwargs):
-        return (
-            self.schema_impl(value, **kwargs)
-            if self.schema_impl
-            else _CompressionResult(value, False)
-        )
-
-    def compress_toon(self, value, **_kwargs):
-        return (
-            self.toon_impl(value)
-            if self.toon_impl
-            else _CompressionResult(value, False)
-        )
-
-    def retrieve(self, value):
-        if self.retrieve_impl:
-            return self.retrieve_impl(value)
-        raise _NativeError("missing")
 
 
 class _ResultState(StrEnum):
@@ -197,6 +182,7 @@ def _install_stubs() -> None:
 
 
 _install_stubs()
+core = importlib.import_module("anolisa_tokenless")
 api = importlib.import_module("tokenless_agentscope")
 
 
@@ -204,21 +190,43 @@ async def _collect(generator):
     return [item async for item in generator]
 
 
+def _post_response(output: str, additional_context: str | None = None):
+    return core.PostToolResponse(
+        output=output,
+        disposition=core.Disposition.PASSTHROUGH,
+        content_type=core.ContentType.PLAIN_TEXT,
+        applied_operations=(),
+        recoverability=core.Recoverability.LOSSLESS,
+        before_tokens=1,
+        after_tokens=1,
+        stash_keys=(),
+        tokenizer_id="heuristic-v1",
+        additional_context=additional_context,
+    )
+
+
 class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        config = api.TokenlessConfig(min_chars=0, rtk_enabled=False)
-        self.middleware = api.TokenlessMiddleware(_config=config)
+        contracts = {
+            name: api.ToolContract(core.ContentOrigin.API_RESPONSE)
+            for name in ("api", "large_result")
+        }
+        self.middleware = api.TokenlessMiddleware(
+            _config=api.TokenlessConfig(rtk_enabled=False),
+            tool_contracts=contracts,
+        )
         self.agent = _Agent("agent-2", _State("session-2"))
 
     async def test_model_call_transforms_tools_and_stores_markers(self) -> None:
         marker = "0123456789abcdef01234567"
 
         async def before_model(request):
-            return type(request)(
-                request.tools,
-                request.visible_context,
-                request.attribution,
-                frozenset({marker}),
+            self.assertEqual(request.tools[0]["function"]["name"], "api")
+            self.assertEqual(request.tools[1], {"type": "web_search"})
+            return core.BeforeModelResponse(
+                tools=request.tools,
+                visible_markers=frozenset({marker}),
+                retrieve_tool=self.middleware.sdk.retrieve_tool_declaration(),
             )
 
         self.middleware.sdk.before_model = before_model
@@ -232,27 +240,40 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
             self.agent,
             {
                 "messages": [],
-                "tools": [{"type": "web_search"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "api", "parameters": {}},
+                    },
+                    {"type": "web_search"},
+                    self.middleware._retrieve_declaration.as_function_tool(),
+                ],
                 "tool_choice": None,
                 "current_model": object(),
             },
             next_handler,
         )
         self.assertEqual(result, "model-response")
-        self.assertEqual(observed["tools"], [{"type": "web_search"}])
+        self.assertEqual(
+            observed["tools"][-1]["function"]["name"], "tokenless_retrieve"
+        )
         self.assertEqual(
             self.agent.state.middle_context["anolisa_tokenless"]["visible_markers"],
             [marker],
         )
-        self.assertEqual(self.middleware._session_markers, {})
+        self.assertEqual(
+            self.agent.state.middle_context["anolisa_tokenless"]["agent_id"],
+            "agent-2",
+        )
 
     async def test_acting_preserves_stream_and_transforms_final_text(self) -> None:
-        def compress(value, **kwargs):
-            self.assertEqual(kwargs["session_id"], "session-2")
-            self.assertEqual(kwargs["tool_use_id"], "call-1")
-            return _CompressionResult(json.dumps("short"), True)
+        observed = []
 
-        self.middleware.sdk.runtime.compress_impl = compress
+        async def post_tool(request):
+            observed.append(request)
+            return _post_response("short")
+
+        self.middleware.sdk.post_tool = post_tool
         chunk = _ToolChunk([_TextBlock("stream")])
         response = _ToolResponse([_TextBlock("long " * 100)])
 
@@ -269,28 +290,37 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(output[0], chunk)
         self.assertEqual(output[1].content[0].text, "short")
         self.assertEqual(response.content[0].text, "long " * 100)
+        self.assertEqual(observed[0].content_origin, core.ContentOrigin.API_RESPONSE)
+        self.assertEqual(observed[0].attribution.tool_use_id, "call-1")
 
     async def test_rtk_state_reaches_the_final_response(self) -> None:
-        async def rewrite(call):
-            return replace(
-                call,
-                arguments={**call.arguments, "command": "rtk grep needle file.txt"},
-                rewritten=True,
+        self.middleware.config = replace(self.middleware.config, rtk_enabled=True)
+
+        async def pre_tool(request):
+            return core.PreToolResponse(
+                arguments={
+                    **request.arguments,
+                    "command": "rtk grep needle file.txt",
+                },
+                action=core.PreToolAction.REPLACE_ARGUMENTS,
+                output_optimization=core.OutputOptimization.RTK,
             )
 
-        self.middleware.sdk.before_tool_call = rewrite
+        observed = []
 
-        def fail_compression(_value, **_kwargs):
-            raise AssertionError("RTK output reached response compression")
+        async def post_tool(request):
+            observed.append(request)
+            return _post_response(request.content)
 
-        self.middleware.sdk.runtime.compress_impl = fail_compression
+        self.middleware.sdk.pre_tool = pre_tool
+        self.middleware.sdk.post_tool = post_tool
         source = _Call(
             "call-rtk",
             "shell",
             json.dumps({"command": "grep needle file.txt"}),
         )
         chunk = _ToolChunk([_TextBlock("stream")])
-        response = _ToolResponse([_TextBlock(json.dumps({"items": list(range(100))}))])
+        response = _ToolResponse([_TextBlock("optimized output")])
 
         async def next_handler(**kwargs):
             self.assertEqual(
@@ -311,8 +341,17 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(source.input)["command"], "grep needle file.txt")
         self.assertIs(output[0], chunk)
         self.assertIs(output[1], response)
+        self.assertEqual(observed[0].output_optimization, core.OutputOptimization.RTK)
 
-    async def test_error_adds_environment_guidance(self) -> None:
+    async def test_error_context_is_owned_by_core(self) -> None:
+        async def post_tool(request):
+            self.assertEqual(request.status, core.ToolResultStatus.ERROR)
+            return _post_response(
+                request.content,
+                "Environment diagnosis from Core.",
+            )
+
+        self.middleware.sdk.post_tool = post_tool
         response = _ToolResponse(
             [_TextBlock("command not found")], state=_ResultState.ERROR
         )
@@ -325,28 +364,33 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
                 self.agent, {"tool_call": _Call("call-2", "api", "{}")}, next_handler
             )
         )
-        self.assertEqual(output[0].content[0].text, "command not found")
-        self.assertIn("Skip retry", output[0].content[1].text)
+        self.assertEqual(output[0].content[1].text, "Environment diagnosis from Core.")
 
     async def test_retrieve_uses_only_middleware_marker_state(self) -> None:
         marker = "0123456789abcdef01234567"
         self.agent.state.middle_context["anolisa_tokenless"] = {
-            "visible_markers": [marker]
+            "visible_markers": [marker],
+            "agent_id": "agent-2",
         }
-        self.middleware.sdk.runtime.retrieve_impl = lambda value: (
-            "payload" if value == marker else "wrong"
-        )
+
+        async def retrieve(request):
+            self.assertEqual(request.hash_or_marker, marker.upper())
+            self.assertEqual(request.visible_markers, frozenset({marker}))
+            self.assertEqual(request.attribution.agent_id, "agent-2")
+            return core.RetrieveResponse(hash=marker, payload="payload")
+
+        self.middleware.sdk.retrieve = retrieve
         result = await self.middleware.retrieve_tool.call(
             marker.upper(), self.agent.state
         )
         self.assertEqual(result.content[0].text, "payload")
 
-    async def test_retrieve_response_bypasses_all_optimization(self) -> None:
-        original = json.dumps({"items": list(range(100))})
-        self.middleware.sdk.runtime.toon_impl = lambda _value: _CompressionResult(
-            "changed", True
-        )
-        response = _ToolResponse([_TextBlock(original)])
+    async def test_retrieve_response_bypasses_post_tool(self) -> None:
+        async def post_tool(_request):
+            raise AssertionError("Retrieve output reached PostTool")
+
+        self.middleware.sdk.post_tool = post_tool
+        response = _ToolResponse([_TextBlock("restored payload")])
 
         async def next_handler(**_kwargs):
             yield response
@@ -358,22 +402,21 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
                     "tool_call": _Call(
                         "call-retrieve",
                         "tokenless_retrieve",
-                        json.dumps({"hash": "0123456789abcdef01234567"}),
+                        json.dumps({"hash_or_marker": "0123456789abcdef01234567"}),
                     )
                 },
                 next_handler,
             )
         )
         self.assertIs(output[0], response)
-        self.assertEqual(output[0].content[0].text, original)
 
     async def test_register_tools_rejects_collision(self) -> None:
-        schema = self.middleware.sdk.retrieve_schema()["function"]
+        declaration = self.middleware.sdk.retrieve_tool_declaration()
         self.assertEqual(
-            self.middleware.retrieve_tool.description, schema["description"]
+            self.middleware.retrieve_tool.description, declaration.description
         )
         self.assertEqual(
-            self.middleware.retrieve_tool.input_schema, schema["parameters"]
+            self.middleware.retrieve_tool.input_schema, declaration.input_schema
         )
         toolkit = _Toolkit()
         await self.middleware.register_tools(toolkit)
@@ -383,6 +426,25 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         other = api.TokenlessMiddleware(_config=api.TokenlessConfig(rtk_enabled=False))
         with self.assertRaisesRegex(ValueError, "already contains"):
             await other.register_tools(toolkit)
+
+    async def test_unknown_custom_tool_requires_contract(self) -> None:
+        async def next_handler(**_kwargs):
+            return "unreachable"
+
+        with self.assertRaisesRegex(ValueError, "ToolContract"):
+            await self.middleware.on_model_call(
+                self.agent,
+                {
+                    "messages": [],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {"name": "custom", "parameters": {}},
+                        }
+                    ],
+                },
+                next_handler,
+            )
 
 
 if __name__ == "__main__":

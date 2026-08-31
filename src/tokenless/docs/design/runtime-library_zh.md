@@ -13,31 +13,33 @@ Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `
 | 生命周期 | 行为 |
 |---|---|
 | `before_model` | 可恢复的 Function Calling Schema 压缩，并按需发布恢复工具 |
-| `before_tool_call` | 对 Adapter 明确指定的命令字段执行 RTK 改写 |
-| `after_tool_call` | 响应压缩、TOON 候选选择和环境错误提示 |
+| `pre_tool` | 对 Adapter 明确指定的命令字段执行 RTK 改写 |
+| `post_tool` | 状态路由、响应压缩、TOON 候选选择和环境错误提示 |
 | `retrieve` | 受可见 marker 授权的 byte-exact Stash 恢复 |
 
 Tool Ready 在产品范围内硬关闭，不属于该 API。
 
 ## 协议与状态
 
-Adapter 把框架对象转换为不可变的 `ModelRequest`、`ToolCall`、`ToolResult` 和
-`RetrieveRequest`。`Attribution` 要求 Agent 和 Session 标识；工具生命周期还必须提供
-Tool Use 标识。工具 Schema 统一为 OpenAI Function Calling JSON，但生命周期 Envelope
-是 Tokenless 自身协议，不是 OpenAI 请求。
+Adapter 把框架对象转换为四组不可变 Request/Response：`BeforeModelRequest`、
+`PreToolRequest`、`PostToolRequest` 和 `RetrieveRequest`。`Attribution` 要求 Agent 和
+Session 标识；PreTool 与普通 PostTool 还必须提供 Tool Use 标识。工具 Schema 统一为
+OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约，不是 OpenAI 请求。
 
 `tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
 候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
 提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
-携带本次执行的归属信息。
+携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
+Rust Core，而不是 Python 配置中。
 
-SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 marker 集合，Adapter
-把它保存在框架 Session 状态中，`retrieve` 只接受该集合中的 hash。宿主应用继续保存
-原始工具结果供 UI 和业务逻辑使用，只把复制后的模型可见文本传给 `after_tool_call`。
+SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合和可选的
+Core-owned Retrieve 声明。Adapter 把 Marker 集合保存在框架 Session 状态中，`retrieve`
+只授权该集合中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
+后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
-非法输入、内置 RTK 缺失、挂载失败和工具重名会快速失败。压缩或单次命令改写失败属于
-可选优化失败，会告警并保留原值。候选只有严格更短时才会采用；Schema 和响应截断还必须
-能够恢复。
+非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、
+No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
+只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
 ## Stats 查询
 
@@ -68,4 +70,5 @@ Session；客户端不会推断或强制这两种模式。Python API 不清空�
 使用 Tokenless Toolkit、模型代理和公开的实例 Hook；2.x Adapter 使用 `on_model_call`
 和 `on_acting`。2.0.0 在配对的 Middleware/Tool 中保存 marker，后续版本还会把它持久化
 到 `AgentState.middle_context`。两者都开放完整 SDK；2.0.0 支持直接构造 Agent，App
-集成从 2.0.1 开始。
+集成从 2.0.1 开始。内置工具具有显式契约；应用必须为每个自定义工具注册 `ToolContract`，
+确保 `ContentOrigin` 不从输出文本推断。

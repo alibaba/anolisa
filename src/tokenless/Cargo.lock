@@ -882,7 +882,9 @@ name = "tokenless-python"
 version = "0.7.14"
 dependencies = [
  "pyo3",
+ "serde",
  "serde_json",
+ "tokenless-protocol",
  "tokenless-runtime",
  "tokenless-stats",
 ]
