@@ -1124,6 +1124,31 @@ mod tests {
         assert!(content.contains("schema_version = 1"));
     }
 
+    /// Fail-closed: a warm download cache never stands in for a repository
+    /// that has become unreachable, so a withdrawn or revoked index entry
+    /// cannot be resurrected from disk.
+    #[test]
+    fn fetch_raw_index_does_not_serve_a_cached_index_when_the_repo_is_gone() {
+        let repo = tempdir().unwrap();
+        let root = repo.path().join("v1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
+        let cache = tempdir().unwrap();
+        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let base_url = format!("file://{}", root.display());
+        fetch_raw_index(&dl, &base_url, None).expect("prime the cache");
+
+        std::fs::remove_file(root.join("index.toml")).unwrap();
+        let err = fetch_raw_index(&dl, &base_url, None).unwrap_err();
+        let CliError::Runtime { reason, .. } = err else {
+            panic!("expected runtime error");
+        };
+        assert!(
+            reason.contains("local raw repository index not found"),
+            "got: {reason}"
+        );
+    }
+
     /// With neither file published the error must attribute the miss to
     /// `index.toml` (the canonical location), not to the optional v2 file.
     #[test]

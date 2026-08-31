@@ -234,20 +234,21 @@ anolisa status
 
 ## 配置
 
-system mode 从 `/etc/anolisa/config.toml` 读取 registry 设置，user mode 从
-`~/.config/anolisa/config.toml` 读取。registry resolution 只使用
-`[registry]` 表：
+system mode 从 `/etc/anolisa/repo.toml` 读取 backend 选择和 endpoint，
+user mode 从 `~/.config/anolisa/repo.toml` 读取：
 
 ```toml
-[registry]
-url = "https://registry.example.com/index.toml"
-cache_ttl_secs = 3600
-offline_fallback = true
+schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "https://repo.example.com/anolisa/v1/"
 ```
 
-backend 选择和 endpoint 位于对应的 `repo.toml`（`/etc/anolisa/repo.toml`
-或 `~/.config/anolisa/repo.toml`）。CLI 参数覆盖当前执行的操作；不存在
-`[install] mode` 配置。
+The raw backend fetches the distribution index on every run. It does not use an index cache or fall back to stale metadata, so commands fail when the repository is unavailable.
+`cache_ttl_secs` and `offline_fallback` were never wired into the active implementation. Existing configuration files that still contain these fields continue to parse correctly, but the values are ignored.
+
+CLI arguments control the current operation. There is no `[install] mode` configuration.
 
 ---
 

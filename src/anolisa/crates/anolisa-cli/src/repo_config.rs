@@ -259,22 +259,21 @@ pub struct BackendConfig {
     #[serde(default)]
     pub insecure: bool,
     /// rpm: signature verification toggle, handed to dnf.
-    ///
-    /// This and the two raw cache knobs below are deserialized for the
-    /// executors that will consume them (rpm delegation / raw index
-    /// cache); nothing reads them during resolution, hence the narrow
-    /// dead-code allowance until those land.
     #[serde(default)]
-    #[allow(dead_code)]
     pub gpgcheck: Option<bool>,
     /// npm: default package scope (`@anolis` → `@anolis/<component>`).
     #[serde(default)]
     pub scope: Option<String>,
-    /// raw: index cache freshness window.
+    /// Accepted but ignored: the raw backend re-fetches the index every run.
+    ///
+    /// Both knobs were written for an index cache that no CLI path uses;
+    /// `deny_unknown_fields` means dropping them would reject configs already
+    /// on disk, so they stay parseable and inert. Shipped templates no longer
+    /// emit them.
     #[serde(default)]
     #[allow(dead_code)]
     pub cache_ttl_secs: Option<u64>,
-    /// raw: serve a stale cached index when the network is down.
+    /// Accepted but ignored; see [`BackendConfig::cache_ttl_secs`].
     #[serde(default)]
     #[allow(dead_code)]
     pub offline_fallback: Option<bool>,
@@ -947,6 +946,44 @@ mod tests {
         let content = std::fs::read_to_string(&repo_path).expect("read repo manifest");
         let cfg = RepoConfig::from_toml_str(&content).expect("repo manifest");
         cfg.select_backend(Some("rpm")).expect("rpm backend");
+    }
+
+    /// Neither shipped file may advertise the inert raw cache knobs.
+    #[test]
+    fn shipped_repo_configs_omit_raw_cache_knobs() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in ["../../templates/repo.toml", "../../manifests/repo.toml"] {
+            let path = manifest_dir.join(relative);
+            let content = std::fs::read_to_string(&path).expect("read shipped repo config");
+            let cfg = RepoConfig::from_toml_str(&content).expect("shipped repo config");
+            let raw = cfg.backends.get("raw").expect("raw backend");
+            assert_eq!(raw.cache_ttl_secs, None, "{relative}");
+            assert_eq!(raw.offline_fallback, None, "{relative}");
+        }
+    }
+
+    /// Configs written by older releases still carry the knobs and must load.
+    #[test]
+    fn legacy_raw_cache_knobs_still_parse() {
+        let cfg = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "raw"
+[backends.raw]
+base_url = "https://repo.test/v1/"
+cache_ttl_secs = 3600
+offline_fallback = true
+"#,
+        )
+        .expect("legacy repo config must load");
+
+        let (name, backend) = cfg.select_backend(None).expect("default backend");
+        assert_eq!(name, "raw");
+        assert_eq!(backend.cache_ttl_secs, Some(3600));
+        assert_eq!(backend.offline_fallback, Some(true));
+        assert_eq!(
+            cfg.resolved_base_url(name, backend, &host()).expect("url"),
+            "https://repo.test/v1"
+        );
     }
 
     #[test]
