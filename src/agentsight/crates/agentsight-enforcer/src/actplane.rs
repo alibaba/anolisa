@@ -248,11 +248,11 @@ impl ActPlaneBackend {
         }
         if let Err(error) = self
             .reload
-            .append_policy_delta(control_pid, id, &compiled.bytes)
+            .reload_policy_delta(id, &compiled.bytes)
         {
             let cleanup = self.cleanup_binding(&request, id);
             return Err(kernel_error_with_cleanup(
-                "append policy delta",
+                "reload policy delta",
                 error,
                 cleanup,
             ));
