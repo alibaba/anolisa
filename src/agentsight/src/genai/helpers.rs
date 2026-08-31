@@ -534,14 +534,14 @@ impl GenAIBuilder {
     /// ```
     ///
     /// **OpenClaw**: 时间戳方括号
-    /// ```text
+    /// ````text
     /// Sender (untrusted metadata):
     /// ```json
     /// {"label":"...", ...}
     /// ```
     ///
     /// [Tue 2026-03-31 17:19 GMT+8] 用户实际输入
-    /// ```
+    /// ````
     ///
     /// **QwenCode**: `<system-reminder>` 标签块
     /// ```text
