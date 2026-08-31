@@ -339,6 +339,40 @@ mod tests {
         assert_eq!(hostname_candidate("*.internal"), None);
         assert_eq!(hostname_candidate("api.internal"), Some("api.internal"));
     }
+
+    #[test]
+    fn file_path_at_abi_limit_compiles() {
+        // 63 bytes: exactly PAT - 1, fits with NUL terminator in [u8; 64]
+        let path = format!("/{}", "a".repeat(62)); // "/" + 62 × 'a' = 63 bytes
+        assert_eq!(path.len(), 63);
+        let dsl = format!(
+            "source T = file \"{}\"\nrule r:\n  notify open file \"{}\" if T\n  because \"test\"\n",
+            path, path
+        );
+        assert!(
+            crate::dsl::compile_str(&dsl).is_ok(),
+            "63-byte path should compile successfully"
+        );
+    }
+
+    #[test]
+    fn file_path_exceeding_abi_limit_rejected() {
+        // 64 bytes: exactly PAT, too long for [u8; PAT] with NUL terminator
+        let path = format!("/{}", "a".repeat(63)); // "/" + 63 × 'a' = 64 bytes
+        assert_eq!(path.len(), 64);
+        let dsl = format!(
+            "source T = file \"{}\"\nrule r:\n  notify open file \"{}\" if T\n  because \"test\"\n",
+            path, path
+        );
+        let err = match crate::dsl::compile_str(&dsl) {
+            Ok(_) => panic!("64-byte path must be rejected at compile time"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("byte") && err.contains("ABI"),
+            "error should mention byte ABI limit: {err}"
+        );
+    }
 }
 
 fn ipv4_to_kernel(addr: Ipv4Addr) -> u32 {
@@ -880,6 +914,15 @@ pub fn compile_with_labels(
             }
             Kind::File => {
                 let (m, lit) = lower_path(&s.pattern);
+                if lit.len() >= PAT {
+                    return Err(format!(
+                        "source '{}': file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                        s.label,
+                        lit.len(),
+                        PAT - 1,
+                        PAT
+                    ));
+                }
                 (OP_OPEN, m, lit, 0, 0)
             }
             Kind::Endpoint => {
@@ -946,6 +989,15 @@ pub fn compile_with_labels(
                         .collect::<Vec<_>>()
                 } else {
                     let (tm, tlit) = lower_target(op, cl.target.kind, &cl.target.pattern);
+                    if (op == OP_OPEN || op == OP_WRITE) && tlit.len() >= PAT {
+                        return Err(format!(
+                            "rule '{}': target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                            rule.name,
+                            tlit.len(),
+                            PAT - 1,
+                            PAT
+                        ));
+                    }
                     vec![(tm, tlit, 0, 0)]
                 };
                 for (tm, tlit, ipv4, ipv4_mask) in target_matches {
@@ -966,6 +1018,15 @@ pub fn compile_with_labels(
                                 cipv4_mask = mk;
                             } else {
                                 let (m, l) = lower_target(op, cl.target.kind, pattern);
+                                if (op == OP_OPEN || op == OP_WRITE) && l.len() >= PAT {
+                                    return Err(format!(
+                                        "rule '{}': condition target file path pattern is {} bytes, exceeds the {} byte ABI limit (PAT={})",
+                                        rule.name,
+                                        l.len(),
+                                        PAT - 1,
+                                        PAT
+                                    ));
+                                }
                                 cm = m;
                                 clit = l;
                             }

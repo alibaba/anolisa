@@ -305,6 +305,7 @@ version = "0.1.0"
 dependencies = [
  "agentsight-enforcement-protocol",
  "libc",
+ "log 0.4.33",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1571,7 +1572,6 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "ebpf-ifc-engine"
 version = "0.1.9"
 dependencies = [
- "actplane-ifc-compiler",
  "aya",
  "libbpf-sys",
  "libc",
