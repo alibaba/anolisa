@@ -95,6 +95,10 @@ scope。因此，即使 system scope 已安装同名组件，
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前
 记录崩溃恢复意图。组件元数据通过 `component.toml` 声明。
 
+raw backend 每次解析都会重新拉取 distribution index，仓库不可达时命令直接
+失败。`repo.toml` 中旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常
+解析以保持向后兼容，但当前 raw backend 不会使用这些值。
+
 ## 环境要求
 
 - Linux（x86_64 / aarch64）或 macOS（arm64，功能受限）

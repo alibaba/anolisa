@@ -97,6 +97,11 @@ The lifecycle planner separates ANOLISA-owned files from native-package
 authority and records crash-recovery intent before side effects. Component
 metadata is declared through `component.toml`.
 
+The raw backend re-fetches the distribution index on every resolve and fails
+when the repository is unreachable. Legacy `cache_ttl_secs` and
+`offline_fallback` keys in `repo.toml` are still accepted for compatibility,
+but the current raw backend ignores their values.
+
 ## Requirements
 
 - Linux (x86_64 / aarch64) or macOS (arm64, limited)

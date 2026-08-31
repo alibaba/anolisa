@@ -245,10 +245,10 @@ default_backend = "raw"
 base_url = "https://repo.example.com/anolisa/v1/"
 ```
 
-The raw backend fetches the distribution index on every run. It does not use an index cache or fall back to stale metadata, so commands fail when the repository is unavailable.
-`cache_ttl_secs` and `offline_fallback` were never wired into the active implementation. Existing configuration files that still contain these fields continue to parse correctly, but the values are ignored.
+raw backend 每次执行都会重新拉取 distribution index。当前不会使用缓存的 index 作为回退，因此仓库不可达时命令会直接失败。
+旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常解析以保持向后兼容，但当前 raw backend 不会使用这些值。
 
-CLI arguments control the current operation. There is no `[install] mode` configuration.
+CLI 参数只影响当前执行的操作，不存在 `[install] mode` 配置。
 
 ---
 
