@@ -115,3 +115,6 @@ Native 仍是严格零注入选择。#2683 记录的 xtrace 输出，以及 #254
 - Direct Exec 没有用户入口，也不渲染输入态。
 - 增强集成是有界集成而非零注入。若要求提示符、helper、环境变量和
   command-not-found 均无集成，必须在启动时选择 Native 会话。
+- `_COSH_*`、`_cosh_*` 以及限定范围的 `COSH_*` 状态是 Enhanced 集成的保留
+  实现命名空间。修改、取消设置或将这些变量标记为 `readonly` 会导致未定义
+  行为；若要求严格隔离这些名称，请使用 Native 模式。

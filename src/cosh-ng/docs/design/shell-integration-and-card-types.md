@@ -133,3 +133,7 @@ separate contracts.
 - Enhanced integration is bounded rather than injection-free; users requiring
   no prompt, helper, environment, or command-not-found integration must start
   a Native session.
+- `_COSH_*`, `_cosh_*`, and scoped `COSH_*` state are reserved implementation
+  namespaces used by Enhanced integration. Modifying, unsetting, or marking
+  these variables as `readonly` produces undefined behavior; use Native mode
+  if strict isolation from these names is required.
