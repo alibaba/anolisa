@@ -60,6 +60,7 @@ use anolisa_core::providers::DelegatedProvider;
 use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
+use anolisa_core::transaction::mint_operation_id;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -1325,6 +1326,7 @@ pub(in crate::commands) fn handle_self_update(ctx: &CliContext) -> Result<(), Cl
         None
     };
 
+    let started_at = now_iso8601();
     let result = run_self_update_with_deps(
         &url,
         current_version,
@@ -1341,7 +1343,16 @@ pub(in crate::commands) fn handle_self_update(ctx: &CliContext) -> Result<(), Cl
         eprint!("\r\x1b[2K");
     }
 
-    let run = result?;
+    // Audit before rendering: an applied self-update must leave a record even
+    // when the caller never reads the terminal output (issue #2992).
+    let run = match result {
+        Ok(run) => run,
+        Err(failure) => {
+            append_self_update_log(ctx, &started_at, Err(&failure));
+            return Err(failure.error);
+        }
+    };
+    append_self_update_log(ctx, &started_at, Ok(&run));
 
     if ctx.json {
         return render_json_outcome(&run, ctx.dry_run);
@@ -1392,6 +1403,66 @@ pub(in crate::commands) fn handle_self_update(ctx: &CliContext) -> Result<(), Cl
     }
 
     Ok(())
+}
+
+/// A failed self-update, carrying what the run had already learned.
+#[derive(Debug)]
+struct SelfUpdateFailure {
+    error: CliError,
+    context: SelfUpdateFailureContext,
+}
+
+/// Structured context recorded for a failed self-update (issue #2992 review).
+///
+/// Fields are filled as the run learns them, so a manifest-fetch failure
+/// records only the running version, while a failed `dnf` transaction records
+/// the package and the versions rpm reported on both sides of it. Field names
+/// match [`SelfUpdateData`] so one reader handles both outcomes.
+#[derive(Debug, Serialize)]
+struct SelfUpdateFailureContext {
+    current_version: String,
+    /// Whether the installed version actually moved, and only when the run
+    /// observed both sides of it. A failed `dnf` transaction can still leave a
+    /// moved rpmdb, so a hard-coded `false` would contradict the very versions
+    /// recorded next to it; absent means "not observed", never "unchanged".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apply_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpm_version_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpm_version_after: Option<String>,
+    /// The manifest endpoint reduced to scheme, host, and path. Recorded so the
+    /// endpoint is still known when the failure text had to be withheld;
+    /// absent when it could not be reduced safely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    /// URLs this run handled, kept only so they can be redacted out of the
+    /// persisted failure text. Never serialised: they are the material being
+    /// removed.
+    #[serde(skip)]
+    sensitive_urls: Vec<String>,
+}
+
+impl SelfUpdateFailureContext {
+    fn new(current_version: &str, endpoint_url: &str) -> Self {
+        Self {
+            current_version: current_version.to_string(),
+            updated: None,
+            latest_version: None,
+            apply_mode: None,
+            package: None,
+            rpm_version_before: None,
+            rpm_version_after: None,
+            endpoint: endpoint_without_credentials(endpoint_url),
+            sensitive_urls: vec![endpoint_url.to_string()],
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1470,6 +1541,39 @@ fn run_self_update_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
     on_progress: Option<&ProgressFn>,
+) -> Result<SelfUpdateRun, Box<SelfUpdateFailure>> {
+    let mut context = SelfUpdateFailureContext::new(current_version, endpoint_url);
+    match run_self_update_inner(
+        endpoint_url,
+        current_version,
+        ctx,
+        ops,
+        query,
+        txn,
+        is_root,
+        on_progress,
+        &mut context,
+    ) {
+        Ok(run) => Ok(run),
+        // Boxed: the context makes the error variant far larger than the
+        // success one, and every caller only ever moves it once.
+        Err(error) => Err(Box::new(SelfUpdateFailure { error, context })),
+    }
+}
+
+/// The self-update run proper. Everything it learns on the way to the failure
+/// is recorded in `context` so the audit record keeps it (issue #2992 review).
+#[expect(clippy::too_many_arguments)]
+fn run_self_update_inner(
+    endpoint_url: &str,
+    current_version: &str,
+    ctx: &CliContext,
+    ops: &dyn SelfUpdateOps,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+    on_progress: Option<&ProgressFn>,
+    context: &mut SelfUpdateFailureContext,
 ) -> Result<SelfUpdateRun, CliError> {
     let manifest = match ops
         .check_update(endpoint_url, current_version)
@@ -1485,6 +1589,7 @@ fn run_self_update_with_deps(
         }
         Some(manifest) => manifest,
     };
+    context.latest_version = Some(manifest.version.clone());
 
     let os = self_update::current_os();
     let arch = self_update::current_arch();
@@ -1495,6 +1600,9 @@ fn run_self_update_with_deps(
             arch: arch.to_string(),
         })
         .map_err(self_update_cli_err)?;
+
+    // A failed download quotes the artifact URL, which carries its own query.
+    context.sensitive_urls.push(artifact.url.clone());
 
     if ctx.dry_run {
         return Ok(SelfUpdateRun {
@@ -1508,6 +1616,8 @@ fn run_self_update_with_deps(
 
     let current_exe = ops.resolve_current_exe().map_err(self_update_cli_err)?;
     let apply_mode = if let Some(package) = rpm_owner_for_current_exe(query, &current_exe)? {
+        context.apply_mode = Some("rpm_package");
+        context.package = Some(package.clone());
         if !is_root {
             return Err(CliError::Runtime {
                 command: "update self".to_string(),
@@ -1517,8 +1627,19 @@ fn run_self_update_with_deps(
             });
         }
         let before_version = installed_package_version_best_effort(query, &package);
-        txn.update(&[package.as_str()])
-            .map_err(|err| txn_err(err, "update self"))?;
+        context.rpm_version_before = before_version.clone();
+        if let Err(err) = txn.update(&[package.as_str()]) {
+            // A failed dnf transaction is not proof nothing moved, so re-read
+            // rpm rather than leaving the post-failure version unknown: that
+            // reading is what tells an operator which version they are on, and
+            // it is the only honest basis for `updated`.
+            context.rpm_version_after = installed_package_version_best_effort(query, &package);
+            context.updated = match (&context.rpm_version_before, &context.rpm_version_after) {
+                (Some(before), Some(after)) => Some(before != after),
+                _ => None,
+            };
+            return Err(txn_err(err, "update self"));
+        }
         let after_version = installed_package_version_best_effort(query, &package);
         SelfUpdateApplyMode::RpmPackage {
             package,
@@ -1526,6 +1647,7 @@ fn run_self_update_with_deps(
             after_version,
         }
     } else {
+        context.apply_mode = Some("binary");
         ops.perform_binary_update(artifact, &current_exe, on_progress)
             .map_err(self_update_cli_err)?;
         SelfUpdateApplyMode::Binary
@@ -1720,6 +1842,210 @@ fn render_json_outcome(run: &SelfUpdateRun, dry_run: bool) -> Result<(), CliErro
     response::render_json("update self", build_json_data(run, dry_run))
 }
 
+/// Marker written in place of anything that could not be shown to be free of
+/// credentials.
+const REDACTED: &str = "<redacted>";
+
+/// Strip every known URL out of `text` before it is persisted.
+///
+/// The self-update endpoint is operator-supplied (`ANOLISA_UPDATE_URL`) and
+/// `SelfUpdateError::FetchManifest` quotes it verbatim, as can the transport
+/// error nested inside it. A mirror URL would otherwise be written to the
+/// central log and travel on in the `anolisa bug` bundle.
+///
+/// The whole URL goes, not the parts of it that look like credentials. Which
+/// part carries a secret is not knowable from the outside: userinfo does, a
+/// pre-signed query does, and so does a path — `https://host/download/<bearer>/
+/// release.toml` is an ordinary shape. What is left, scheme and host, is
+/// published separately as `details.endpoint`, so the record keeps the one
+/// thing a reader needs to tell a broken mirror from a broken network.
+///
+/// Replacement alone is not enough, because the text is not required to quote
+/// a URL the way it was given: a transport error may percent-encode it (`"`
+/// becomes `%22`), normalise it, or quote a URL this run never saw. So the
+/// result is verified rather than trusted — any URL still standing is one this
+/// code cannot vouch for, and the text is dropped instead of persisted.
+///
+/// Dropping the text loses the transport detail, which is why it is the
+/// fallback and not the rule.
+fn redact_known_urls(text: &str, urls: &[String]) -> String {
+    let mut out = text.to_string();
+    for url in urls {
+        out = redact_url_runs(&out, url);
+    }
+    if out.contains("://") {
+        return "the failure text was withheld: it carried a URL that could not be \
+                shown to be free of credentials"
+            .to_string();
+    }
+    out
+}
+
+/// Replace every run of `text` that contains `url` — from the match to the next
+/// whitespace — with [`REDACTED`].
+///
+/// Taking the run rather than the match is what makes the result verifiable.
+/// The transport may hand back a URL that merely *starts* with the one we know,
+/// as when a query gains a parameter, and replacing the match alone would leave
+/// the remainder standing. A URL in free text ends at whitespace and a
+/// credential cannot contain any, so the run covers whatever was appended.
+fn redact_url_runs(text: &str, url: &str) -> String {
+    if url.is_empty() {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(url) {
+        out.push_str(&rest[..at]);
+        out.push_str(REDACTED);
+        let matched = &rest[at..];
+        // At least the match itself, so the loop always advances.
+        let end = matched
+            .find(char::is_whitespace)
+            .unwrap_or(matched.len())
+            .max(url.len());
+        rest = &matched[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The scheme and host of `url`, the only parts that cannot hold a secret: a
+/// host has to be routable, so it is already on the wire and in DNS.
+///
+/// Everything after the authority is dropped. A path segment can carry a
+/// bearer token just as a query parameter can, and nothing about the string
+/// says which one does.
+/// `url` reduced to scheme, host, and path, or `None` when it cannot be taken
+/// apart safely.
+///
+/// Recorded so an operator still knows which endpoint was contacted when the
+/// failure text had to be withheld.
+fn endpoint_without_credentials(url: &str) -> Option<String> {
+    let sep = url.find("://")?;
+    let remainder = &url[sep + 3..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let (authority, tail) = remainder.split_at(authority_end);
+    if tail.contains('@') {
+        return None;
+    }
+    let host = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{}{host}", &url[..sep + 3]))
+}
+
+/// Best-effort central-log record for a CLI self-update (issue #2992).
+///
+/// Mirrors [`append_update_log`]: the log is audit bookkeeping, so a write
+/// failure warns instead of failing an update that already applied. The CLI
+/// binary is not a state object, so — like the CLI package `anolisa upgrade`
+/// reports — this records to the central log only and never to
+/// `installed.toml::operations`.
+///
+/// `details` carries the same payload the `--json` envelope reports, so the
+/// recorded versions line up 1:1 with what the command printed: the version
+/// transition for both apply modes, plus the observed before/after installed
+/// versions on the RPM path, which is where a self-update most often ends
+/// somewhere other than the advertised release.
+fn append_self_update_log(
+    ctx: &CliContext,
+    started_at: &str,
+    outcome: Result<&SelfUpdateRun, &SelfUpdateFailure>,
+) {
+    // A preview writes nothing: `--dry-run` leaves the log as it found it.
+    if ctx.dry_run {
+        return;
+    }
+
+    let (severity, status, message, objects, details) = match outcome {
+        Ok(run) => {
+            let data = build_json_data(run, false);
+            let (message, objects) = match &run.apply_mode {
+                // Nothing was applied — an already-latest no-op. There is no
+                // operation to audit.
+                SelfUpdateApplyMode::None => return,
+                SelfUpdateApplyMode::Binary => (
+                    format!(
+                        "updated the anolisa CLI binary {} → {}",
+                        data.current_version, data.latest_version
+                    ),
+                    Vec::new(),
+                ),
+                SelfUpdateApplyMode::RpmPackage {
+                    package,
+                    before_version,
+                    after_version,
+                } => (
+                    format!(
+                        "delegated the anolisa CLI self-update to dnf package '{package}'; \
+                         installed RPM version {} → {} (release manifest advertises {})",
+                        before_version.as_deref().unwrap_or("unknown"),
+                        after_version.as_deref().unwrap_or("unconfirmed"),
+                        data.latest_version,
+                    ),
+                    vec![package.clone()],
+                ),
+            };
+            // An applied self-update is `ok` even when the installed version
+            // did not move: `PackageTransaction::update` defines a package
+            // already at the latest version as a successful no-op, and
+            // `Partial` means some objects applied while others did not —
+            // there is no partial commit here, and one object cannot be
+            // partly applied. `details.updated` still reports that nothing
+            // moved, without raising it to a diagnostic warning.
+            (
+                Severity::Info,
+                LogStatus::Ok,
+                message,
+                objects,
+                serde_json::to_value(&data).unwrap_or_default(),
+            )
+        }
+        Err(failure) => (
+            Severity::Error,
+            LogStatus::Failed,
+            format!(
+                "anolisa CLI self-update failed: {}",
+                redact_known_urls(&failure.error.reason(), &failure.context.sensitive_urls)
+            ),
+            // A failed delegation is found through the package it was moving,
+            // so `logs <package>` reaches it like the applied record.
+            failure.context.package.clone().into_iter().collect(),
+            serde_json::to_value(&failure.context).unwrap_or_default(),
+        ),
+    };
+
+    let layout = common::resolve_layout(ctx);
+    let log = CentralLog::open(layout.central_log.clone());
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(mint_operation_id("update-self")),
+        command: "update self".to_string(),
+        source: "anolisa-cli".to_string(),
+        component: None,
+        severity,
+        message,
+        actor: "cli".to_string(),
+        install_mode: Some(ctx.install_mode.as_str().to_string()),
+        started_at: started_at.to_string(),
+        finished_at: Some(now_iso8601()),
+        status: Some(status),
+        objects,
+        backup_ids: Vec::new(),
+        warnings: Vec::new(),
+        details,
+    };
+    if let Err(err) = log.append(&record) {
+        eprintln!("warning: failed to write central log: {err}");
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1779,6 +2105,537 @@ pub(crate) mod tests {
         assert_eq!(data.package.as_deref(), Some("anolisa"));
         assert_eq!(data.rpm_version_before.as_deref(), Some("0.1.0"));
         assert_eq!(data.rpm_version_after.as_deref(), Some("0.2.0"));
+    }
+
+    /// Read the single central-log record `append_self_update_log` wrote,
+    /// asserting the log holds exactly one line.
+    fn only_self_update_record(ctx: &CliContext) -> serde_json::Value {
+        let raw = std::fs::read_to_string(&common::resolve_layout(ctx).central_log)
+            .expect("read central log");
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one record, got {lines:?}");
+        serde_json::from_str(lines[0]).expect("parse record")
+    }
+
+    fn central_log_is_absent(ctx: &CliContext) -> bool {
+        !common::resolve_layout(ctx).central_log.exists()
+    }
+
+    /// Issue #2992: an applied binary self-update must be auditable, and the
+    /// record must carry the version transition it applied.
+    #[test]
+    fn binary_self_update_records_the_version_transition() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let run = self_run(
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::Binary,
+        );
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["kind"], "operation");
+        assert_eq!(record["command"], "update self");
+        assert_eq!(record["source"], "anolisa-cli");
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["severity"], "info");
+        assert_eq!(record["started_at"], "2026-06-01T10:00:00Z");
+        assert!(record["finished_at"].is_string());
+        assert!(
+            record["operation_id"]
+                .as_str()
+                .expect("operation id")
+                .starts_with("op-update-self-"),
+            "operation id must self-classify: {}",
+            record["operation_id"]
+        );
+        // The versions are the point of the record: they must be recoverable
+        // without re-parsing the human message.
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert_eq!(record["details"]["latest_version"], "0.2.0");
+        assert_eq!(record["details"]["apply_mode"], "binary");
+        assert_eq!(record["details"]["updated"], true);
+        let message = record["message"].as_str().expect("message");
+        assert!(
+            message.contains("0.1.0") && message.contains("0.2.0"),
+            "message must state the transition: {message}"
+        );
+    }
+
+    /// The RPM path delegates to dnf, so the package it moved and the versions
+    /// rpm actually reports must both be recorded.
+    #[test]
+    fn rpm_self_update_records_package_and_observed_versions() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let run = self_run(
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::RpmPackage {
+                package: "anolisa".to_string(),
+                before_version: Some("0.1.0".to_string()),
+                after_version: Some("0.2.0".to_string()),
+            },
+        );
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["severity"], "info");
+        // `objects` carries the RPM package exactly like `anolisa upgrade`
+        // records a CLI package update, so `logs anolisa` finds it.
+        assert_eq!(record["objects"][0], "anolisa");
+        assert_eq!(record["details"]["apply_mode"], "rpm_package");
+        assert_eq!(record["details"]["package"], "anolisa");
+        assert_eq!(record["details"]["rpm_version_before"], "0.1.0");
+        assert_eq!(record["details"]["rpm_version_after"], "0.2.0");
+    }
+
+    /// dnf treats a package already at the latest version as a successful
+    /// no-op, and one object cannot be partly applied — so this is `ok`, and
+    /// must not reach the warn/error set `anolisa bug` collects.
+    #[test]
+    fn rpm_self_update_that_did_not_move_the_version_is_ok_not_a_warning() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let run = self_run(
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::RpmPackage {
+                package: "anolisa".to_string(),
+                before_version: Some("0.1.0".to_string()),
+                after_version: Some("0.1.0".to_string()),
+            },
+        );
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["severity"], "info");
+        // The record still states plainly that nothing moved.
+        assert_eq!(record["details"]["updated"], false);
+        assert_eq!(record["details"]["rpm_version_after"], "0.1.0");
+
+        // `anolisa bug` collects `warn` and above; a successful no-op is not a
+        // diagnostic finding and must stay out of that set.
+        let diagnostics = CentralLog::open(common::resolve_layout(&ctx).central_log)
+            .query(&anolisa_core::LogFilter {
+                severity_at_least: Some(Severity::Warn),
+                ..Default::default()
+            })
+            .expect("query central log");
+        assert!(
+            diagnostics.is_empty(),
+            "a successful dnf no-op must not surface as a diagnostic: {diagnostics:?}"
+        );
+    }
+
+    /// A failed dnf delegation is the case with the most context to lose, so
+    /// it is driven through the real run: the record must keep the package,
+    /// the target version, and the version rpm reports after the failure.
+    #[test]
+    fn failed_dnf_self_update_records_package_and_observed_versions() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"])
+            .with_installed_versions("anolisa", vec![Some("0.1.0"), Some("0.1.0")]);
+        let txn = FakeSelfTxn::new("anolisa").failing();
+
+        let failure = run_self_update_with_deps(
+            "https://example.invalid/release-manifest.toml",
+            "0.1.0",
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+        )
+        .expect_err("a failed dnf transaction must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        assert_eq!(
+            query.installed_queries.get(),
+            2,
+            "the installed version must be re-observed after dnf failed"
+        );
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["severity"], "error");
+        // Everything the run had learned survives into the record.
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert_eq!(record["details"]["latest_version"], "0.2.0");
+        assert_eq!(record["details"]["apply_mode"], "rpm_package");
+        assert_eq!(record["details"]["package"], "anolisa");
+        assert_eq!(record["details"]["rpm_version_before"], "0.1.0");
+        assert_eq!(record["details"]["rpm_version_after"], "0.1.0");
+        // Observed on both sides and unchanged, so `updated` is a reading, not
+        // an assumption.
+        assert_eq!(record["details"]["updated"], false);
+        // `logs anolisa` must reach the failure, not just the applied record.
+        assert_eq!(record["objects"][0], "anolisa");
+        let message = record["message"].as_str().expect("message");
+        assert!(
+            message.contains("dnf"),
+            "message must carry the failure reason: {message}"
+        );
+    }
+
+    /// A non-zero dnf exit does not mean the rpmdb stayed put. When the
+    /// re-observation shows the version did move, the record must say so
+    /// instead of contradicting the versions printed beside it.
+    #[test]
+    fn failed_dnf_that_still_moved_the_version_records_it_as_updated() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        // dnf fails, but rpm reports a different version afterwards.
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"])
+            .with_installed_versions("anolisa", vec![Some("0.1.0"), Some("0.2.0")]);
+        let txn = FakeSelfTxn::new("anolisa").failing();
+
+        let failure = run_self_update_with_deps(
+            "https://example.invalid/release-manifest.toml",
+            "0.1.0",
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+        )
+        .expect_err("a failed dnf transaction must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["details"]["rpm_version_before"], "0.1.0");
+        assert_eq!(record["details"]["rpm_version_after"], "0.2.0");
+        assert_eq!(
+            record["details"]["updated"], true,
+            "a moved rpmdb must not be recorded as `updated: false`"
+        );
+    }
+
+    /// A failed binary swap knows its target version even though nothing was
+    /// applied; the record must not throw that away.
+    #[test]
+    fn failed_binary_self_update_records_the_target_version() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_binary_update();
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure = run_self_update_with_deps(
+            "https://example.invalid/release-manifest.toml",
+            "0.1.0",
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            false,
+            None,
+        )
+        .expect_err("a failed binary swap must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["severity"], "error");
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert_eq!(record["details"]["latest_version"], "0.2.0");
+        assert_eq!(record["details"]["apply_mode"], "binary");
+        // Nothing was observed on this path — a binary swap can fail with the
+        // executable in an uncertain state — so `updated` is absent rather
+        // than a definitive claim.
+        assert!(record["details"].get("updated").is_none());
+        // No RPM package is involved, so those fields stay absent rather than
+        // being recorded as unknown.
+        assert!(record["details"].get("package").is_none());
+        assert!(record["objects"].as_array().expect("objects").is_empty());
+        let message = record["message"].as_str().expect("message");
+        assert!(
+            message.contains("sha256 mismatch"),
+            "message must carry the failure reason: {message}"
+        );
+    }
+
+    /// A manifest that never resolved leaves only the running version, and the
+    /// record must say exactly that much rather than inventing a target.
+    #[test]
+    fn failed_self_update_before_the_manifest_records_only_what_is_known() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let failure = SelfUpdateFailure {
+            error: CliError::Runtime {
+                command: "update self".to_string(),
+                reason: "failed to fetch release manifest".to_string(),
+            },
+            context: SelfUpdateFailureContext::new("0.1.0", "https://example.invalid/m.toml"),
+        };
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert!(record["details"].get("updated").is_none());
+        assert!(record["details"].get("latest_version").is_none());
+        assert!(record["details"].get("apply_mode").is_none());
+    }
+
+    /// `ANOLISA_UPDATE_URL` is operator-supplied and the fetch error quotes it
+    /// verbatim, so a mirror carrying credentials must not reach the log the
+    /// `anolisa bug` bundle is built from.
+    ///
+    /// Driven through the real run path. The endpoints deliberately hold
+    /// characters that break a scan of the message — quotes, a newline,
+    /// non-ASCII — and delimiters inside the password that end the authority
+    /// early, which is the case that must fail closed rather than pass through.
+    ///
+    /// Assertions run on the *decoded* record, not the raw JSONL: serialisation
+    /// escapes `"` and a newline, so a check against the raw bytes would pass
+    /// while the credential is sitting in the file.
+    #[test]
+    fn failed_self_update_does_not_persist_endpoint_credentials() {
+        let secrets = [
+            "s3cr3t-token",
+            "s3'cr3t",
+            "s3\"cr3t",
+            "s3\ncr3t",
+            "s3\u{4e2d}cr3t",
+            "s3/cr3t",
+            "s3?cr3t",
+            "s3#cr3t",
+            "p@ss!w$rd",
+            "deadbeef",
+            "dead'beef",
+            "a(b)c*d",
+        ];
+        for endpoint in [
+            "https://ci:s3cr3t-token@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3'cr3t@mirror.invalid/release.toml?X-Amz-Signature=dead'beef",
+            "https://ci:s3\"cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3\ncr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3\u{4e2d}cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            // Delimiters inside the userinfo end the authority early: these
+            // must fail closed, not slip through unredacted.
+            "https://ci:s3/cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3?cr3t@mirror.invalid/release.toml",
+            "https://ci:s3#cr3t@mirror.invalid/release.toml",
+            "https://ci:p@ss!w$rd&x=1@mirror.invalid/release.toml?sig=a(b)c*d,e;f=g",
+            "https://ci:s3%27cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            // Not a URL at all: unparseable input must not leak either.
+            "\u{4e2d}https://ci:s3cr3t-token@mirror.invalid/release.toml",
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let ctx = self_ctx(tmp.path().to_path_buf(), false);
+            let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+            let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+            let txn = FakeSelfTxn::new("anolisa");
+
+            let failure =
+                run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                    .expect_err("an unreachable manifest endpoint must not report success");
+
+            append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+            // Decode first: escaping would hide a leaked `"` or newline.
+            let record = only_self_update_record(&ctx);
+            let decoded = serde_json::to_string(&record).expect("re-encode");
+            let message = record["message"].as_str().expect("message");
+            for secret in secrets {
+                assert!(
+                    !message.contains(secret),
+                    "credential leaked into the message for {endpoint}: {secret}"
+                );
+                assert!(
+                    !record["details"].to_string().contains(secret),
+                    "credential leaked into details for {endpoint}: {secret}"
+                );
+                assert!(
+                    !decoded.contains(secret),
+                    "credential leaked into the record for {endpoint}: {secret}"
+                );
+            }
+        }
+    }
+
+    /// The endpoint stays recorded in a form that carries no credentials, so a
+    /// withheld failure text still leaves the operator knowing what was
+    /// contacted. Scheme and host only: a path segment can hold a bearer token
+    /// as readily as userinfo can.
+    #[test]
+    fn failed_self_update_records_the_endpoint_without_credentials() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let endpoint = "https://ci:s3cr3t-token@mirror.invalid/release.toml?sig=deadbeef";
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure =
+            run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                .expect_err("an unreachable manifest endpoint must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["details"]["endpoint"], "https://mirror.invalid");
+    }
+
+    /// A transport error is free to quote the URL in a form this run never
+    /// handled — percent-encoded, normalised, or a redirect target — which a
+    /// literal replacement cannot catch. Such a message must be withheld.
+    #[test]
+    fn a_message_with_an_unrecognised_credential_url_is_withheld() {
+        let known = "https://mirror.invalid/release.toml";
+        // The transport re-encoded the password, so the known value no longer
+        // matches what the text carries.
+        let text = "failed: https://ci:s3%22cr3t@mirror.invalid/release.toml: Dns Failed";
+
+        let out = redact_known_urls(text, &[known.to_string()]);
+
+        assert!(
+            !out.contains("s3%22cr3t"),
+            "a re-encoded credential must not survive: {out}"
+        );
+        assert!(
+            out.contains("withheld"),
+            "the text must be withheld rather than partly redacted: {out}"
+        );
+    }
+
+    /// Withholding is the fallback, not the rule: an ordinary failure keeps its
+    /// transport detail so the record stays useful.
+    #[test]
+    fn a_message_without_credentials_keeps_its_transport_detail() {
+        let known = "https://ci:tok@mirror.invalid/release.toml?sig=abc";
+        let text = "failed to fetch release manifest from \
+                    https://ci:tok@mirror.invalid/release.toml?sig=abc: Dns Failed: not known";
+
+        let out = redact_known_urls(text, &[known.to_string()]);
+
+        assert!(!out.contains("tok"), "userinfo must go: {out}");
+        assert!(!out.contains("abc"), "query must go: {out}");
+        assert!(
+            !out.contains("release.toml"),
+            "the path leaves with the rest of the URL: {out}"
+        );
+        assert!(
+            out.contains("Dns Failed: not known"),
+            "the transport reason must survive: {out}"
+        );
+    }
+
+    /// Replacement matches a literal value, so a query the transport extended
+    /// leaves behind whatever the known value did not cover. Redacting the run
+    /// out to the next whitespace takes the remainder with it.
+    #[test]
+    fn a_query_extended_past_the_known_value_is_swallowed() {
+        let known = "https://mirror.invalid/release.toml?sig=abc";
+        let text = "failed to fetch release manifest from \
+                    https://mirror.invalid/release.toml?sig=abcSECRET: Dns Failed";
+
+        let out = redact_known_urls(text, &[known.to_string()]);
+
+        assert!(
+            !out.contains("SECRET"),
+            "the appended parameter must not survive: {out}"
+        );
+        assert!(
+            out.contains("Dns Failed"),
+            "swallowing the run must not cost the transport reason: {out}"
+        );
+    }
+
+    /// A path segment carries a bearer token as readily as userinfo does, and
+    /// nothing about the string says which segment is which. Neither the text
+    /// nor the recorded endpoint may keep it.
+    #[test]
+    fn a_credential_in_the_url_path_is_not_persisted() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let endpoint = "https://mirror.invalid/download/bearer-PATHTOKEN/release.toml";
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure =
+            run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                .expect_err("an unreachable manifest endpoint must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        let rendered = record.to_string();
+        assert!(
+            !rendered.contains("PATHTOKEN"),
+            "a path credential must not reach the record: {rendered}"
+        );
+        assert_eq!(record["details"]["endpoint"], "https://mirror.invalid");
+    }
+
+    /// An up-to-date run changed nothing, so it is not an operation to audit.
+    #[test]
+    fn already_latest_self_update_writes_no_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let run = self_run(
+            SelfUpdateOutcome::AlreadyLatest {
+                version: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::None,
+        );
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+
+        assert!(central_log_is_absent(&ctx), "a no-op must not be audited");
+    }
+
+    /// `--dry-run` must leave the log exactly as it found it — including when
+    /// the preview itself failed.
+    #[test]
+    fn dry_run_self_update_writes_no_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), true);
+        let run = self_run(
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::None,
+        );
+        let failure = SelfUpdateFailure {
+            error: CliError::Runtime {
+                command: "update self".to_string(),
+                reason: "release manifest unreachable".to_string(),
+            },
+            context: SelfUpdateFailureContext::new("0.1.0", "https://example.invalid/m.toml"),
+        };
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        assert!(
+            central_log_is_absent(&ctx),
+            "a dry-run preview must never write"
+        );
     }
 
     #[test]
@@ -1866,6 +2723,8 @@ pub(crate) mod tests {
         manifest: Option<self_update::ReleaseManifest>,
         current_exe: PathBuf,
         binary_updates: Cell<usize>,
+        binary_update_fails: bool,
+        check_update_error: Option<self_update::SelfUpdateError>,
     }
 
     impl FakeSelfUpdateOps {
@@ -1874,7 +2733,27 @@ pub(crate) mod tests {
                 manifest: Some(self_manifest("0.2.0")),
                 current_exe: PathBuf::from(current_exe),
                 binary_updates: Cell::new(0),
+                binary_update_fails: false,
+                check_update_error: None,
             }
+        }
+
+        /// The manifest request fails against `endpoint`, reproducing the real
+        /// `FetchManifest` text: it quotes the endpoint, and so does the
+        /// transport error nested in it.
+        fn failing_check_update(mut self, endpoint: &str) -> Self {
+            self.check_update_error = Some(self_update::SelfUpdateError::FetchManifest {
+                url: endpoint.to_string(),
+                reason: format!("{endpoint}: Dns Failed: resolve dns name"),
+            });
+            self
+        }
+
+        /// The binary swap fails after the manifest resolved, so the run knows
+        /// its target version but never applies it.
+        fn failing_binary_update(mut self) -> Self {
+            self.binary_update_fails = true;
+            self
         }
     }
 
@@ -1884,6 +2763,17 @@ pub(crate) mod tests {
             _endpoint_url: &str,
             _current_version: &str,
         ) -> Result<Option<self_update::ReleaseManifest>, self_update::SelfUpdateError> {
+            if let Some(err) = &self.check_update_error {
+                return Err(match err {
+                    self_update::SelfUpdateError::FetchManifest { url, reason } => {
+                        self_update::SelfUpdateError::FetchManifest {
+                            url: url.clone(),
+                            reason: reason.clone(),
+                        }
+                    }
+                    other => self_update::SelfUpdateError::ParseManifest(other.to_string()),
+                });
+            }
             Ok(self.manifest.clone())
         }
 
@@ -1899,6 +2789,12 @@ pub(crate) mod tests {
         ) -> Result<(), self_update::SelfUpdateError> {
             assert_eq!(current_exe, self.current_exe.as_path());
             self.binary_updates.set(self.binary_updates.get() + 1);
+            if self.binary_update_fails {
+                return Err(self_update::SelfUpdateError::ChecksumMismatch {
+                    expected: "aaaa".to_string(),
+                    actual: "bbbb".to_string(),
+                });
+            }
             Ok(())
         }
     }
@@ -1994,6 +2890,7 @@ pub(crate) mod tests {
     struct FakeSelfTxn {
         expected_package: String,
         update_calls: Cell<usize>,
+        update_fails: bool,
     }
 
     impl FakeSelfTxn {
@@ -2001,7 +2898,15 @@ pub(crate) mod tests {
             Self {
                 expected_package: expected_package.to_string(),
                 update_calls: Cell::new(0),
+                update_fails: false,
             }
+        }
+
+        /// dnf refuses the transaction, leaving the installed version to be
+        /// re-observed rather than assumed.
+        fn failing(mut self) -> Self {
+            self.update_fails = true;
+            self
         }
     }
 
@@ -2016,6 +2921,14 @@ pub(crate) mod tests {
             };
             self.update_calls.set(self.update_calls.get() + 1);
             assert_eq!(package, self.expected_package);
+            if self.update_fails {
+                return Err(PackageTransactionError::TransactionFailed {
+                    command: "dnf".to_string(),
+                    operation: "update".to_string(),
+                    code: Some(1),
+                    stderr: "Error: Transaction test error".to_string(),
+                });
+            }
             Ok(())
         }
 
@@ -2177,12 +3090,16 @@ pub(crate) mod tests {
         )
         .expect_err("rpm-owned self update needs root");
 
-        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(err.error.code(), "EXECUTION_FAILED");
         assert!(
-            err.reason().contains("root") && err.reason().contains("sudo"),
+            err.error.reason().contains("root") && err.error.reason().contains("sudo"),
             "reason must point at sudo: {}",
-            err.reason()
+            err.error.reason()
         );
+        // The refusal happens before dnf, so there is no observed version to
+        // record — but the package it would have moved is already known.
+        assert_eq!(err.context.package.as_deref(), Some("anolisa"));
+        assert_eq!(err.context.rpm_version_before, None);
         assert_eq!(txn.update_calls.get(), 0, "dnf must not run");
         assert_eq!(
             ops.binary_updates.get(),
