@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 全量 TOON 功能验证测试
-# 覆盖三种应用场景：Tokenless CLI、COSH (copilot-shell)、OpenClaw
+# 覆盖三种应用场景：Tokenless CLI、Cosh-NG、OpenClaw
 
 set -uo pipefail
 
@@ -66,11 +66,11 @@ else
     fail "OpenClaw 插件配置异常"
 fi
 
-# 检查 copilot-shell hook
-if [ -f /usr/share/anolisa/adapters/tokenless/common/hooks/compress_toon_hook.py ]; then
-    pass "COSH TOON hook 已安装"
+# 检查统一 PostTool hook
+if [ -f /usr/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py ]; then
+    pass "COSH PostTool hook 已安装"
 else
-    fail "COSH TOON hook 缺失"
+    fail "COSH PostTool hook 缺失"
 fi
 
 # ========== 场景 1: Tokenless CLI ==========
@@ -225,65 +225,12 @@ else
     fail "往返转换存在数据不一致"
 fi
 
-# ========== 场景 2: COSH (copilot-shell) ==========
-section "场景 2: COSH (copilot-shell) Hooks"
+# ========== 场景 2: Cosh-NG ==========
+section "场景 2: Cosh-NG Hooks"
 
 HOOK_DIR=/usr/share/anolisa/adapters/tokenless/common/hooks
 
-scenario "2.1 独立 TOON Hook — 直接 JSON 对象"
-
-payload=$(cat <<'EOF'
-{
-  "tool_name": "web_fetch",
-  "tool_response": {
-    "users": [
-      {"id": 1, "name": "Alice", "email": "alice@example.com", "role": "admin"},
-      {"id": 2, "name": "Bob", "email": "bob@example.com", "role": "user"},
-      {"id": 3, "name": "Charlie", "email": "charlie@example.com", "role": "moderator"},
-      {"id": 4, "name": "Diana", "email": "diana@example.com", "role": "admin"},
-      {"id": 5, "name": "Eve", "email": "eve@example.com", "role": "user"}
-    ],
-    "meta": {"total": 5, "page": 1}
-  }
-}
-EOF
-)
-
-result=$(echo "$payload" | python3 "$HOOK_DIR/compress_toon_hook.py" 2>/dev/null)
-assert_not_empty "$result" "TOON Hook 直接 JSON 输出"
-assert_contains "$result" "users[5]" "TOON Hook 表格格式输出"
-if echo "$result" | jq -e '.hookSpecificOutput.additionalContext' &>/dev/null; then
-    pass "TOON Hook 响应结构正确"
-else
-    fail "TOON Hook 响应结构异常"
-fi
-context=$(echo "$result" | jq -r '.hookSpecificOutput.additionalContext')
-assert_contains "$context" "users[5]" "TOON Hook additionalContext 为裸 TOON 内容"
-if echo "$context" | grep -qF "TOON format"; then
-    fail "TOON Hook 仍包含已废弃的 [TOON format ...] 前缀"
-else
-    pass "TOON Hook 已去除 [TOON format ...] 前缀"
-fi
-
-scenario "2.2 独立 TOON Hook — 转义 JSON 字符串"
-
-payload=$(cat <<'EOF'
-{
-  "tool_name": "exec",
-  "tool_response": "{\"users\":[{\"id\":1,\"name\":\"Alice\",\"email\":\"alice@example.com\",\"role\":\"admin\"},{\"id\":2,\"name\":\"Bob\",\"email\":\"bob@example.com\",\"role\":\"user\"},{\"id\":3,\"name\":\"Charlie\",\"email\":\"charlie@example.com\",\"role\":\"moderator\"},{\"id\":4,\"name\":\"Diana\",\"email\":\"diana@example.com\",\"role\":\"admin\"},{\"id\":5,\"name\":\"Eve\",\"email\":\"eve@example.com\",\"role\":\"user\"}],\"meta\":{\"total\":5,\"page\":1}}"
-}
-EOF
-)
-
-result=$(echo "$payload" | python3 "$HOOK_DIR/compress_toon_hook.py" 2>/dev/null)
-assert_not_empty "$result" "TOON Hook 转义字符串输出"
-if echo "$result" | jq -r '.hookSpecificOutput.additionalContext' | grep -qF "users[5]"; then
-    pass "TOON Hook 正确 unwrap 转义字符串"
-else
-    fail "TOON Hook unwrap 转义字符串失败"
-fi
-
-scenario "2.3 响应压缩 → TOON 流水线"
+scenario "2.1 响应压缩 → TOON 流水线"
 
 payload=$(cat <<'EOF'
 {
@@ -291,14 +238,18 @@ payload=$(cat <<'EOF'
   "tool_response": {
     "title": "Test API Response",
     "data": [
-      {"id": 1, "name": "Item A", "price": 29.99, "in_stock": true, "tags": ["electronics", "sale"]},
-      {"id": 2, "name": "Item B", "price": 49.99, "in_stock": false, "tags": ["clothing"]},
-      {"id": 3, "name": "Item C", "price": 99.99, "in_stock": true, "tags": ["electronics", "new"]},
-      {"id": 4, "name": "Item D", "price": 19.99, "in_stock": true, "tags": ["food", "organic"]},
-      {"id": 5, "name": "Item E", "price": 149.99, "in_stock": true, "tags": ["electronics", "premium"]}
+      {"id": 1, "name": "Item A", "price": 29.99, "in_stock": true, "category": "electronics"},
+      {"id": 2, "name": "Item B", "price": 49.99, "in_stock": false, "category": "clothing"},
+      {"id": 3, "name": "Item C", "price": 99.99, "in_stock": true, "category": "electronics"},
+      {"id": 4, "name": "Item D", "price": 19.99, "in_stock": true, "category": "food"},
+      {"id": 5, "name": "Item E", "price": 149.99, "in_stock": true, "category": "electronics"},
+      {"id": 6, "name": "Item F", "price": 39.99, "in_stock": true, "category": "clothing"},
+      {"id": 7, "name": "Item G", "price": 59.99, "in_stock": true, "category": "electronics"},
+      {"id": 8, "name": "Item H", "price": 79.99, "in_stock": false, "category": "food"},
+      {"id": 9, "name": "Item I", "price": 89.99, "in_stock": true, "category": "electronics"},
+      {"id": 10, "name": "Item J", "price": 109.99, "in_stock": true, "category": "clothing"}
     ],
-    "meta": {"total": 5, "page": 1, "has_next": false},
-    "debug_trace_id": "abc-123-def-456",
+    "meta": {"total": 10, "page": 1, "has_next": false},
     "null_field": null,
     "empty_obj": {},
     "empty_arr": []
@@ -307,42 +258,24 @@ payload=$(cat <<'EOF'
 EOF
 )
 
-result=$(echo "$payload" | python3 "$HOOK_DIR/compress_response_hook.py" 2>/dev/null)
+result=$(
+    echo "$payload" |
+        COSH_NG_VERSION=0.5.0 python3 "$HOOK_DIR/compress_response_hook.py" \
+            --agent-id copilot-shell 2>/dev/null
+)
 assert_not_empty "$result" "Response→TOON 流水线输出"
-context=$(echo "$result" | jq -r '.hookSpecificOutput.additionalContext')
-assert_contains "$context" "data[5]" "流水线产出 TOON 表格内容"
+context=$(echo "$result" | jq -r '.hookSpecificOutput.updatedToolResponse')
+assert_contains "$context" "data[10]" "流水线产出 TOON 表格内容"
 if echo "$context" | grep -qE "\[tokenless\]|TOON format"; then
-    fail "流水线 additionalContext 仍包含已废弃的标签前缀"
+    fail "流水线 updatedToolResponse 仍包含已废弃的标签前缀"
 else
-    pass "流水线 additionalContext 已去除标签前缀"
+    pass "流水线 updatedToolResponse 已去除标签前缀"
 fi
-# 验证 debug 字段被移除
-if echo "$context" | grep -qvF "debug_trace_id"; then
-    pass "Response 压缩移除了 debug 字段"
+# 验证 JSON 清理移除空值字段
+if echo "$context" | grep -qE "null_field|empty_obj|empty_arr"; then
+    fail "Response 压缩未移除空值字段"
 else
-    fail "Response 压缩未移除 debug 字段"
-fi
-
-scenario "2.4 COSH Hook — 小响应跳过"
-
-payload='{"tool_name":"exec","tool_response":"{\"result\":\"ok\"}"}'
-result=$(echo "$payload" | python3 "$HOOK_DIR/compress_toon_hook.py" 2>/dev/null)
-# 小响应应该被跳过（无输出）
-if [ -z "$result" ]; then
-    pass "小响应正确跳过"
-else
-    fail "小响应未被跳过"
-fi
-
-scenario "2.5 COSH Hook — 非 JSON 响应跳过"
-
-payload='{"tool_name":"exec","tool_response":"plain text output, not json at all but long enough to pass length check... padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding"}'
-result=$(echo "$payload" | python3 "$HOOK_DIR/compress_toon_hook.py" 2>/dev/null)
-# 非 JSON 应该被跳过
-if [ -z "$result" ]; then
-    pass "非 JSON 响应正确跳过"
-else
-    fail "非 JSON 响应未被跳过"
+    pass "Response 压缩移除了空值字段"
 fi
 
 # ========== 场景 3: OpenClaw ==========

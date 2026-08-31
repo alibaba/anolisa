@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""Regression tests for rewrite_hook.py rtk-prefix anchoring.
-
-rtk emits rewritten commands with a bare `rtk` prefix, which only resolves
-when the shell executing the tool call has the rtk location on its PATH.
-Agent runtimes with a trimmed PATH (e.g. IDE tool environments without
-~/.local/bin) would fail every rewritten command with exit 127. The hook
-must anchor the rewrite to the resolved absolute rtk binary so the command
-is self-contained — without touching quoting, globs, or any other part of
-the command text.
-
-The tests stage a fake rtk/tokenless pair in the fallback layout under a
-sandboxed HOME and run the hook with a PATH that deliberately lacks the
-rtk location — the exact shape of the affected environments.
-"""
+"""Protocol v2 and cross-operation tests for the Common PreTool hook."""
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,184 +11,295 @@ import tempfile
 import unittest
 from pathlib import Path
 
-HOOK = (
-    Path(__file__).resolve().parent.parent
-    / "adapters"
-    / "tokenless"
-    / "common"
-    / "hooks"
-    / "rewrite_hook.py"
+TESTS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = TESTS_DIR.parent
+CONTRACT_DIR = TESTS_DIR / "contract"
+sys.path.insert(0, str(CONTRACT_DIR))
+
+import contract_runner
+import corpus
+
+RESPONSE_HOOK = REPO_ROOT / "adapters/tokenless/common/hooks/compress_response_hook.py"
+MOCK_TOKENLESS = CONTRACT_DIR / "mock_tokenless.py"
+QWEN_MANIFEST = (
+    REPO_ROOT / "adapters/tokenless/qwencode/qwen-extension.json.in"
 )
 
-# Mirrors real rtk: --version answers; rewrite maps each input command to
-# the shape real rtk would emit, with a bare `rtk` prefix at wrapper
-# positions (including after `sudo`, env assignments, and connectives).
-FAKE_RTK = """#!/usr/bin/env python3
-import sys
 
-REWRITES = {
-    "grep foo bar && git status": "rtk grep --cached foo && rtk git status",
-    "grep foo bar": "rtk grep foo bar",
-    "sudo git status": "sudo rtk git status",
-    "RUST_BACKTRACE=1 cargo test": "RUST_BACKTRACE=1 rtk cargo test",
-    "git status & grep foo": "git status & rtk grep foo",
-    "grep -E 'foo|rtk bar' src/": "rtk grep -E 'foo|rtk bar' src/",
-    "grep foo *.txt": "rtk grep foo *.txt",
-    "grep foo #include src/": "rtk grep foo #include src/",
-    "git log 2>&1 | head": "rtk git log 2>&1 | rtk head",
-    "git status 2>/dev/null": "rtk git status 2>/dev/null",
-    "echo $(date)": "rtk echo $(date)",
-}
-
-if len(sys.argv) > 1 and sys.argv[1] == "--version":
-    print("rtk 0.43.0")
-    sys.exit(0)
-if len(sys.argv) > 2 and sys.argv[1] == "rewrite" and sys.argv[2] in REWRITES:
-    print(REWRITES[sys.argv[2]])
-    sys.exit(0)
-sys.exit(1)
-"""
-
-FAKE_TOKENLESS = """#!/bin/sh
-echo "tokenless 0.7.3"
-"""
+def pre_tool_payload(call_id: str = "call-1") -> dict:
+    payload = {
+        "session_id": "session-1",
+        "tool_name": "Bash",
+        "tool_input": {"command": "grep error log", "timeout": 30},
+    }
+    if call_id:
+        payload["tool_use_id"] = call_id
+    return payload
 
 
-def _write_exec(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+def post_tool_payload(call_id: str) -> dict:
+    return {
+        "session_id": "session-1",
+        "tool_use_id": call_id,
+        "tool_name": "Bash",
+        "tool_response": {"output": "x" * 80},
+    }
 
 
-class RewriteAnchorTest(unittest.TestCase):
+class PreToolContractTest(unittest.TestCase):
+    def run_case(self, behavior: str | None, call_id: str = "call-1"):
+        return contract_runner.run_case(
+            corpus.PRE_TOOL_HOOK,
+            json.dumps(pre_tool_payload(call_id)),
+            {"TOKENLESS_AGENT_ID": "qoder-cli"},
+            behavior,
+        )
+
+    def test_applied_rewrite_uses_protocol_v2(self) -> None:
+        result = self.run_case("applied")
+        self.assertEqual(result.spawns, ["compress"])
+        self.assertEqual(
+            result.envelope,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "tool_input": {"command": "/mock/rtk grep error log"},
+                    "updatedInput": {
+                        "command": "/mock/rtk grep error log",
+                        "timeout": 30,
+                    },
+                }
+            },
+        )
+        self.assertEqual(len(result.requests), 1)
+        request = result.requests[0]
+        self.assertEqual(request["protocol_version"], 2)
+        self.assertEqual(request["operation"], "pre_tool")
+        self.assertEqual(
+            request["attribution"],
+            {
+                "agent_id": "qoder-cli",
+                "session_id": "session-1",
+                "tool_use_id": "call-1",
+            },
+        )
+        self.assertEqual(
+            request["input"],
+            {
+                "tool_name": "Bash",
+                "arguments": {"command": "grep error log", "timeout": 30},
+                "command_field": "command",
+                "capabilities": {
+                    "replace_arguments": True,
+                    "block_and_suggest": False,
+                },
+            },
+        )
+
+    def test_passthrough_and_failure_classes_fail_open(self) -> None:
+        for behavior in [
+            "no_savings",
+            "passthrough",
+            "error_disposition",
+            "nonzero_exit",
+            "malformed_stdout",
+        ]:
+            with self.subTest(behavior=behavior):
+                result = self.run_case(behavior)
+                self.assertEqual(result.envelope, {})
+                self.assertEqual(result.spawns, ["compress"])
+
+    def test_missing_binary_and_missing_call_id_do_not_spawn(self) -> None:
+        self.assertEqual(self.run_case(None).envelope, {})
+        missing_id = self.run_case("applied", call_id="")
+        self.assertEqual(missing_id.envelope, {})
+        self.assertEqual(missing_id.spawns, [])
+
+
+class HookLifecycleStateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.home = Path(self.tmp.name)
-        # Fallback layout resolve_binary probes when PATH lookup fails.
-        share = self.home / ".local" / "share" / "anolisa" / "tokenless"
-        _write_exec(share / "rtk", FAKE_RTK)
-        _write_exec(share / "tokenless", FAKE_TOKENLESS)
-        self.rtk = str(share / "rtk")
+        root = Path(self.tmp.name)
+        self.home = root / "home"
+        self.bin_dir = root / "bin"
+        self.home.mkdir()
+        self.bin_dir.mkdir()
+        tokenless = self.bin_dir / "tokenless"
+        shutil.copy(MOCK_TOKENLESS, tokenless)
+        tokenless.chmod(tokenless.stat().st_mode | stat.S_IXUSR)
+        self.request_log = root / "requests.jsonl"
+        self.env = {
+            **os.environ,
+            "HOME": str(self.home),
+            "PATH": f"{self.bin_dir}:/usr/bin:/bin",
+            "LC_ALL": "C.UTF-8",
+            "TOKENLESS_AGENT_ID": "qoder-cli",
+            "TOKENLESS_STATS_ENABLED": "0",
+            "TOKENLESS_SLS_ENABLED": "0",
+            "TOKENLESS_MOCK_BEHAVIOR": "applied",
+            "TOKENLESS_MOCK_REQUEST_LOG": str(self.request_log),
+        }
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _rewrite(self, command: str) -> str:
-        env = os.environ.copy()
-        env["HOME"] = str(self.home)
-        # The affected shape: PATH lacks the rtk location entirely.
-        env["PATH"] = "/usr/bin:/bin"
-        env.pop("TOKENLESS_AGENT_ID", None)
+    def run_hook(
+        self, hook: Path, payload: dict, *hook_args: str, env: dict | None = None
+    ) -> dict:
         proc = subprocess.run(
-            [sys.executable, str(HOOK)],
-            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+            [sys.executable, str(hook), *hook_args],
+            input=json.dumps(payload),
             capture_output=True,
             text=True,
-            env=env,
+            env=self.env if env is None else env,
             timeout=15,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        out = json.loads(proc.stdout or "{}")
-        rewritten = (
-            out.get("hookSpecificOutput", {}).get("tool_input", {}).get("command", "")
+        return json.loads(proc.stdout or "{}")
+
+    def requests(self) -> list[dict]:
+        with self.request_log.open() as request_log:
+            return [json.loads(line) for line in request_log if line.strip()]
+
+    def test_rtk_state_reaches_post_tool_once(self) -> None:
+        rewritten = self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload())
+        self.assertIn("hookSpecificOutput", rewritten)
+
+        first = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
+        self.assertEqual(first, {})
+        self.assertEqual(
+            self.requests()[-1]["input"]["output_optimization"], "rtk"
         )
-        self.assertTrue(rewritten, f"hook did not rewrite: {out}")
-        return rewritten
 
-    def test_rewrite_anchored_to_resolved_rtk_path(self) -> None:
-        command = self._rewrite("grep foo bar && git status")
-        # Every segment starts with the absolute rtk binary, not bare `rtk`.
-        self.assertEqual(command, f"{self.rtk} grep --cached foo && {self.rtk} git status")
-        # Self-contained: the resolved first word is an executable file even
-        # though PATH lacks its directory.
-        first_word = command.split(" ", 1)[0]
-        self.assertTrue(os.path.isfile(first_word), command)
-        self.assertTrue(os.access(first_word, os.X_OK), command)
+        second = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
+        self.assertIn("hookSpecificOutput", second)
+        self.assertEqual(
+            self.requests()[-1]["input"]["output_optimization"], "none"
+        )
 
-    def test_updated_input_matches_tool_input(self) -> None:
-        env = os.environ.copy()
-        env["HOME"] = str(self.home)
-        env["PATH"] = "/usr/bin:/bin"
-        env.pop("TOKENLESS_AGENT_ID", None)
-        proc = subprocess.run(
-            [sys.executable, str(HOOK)],
-            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "grep foo bar"}}),
-            capture_output=True,
-            text=True,
+    def test_state_is_isolated_by_tool_call(self) -> None:
+        self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload("call-a"))
+
+        other = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-b"))
+        self.assertIn("hookSpecificOutput", other)
+        self.assertEqual(
+            self.requests()[-1]["input"]["output_optimization"], "none"
+        )
+
+        matching = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-a"))
+        self.assertEqual(matching, {})
+        self.assertEqual(
+            self.requests()[-1]["input"]["output_optimization"], "rtk"
+        )
+
+    def test_rewrite_is_not_applied_when_state_cannot_be_written(self) -> None:
+        tokenless_dir = self.home / ".tokenless"
+        tokenless_dir.mkdir()
+        (tokenless_dir / "hook-state").write_text("not a directory")
+        output = self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload())
+        self.assertEqual(output, {})
+
+    def test_command_agent_id_keeps_lifecycle_state_stable(self) -> None:
+        env = {
+            key: value
+            for key, value in self.env.items()
+            if key != "TOKENLESS_AGENT_ID"
+        }
+        self.run_hook(
+            corpus.PRE_TOOL_HOOK,
+            pre_tool_payload(),
+            "--agent-id",
+            "copilot-shell",
             env=env,
-            timeout=15,
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        hook_out = json.loads(proc.stdout).get("hookSpecificOutput", {})
-        command = hook_out.get("tool_input", {}).get("command", "")
-        self.assertEqual(command, f"{self.rtk} grep foo bar")
-        self.assertEqual(command, hook_out.get("updatedInput", {}).get("command", ""))
+        self.run_hook(
+            RESPONSE_HOOK,
+            post_tool_payload("call-1"),
+            "--agent-id",
+            "copilot-shell",
+            env=env,
+        )
+        requests = self.requests()
+        self.assertEqual(requests[-2]["attribution"]["agent_id"], "copilot-shell")
+        self.assertEqual(requests[-1]["attribution"]["agent_id"], "copilot-shell")
+        self.assertEqual(requests[-1]["input"]["output_optimization"], "rtk")
 
-    def test_anchor_after_wrapper(self) -> None:
-        self.assertEqual(
-            self._rewrite("sudo git status"),
-            f"sudo {self.rtk} git status",
-        )
+    def test_abandoned_state_is_bounded_on_next_rewrite(self) -> None:
+        state_dir = self.home / ".tokenless" / "hook-state"
+        state_dir.mkdir(parents=True)
+        stale = state_dir / "stale"
+        stale.write_text("rtk\n")
+        stale_time = stale.stat().st_mtime - 25 * 60 * 60
+        os.utime(stale, (stale_time, stale_time))
+        claimed = state_dir / "claimed.consuming.1234"
+        claimed.write_text("rtk\n")
+        crashed = state_dir / "crashed.consuming.5678"
+        crashed.write_text("rtk\n")
+        os.utime(crashed, (stale_time, stale_time))
+        for index in range(1025):
+            (state_dir / f"abandoned-{index:04}").write_text("rtk\n")
 
-    def test_anchor_after_env_assignment(self) -> None:
-        self.assertEqual(
-            self._rewrite("RUST_BACKTRACE=1 cargo test"),
-            f"RUST_BACKTRACE=1 {self.rtk} cargo test",
-        )
+        self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload())
 
-    def test_anchor_after_single_ampersand(self) -> None:
-        self.assertEqual(
-            self._rewrite("git status & grep foo"),
-            f"git status & {self.rtk} grep foo",
-        )
+        self.assertFalse(stale.exists())
+        self.assertTrue(claimed.exists())
+        self.assertFalse(crashed.exists())
+        unclaimed = [
+            path for path in state_dir.iterdir() if ".consuming." not in path.name
+        ]
+        self.assertLessEqual(len(unclaimed), 1024)
 
-    def test_quoted_rtk_pattern_untouched(self) -> None:
-        # Only the leading wrapper is anchored; the `rtk` inside the quoted
-        # regex pattern must survive byte-for-byte.
-        self.assertEqual(
-            self._rewrite("grep -E 'foo|rtk bar' src/"),
-            f"{self.rtk} grep -E 'foo|rtk bar' src/",
-        )
+    def test_qwen_lifecycle_commands_pin_agent_id(self) -> None:
+        manifest = json.loads(QWEN_MANIFEST.read_text().replace("@VERSION@", "test"))
+        rewrite = manifest["hooks"]["PreToolUse"][1]["hooks"][0]["command"]
+        response = manifest["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        self.assertIn("rewrite_hook.py --agent-id qwencode", rewrite)
+        self.assertIn("compress_response_hook.py --agent-id qwencode", response)
 
-    def test_unquoted_glob_preserved(self) -> None:
-        # The glob must stay an unquoted glob — re-quoting tokens would
-        # produce '*.txt' and neuter expansion.
-        self.assertEqual(
-            self._rewrite("grep foo *.txt"),
-            f"{self.rtk} grep foo *.txt",
-        )
 
-    def test_hash_argument_preserved(self) -> None:
-        # `#` must not be treated as a comment starter — the argument and
-        # everything after it stays in the command.
-        self.assertEqual(
-            self._rewrite("grep foo #include src/"),
-            f"{self.rtk} grep foo #include src/",
-        )
-
-    def test_fd_merging_preserved(self) -> None:
-        # `2>&1` must stay one unsplit token — splitting it into
-        # `2 >& 1` would turn `2` into an argument and break the merge.
-        self.assertEqual(
-            self._rewrite("git log 2>&1 | head"),
-            f"{self.rtk} git log 2>&1 | {self.rtk} head",
-        )
-
-    def test_fd_redirection_preserved(self) -> None:
-        # `2>/dev/null` must stay attached — `2 > /dev/null` would make `2`
-        # an argument and redirect stdout instead of stderr.
-        self.assertEqual(
-            self._rewrite("git status 2>/dev/null"),
-            f"{self.rtk} git status 2>/dev/null",
-        )
-
-    def test_command_substitution_preserved(self) -> None:
-        # `$(...)` must not be split into `$ ( ... )`, which would destroy
-        # the substitution.
-        self.assertEqual(
-            self._rewrite("echo $(date)"),
-            f"{self.rtk} echo $(date)",
-        )
+@unittest.skipUnless(
+    os.path.exists(corpus.DEBUG_TOKENLESS_BIN),
+    "tokenless debug binary not built",
+)
+class RealCorePreToolTest(unittest.TestCase):
+    def test_core_owns_rtk_execution_and_path_anchoring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            bin_dir = root / "bin"
+            home.mkdir()
+            bin_dir.mkdir()
+            os.symlink(corpus.DEBUG_TOKENLESS_BIN, bin_dir / "tokenless")
+            rtk = bin_dir / "rtk"
+            rtk.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"--version\" ]; then echo 'rtk 0.43.0'; exit 0; fi\n"
+                "if [ \"$1\" = \"rewrite\" ]; then echo 'rtk grep --count error log'; exit 0; fi\n"
+                "exit 1\n"
+            )
+            rtk.chmod(rtk.stat().st_mode | stat.S_IXUSR)
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "TOKENLESS_AGENT_ID": "qoder-cli",
+                "TOKENLESS_STATS_ENABLED": "0",
+                "TOKENLESS_SLS_ENABLED": "0",
+            }
+            proc = subprocess.run(
+                [sys.executable, corpus.PRE_TOOL_HOOK],
+                input=json.dumps(pre_tool_payload()),
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=15,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            output = json.loads(proc.stdout)["hookSpecificOutput"]
+            command = output["tool_input"]["command"]
+            self.assertIn(f" {rtk} grep --count error log", command)
+            self.assertIn("TOKENLESS_AGENT_ID=qoder-cli", command)
+            self.assertEqual(output["updatedInput"]["timeout"], 30)
 
 
 if __name__ == "__main__":

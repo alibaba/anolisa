@@ -82,8 +82,10 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
 Common Hook 不声明受信 Retrieve 能力，因此只接受无损 JSON 候选；需要截断的候选以
 `recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK 操作错误由 CLI 以退出码 1
-返回，Hook 在进程边界上 fail-open。Common PreTool Hook 仍直接调用 RTK，本阶段尚未把逐调用
-`output_optimization: "rtk"` 状态传给 PostTool。
+返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过 Protocol v2 调用 Core，由 Core
+执行 RTK；Adapter 按 Tool Call ID 暂存 `output_optimization: "rtk"`，并在对应 PostTool 调用中
+消费该状态，使 RTK 输出绕过二次压缩。缺少稳定 Tool Call ID 时保持原命令不变；宿主未发送
+PostTool 事件时遗留的状态会在后续 PreTool 调用中按 24 小时 TTL 和 1024 个文件上限清理。
 
 **TOON 效果**：对结构化/表格数据可额外节省 30-60%，整体压缩效果 = 响应压缩节省 + TOON 语法消除。例如：原始 JSON 4480 字节，经响应压缩至 625 字节（~86%），再经 TOON 编码进一步缩减。实测表格数据（`[{"id":...}]`）可达到 44% 的 TOON 单独节省。
 

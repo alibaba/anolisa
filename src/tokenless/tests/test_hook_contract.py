@@ -32,6 +32,14 @@ FAIL_OPEN_BEHAVIORS = [
     "malformed_stdout",
 ]
 
+PRE_TOOL_AGENTS = {
+    "claude-code": {"TOKENLESS_AGENT_ID": "claude-code"},
+    "qoder-cli": {"TOKENLESS_AGENT_ID": "qoder-cli"},
+    "opencode": {"TOKENLESS_AGENT_ID": "opencode"},
+    "qwencode": {"TOKENLESS_AGENT_ID": "qwencode"},
+    "cosh-ng": {"COSH_NG_VERSION": "0.5.0"},
+}
+
 
 def load_fixture(kind: str, name: str) -> str:
     with open(corpus.fixture_path(kind, name)) as f:
@@ -54,6 +62,55 @@ def mock_applied_output(content: str) -> str:
         return value
 
     return json.dumps(truncate(data), separators=(",", ":"), ensure_ascii=False)
+
+
+class PreToolHookContract(unittest.TestCase):
+    def run_case(self, agent: str, behavior: str | None):
+        payload = json.dumps(
+            {
+                "session_id": "session-1",
+                "tool_use_id": "call-1",
+                "tool_call_id": "call-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "grep error log"},
+            }
+        )
+        return contract_runner.run_case(
+            corpus.PRE_TOOL_HOOK,
+            payload,
+            PRE_TOOL_AGENTS[agent],
+            behavior,
+        )
+
+    def test_replacement(self):
+        expected = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "tool_input": {"command": "/mock/rtk grep error log"},
+                "updatedInput": {"command": "/mock/rtk grep error log"},
+            }
+        }
+        for agent in PRE_TOOL_AGENTS:
+            with self.subTest(agent=agent):
+                result = self.run_case(agent, "applied")
+                self.assertEqual(result.envelope, expected)
+                self.assertEqual(result.spawns, ["compress"])
+                self.assertEqual(result.requests[0]["operation"], "pre_tool")
+
+    def test_fail_open_classes_pass_through(self):
+        for agent in PRE_TOOL_AGENTS:
+            for behavior in FAIL_OPEN_BEHAVIORS:
+                with self.subTest(agent=agent, behavior=behavior):
+                    result = self.run_case(agent, behavior)
+                    self.assertEqual(result.envelope, {})
+                    self.assertEqual(result.spawns, ["compress"])
+
+    def test_missing_binary_passes_through_without_spawning(self):
+        for agent in PRE_TOOL_AGENTS:
+            with self.subTest(agent=agent):
+                result = self.run_case(agent, None)
+                self.assertEqual(result.envelope, {})
+                self.assertEqual(result.spawns, [])
 
 
 class ResponseHookContract(unittest.TestCase):

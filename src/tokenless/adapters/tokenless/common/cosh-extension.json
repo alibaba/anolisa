@@ -26,8 +26,8 @@
             "type": "command",
             "name": "tokenless-rewrite",
             "description": "Rewrites shell commands via rtk for token savings",
-            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py",
-            "timeout": 5000,
+            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py --agent-id copilot-shell",
+            "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
@@ -40,7 +40,7 @@
             "type": "command",
             "name": "tokenless-compress-response",
             "description": "Compresses tool responses and encodes to TOON format",
-            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py",
+            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py --agent-id copilot-shell",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }

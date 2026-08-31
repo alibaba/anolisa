@@ -69,6 +69,50 @@ def respond_before_model(request: dict, behavior: str) -> int:
     return 0
 
 
+def respond_pre_tool(request: dict, behavior: str) -> int:
+    input_data = request.get("input")
+    if (
+        not isinstance(input_data, dict)
+        or not isinstance(input_data.get("tool_name"), str)
+        or not isinstance(input_data.get("arguments"), dict)
+        or not isinstance(input_data.get("command_field"), str)
+        or not isinstance(input_data.get("capabilities"), dict)
+    ):
+        return 3
+
+    arguments = input_data["arguments"]
+    command_field = input_data["command_field"]
+    command = arguments.get(command_field)
+    if not isinstance(command, str):
+        return 3
+    if behavior == "applied":
+        rewritten = dict(arguments)
+        rewritten[command_field] = f"/mock/rtk {command}"
+        envelope(
+            request,
+            {
+                "arguments": rewritten,
+                "action": "replace_arguments",
+                "output_optimization": "rtk",
+            },
+        )
+        return 0
+    if behavior in {"no_savings", "passthrough"}:
+        envelope(
+            request,
+            {
+                "arguments": arguments,
+                "action": "passthrough",
+                "output_optimization": "none",
+            },
+        )
+        return 0
+    if behavior == "error_disposition":
+        envelope(request, {})
+        return 0
+    return 4
+
+
 def respond_post_tool(request: dict, behavior: str) -> int:
     input_data = request.get("input")
     if (
@@ -87,7 +131,9 @@ def respond_post_tool(request: dict, behavior: str) -> int:
     before_tokens = 100
     after_tokens = 100
     can_replace = input_data["capabilities"].get("replace_output") is True
-    if behavior == "applied" and can_replace:
+    if input_data["output_optimization"] == "rtk":
+        disposition = "passthrough"
+    elif behavior == "applied" and can_replace:
         output = json.dumps(
             truncate_strings(json.loads(content)),
             separators=(",", ":"),
@@ -142,15 +188,22 @@ def main() -> int:
         return 0
 
     request = json.loads(raw)
+    request_log_path = os.environ.get("TOKENLESS_MOCK_REQUEST_LOG")
+    if request_log_path:
+        with open(request_log_path, "a") as request_log:
+            request_log.write(json.dumps(request) + "\n")
     if (
         request.get("protocol_version") != 2
-        or request.get("operation") not in {"before_model", "post_tool"}
+        or request.get("operation")
+        not in {"before_model", "pre_tool", "post_tool"}
         or not isinstance(request.get("attribution"), dict)
         or set(request) != {"protocol_version", "operation", "attribution", "input"}
     ):
         return 3
     if request["operation"] == "before_model":
         return respond_before_model(request, behavior)
+    if request["operation"] == "pre_tool":
+        return respond_pre_tool(request, behavior)
     return respond_post_tool(request, behavior)
 
 

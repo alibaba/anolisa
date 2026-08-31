@@ -125,15 +125,25 @@ class CoshExtensionMatcherTest(unittest.TestCase):
                     f"matcher must not match non-shell tool name {name!r}",
                 )
 
-    def test_rewrite_hook_command_unchanged(self):
+    def test_lifecycle_commands_pin_agent_id(self):
         # Structural guard: the rewrite group still dispatches to
-        # rewrite_hook.py, so the matcher above gates the real hook.
+        # rewrite_hook.py, so the matcher above gates the real hook. The
+        # command argument survives hosts that drop the manifest env block.
         for group in self.manifest["hooks"]["PreToolUse"]:
             for hook in group.get("hooks", []):
                 if hook.get("name") == "tokenless-rewrite":
                     self.assertIn("rewrite_hook.py", hook["command"])
-                    return
-        self.fail("tokenless-rewrite hook not found in PreToolUse groups")
+                    self.assertIn("--agent-id copilot-shell", hook["command"])
+                    break
+            else:
+                continue
+            break
+        else:
+            self.fail("tokenless-rewrite hook not found in PreToolUse groups")
+
+        response_hook = self.manifest["hooks"]["PostToolUse"][0]["hooks"][0]
+        self.assertIn("compress_response_hook.py", response_hook["command"])
+        self.assertIn("--agent-id copilot-shell", response_hook["command"])
 
 
 if __name__ == "__main__":

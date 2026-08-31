@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 
 # -- Binary fallback paths ----------------------------------------------------
 #
@@ -211,12 +213,6 @@ _TRUNCATE_STRINGS_AT = _layer3_thr.get("truncate_strings_at", 1_048_576)
 _TRUNCATE_ARRAYS_AT = _layer3_thr.get("truncate_arrays_at", 65_536)
 _MAX_DEPTH = _layer3_thr.get("max_depth", 32)
 
-# Backward-compatible alias — direct reference (not a copy) so consumers see
-# the same set as SKIP_TOOLS. Used by compress_toon_hook.py for the standalone
-# TOON-only path where "content retrieval" is the more descriptive name.
-CONTENT_RETRIEVAL_TOOLS = SKIP_TOOLS
-
-
 def get_thresholds(tool_name: str) -> tuple[int, int, int]:
     """Return (truncate_strings_at, truncate_arrays_at, max_depth) for a tool.
 
@@ -346,6 +342,9 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
 
 _CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
 _CONTEXT_FILE = os.path.join(_CONTEXT_DIR, ".rewrite-context")
+_OPTIMIZATION_STATE_DIR = os.path.join(_CONTEXT_DIR, "hook-state")
+_OPTIMIZATION_STATE_TTL_SECONDS = 24 * 60 * 60
+_OPTIMIZATION_STATE_MAX_FILES = 1024
 
 # -- Binary resolution (cached) -----------------------------------------------
 
@@ -474,6 +473,83 @@ def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
     secure_write_text(_CONTEXT_FILE, f"{agent_id}\n{session_id}\n{tool_use_id}\n")
 
 
+def _optimization_state_path(
+    agent_id: str, session_id: str, tool_use_id: str
+) -> str:
+    identity = "\0".join((agent_id, session_id, tool_use_id)).encode()
+    digest = hashlib.sha256(identity).hexdigest()
+    return os.path.join(_OPTIMIZATION_STATE_DIR, digest)
+
+
+def _prune_optimization_states() -> None:
+    """Bound abandoned per-call state when a host omits PostToolUse."""
+    try:
+        entries = os.scandir(_OPTIMIZATION_STATE_DIR)
+    except FileNotFoundError:
+        return
+
+    cutoff = time.time() - _OPTIMIZATION_STATE_TTL_SECONDS
+    live = []
+    with entries:
+        for entry in entries:
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                modified = entry.stat(follow_symlinks=False).st_mtime
+                if ".consuming." in entry.name and modified > cutoff:
+                    continue
+                if modified <= cutoff:
+                    os.unlink(entry.path)
+                else:
+                    live.append((modified, entry.path))
+            except FileNotFoundError:
+                continue
+
+    excess = len(live) - _OPTIMIZATION_STATE_MAX_FILES + 1
+    if excess > 0:
+        for _, path in sorted(live)[:excess]:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+
+def mark_rtk_optimized(agent_id: str, session_id: str, tool_use_id: str) -> None:
+    """Persist RTK ownership for one tool call before applying its rewrite."""
+    _prune_optimization_states()
+    secure_write_text(
+        _optimization_state_path(agent_id, session_id, tool_use_id), "rtk\n"
+    )
+
+
+def consume_output_optimization(
+    agent_id: str, session_id: str, tool_use_id: str
+) -> str:
+    """Consume one tool call's optimization state for its final result."""
+    if not tool_use_id:
+        return "none"
+    path = _optimization_state_path(agent_id, session_id, tool_use_id)
+    consuming_path = f"{path}.consuming.{os.getpid()}"
+    try:
+        os.rename(path, consuming_path)
+    except FileNotFoundError:
+        return "none"
+
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(consuming_path, flags)
+        with os.fdopen(fd) as state_file:
+            state = state_file.read()
+    finally:
+        try:
+            os.unlink(consuming_path)
+        except FileNotFoundError:
+            pass
+    return "rtk" if state == "rtk\n" else "none"
+
+
 def forward_stderr(proc: subprocess.CompletedProcess) -> None:
     """Forward subprocess stderr on failure (non-zero exit) via warn()."""
     if proc.returncode != 0 and proc.stderr:
@@ -535,12 +611,38 @@ def build_before_model_request(
     }
 
 
+def build_pre_tool_request(
+    arguments: dict,
+    agent_id: str,
+    tool_name: str,
+    command_field: str,
+    session_id: str = "",
+    tool_use_id: str = "",
+) -> dict:
+    """Build a Protocol v2 PreTool transport request."""
+    return {
+        "protocol_version": 2,
+        "operation": "pre_tool",
+        "attribution": _attribution(agent_id, session_id, tool_use_id),
+        "input": {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "command_field": command_field,
+            "capabilities": {
+                "replace_arguments": True,
+                "block_and_suggest": False,
+            },
+        },
+    }
+
+
 def build_post_tool_request(
     content: str,
     agent_id: str,
     tool_name: str,
     status: str,
     content_origin: str,
+    output_optimization: str,
     session_id: str = "",
     tool_use_id: str = "",
     replace_output: bool = False,
@@ -561,7 +663,7 @@ def build_post_tool_request(
             "content": content,
             "status": status,
             "content_origin": content_origin,
-            "output_optimization": "none",
+            "output_optimization": output_optimization,
             "capabilities": {
                 "replace_output": replace_output,
                 "publish_retrieve_tool": False,

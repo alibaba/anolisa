@@ -36,10 +36,10 @@ Output contract per agent:
     replacement remain passthrough (roadmap §7). Environment attribution is
     still injected: it is additive by design.
 
-The agent ID is read from the TOKENLESS_AGENT_ID environment variable
-(set by the install action script).  When running under Cosh-NG, the
-agent ID is overridden to ``cosh-ng`` for correct stats attribution.
-Fallback paths follow the ANOLISA FHS spec: /usr/bin/tokenless.
+The agent ID is resolved from the host runtime, ``--agent-id`` argument, or
+TOKENLESS_AGENT_ID environment variable. When running under Cosh-NG, runtime
+detection overrides the declared ID for correct stats attribution. Fallback
+paths follow the ANOLISA FHS spec: /usr/bin/tokenless.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ from hook_utils import (
     SHELL_TOOLS,
     SKIP_TOOLS,
     build_post_tool_request,
+    consume_output_optimization,
     detect_cosh_ng_runtime,
     is_skill_file,
     parse_version,
@@ -212,27 +213,36 @@ def main() -> None:
     cosh_ng_version = detect_cosh_ng_runtime()
     cosh_ng_detected = cosh_ng_version is not None
 
-    # If Cosh-NG is detected but unsupported version, fail open
+    # 2. Resolve agent ID based on runtime
+    agent_id = resolve_agent_id()
+
+    # 3. Read stdin JSON and consume any matching PreTool state.
+    try:
+        input_data = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        warn("failed to read PostToolUse payload. Passing through unchanged.")
+        skip()
+
+    session_id = input_data.get("session_id", "")
+    tool_use_id = resolve_tool_call_id(agent_id, input_data)
+    try:
+        output_optimization = consume_output_optimization(
+            agent_id, session_id, tool_use_id
+        )
+    except OSError as error:
+        warn(f"failed to consume PreTool optimization state: {error}")
+        output_optimization = "none"
+
     if cosh_ng_detected and cosh_ng_version == (0, 0, 0):
         warn("Unsupported Cosh-NG version. Response compression disabled (fail open).")
         skip()
 
-    # 2. Resolve agent ID based on runtime
-    agent_id = resolve_agent_id()
-
-    # 3. Resolve binaries
+    # 4. Resolve the single Core entry point after consuming per-call state.
     tokenless_bin = resolve_binary(
         "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
     )
     if not tokenless_bin:
         warn("tokenless is not installed. Response compression hook disabled.")
-        skip()
-
-    # 4. Read stdin JSON
-    try:
-        input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError, ValueError):
-        warn("failed to read PostToolUse payload. Passing through unchanged.")
         skip()
 
     tool_name = input_data.get("tool_name", "unknown")
@@ -277,11 +287,7 @@ def main() -> None:
     else:
         skip()
 
-    # 8. Extract caller context
-    session_id = input_data.get("session_id", "")
-    tool_use_id = resolve_tool_call_id(agent_id, input_data)
-
-    # 9. Capability declaration: what can this host actually do?
+    # 8. Capability declaration: what can this host actually do?
     if cosh_ng_detected:
         can_replace = True
         replace_with_text = True  # updatedToolResponse accepts any text
@@ -307,7 +313,7 @@ def main() -> None:
         can_replace = False
         replace_with_text = True
 
-    # 10. Map host facts into the required lifecycle fields.
+    # 9. Map host facts into the required lifecycle fields.
     if tool_name in SKIP_TOOLS:
         content_origin = "file_content"
     elif tool_name in SHELL_TOOLS:
@@ -359,13 +365,14 @@ def main() -> None:
         if error_parts:
             content = "\n".join(error_parts)
 
-    # 11. The one Tokenless subprocess: Core owns all PostTool policy.
+    # 10. The one Tokenless subprocess: Core owns all PostTool policy.
     request = build_post_tool_request(
         content,
         agent_id,
         tool_name,
         status,
         content_origin,
+        output_optimization,
         session_id=session_id,
         tool_use_id=tool_use_id,
         replace_output=can_replace,
@@ -385,7 +392,7 @@ def main() -> None:
         warn("tokenless compress returned no output. Passing through unchanged.")
         _emit_attribution_or_skip(env_attribution)
 
-    # 13. Envelope construction — dispatch by agent runtime. An unwrapped
+    # 11. Envelope construction — dispatch by agent runtime. An unwrapped
     # shell field is re-injected into a same-shaped envelope: the compressed
     # text replaces exactly the field that was sent, every other field stays
     # byte-identical.
