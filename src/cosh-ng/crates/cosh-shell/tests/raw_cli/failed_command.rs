@@ -84,6 +84,41 @@ fn raw_cli_failure_insight_keeps_assisted_ownership_of_shift_tab() {
 }
 
 #[test]
+fn raw_cli_success_then_command_not_found_keeps_failure_insight() {
+    let home = temp_shell_home("success-then-command-not-found-insight");
+    fs::write(home.join(".bashrc"), "PS1='insight-sequence$ '\n").unwrap();
+    let home_str = home.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_ANALYSIS_MODE", "smart"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (
+                b"printf '__PREVIOUS_OK__\\n'\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"sdsd\n".to_vec(), Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_000)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output);
+
+    assert!(visible.contains("__PREVIOUS_OK__"), "{output}");
+    assert!(visible.contains("sdsd: command not found"), "{output}");
+    assert!(
+        visible.contains("The previous input did not run successfully"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_slash_after_failed_command_invokes_adapter() {
     let output = run_raw_cli_with_env(
         "fake",

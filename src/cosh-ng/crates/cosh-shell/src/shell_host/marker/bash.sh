@@ -758,8 +758,13 @@ _cosh_begin_attempt() {
   local input="$1"
   local top_token="$2"
   local expansion_drift="${3:-0}"
+  local generation="${4:-}"
   local utf8_status
-  _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+  if [[ "$generation" =~ ^[0-9]+$ ]]; then
+    _COSH_ATTEMPT_GENERATION="$generation"
+  else
+    _COSH_ATTEMPT_GENERATION=$((_COSH_ATTEMPT_GENERATION + 1))
+  fi
   _COSH_ATTEMPT_ACTIVE=1
   _COSH_ATTEMPT_WRAPPER_ID="$_COSH_WRAPPER_ID"
   _COSH_ATTEMPT_SENSITIVE=0
@@ -827,7 +832,7 @@ _cosh_command_not_found_handle() {
   local command="$1"
   shift || true
   if [[ "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
-    local history_entry history_command classification_command first_word
+    local history_entry history_no history_command classification_command first_word
     if [[ -n "${_COSH_PENDING_RECOVERY_INPUT+x}" ]]; then
       history_command="$_COSH_PENDING_RECOVERY_INPUT"
       classification_command="${_COSH_PENDING_RECOVERY_CLASSIFICATION:-$history_command}"
@@ -835,6 +840,7 @@ _cosh_command_not_found_handle() {
         2>/dev/null || true
     else
       history_entry="$(_cosh_history_entry)"
+      history_no="$(_cosh_history_no "$history_entry")"
       history_command="$(_cosh_history_command_from_entry "$history_entry")"
       classification_command="$history_command"
     fi
@@ -842,7 +848,7 @@ _cosh_command_not_found_handle() {
     if [[ -n "$history_command" ]] \
        && ! _cosh_has_leading_alias "$classification_command" \
        && _cosh_literal_first_word_matches "$classification_command" "$first_word" "$command"; then
-      _cosh_begin_attempt "$history_command" "$first_word" 0
+      _cosh_begin_attempt "$history_command" "$first_word" 0 "$history_no"
     fi
   fi
   local original="${_COSH_ATTEMPT_INPUT:-}"

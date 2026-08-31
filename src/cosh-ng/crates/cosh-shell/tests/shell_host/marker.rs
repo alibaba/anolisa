@@ -761,6 +761,47 @@ fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
     assert!(String::from_utf8_lossy(&output.terminal_output).contains("command not found"));
 }
 
+#[test]
+fn shell_host_bash_success_then_missing_keeps_routing_provenance() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-success-then-missing-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let output = run_scripted_bash(
+        &ShellHostConfig::new("bash-success-then-missing", &work_dir),
+        &[
+            ScriptedInput::user_line("printf '__PREVIOUS_OK__\\n'"),
+            ScriptedInput::user_line("sdsd"),
+        ],
+    )
+    .expect("scripted bash");
+
+    let failed_id = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::CommandFailed && event.command.as_deref() == Some("sdsd")
+        })
+        .and_then(|event| event.command_id.as_deref())
+        .expect("missing command block");
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandRoutingObserved
+                && event.command_id.as_deref() == Some(failed_id)
+                && event.routing.as_ref().is_some_and(|routing| {
+                    routing.top_level_missing && routing.proven && !routing.sensitive
+                })
+        }),
+        "{:?}",
+        output.events
+    );
+}
+
 /// #2138: natural-language input carrying a secret routes to the agent like
 /// regular NL (intercept event emitted, sensitive routing flag set) instead
 /// of being silently vetoed to the native command-not-found error. The
