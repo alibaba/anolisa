@@ -309,7 +309,7 @@ export default {
   version: "1.0.0",
   description: "Protocol v2 RTK rewriting and PostTool optimization for OpenClaw",
   register(api: any) {
-    const pluginConfig = api.config ?? {};
+    const pluginConfig = api.pluginConfig ?? {};
     const rtkEnabled = pluginConfig.rtk_enabled !== false;
     const postToolEnabled = pluginConfig.post_tool_enabled !== false;
     const toolReadyEnabled = pluginConfig.tool_ready_enabled !== false;

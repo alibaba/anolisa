@@ -91,6 +91,12 @@ const { default: plugin } = await import(pathToFileURL(pluginPath).href);
 const handlers = new Map();
 plugin.register({
   config: {
+    rtk_enabled: false,
+    post_tool_enabled: false,
+    tool_ready_enabled: true,
+    verbose: false,
+  },
+  pluginConfig: {
     rtk_enabled: true,
     post_tool_enabled: true,
     tool_ready_enabled: false,
@@ -160,6 +166,30 @@ test("plugin manifest exposes only lifecycle policy switches", () => {
     "tool_ready_enabled",
     "verbose",
   ]);
+});
+
+test("plugin reads lifecycle switches from OpenClaw pluginConfig", () => {
+  const disabledHandlers = new Map();
+  plugin.register({
+    config: {
+      rtk_enabled: true,
+      post_tool_enabled: true,
+      tool_ready_enabled: true,
+    },
+    pluginConfig: {
+      rtk_enabled: false,
+      post_tool_enabled: false,
+      tool_ready_enabled: false,
+      verbose: false,
+    },
+    on(name, hookHandler) {
+      const registered = disabledHandlers.get(name) || [];
+      registered.push(hookHandler);
+      disabledHandlers.set(name, registered);
+    },
+  });
+
+  assert.deepEqual([...disabledHandlers.keys()].sort(), ["session_end", "session_start"]);
 });
 
 test("resumed non-exec tools retain UUID attribution when RTK is disabled", () => {

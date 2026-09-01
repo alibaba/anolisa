@@ -92,7 +92,9 @@ Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、�
 OpenClaw 没有受信 Retrieve 能力，需要恢复的候选会原样透传。该 PostTool Hook 只改写持久化
 transcript，不会改变同一轮中模型已经看到的实时结果；Media 与多个 Content Block 也会透传。
 
-OpenClaw 配置只包含 `rtk_enabled`、`post_tool_enabled`、`tool_ready_enabled` 和 `verbose`；
+该 Adapter 要求 OpenClaw Plugin API `2026.4.22` 或更高版本；支持兼容性检查的宿主会在
+安装阶段根据 Package Metadata 强制执行该下限。OpenClaw 配置只包含
+`rtk_enabled`、`post_tool_enabled`、`tool_ready_enabled` 和 `verbose`；
 默认值依次为 `true`、`true`、`true` 和 `false`。旧的 Response、TOON 与工具分类开关已经
 删除，所有压缩策略由 Core 统一决定。
 

@@ -5,7 +5,10 @@
   "type": "module",
   "main": "dist/index.js",
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": ["./dist/index.js"],
+    "compat": {
+      "pluginApi": ">=2026.4.22"
+    }
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",

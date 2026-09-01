@@ -509,6 +509,9 @@ missing or returns an invalid response.
 
 ### Configuration
 
+The adapter requires OpenClaw Plugin API `2026.4.22` or newer; package metadata enforces this
+minimum during installation on hosts that support compatibility checks.
+
 Options in `openclaw.plugin.json`:
 
 | Option | Default | Description |
