@@ -34,6 +34,7 @@ use. The reference copy shipped with the source is `src/agentsight/agentsight.js
     "tokenizer": { "enabled": false, "cache_size": 4 },
     "session_mapping": { "enabled": true, "max_entries": 10000 },
     "sqlite_storage": { "enabled": true, "batch": { "max_size": 100, "flush_ms": 100 } },
+    "resource_sampling": false,
     "interruption_detection": { "enabled": true, "retention_days": 30, "max_db_size_mb": 100 },
     "audit": true,
     "token_consumption": false,
@@ -80,6 +81,7 @@ instantiated at all, so it costs no memory and no I/O.
 | Local tokenizer | `features.tokenizer.enabled` | `false` | Hugging Face tokenizer fallback when the provider returns no usage block |
 | Session mapping | `features.session_mapping.enabled` | `true` | Maps provider response IDs to Agent session IDs |
 | SQLite storage | `features.sqlite_storage.enabled` | `true` | Local persistence; off means a no-op store and an empty Dashboard |
+| Resource sampling | `features.resource_sampling` | `false` | Samples Agent CPU/RSS once per second; requires SQLite storage |
 | Interruption detection | `features.interruption_detection.enabled` | `true` | Detects failures, stalls, and loops |
 | Audit | `features.audit` | `true` | Persists LLM calls and process actions |
 | Token consumption records | `features.token_consumption` | `false` | Extra aggregated consumption records |

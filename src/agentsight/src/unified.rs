@@ -558,22 +558,15 @@ impl AgentSight {
                 Arc::clone(&running),
             );
         }
-        let resource_sampler_handle = if let Some(ref sqlite_store) = genai_sqlite_store {
+        if let Some(ref sqlite_store) = genai_sqlite_store {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
-            match crate::health::resource::start_resource_sampler(
-                Arc::clone(sqlite_store),
-                Arc::clone(&resource_targets),
-                Arc::clone(&running),
-            ) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    log::warn!("Failed to start Agent resource sampler: {error}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        }
+        let resource_sampler_handle = Self::start_resource_sampler_if_enabled(
+            config.features.resource_sampling_enabled,
+            genai_sqlite_store.as_ref(),
+            Arc::clone(&resource_targets),
+            Arc::clone(&running),
+        );
 
         // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
         // Feature-gated (default off); the thread shares `running` as stop flag.
@@ -695,6 +688,29 @@ impl AgentSight {
         if Self::should_register_descendants(agent_name) {
             for child in Self::collect_descendant_pids(pid) {
                 targets.insert(child, agent_name.to_string());
+            }
+        }
+    }
+
+    fn start_resource_sampler_if_enabled(
+        enabled: bool,
+        store: Option<&Arc<GenAISqliteStore>>,
+        targets: Arc<RwLock<HashMap<u32, String>>>,
+        running: Arc<AtomicBool>,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        if !enabled {
+            log::debug!("Agent resource sampling disabled");
+            return None;
+        }
+        let Some(store) = store else {
+            log::debug!("Resource sampling enabled but SQLite storage is unavailable");
+            return None;
+        };
+        match crate::health::resource::start_resource_sampler(Arc::clone(store), targets, running) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                log::warn!("Failed to start Agent resource sampler: {error}");
+                None
             }
         }
     }
@@ -2708,6 +2724,44 @@ mod tests {
         );
         assert!(!needs_attention);
         assert!(report.contains("8388608 / 0 bytes in flight"));
+    }
+
+    #[test]
+    fn resource_sampler_is_not_started_when_disabled() {
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        assert!(
+            AgentSight::start_resource_sampler_if_enabled(false, None, targets, running).is_none()
+        );
+    }
+
+    #[test]
+    fn resource_sampler_is_not_started_without_sqlite() {
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        assert!(
+            AgentSight::start_resource_sampler_if_enabled(true, None, targets, running).is_none()
+        );
+    }
+
+    #[test]
+    fn resource_sampler_starts_when_enabled_with_sqlite() {
+        let dir = unique_tmp_dir("resource-sampler");
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store"),
+        );
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let handle = AgentSight::start_resource_sampler_if_enabled(
+            true,
+            Some(&store),
+            targets,
+            Arc::clone(&running),
+        )
+        .expect("resource sampler handle");
+        running.store(false, Ordering::SeqCst);
+        handle.join().expect("resource sampler join");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Generate a unique temp directory for each test invocation.

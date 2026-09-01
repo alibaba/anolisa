@@ -33,6 +33,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
     "tokenizer": { "enabled": false, "cache_size": 4 },
     "session_mapping": { "enabled": true, "max_entries": 10000 },
     "sqlite_storage": { "enabled": true, "batch": { "max_size": 100, "flush_ms": 100 } },
+    "resource_sampling": false,
     "interruption_detection": { "enabled": true, "retention_days": 30, "max_db_size_mb": 100 },
     "audit": true,
     "token_consumption": false,
@@ -78,6 +79,7 @@ AgentSight 只读一个 JSON 文件：`/etc/agentsight/config.json`（可用 `--
 | 本地 tokenizer | `features.tokenizer.enabled` | `false` | 供应商未返回 usage 时用 Hugging Face 分词器兜底 |
 | Session 映射 | `features.session_mapping.enabled` | `true` | 把供应商返回的 response ID 映射到 Agent 的 session ID |
 | SQLite 存储 | `features.sqlite_storage.enabled` | `true` | 本地持久化；关闭后使用空实现，Dashboard 将没有数据 |
+| 资源采样 | `features.resource_sampling` | `false` | 每秒采集 Agent CPU/RSS；依赖 SQLite 存储 |
 | 中断检测 | `features.interruption_detection.enabled` | `true` | 检测失败、停滞与死循环 |
 | 审计 | `features.audit` | `true` | 持久化 LLM 调用与进程动作 |
 | Token 消费记录 | `features.token_consumption` | `false` | 额外的聚合消费记录 |

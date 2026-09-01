@@ -29,6 +29,7 @@
         "flush_ms": 100
       }
     },
+    "resource_sampling": false,
     "interruption_detection": {
       "enabled": true,
       "retention_days": 30,
