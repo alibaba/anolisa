@@ -13,7 +13,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 
 Agent adapters are available for:
 
-- **OpenClaw plugin** — covers command rewriting and response/TOON compression in one plugin.
+- **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
 - **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and registered but hard-disabled Tool Ready via Hermes's native plugin system.
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, and response compression via Qoder's native hook system.
@@ -37,7 +37,7 @@ retrieval, and attribution.
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
-| OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, optional TOON ✅, Schema compression — |
+| OpenClaw plugin | — | Protocol v2 RTK ✅, transcript PostTool ✅, Schema/Retrieve unavailable in the host |
 | copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Protocol v2 PostTool; Common BeforeModel passes schemas through until trusted Retrieve is available |
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
@@ -485,21 +485,27 @@ String format `"jq"` is also supported (auto-converts to object).
 
 ## OpenClaw Plugin
 
-The plugin hooks into the OpenClaw agent loop at two stages:
+The plugin translates two OpenClaw events into Protocol v2 lifecycle operations:
 
 | Hook | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `before_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `before_tool_call` | Rewrites `exec` commands to RTK equivalents for filtered output | ✅ Active |
-| Response compression | `tool_result_persist` | Compresses tool results before they enter the context window | ✅ Active |
-| Schema compression | — | Not supported by OpenClaw's hook system | ⏳ → ✅ |
+| PreTool | `before_tool_call` | Sends `exec` arguments to Core and applies the returned RTK rewrite | ✅ Active |
+| PostTool | `tool_result_persist` | Rewrites supported OpenClaw-owned transcript tool results | ✅ Active |
+| BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor trusted Marker visibility | — |
 
-**Response compression details:**
-- Automatically compresses results from all tool types (`web_search`, `web_fetch`, `read_file`, etc.)
-- Skips `exec` tool results when RTK is enabled — RTK already produces optimized output, avoiding double-compression
-- Observed savings: **~78%** on `web_fetch` results, varies by content type
+Core owns RTK execution, JSON detection, cleanup, TOON selection, thresholds, diagnostics, and final
+arbitration. The plugin carries Core's per-call `output_optimization` from PreTool into the matching
+PostTool request, so RTK output is not compressed twice. It declares no trusted Retrieve capability,
+therefore candidates that require recovery pass through unchanged.
 
-Each hook degrades gracefully — if the corresponding binary (`rtk` or `tokenless`) is not installed, that hook is silently skipped.
+`tool_result_persist` is a synchronous OpenClaw transcript seam. It can replace a persisted string,
+a structured value, or a single text block while preserving the surrounding Tool Result envelope;
+media and multi-block results pass through. It does not replace a tool result already consumed by
+the model in the same turn, and it does not cover non-OpenClaw transcript implementations.
+
+Both operations use the single `tokenless compress` entry point and fail open if Tokenless is
+missing or returns an invalid response.
 
 ### Configuration
 
@@ -508,9 +514,12 @@ Options in `openclaw.plugin.json`:
 | Option | Default | Description |
 |---|---|---|
 | `rtk_enabled` | `true` | Enable RTK command rewriting |
-| `schema_compression_enabled` | `true` | Enable tool schema compression (pending OpenClaw support) |
-| `response_compression_enabled` | `true` | Enable tool response compression via `tool_result_persist` |
-| `verbose` | `true` | Log detailed rewrite/compression info |
+| `post_tool_enabled` | `true` | Enable Protocol v2 PostTool handling of persisted tool results |
+| `tool_ready_enabled` | `true` | Register the currently hard-disabled Tool Ready hook |
+| `verbose` | `false` | Log lifecycle rewrites and applied PostTool results |
+
+The previous response, TOON, skip-tool, and shell-tool configuration keys are removed; Core now
+owns those decisions.
 
 ## Hermes Agent Plugin
 

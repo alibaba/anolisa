@@ -281,7 +281,10 @@ their current contracts provide no replacement field; compressed copies are not 
 `additionalContext`. Codex also avoids response compression and limits its PostToolUse context to
 classified environment failures. Measure Codex savings on RTK-rewritten shell calls.
 
-For Claude Code, response replacement requires version 2.1.121 or later. Older or unrecognized versions pass the original through. OpenClaw replaces persisted results, but TOON remains off unless `toon_compression_enabled=true`.
+For Claude Code, response replacement requires version 2.1.121 or later. Older or unrecognized
+versions pass the original through. OpenClaw optimizes supported persisted results when
+`post_tool_enabled` is on. Tokenless automatically chooses JSON cleanup or TOON when it produces a
+smaller valid result.
 
 ## Qoder plugin cache issue
 

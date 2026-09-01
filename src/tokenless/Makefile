@@ -268,10 +268,8 @@ test-hook-parity:
 	python3 tests/test_hook_parity.py
 
 test-adapters: build-openclaw-plugin build-dsh-plugin
-	@echo "==> Testing openclaw RTK context propagation..."
-	node --test tests/test-openclaw-rtk-context.mjs
-	@echo "==> Testing openclaw TOON minimum payload threshold..."
-	node --test tests/test-openclaw-toon-threshold.mjs
+	@echo "==> Testing openclaw Protocol v2 lifecycle..."
+	node --test tests/test-openclaw-lifecycle-v2.mjs
 	@echo "==> Testing native dsh adapter bundle..."
 	bash tests/test-dsh-adapter.sh
 	@echo "==> Testing qoder adapter installer..."

@@ -220,19 +220,22 @@ OpenClaw Plugin 还提供框架级选项：
 
 | 选项 | 作用 |
 |------|------|
-| `rtk_enabled` | 命令重写 |
+| `rtk_enabled` | 通过 RTK 改写支持的 Shell 命令 |
 | `tool_ready_enabled` | OpenClaw 侧的 Tool Ready 注册门槛 |
-| `response_compression_enabled` | 响应压缩 |
-| `toon_compression_enabled` | TOON 编码 |
-| `skip_tools` | 完全跳过压缩的工具名列表 |
-| `shell_tools` | 按 Shell/exec 策略处理中等截断的工具名 |
+| `post_tool_enabled` | 优化支持的持久化工具结果 |
 | `verbose` | Plugin 诊断日志 |
 
-OpenClaw Adapter 当前未实现 Schema 压缩；需要时可以直接调用 `tokenless compress-schema` CLI 命令。
+OpenClaw Plugin 不压缩工具 Schema，也不提供内容恢复。无法在不恢复内容的情况下安全优化的
+结果会原样透传。
 
-运行时代码默认开启 RTK、OpenClaw 侧的 Tool Ready 门槛和响应压缩，默认关闭 TOON。但由于 Tokenless 已硬关闭底层检查，Tool Ready 选项当前不会生效。当前运行时代码把未提供的 `verbose` 当作开启，但 Plugin Schema 声明的默认值是关闭；在二者统一前应显式设置 `verbose`。
+RTK、OpenClaw 侧的 Tool Ready 注册门槛和 PostTool 默认开启，verbose 日志默认关闭。由于
+Tokenless 已硬关闭底层检查，Tool Ready 选项当前没有实际效果。Tokenless 会自动判断 JSON
+清理或 TOON 是否有收益，以及哪些工具输出必须原样透传。已经删除的
+`response_compression_enabled`、`toon_compression_enabled`、`skip_tools` 和 `shell_tools` 不再
+控制 Adapter。
 
-这些值由 OpenClaw Plugin 配置管理，不属于 `~/.tokenless/config.json`。修改后按 OpenClaw 提示重启 gateway。
+这些值由 OpenClaw Plugin 配置管理，不属于 `~/.tokenless/config.json`。Adapter 要求
+OpenClaw Plugin API 2026.4.22 或更高版本。修改后按 OpenClaw 提示重启 gateway。
 
 ## 相关文档
 

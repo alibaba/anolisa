@@ -74,7 +74,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ### Agent Adapter
 
-- **OpenClaw 插件** — 命令重写 + 响应压缩 + 可选 TOON；不支持 Schema 压缩
+- **OpenClaw 插件** — 通过 Protocol v2 Core 执行 PreTool RTK 改写和 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与受信 Retrieve
 - **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + Protocol v2 PostTool；Common BeforeModel 在受信 Retrieve 接入前透传 Schema，旧版 Copilot Shell 透传 Pipeline 输出
 - **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline
@@ -84,6 +84,17 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
 - **DeepSeek Harness 插件**。通过 DSH 原生 `tools/post-execute` 接入响应压缩和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
+
+OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
+`tokenless compress`，`tool_result_persist` 把 OpenClaw 自己持久化的 Tool Result 交给同一
+Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
+把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
+OpenClaw 没有受信 Retrieve 能力，需要恢复的候选会原样透传。该 PostTool Hook 只改写持久化
+transcript，不会改变同一轮中模型已经看到的实时结果；Media 与多个 Content Block 也会透传。
+
+OpenClaw 配置只包含 `rtk_enabled`、`post_tool_enabled`、`tool_ready_enabled` 和 `verbose`；
+默认值依次为 `true`、`true`、`true` 和 `false`。旧的 Response、TOON 与工具分类开关已经
+删除，所有压缩策略由 Core 统一决定。
 
 ### Agent 开发框架集成
 

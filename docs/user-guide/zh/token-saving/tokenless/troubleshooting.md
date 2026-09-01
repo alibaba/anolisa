@@ -275,7 +275,9 @@ tokenless retrieve <hash> --stash-db ~/.tokenless/stash.db
 压缩，其 PostToolUse Context 只包含识别出的环境失败；实际节省应在经过 RTK 改写的 Shell
 调用上测量。
 
-Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。OpenClaw 会替换持久化结果，但只有设置 `toon_compression_enabled=true` 才会启用 TOON。
+Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。
+OpenClaw 在 `post_tool_enabled` 开启时优化受支持的持久化结果。Tokenless 会在 JSON 清理或
+TOON 能产生更小合法结果时自动选择对应方式。
 
 ## Qoder Plugin 缓存问题
 

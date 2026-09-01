@@ -1,7 +1,7 @@
 {
   "name": "@tokenless/openclaw-plugin",
   "version": "@VERSION@",
-  "description": "Unified OpenClaw plugin — RTK command rewriting + tokenless schema/response compression for 60-90% LLM token savings",
+  "description": "OpenClaw lifecycle adapter for Tokenless Protocol v2",
   "type": "module",
   "main": "dist/index.js",
   "openclaw": {
@@ -12,7 +12,6 @@
     "build": "npm run clean && tsc --project tsconfig.json && cp ../common/hooks/tool_categories.json dist/"
   },
   "peerDependencies": {
-    "rtk": ">=0.35.0",
     "tokenless": ">=0.1.0"
   },
   "devDependencies": {

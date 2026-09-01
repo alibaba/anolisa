@@ -220,19 +220,24 @@ The OpenClaw plugin also provides framework-level options:
 
 | Option | Purpose |
 |--------|---------|
-| `rtk_enabled` | Command rewriting |
+| `rtk_enabled` | Rewrite supported shell commands through RTK |
 | `tool_ready_enabled` | OpenClaw-side Tool Ready registration gate |
-| `response_compression_enabled` | Response compression |
-| `toon_compression_enabled` | TOON encoding |
-| `skip_tools` | Tool names that bypass all compression |
-| `shell_tools` | Tool names handled as shell/exec with moderate truncation |
+| `post_tool_enabled` | Optimize supported persisted tool results |
 | `verbose` | Plugin diagnostic logging |
 
-The OpenClaw adapter does not currently implement Schema compression; invoke the `tokenless compress-schema` CLI command directly when needed.
+The OpenClaw plugin does not compress tool schemas or provide content retrieval. Results that cannot
+be safely optimized without retrieval pass through unchanged.
 
-The runtime defaults RTK, its OpenClaw-side Tool Ready gate, and response compression to on, and TOON to off. The Tool Ready option currently has no effect because Tokenless hard-disables the underlying check. The current runtime code treats an omitted `verbose` as on, while the plugin schema declares its default as off; set `verbose` explicitly until those definitions are aligned.
+RTK, the OpenClaw-side Tool Ready registration gate, and PostTool default to on; verbose logging
+defaults to off. The Tool Ready option currently has no operational effect because Tokenless
+hard-disables the underlying check. Tokenless automatically decides whether JSON cleanup or TOON is
+useful and which tool outputs must pass through unchanged. The removed
+`response_compression_enabled`, `toon_compression_enabled`, `skip_tools`, and `shell_tools` keys no
+longer control the adapter.
 
-These values are managed by OpenClaw plugin configuration, not `~/.tokenless/config.json`. Restart the gateway as instructed after changing them.
+These values are managed by OpenClaw plugin configuration, not `~/.tokenless/config.json`. The
+adapter requires OpenClaw Plugin API 2026.4.22 or later. Restart the gateway as instructed after
+changing them.
 
 ## Related documents
 

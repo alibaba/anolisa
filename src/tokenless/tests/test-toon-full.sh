@@ -59,9 +59,9 @@ import json, os
 cfg=json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
 entries=cfg.get('plugins',{}).get('entries',{})
 assert 'tokenless' in entries and entries['tokenless'].get('enabled'), 'not enabled'
-assert entries['tokenless'].get('config',{}).get('toon_compression_enabled'), 'toon disabled'
+assert entries['tokenless'].get('config',{}).get('post_tool_enabled', True), 'PostTool disabled'
 " 2>/dev/null; then
-    pass "OpenClaw 插件已启用且 TOON 配置正确"
+    pass "OpenClaw 插件已启用且 PostTool 配置正确"
 else
     fail "OpenClaw 插件配置异常"
 fi
