@@ -9,6 +9,9 @@ pub(super) trait ShellAdapter {
     fn marker_filename(&self) -> &'static str;
     fn marker_script(&self) -> &'static str;
     fn isolates_readline(&self) -> bool;
+    fn supports_zsh_path_prompt_buffering(&self) -> bool {
+        false
+    }
     fn configure_command(
         &self,
         command: &mut Command,
@@ -83,6 +86,10 @@ impl ShellAdapter for ZshAdapter {
 
     fn isolates_readline(&self) -> bool {
         false
+    }
+
+    fn supports_zsh_path_prompt_buffering(&self) -> bool {
+        true
     }
 
     fn configure_command(

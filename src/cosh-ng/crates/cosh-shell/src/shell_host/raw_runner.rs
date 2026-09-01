@@ -12,7 +12,8 @@ use nix::libc;
 use crate::input::{AssistanceControl, InputClassifier};
 use crate::raw_input::{
     spawn_raw_action_relay_with_wake, spawn_raw_input_relay_with_wake, MainPromptGate,
-    RawInputEvent, RawInputMode, RawObserverAction, RawRelayAction, UserPtyInputGeneration,
+    RawInputEvent, RawInputMode, RawInputShellRoute, RawObserverAction, RawRelayAction,
+    UserPtyInputGeneration,
 };
 use crate::types::ShellEvent;
 
@@ -115,8 +116,7 @@ where
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed,
+         shell_route,
          wake| {
             spawn_raw_input_relay_with_wake(
                 input,
@@ -125,8 +125,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
                 input_fd,
                 Some(wake),
             )
@@ -181,8 +180,7 @@ where
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed,
+         shell_route,
          wake| {
             spawn_raw_input_relay_with_wake(
                 input,
@@ -191,8 +189,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
                 input_fd,
                 Some(wake),
             )
@@ -233,8 +230,7 @@ where
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed,
+         shell_route,
          wake| {
             spawn_raw_action_relay_with_wake(
                 actions,
@@ -244,8 +240,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
                 Some(wake),
             )
         },
@@ -280,8 +275,7 @@ where
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed,
+         shell_route,
          wake| {
             spawn_raw_action_relay_with_wake(
                 actions,
@@ -291,8 +285,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
                 Some(wake),
             )
         },
@@ -324,8 +317,7 @@ where
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed,
+         shell_route,
          wake| {
             spawn_raw_action_relay_with_wake(
                 actions,
@@ -335,8 +327,7 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
                 Some(wake),
             )
         },
@@ -363,8 +354,7 @@ where
         InputClassifier,
         Arc<Mutex<RawInputMode>>,
         UserPtyInputGeneration,
-        MainPromptGate,
-        bool,
+        RawInputShellRoute,
         UnixStream,
     ) -> JoinHandle<io::Result<()>>,
 {
@@ -438,8 +428,11 @@ where
             .with_bash_slash_submission_guard(slash_route_enabled),
         Arc::clone(&input_mode),
         input_generation.clone(),
-        main_prompt_gate,
-        slash_route_enabled,
+        RawInputShellRoute::new(
+            main_prompt_gate,
+            slash_route_enabled,
+            session.zsh_path_prompt_buffering.take(),
+        ),
         wake_writer,
     );
     let (driver_completion_sender, driver_completion_receiver) = mpsc::channel();

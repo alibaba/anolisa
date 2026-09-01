@@ -660,10 +660,6 @@ _cosh_precmd_marker() {
     _cosh_emit_marker "prompt_ready" "" "$exit_status" false
   fi
 }
-# ── Hook setup (re-set after user rcfile may have overridden) ──
-# Slash command function stubs — prevent "zsh: no such file or directory" for
-# commands starting with / that zsh would try to exec as an absolute path.
-# The actual interception and marker emission happens in _cosh_preexec_marker.
 for _cosh_sc in about agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mcp mode new recommendations resume select send-to-shell session shell skills stats status; do
   functions[/$_cosh_sc]='_cosh_assistance_enabled || command "$0" "$@"'
 done

@@ -15,6 +15,11 @@ pub(super) fn route_missing_path_submission(
     relay: &mut InputRelayContext<'_>,
     pending_shell_submits: usize,
 ) -> io::Result<bool> {
+    // Zsh path candidates remain Rust-owned until Enter. If editing or a
+    // control key already returned the line to ZLE, keep it Shell-owned.
+    if relay.zsh_path_prompt_buffering.is_some() {
+        return Ok(false);
+    }
     if !relay.main_prompt_gate.is_path_prompt_ready() || pending_shell_submits > 0 {
         return Ok(false);
     }
@@ -53,15 +58,15 @@ pub(super) fn route_missing_path_submission(
     if let Ok(mut mode) = relay.input_mode.lock() {
         *mode = new_delay_input_mode();
     }
-    // Bytes typed in this read have not reached Readline yet. Write them
-    // before Ctrl-U so Bash echoes the exact user submission, then accept the
-    // cleared line to repaint PS1. The command itself is never executed.
-    let mut repaint = Vec::with_capacity(submit + 2);
-    repaint.extend_from_slice(&bytes[..submit]);
-    repaint.extend_from_slice(b"\x15\r");
     let _ = relay
         .input_events
         .send(RawInputEvent::SyntheticPromptRepaint);
+    // Bytes typed in this read have not reached Readline yet. Write them
+    // before Ctrl-U so Bash echoes the exact user submission, then accept
+    // the cleared line to repaint PS1. The command itself never executes.
+    let mut repaint = Vec::with_capacity(submit + 2);
+    repaint.extend_from_slice(&bytes[..submit]);
+    repaint.extend_from_slice(b"\x15\r");
     write_user_bytes_to_pty(
         relay.master,
         relay.input_generation,
@@ -111,14 +116,21 @@ pub(super) fn route_candidate_missing_path_submission(
         *mode = new_delay_input_mode();
     }
     let sensitive = redact_sensitive_text(&input).1;
-    let _ = relay
-        .input_events
-        .send(RawInputEvent::UserInterceptWithRouting {
+    let event = if input.starts_with('/') {
+        RawInputEvent::UserInterceptWithRouting {
             input,
             reason: InterceptReason::NaturalLanguage,
             cwd,
             sensitive,
-        });
+        }
+    } else {
+        RawInputEvent::NativePathPromptIntercept {
+            input,
+            cwd,
+            sensitive,
+        }
+    };
+    let _ = relay.input_events.send(event);
     send_shell_input_state(true, relay.input_events);
     true
 }

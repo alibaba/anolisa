@@ -13,9 +13,11 @@ use super::event_parser::{
 use super::event_sender::RawInputEventSink;
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
+use super::path_prompt_candidate::zsh_path_candidate_should_hold;
 use super::soft_newline::{
     contains_soft_newline_sequence, draft_text_from_bytes, render_soft_newline_markers,
 };
+use super::spawn::ZshPathPromptBuffering;
 use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
 pub(super) struct InputRelayContext<'a> {
@@ -35,6 +37,9 @@ pub(super) struct InputRelayContext<'a> {
     /// until the next prompt_ready marker and later bytes fall back to the
     /// Rust intercept path instead of leaking into a foreground process.
     pub(super) slash_route_enabled: bool,
+    /// Zsh-only capability that keeps slash candidates out of ZLE until Rust
+    /// can route or submit the complete line.
+    pub(super) zsh_path_prompt_buffering: Option<&'a mut ZshPathPromptBuffering>,
 }
 
 /// Writes real user bytes to the PTY, bumping the shared input generation
@@ -114,6 +119,16 @@ fn relay_passthrough_input_with_policy(
     emit_activity: bool,
     pending_shell_submits: usize,
 ) -> io::Result<bool> {
+    if relay
+        .zsh_path_prompt_buffering
+        .as_deref()
+        .is_some_and(ZshPathPromptBuffering::has_deferred_tab_typeahead)
+    {
+        if let Some(buffering) = relay.zsh_path_prompt_buffering.as_deref_mut() {
+            buffering.defer_tab_typeahead(bytes);
+        }
+        return Ok(true);
+    }
     if relay.line_buffer.force_agent_intercept && relay.line_buffer.is_active() {
         relay.line_buffer.soft_newline_enabled = true;
         relay.line_buffer.push(bytes);
@@ -138,6 +153,18 @@ fn relay_passthrough_input_with_policy(
         return candidate::relay_candidate_line(relay, emit_activity, pending_shell_submits);
     }
     relay_native_passthrough(bytes, relay, emit_activity, pending_shell_submits)
+}
+
+pub(super) fn replay_deferred_zsh_tab_typeahead(
+    bytes: &[u8],
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<()> {
+    // A separate relay turn gives ZLE time to finish the Tab widget. Cancel
+    // its potentially rewritten buffer before replaying preserved input as
+    // the next logical line.
+    relay_native_passthrough(&[CTRL_C], relay, true, 0)?;
+    relay_passthrough_input_with_policy(bytes, relay, true, 0)?;
+    Ok(())
 }
 
 pub(super) fn relay_prompt_ghost_input(
@@ -338,8 +365,21 @@ fn relay_native_passthrough(
     let complete_paste = bytes.starts_with(BRACKETED_PASTE_START);
     if relay.line_buffer.is_active()
         || complete_paste
-        || starts_native_intercept_candidate(bytes, relay.native_line_state)
+        || starts_native_intercept_candidate(
+            bytes,
+            relay.native_line_state,
+            relay.zsh_path_prompt_buffering.is_some(),
+        )
     {
+        if let Some(handled) = tab_handoff::relay_coalesced_zsh_tab(
+            bytes,
+            relay,
+            emit_activity,
+            pending_shell_submits,
+            complete_paste,
+        )? {
+            return Ok(handled);
+        }
         // Route flags must consider the whole draft so far: a bracketed
         // paste opener may arrive as its own chunk (or split mid-delimiter,
         // #1721) before the payload decides CJK vs slash (#1721 D13).
@@ -351,8 +391,21 @@ fn relay_native_passthrough(
         .concat();
         relay.line_buffer.soft_newline_enabled = native_candidate_allows_soft_newline(&combined);
         relay.line_buffer.push(bytes);
+        let zsh_path_candidate = relay.zsh_path_prompt_buffering.is_some();
+        let hold_zsh_path_candidate = zsh_path_candidate
+            && !relay.line_buffer.saw_paste()
+            && zsh_path_candidate_should_hold(&relay.line_buffer.bytes)
+            && !relay.line_buffer.bytes.contains(&b'\t');
+        let return_resolved_zsh_space_prefix = zsh_path_candidate
+            && relay.line_buffer.bytes.first() == Some(&b' ')
+            && !hold_zsh_path_candidate;
         if !relay.line_buffer.in_paste()
-            && native_candidate_should_return_to_shell(relay.input_classifier, relay.line_buffer)
+            && !hold_zsh_path_candidate
+            && (return_resolved_zsh_space_prefix
+                || native_candidate_should_return_to_shell(
+                    relay.input_classifier,
+                    relay.line_buffer,
+                ))
         {
             return flush_candidate_line_to_shell(relay, emit_activity, pending_shell_submits);
         }
@@ -633,6 +686,7 @@ mod candidate;
 mod exit_tracker;
 mod path_prompt_submit;
 mod soft_newline_upgrade;
+mod tab_handoff;
 use bash_submission_guard::{
     bash_submission_has_leading_whitespace, bash_submission_needs_guard, guarded_bash_submission,
     history_private_submission,

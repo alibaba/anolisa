@@ -1,5 +1,6 @@
 use crate::input::InputClassifier;
 
+use super::path_prompt_candidate::zsh_path_candidate_should_hold;
 use super::soft_newline::{
     soft_newline_sequence_len, soft_newline_suffix_len, CANONICAL_SOFT_NEWLINE,
 };
@@ -478,16 +479,19 @@ pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
 pub(super) fn starts_native_intercept_candidate(
     bytes: &[u8],
     native_line_state: &NativeLineState,
+    buffer_non_ascii_prefix: bool,
 ) -> bool {
-    // Only explicit slash and `??` routes are buffered. Ordinary text and
-    // paste bytes stay owned by the Shell.
+    // Zsh also buffers a potential Han-leading path prompt because its ZLE
+    // buffer cannot be cleared safely after submit-time classification.
     if !native_line_state.is_at_line_start() {
         return false;
     }
-    if first_visible_input_byte(bytes) == Some(b'/') {
+    let visible = first_visible_input_bytes(bytes);
+    if visible.first() == Some(&b'/')
+        || (buffer_non_ascii_prefix && zsh_path_candidate_should_hold(visible))
+    {
         return true;
     }
-    let visible = first_visible_input_bytes(bytes);
     // A lone `?` may be the first half of a `??` marker typed key by key
     // (#1932): own the line now so the follow-up decides the route; any
     // non-`??` continuation flushes back to bash byte-identically.
@@ -645,5 +649,47 @@ fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
         [0x1b, b'[', parameters @ ..] => parameters.iter().all(|byte| matches!(byte, 0x20..=0x3f)),
         [0x1b, b'O'] => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{starts_native_intercept_candidate, NativeLineState};
+
+    #[test]
+    fn native_intercept_candidate_only_starts_at_line_start() {
+        let mut state = NativeLineState::default();
+
+        assert!(starts_native_intercept_candidate(b"/", &state, false));
+        assert!(starts_native_intercept_candidate(
+            b"?? hello",
+            &state,
+            false
+        ));
+        assert!(!starts_native_intercept_candidate(
+            "你".as_bytes(),
+            &state,
+            false
+        ));
+        assert!(starts_native_intercept_candidate(
+            "你".as_bytes(),
+            &state,
+            true
+        ));
+        state.observe_shell_bytes(b"vim .");
+        assert!(!starts_native_intercept_candidate(b"/", &state, true));
+        assert!(!starts_native_intercept_candidate(
+            b"?? hello",
+            &state,
+            true
+        ));
+        assert!(!starts_native_intercept_candidate(
+            "你".as_bytes(),
+            &state,
+            true
+        ));
+
+        state.observe_shell_bytes(b"\n");
+        assert!(starts_native_intercept_candidate(b"/mode", &state, false));
     }
 }

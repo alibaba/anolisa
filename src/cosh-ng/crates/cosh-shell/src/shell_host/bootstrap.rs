@@ -10,6 +10,8 @@ use std::time::{Duration, SystemTime};
 use nix::libc;
 use nix::pty::openpty;
 
+use crate::raw_input::ZshPathPromptBuffering;
+
 use super::adapter::{BashAdapter, ShellAdapter, ZshAdapter};
 use super::auth::{generate_marker_token, marker_script_with_token};
 use super::lifecycle::push_shell_started_event;
@@ -31,6 +33,7 @@ pub(super) struct PtySession {
     pub(super) parser: OscParser,
     pub(super) recovery_request_file: PathBuf,
     pub(super) handoff_request_file: PathBuf,
+    pub(super) zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
 }
 
 pub(super) fn start_bash_session(config: &ShellHostConfig) -> io::Result<PtySession> {
@@ -90,6 +93,9 @@ fn start_shell_session(
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Some(path)
     };
+    let zsh_path_prompt_buffering = (marker.is_some()
+        && adapter.supports_zsh_path_prompt_buffering())
+    .then(ZshPathPromptBuffering::new);
 
     let pty = openpty(Some(&config.winsize), None).map_err(nix_to_io)?;
     let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
@@ -188,6 +194,7 @@ fn start_shell_session(
         parser,
         recovery_request_file,
         handoff_request_file,
+        zsh_path_prompt_buffering,
     })
 }
 

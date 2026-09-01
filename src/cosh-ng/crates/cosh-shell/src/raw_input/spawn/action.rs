@@ -17,10 +17,11 @@ use super::super::pty::{set_pty_winsize, signal_process_group};
 use super::super::{MainPromptGate, RawInputEvent, RawRelayAction, ESC};
 use super::deadline::next_pending_deadline;
 use super::{
-    finish_input_relay, flush_pending_prompt_ghost_escape,
+    finish_input_relay, flush_deferred_zsh_tab_typeahead, flush_pending_prompt_ghost_escape,
     flush_pending_replaced_prompt_ghost_suffix, is_pending_shell_submission,
     relay_input_bytes_with_read_ahead, relay_input_for_mode, should_split_passthrough_batch,
-    RawInputEventSink, RawInputRelayState, RelayReadContext, WakingRawInputEventSender,
+    RawInputEventSink, RawInputRelayState, RawInputShellRoute, RelayReadContext,
+    WakingRawInputEventSender,
 };
 
 pub(super) struct PendingDelayEscape {
@@ -184,6 +185,15 @@ fn wait_for_raw_action(
             break;
         }
         thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        flush_deferred_zsh_tab_typeahead(
+            false,
+            Instant::now(),
+            master,
+            input_classifier,
+            input_events,
+            input_mode,
+            state,
+        )?;
         flush_pending_prompt_ghost_escape(
             false,
             Instant::now(),
@@ -239,8 +249,7 @@ pub(crate) fn spawn_raw_action_relay(
         input_classifier,
         input_mode,
         input_generation,
-        main_prompt_gate,
-        slash_route_enabled,
+        RawInputShellRoute::new(main_prompt_gate, slash_route_enabled, None),
         None,
     )
 }
@@ -254,18 +263,22 @@ pub(crate) fn spawn_raw_action_relay_with_wake(
     input_classifier: InputClassifier,
     input_mode: Arc<Mutex<RawInputMode>>,
     input_generation: UserPtyInputGeneration,
-    main_prompt_gate: MainPromptGate,
-    slash_route_enabled: bool,
+    shell_route: RawInputShellRoute,
     wake: Option<UnixStream>,
 ) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
         let input_events = WakingRawInputEventSender::new(input_events, wake);
-        let mut state = RawInputRelayState::with_generation_and_gate(
-            input_generation,
-            main_prompt_gate,
-            slash_route_enabled,
-        );
+        let mut state = RawInputRelayState::with_shell_route(input_generation, shell_route);
         for action in actions {
+            flush_deferred_zsh_tab_typeahead(
+                false,
+                Instant::now(),
+                &mut master,
+                &input_classifier,
+                &input_events,
+                &input_mode,
+                &mut state,
+            )?;
             flush_pending_prompt_ghost_escape(
                 false,
                 Instant::now(),

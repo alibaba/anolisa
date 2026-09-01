@@ -9,6 +9,7 @@ mod event_sender;
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
 mod mode;
+mod path_prompt_candidate;
 mod prompt_epoch;
 mod pty;
 mod relay;
@@ -28,7 +29,7 @@ pub(crate) use pty::{
 pub use relay_action::RawRelayAction;
 pub(crate) use spawn::{
     spawn_raw_action_relay, spawn_raw_action_relay_with_wake, spawn_raw_input_relay,
-    spawn_raw_input_relay_with_wake,
+    spawn_raw_input_relay_with_wake, RawInputShellRoute, ZshPathPromptBuffering,
 };
 
 pub(super) const CTRL_C: u8 = 0x03;
@@ -79,8 +80,8 @@ pub(crate) enum RawInputEvent {
         cwd: String,
         sensitive: bool,
     },
-    /// A Readline-owned missing-path prompt whose line is cleared before the
-    /// Agent run, so the runtime must acknowledge it on a stable UI surface.
+    /// A missing-path prompt withheld from shell execution, so the runtime
+    /// must acknowledge it on a stable UI surface.
     NativePathPromptIntercept {
         input: String,
         cwd: String,
@@ -195,8 +196,7 @@ pub(crate) enum RawInputEvent {
 mod tests {
     use super::event_parser::{
         candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
-        redact_extension_setting_value, starts_native_intercept_candidate, CandidateLineBuffer,
-        CandidateLineStatus, NativeLineState,
+        redact_extension_setting_value, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
     };
     use super::relay::ExplicitExitTracker;
     use super::soft_newline::render_soft_newline_markers;
@@ -603,21 +603,6 @@ mod tests {
     fn other_slash_values_are_not_redacted() {
         let command = b"/extensions settings get fixture token";
         assert_eq!(redact_extension_setting_value(command), command);
-    }
-
-    #[test]
-    fn native_slash_candidate_only_starts_at_line_start() {
-        let mut state = NativeLineState::default();
-
-        assert!(starts_native_intercept_candidate(b"/", &state));
-        assert!(starts_native_intercept_candidate(b"?? hello", &state));
-
-        state.observe_shell_bytes(b"vim .");
-        assert!(!starts_native_intercept_candidate(b"/", &state));
-        assert!(!starts_native_intercept_candidate(b"?? hello", &state));
-
-        state.observe_shell_bytes(b"\n");
-        assert!(starts_native_intercept_candidate(b"/mode", &state));
     }
 
     #[test]

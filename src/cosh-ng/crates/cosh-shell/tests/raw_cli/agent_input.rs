@@ -105,6 +105,260 @@ fn raw_cli_routes_slash_leading_path_prompt_in_one_input_batch() {
 }
 
 #[test]
+fn raw_cli_zsh_routes_space_prefixed_path_prompt_before_zle() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("space-prefixed-path-prompt");
+    fs::write(
+        home.join(".zshrc"),
+        "PROMPT='zsh-space-path> '\n\
+         RPROMPT=''\n\
+         _cosh_test_accept_line() {\n\
+           [[ \"$BUFFER\" == *nonexistent-cosh-space-prefix* ]] && print -r -- space-path-reached-zle\n\
+           zle .accept-line\n\
+         }\n\
+         _cosh_test_tab_after_agent_submit() {\n\
+           print -r -- tab-after-agent-submit-reached-zle\n\
+           zle .redisplay\n\
+         }\n\
+         zle -N accept-line _cosh_test_accept_line\n\
+         zle -N _cosh_test_tab_after_agent_submit\n\
+         bindkey '^I' _cosh_test_tab_after_agent_submit\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let prompt = "  /nonexistent-cosh-space-prefix/SKILL.md 帮我读一下";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b" ".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes()[1..].to_vec(), Duration::from_millis(50)),
+            (b"\n\t".to_vec(), Duration::from_millis(50)),
+            (
+                b"echo after-space-path\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains(&format!("Received shell prompt request: {prompt}")),
+        "{output}"
+    );
+    assert!(output.contains("after-space-path"), "{output}");
+    assert!(!output.contains("space-path-reached-zle"), "{output}");
+    assert!(
+        !output.contains("tab-after-agent-submit-reached-zle"),
+        "{output}"
+    );
+    assert!(!output.contains("no such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_routes_fragmented_slash_leading_path_prompt() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("path-prompt-custom-kill-line");
+    fs::write(
+        home.join(".zshrc"),
+        "{\n\
+           request_fd=${_COSH_PATH_PROMPT_REQUEST_FD:-${COSH_ZSH_PATH_PROMPT_REQUEST_FD:-}}\n\
+           acknowledgment_fd=${_COSH_PATH_PROMPT_ACK_FD:-${COSH_ZSH_PATH_PROMPT_ACK_FD:-}}\n\
+           if [[ -n \"$request_fd\" && -n \"$acknowledgment_fd\" ]]; then\n\
+             print -r -- path-prompt-fork-channel-exposed\n\
+             IFS= read -r -u \"$request_fd\" request && print -r -- accepted >&\"$acknowledgment_fd\"\n\
+           fi\n\
+         } &!\n\
+         PROMPT='zsh-path:%?> '\nRPROMPT=''\nbindkey -e\nbindkey '^U' self-insert\n\
+         _cosh_test_private_submit() { print -r -- path-prompt-private-binding-ran; zle .redisplay; }\n\
+         zle -N _cosh_test_private_submit\n\
+         bindkey $'\\e[99;99u' _cosh_test_private_submit\n\
+         TRAPINT() { print -r -- path-prompt-user-trap-ran; return 130; }\n\
+         TRAPURG() { print -r -- path-prompt-user-urg-trap-ran; return 0; }\n\
+         typeset -gi COSH_TEST_PRECMD_COUNT=0\n\
+         _cosh_test_slow_third_precmd() {\n\
+           (( ++COSH_TEST_PRECMD_COUNT ))\n\
+           (( COSH_TEST_PRECMD_COUNT == 3 )) && sleep 3\n\
+           return 0\n\
+         }\n\
+         precmd_functions+=(_cosh_test_slow_third_precmd)\n\
+         typeset -g COSH_TEST_PATH_PROMPT='/nonexistent-cosh-1943/SKILL.md 帮我读一下'\n\
+         typeset -g COSH_TEST_HISTORY_LEAK='path-prompt-history-leak'\n\
+         _cosh_test_accept_line() {\n\
+           [[ \"$BUFFER\" == \"$COSH_TEST_PATH_PROMPT\" ]] && print -r -- path-prompt-user-widget-ran\n\
+           zle .accept-line\n\
+         }\n\
+         zle -N accept-line _cosh_test_accept_line\n\
+         typeset -gi COSH_TEST_CUT_BUFFER_SEEDED=0\n\
+         _cosh_test_seed_cut_buffer() {\n\
+           bindkey $'\\e[99;99u' _cosh_test_private_submit\n\
+           (( COSH_TEST_CUT_BUFFER_SEEDED )) && return 0\n\
+           CUTBUFFER='path-prompt-preserved-cut-buffer'\n\
+           killring=('path-prompt-preserved-kill-ring')\n\
+           COSH_TEST_CUT_BUFFER_SEEDED=1\n\
+         }\n\
+         _cosh_test_check_cut_buffer() {\n\
+           if [[ \"$CUTBUFFER\" == path-prompt-preserved-cut-buffer && \"${killring[1]:-}\" == path-prompt-preserved-kill-ring ]]; then\n\
+             print -r -- path-prompt-cut-buffer-preserved\n\
+           else\n\
+             print -r -- path-prompt-cut-buffer-damaged\n\
+           fi\n\
+           zle .redisplay\n\
+         }\n\
+         zle -N zle-line-init _cosh_test_seed_cut_buffer\n\
+         zle -N _cosh_test_check_cut_buffer\n\
+         bindkey '^Xb' _cosh_test_check_cut_buffer\n\
+         _cosh_test_path_history() {\n\
+           [[ \"$1\" == *\"$COSH_TEST_PATH_PROMPT\"* ]] && print -r -- path-prompt-history-hook-ran\n\
+           return 0\n\
+         }\n\
+         autoload -Uz add-zsh-hook\n\
+         add-zsh-hook zshaddhistory _cosh_test_path_history\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let prompt = "/nonexistent-cosh-1943/SKILL.md 帮我读一下";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (
+                b"echo private-sequence-command-ran".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"\x1b[99;99u".to_vec(), Duration::from_millis(100)),
+            (b"\n".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"\x18b".to_vec(), Duration::from_millis(1_000)),
+            (
+                b"fc -l -20 | grep -Fq -- \"$COSH_TEST_PATH_PROMPT\" && print \"$COSH_TEST_HISTORY_LEAK\"\n"
+                    .to_vec(),
+                Duration::from_millis(100),
+            ),
+            (
+                b"echo after-zsh-path-prompt\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"TRAPURG\n".to_vec(), Duration::from_millis(100)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    let routed = format!("Received shell prompt request: {prompt}");
+    let routed_offset = output.find(&routed).unwrap_or_else(|| panic!("{output}"));
+    let history_probe_offset = output
+        .find("fc -l -20")
+        .unwrap_or_else(|| panic!("{output}"));
+    let preserved_status_offset = output[routed_offset..]
+        .find("zsh-path:0>")
+        .map(|offset| routed_offset + offset)
+        .unwrap_or_else(|| panic!("{output}"));
+    assert!(preserved_status_offset < history_probe_offset, "{output}");
+    assert!(output.contains("after-zsh-path-prompt"), "{output}");
+    assert!(!output.contains("no such file or directory"), "{output}");
+    assert!(!output.contains("path-prompt-user-trap-ran"), "{output}");
+    assert!(output.contains("path-prompt-user-urg-trap-ran"), "{output}");
+    assert!(!output.contains("path-prompt-user-widget-ran"), "{output}");
+    assert!(output.contains("private-sequence-command-ran"), "{output}");
+    assert_eq!(
+        output.matches("path-prompt-private-binding-ran").count(),
+        1,
+        "{output}"
+    );
+    assert!(
+        output.contains("path-prompt-cut-buffer-preserved"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("path-prompt-cut-buffer-damaged"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("path-prompt-fork-channel-exposed"),
+        "{output}"
+    );
+    assert!(!output.contains("path-prompt-history-hook-ran"), "{output}");
+    assert!(!output.contains("path-prompt-history-leak"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_hands_buffered_tab_to_zle_before_follow_up_input() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("path-prompt-tab-handoff");
+    fs::write(
+        home.join(".zshrc"),
+        "PROMPT='zsh-tab:%?> '\nRPROMPT=''\nbindkey -e\n\
+         _cosh_test_tab_rewrite() {\n\
+           print -r -- path-prompt-tab-widget-ran\n\
+           BUFFER=': > \"$HOME/path-prompt-tab-command-executed\"'\n\
+           CURSOR=${#BUFFER}\n\
+           zle .redisplay\n\
+         }\n\
+         zle -N _cosh_test_tab_rewrite\n\
+         bindkey '^I' _cosh_test_tab_rewrite\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (
+                b"/definitely-not-command".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"\t\r echo path-prompt-typeahead-preserved\r exit 0\r".to_vec(),
+                Duration::from_millis(300),
+            ),
+            // Hold stdin open without producing another read; the handoff
+            // deadline must drain the complete retained tail on its own.
+            (Vec::new(), Duration::from_millis(300)),
+        ],
+    );
+    assert!(output.contains("path-prompt-tab-widget-ran"), "{output}");
+    assert!(!home.join("path-prompt-tab-command-executed").exists());
+    assert!(
+        output.contains("path-prompt-typeahead-preserved"),
+        "{output}"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn raw_cli_shell_only_keeps_slash_bearing_han_prompt_shell_owned() {
     let prompt = "打开./nonexistent-cosh-2913";
     let output = run_raw_cli_with_args_env_and_delayed_input(
