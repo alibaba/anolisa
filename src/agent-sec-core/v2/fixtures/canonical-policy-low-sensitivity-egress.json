@@ -1,0 +1,77 @@
+{
+  "irSchemaVersion": 1,
+  "profileId": "agentseccore-canonical-ir/v1alpha1-demo1",
+  "policyId": "00000000-0000-4000-8000-000000000003",
+  "revision": 1,
+  "payload": {
+    "resources": [
+      {
+        "id": "low-sensitive-sources",
+        "kind": "file",
+        "matchers": [
+            {
+              "path": {
+                "type": "glob",
+                "pattern": "/workspace/customer-data/**"
+              },
+              "resolution": {
+                "type": "final_object",
+                "followFinalSymlink": true,
+                "matchHardlinkIdentity": true
+              }
+            }
+        ]
+      },
+      {
+        "id": "trusted-egress-destinations",
+        "kind": "endpoint",
+        "matchers": [
+            {
+              "type": "host",
+              "pattern": "audit.example.com",
+              "ports": [443]
+            },
+            {
+              "type": "cidr",
+              "cidr": "10.20.0.0/16",
+              "ports": [443, 8443]
+            }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "deny-direct-low-sensitive-egress",
+        "when": {
+          "type": "atom",
+          "atom": {
+            "type": "information_flow",
+            "source": {
+              "type": "in",
+              "resourceSet": "low-sensitive-sources"
+            },
+            "destination": {
+              "type": "except",
+              "resourceSet": "trusted-egress-destinations"
+            },
+            "propagation": "direct"
+          }
+        },
+        "outcome": {
+          "decision": "deny",
+          "obligations": ["audit", "emit_receipt"],
+          "remediation": "none"
+        },
+        "enforcement": {
+          "decisionTiming": "pre_effect",
+          "requiredEvidence": ["operation_denied", "effect_receipt"]
+        }
+      }
+    ],
+    "activation": "post_attach_allowed",
+    "failurePolicy": {
+      "runtime": "fail_closed",
+      "update": "keep_last_known_good"
+    }
+  }
+}

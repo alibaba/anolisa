@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "3"
+members = [
+    "apps/asc-cli",
+    "apps/asc-daemon",
+    "crates/foundation/asc-foundation-types",
+    "crates/policy/asc-policy-types",
+    "crates/policy/asc-policy-engine",
+    "crates/policy/asc-pap",
+    "crates/policy/asc-policy-runtime",
+    "crates/data/persistence/asc-persistence-sqlite",
+    "crates/daemon/asc-daemon-protocol",
+    "crates/daemon/asc-daemon-client",
+    "crates/daemon/asc-daemon-core",
+    "tests/e2e",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+repository = "https://github.com/alibaba/anolisa"
+publish = false
+
+[workspace.dependencies]
+asc-foundation-types = { path = "crates/foundation/asc-foundation-types" }
+asc-policy-types = { path = "crates/policy/asc-policy-types" }
+asc-policy-engine = { path = "crates/policy/asc-policy-engine" }
+asc-pap = { path = "crates/policy/asc-pap" }
+asc-policy-runtime = { path = "crates/policy/asc-policy-runtime" }
+asc-persistence-sqlite = { path = "crates/data/persistence/asc-persistence-sqlite" }
+asc-daemon-protocol = { path = "crates/daemon/asc-daemon-protocol" }
+asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }
+asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.3"
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["trace"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+signal-hook = "0.3.18"
+subtle = "2.6"
+thiserror = "2"
+time = { version = "=0.3.44", features = ["parsing"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.32"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

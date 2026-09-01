@@ -1,0 +1,10 @@
+{
+  "policyName": "prevent-file-deletion",
+  "template": {
+    "kind": "prevent_file_deletion",
+    "files": [
+      "/workspace/important/**",
+      "/etc/agent/config.yaml"
+    ]
+  }
+}

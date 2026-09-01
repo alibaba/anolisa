@@ -1,0 +1,36 @@
+[package]
+name = "asc-cli"
+description = "Rust CLI client for the AgentSecCore system daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "asc-cli"
+path = "src/main.rs"
+
+[dependencies]
+asc-daemon-client = { workspace = true }
+asc-daemon-protocol = { workspace = true }
+clap = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+asc-daemon = { path = "../asc-daemon" }
+asc-daemon-core = { workspace = true }
+asc-foundation-types = { workspace = true }
+asc-pap = { workspace = true }
+asc-persistence-sqlite = { workspace = true }
+asc-policy-engine = { workspace = true }
+asc-policy-runtime = { workspace = true }
+
+[lints]
+workspace = true

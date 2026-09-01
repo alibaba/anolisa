@@ -1,0 +1,21 @@
+{
+  "policyName": "low-sensitivity-egress",
+  "template": {
+    "kind": "low_sensitivity_egress",
+    "files": [
+      "/workspace/customer-data/**"
+    ],
+    "trustedDestinations": [
+      {
+        "type": "host",
+        "pattern": "audit.example.com",
+        "ports": [443]
+      },
+      {
+        "type": "cidr",
+        "cidr": "10.20.0.0/16",
+        "ports": [443, 8443]
+      }
+    ]
+  }
+}

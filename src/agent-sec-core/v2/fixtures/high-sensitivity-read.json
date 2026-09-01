@@ -1,0 +1,7 @@
+{
+  "kind": "high_sensitivity_read_deny",
+  "files": [
+    "/workspace/secrets/**",
+    "/etc/production.key"
+  ]
+}
