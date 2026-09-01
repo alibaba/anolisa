@@ -148,7 +148,13 @@ pub(crate) fn start_resource_sampler(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_cpu_percent;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+
+    use super::{CpuBaseline, ResourceSampler, compute_cpu_percent, start_resource_sampler};
+    use crate::storage::sqlite::GenAISqliteStore;
 
     #[test]
     fn cpu_percent_uses_process_time_delta() {
@@ -167,5 +173,82 @@ mod tests {
         assert_eq!(compute_cpu_percent(100, 200, 0.0, 100), 0.0);
         assert_eq!(compute_cpu_percent(100, 200, 1.0, 0), 0.0);
         assert_eq!(compute_cpu_percent(200, 100, 1.0, 100), 0.0);
+    }
+
+    #[test]
+    fn sampler_establishes_and_uses_a_process_baseline() {
+        let pid = std::process::id();
+        let mut sampler = ResourceSampler::new();
+        let mut targets = HashMap::new();
+        targets.insert(pid, "test-agent".to_string());
+
+        assert!(sampler.sample_once(&targets).is_empty());
+        std::thread::sleep(Duration::from_millis(5));
+        let samples = sampler.sample_once(&targets);
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].pid, pid as i32);
+        assert_eq!(samples[0].agent_name.as_deref(), Some("test-agent"));
+        assert!(samples[0].memory_bytes > 0);
+        assert!(samples[0].cpu_percent >= 0.0);
+    }
+
+    #[test]
+    fn sampler_skips_dead_processes_and_discards_stale_baselines() {
+        let mut sampler = ResourceSampler::new();
+        let dead_pid = u32::MAX;
+        assert!(sampler.sample_process(dead_pid, "dead").is_err());
+
+        sampler.baselines.insert(
+            42,
+            CpuBaseline {
+                process_start_ticks: 1,
+                cpu_ticks: 1,
+                sampled_at: std::time::Instant::now(),
+            },
+        );
+        let targets = HashMap::new();
+        assert!(sampler.sample_once(&targets).is_empty());
+        assert!(sampler.baselines.is_empty());
+    }
+
+    #[test]
+    fn sampler_rejects_a_reused_pid_baseline() {
+        let pid = std::process::id();
+        let process = procfs::process::Process::new(pid as i32).expect("current process");
+        let stat = process.stat().expect("current process stat");
+        let mut sampler = ResourceSampler::new();
+        sampler.baselines.insert(
+            pid,
+            CpuBaseline {
+                process_start_ticks: stat.starttime.saturating_add(1),
+                cpu_ticks: stat.utime.saturating_add(stat.stime),
+                sampled_at: std::time::Instant::now(),
+            },
+        );
+
+        assert!(
+            sampler
+                .sample_process(pid, "test-agent")
+                .expect("sample")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sampler_thread_honors_stop_flag() {
+        let path = std::env::temp_dir().join(format!(
+            "agentsight-resource-sampler-{}.db",
+            std::process::id()
+        ));
+        let store = Arc::new(GenAISqliteStore::new_with_path(&path).expect("resource store"));
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = start_resource_sampler(store, targets, stop).expect("sampler thread");
+        handle.join().expect("sampler thread join");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }
