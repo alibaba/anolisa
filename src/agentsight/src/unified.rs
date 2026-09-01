@@ -24,6 +24,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::aggregator::Aggregator;
@@ -107,6 +108,10 @@ pub struct AgentSight {
     last_watermark_log: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
     pid_agent_name_cache: lru::LruCache<u32, String>,
+    /// Live Agent processes sampled for Session resource timelines.
+    resource_targets: Arc<RwLock<HashMap<u32, String>>>,
+    /// Resource sampler joined before the GenAI database is checkpointed.
+    resource_sampler_handle: Option<std::thread::JoinHandle<()>>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
@@ -524,6 +529,23 @@ impl AgentSight {
 
         // Create `running` flag early so background threads can observe shutdown.
         let running = Arc::new(AtomicBool::new(true));
+        let resource_targets = Arc::new(RwLock::new(
+            existing_agents
+                .iter()
+                .map(|agent| (agent.pid, agent.agent_info.name.clone()))
+                .chain(conn_results.iter().filter_map(|result| {
+                    Self::conn_scan_agent_name(&scanner, result.pid).map(|name| (result.pid, name))
+                }))
+                .collect(),
+        ));
+        for agent in &existing_agents {
+            Self::register_resource_targets(&resource_targets, agent.pid, &agent.agent_info.name);
+        }
+        for result in &conn_results {
+            if let Some(agent_name) = Self::conn_scan_agent_name(&scanner, result.pid) {
+                Self::register_resource_targets(&resource_targets, result.pid, &agent_name);
+            }
+        }
 
         // Spawn background threads (config watcher, stale scanner).
         if let Some(ref cfg_path) = config.config_path {
@@ -536,9 +558,22 @@ impl AgentSight {
                 Arc::clone(&running),
             );
         }
-        if let Some(ref sqlite_store) = genai_sqlite_store {
+        let resource_sampler_handle = if let Some(ref sqlite_store) = genai_sqlite_store {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
-        }
+            match crate::health::resource::start_resource_sampler(
+                Arc::clone(sqlite_store),
+                Arc::clone(&resource_targets),
+                Arc::clone(&running),
+            ) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    log::warn!("Failed to start Agent resource sampler: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
         // Feature-gated (default off); the thread shares `running` as stop flag.
@@ -599,6 +634,8 @@ impl AgentSight {
             last_interruption_purge: std::time::Instant::now(),
             last_watermark_log: std::time::Instant::now(),
             pid_agent_name_cache,
+            resource_targets,
+            resource_sampler_handle,
             http_domains,
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
@@ -641,7 +678,25 @@ impl AgentSight {
 
     /// Attach SSL probes to a specific agent process
     pub fn attach_process(&mut self, pid: u32, agent_name: &str) {
+        Self::register_resource_targets(&self.resource_targets, pid, agent_name);
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
+    }
+
+    fn register_resource_targets(
+        targets: &Arc<RwLock<HashMap<u32, String>>>,
+        pid: u32,
+        agent_name: &str,
+    ) {
+        let Ok(mut targets) = targets.write() else {
+            log::warn!("Failed to register resource target pid={pid}: target lock poisoned");
+            return;
+        };
+        targets.insert(pid, agent_name.to_string());
+        if Self::should_register_descendants(agent_name) {
+            for child in Self::collect_descendant_pids(pid) {
+                targets.insert(child, agent_name.to_string());
+            }
+        }
     }
 
     /// Resolve the agent name to cache for a connection-scan hit.
@@ -842,6 +897,14 @@ impl AgentSight {
                 );
                 if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
+                } else if let Some(agent_name) =
+                    Self::conn_scan_agent_name(&self.scanner, dns_event.pid)
+                {
+                    self.pid_agent_name_cache
+                        .put(dns_event.pid, agent_name.clone());
+                    if let Ok(mut targets) = self.resource_targets.write() {
+                        targets.insert(dns_event.pid, agent_name);
+                    }
                 }
             }
 
@@ -1066,6 +1129,9 @@ impl AgentSight {
                 }
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
+                if let Ok(mut targets) = self.resource_targets.write() {
+                    targets.remove(pid);
+                }
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
@@ -1139,6 +1205,11 @@ impl AgentSight {
     /// Shutdown gracefully
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.resource_sampler_handle.take()
+            && handle.join().is_err()
+        {
+            log::warn!("Agent resource sampler panicked during shutdown");
+        }
         // Flush all pending GenAI events before exit
         self.flush_all_pending_genai();
         // Checkpoint genai_events.db WAL so -wal/-shm are cleaned up on exit

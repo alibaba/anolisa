@@ -96,6 +96,12 @@ query, its Tokens, an interruption badge, and a quality **Eval** action:
 
 ![Expanded session showing its conversations](../../../../images/agentsight/en/dashboard-session-expanded.png)
 
+The expanded Session also shows CPU and RSS memory curves for its associated Agent processes. Blue
+background bands mark captured LLM calls, violet bands mark matched Tool Call intervals, and orange
+bands mark idle time between observed activities. Values from multiple associated PIDs are summed.
+The chart is process-level context, so a shared Agent process serving concurrent Sessions cannot be
+split into exact per-Session resource consumption.
+
 The `SAVED TOKENS` column is filled in when Tokenless is active for that session.
 
 ## Sessions

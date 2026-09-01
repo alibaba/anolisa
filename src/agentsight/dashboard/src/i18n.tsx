@@ -339,6 +339,15 @@ const enUSMessages = {
   'cl.queryFailed': 'Query failed',
   'cl.loadingEllipsis': 'Loading...',
   'cl.totalTokens': 'Total Tokens',
+  'cl.resourceTimeline': 'Session Resource Timeline',
+  'cl.resourceTimelineHint': 'Process-level totals for all PIDs associated with this session',
+  'cl.loadingResources': 'Loading process resource samples...',
+  'cl.noResourceData': 'No process resource samples are available for this session',
+  'cl.cpuUsage': 'CPU Usage',
+  'cl.memoryUsage': 'RSS Memory',
+  'cl.llmPhase': 'LLM call',
+  'cl.toolCallPhase': 'Tool call',
+  'cl.idlePhase': 'Idle',
 
   // ── Security ──
   'sec.securityObservability': 'Security Observability',
@@ -1348,6 +1357,15 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
     'cl.queryFailed': '查询失败',
     'cl.loadingEllipsis': '加载中...',
     'cl.totalTokens': '总 Token 数',
+    'cl.resourceTimeline': 'Session 资源时间线',
+    'cl.resourceTimelineHint': '汇总展示该 Session 关联的所有 PID 的进程级资源数据',
+    'cl.loadingResources': '正在加载进程资源采样...',
+    'cl.noResourceData': '该 Session 暂无进程资源采样数据',
+    'cl.cpuUsage': 'CPU 使用率',
+    'cl.memoryUsage': 'RSS 内存',
+    'cl.llmPhase': 'LLM 调用',
+    'cl.toolCallPhase': '工具调用',
+    'cl.idlePhase': '空闲',
 
     // ── Security ──
     'sec.securityObservability': '安全可观测',

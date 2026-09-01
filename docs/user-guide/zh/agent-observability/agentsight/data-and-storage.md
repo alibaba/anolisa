@@ -11,7 +11,7 @@ AgentSight 采集到的一切都以 SQLite 数据库形式留在本机。Dashboa
 
 | 文件 | 内容 |
 |---|---|
-| `genai_events.db` | 主库：一次 LLM 调用一行，含请求/响应消息、工具调用、Token、耗时、会话与对话 ID |
+| `genai_events.db` | 主库：保存 LLM 调用及其 Agent 进程的定时 CPU/RSS 采样，含耗时、会话与对话 ID |
 | `agentsight.db` | 审计记录（LLM 调用与进程动作）以及 Token 消费聚合 |
 | `interruption_events.db` | 检测到的中断，含类型、严重级别与证据 |
 | `optimization.db` | Dashboard 优化分析的结果 |
@@ -33,7 +33,7 @@ tracer 自身始终写入默认目录。
 
 | 存储 | 上限 | 修改方式 |
 |---|---|---|
-| `genai_events.db` | 默认 200 MB；达到上限的 90% 开始清理，每轮删除最旧的 5% 记录 | 在服务环境里设置 `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` |
+| `genai_events.db` | 默认 200 MB；达到上限的 90% 开始清理最旧的 LLM 调用与进程资源采样 | 在服务环境里设置 `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` |
 | `interruption_events.db` | 30 天 + 100 MB | `features.interruption_detection.retention_days` / `max_db_size_mb` |
 
 上限按逻辑容量计（物理文件大小减去空闲页），清理按最旧优先收敛到阈值内。清理后
@@ -93,7 +93,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 |---|---|---|
 | 服务 | `GET /health`、`GET /metrics`、`GET /api/docs` | 存活探测、Prometheus 指标、路由清单（`/health` 与 `/metrics` 仅本机可访问） |
 | 认证 | `GET /api/auth/status`、`GET /api/auth/verify`、`POST /api/auth/login` | 认证状态、能力列表、令牌换 cookie |
-| 会话与调用 | `GET /api/sessions`、`GET /api/sessions/{id}/traces`、`GET /api/traces/{id}`、`GET /api/conversations/{id}`、`POST /api/sessions/search` | 会话列表、会话内调用、单次调用详情、语义搜索 |
+| 会话与调用 | `GET /api/sessions`、`GET /api/sessions/{id}/traces`、`GET /api/sessions/{id}/resources`、`GET /api/traces/{id}`、`GET /api/conversations/{id}`、`POST /api/sessions/search` | 会话列表、会话内调用与进程资源、单次调用详情、语义搜索 |
 | 指标 | `GET /api/timeseries`、`GET /api/metrics/latency`、`GET /api/agent-names` | Token 时序、延迟分位、Agent 过滤项 |
 | 中断 | `GET /api/interruptions`、`/count`、`/stats`、`/session-counts`、`/conversation-counts`、`POST /api/interruptions/{id}/resolve` | 排查与关闭 |
 | Agent 健康 | `GET /api/agent-health`、`DELETE /api/agent-health/{pid}`、`POST /api/agent-health/{pid}/restart` | 实时状态与恢复动作 |
@@ -113,6 +113,18 @@ curl -s -H "Authorization: Bearer $TOKEN" http://<host>:7396/api/sessions
 NOW=$(date +%s%N); AGO=$((NOW - 3600000000000))
 curl -s "http://127.0.0.1:7396/api/sessions?start_ns=$AGO&end_ns=$NOW" | python3 -m json.tool | head
 ```
+
+获取某个 Session 的原始 CPU/RSS 采样点和活动区间：
+
+```bash
+curl -s "http://127.0.0.1:7396/api/sessions/<SESSION_ID>/resources?max_points=2000" | python3 -m json.tool
+```
+
+每个采样点都是进程级数据，包含 Epoch 纳秒时间戳、PID、CPU 百分比和以字节计的 RSS 内存。对于多进程
+Agent，Dashboard 会汇总该 Session 关联的所有 PID。这些数据表示 Session 运行时的进程环境，并非严格的
+Session 资源归因：同一个共享 Agent 进程可能同时服务多个 Session。LLM 区间使用采集到的请求和响应时间；
+Tool Call 区间从产生工具请求的 LLM 响应结束开始，到携带对应工具结果的下一次 LLM 请求开始为止。未被
+LLM 调用或已匹配 Tool Call 覆盖的间隙会返回为 `idle`；无法匹配结果的 Tool Call 不会虚构结束时间。
 
 ## Prometheus 指标
 

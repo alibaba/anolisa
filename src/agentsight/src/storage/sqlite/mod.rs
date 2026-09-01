@@ -35,7 +35,10 @@ pub use token_consumption::{
 pub use http::HttpStore;
 
 // Re-export GenAI SQLite storage
-pub use genai::{GenAISqliteStore, PendingCallInfo, PendingOrigin, SseEnrichment};
+pub use genai::{
+    GenAISqliteStore, PendingCallInfo, PendingOrigin, ResourceSample, SessionPhase,
+    SessionResourceTimeline, SseEnrichment,
+};
 
 // Re-export Interruption SQLite storage
 pub use interruption::{

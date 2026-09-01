@@ -10,6 +10,7 @@ import { EvaluationBadge } from '../components/EvaluationBadge';
 import { EvaluationPanel } from '../components/EvaluationPanel';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
+import { SessionResourceChart } from '../components/SessionResourceChart';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { formatNsPadded as nsToDate } from '../utils/datetime';
@@ -425,6 +426,11 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
 
   return (
     <>
+      <tr className="bg-blue-50 border-t border-blue-100">
+        <td colSpan={10} className="px-4 lg:px-8">
+          <SessionResourceChart sessionId={sessionId} startNs={startNs} endNs={endNs} />
+        </td>
+      </tr>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
         <td colSpan={10} className="px-4 lg:px-8 py-2">

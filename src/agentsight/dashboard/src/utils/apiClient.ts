@@ -80,6 +80,27 @@ export interface TraceEventDetail {
   conversation_id: string | null;
 }
 
+export interface ResourceSample {
+  timestamp_ns: number;
+  pid: number;
+  agent_name: string | null;
+  cpu_percent: number;
+  memory_bytes: number;
+}
+
+export interface SessionPhase {
+  kind: 'llm' | 'tool_call' | 'idle';
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  tool_call_id?: string;
+}
+
+export interface SessionResourceTimeline {
+  session_id: string;
+  samples: ResourceSample[];
+  phases: SessionPhase[];
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 export class ApiRequestError extends Error {
@@ -391,6 +412,21 @@ export async function fetchTraces(
   const suffix = qs ? `?${qs}` : '';
   return apiFetch<TraceSummary[]>(
     `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/traces${suffix}`
+  );
+}
+
+/** Fetch process CPU/RSS observations and inferred activity phases for a Session. */
+export async function fetchSessionResources(
+  sessionId: string,
+  startNs?: number | null,
+  endNs?: number | null,
+  maxPoints = 2_000,
+): Promise<SessionResourceTimeline> {
+  const params = new URLSearchParams({ max_points: String(maxPoints) });
+  if (startNs != null) params.set('start_ns', String(startNs));
+  if (endNs != null) params.set('end_ns', String(endNs));
+  return apiFetch<SessionResourceTimeline>(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/resources?${params.toString()}`,
   );
 }
 

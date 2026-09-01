@@ -12,7 +12,7 @@ read them.
 
 | File | Content |
 |---|---|
-| `genai_events.db` | The main store: one row per LLM call with request/response messages, tool calls, Tokens, timings, session and conversation IDs |
+| `genai_events.db` | The main store: LLM calls plus periodic CPU/RSS samples for their Agent processes, with timings, session and conversation IDs |
 | `agentsight.db` | Audit records (LLM calls and process actions) and Token consumption aggregates |
 | `interruption_events.db` | Detected interruptions with their type, severity, and evidence |
 | `optimization.db` | Results of Dashboard optimization analyses |
@@ -36,7 +36,7 @@ how you browse a copy or an archive. The tracer itself always writes to the defa
 
 | Store | Limit | How to change it |
 |---|---|---|
-| `genai_events.db` | 200 MB by default; pruning starts at 90% of the cap and removes the oldest 5% of records per pass | `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` in the service environment |
+| `genai_events.db` | 200 MB by default; pruning starts at 90% of the cap and removes the oldest LLM calls and process-resource samples | `AGENTSIGHT_GENAI_DB_MAX_SIZE_MB=500` in the service environment |
 | `interruption_events.db` | 30 days and 100 MB | `features.interruption_detection.retention_days` / `max_db_size_mb` |
 
 The limit is a logical-data cap (physical file size minus free pages); pruning
@@ -100,7 +100,7 @@ Endpoint groups in 0.11:
 |---|---|---|
 | Service | `GET /health`, `GET /metrics`, `GET /api/docs` | Liveness, Prometheus metrics, route list (`/health` and `/metrics` are loopback-only) |
 | Authentication | `GET /api/auth/status`, `GET /api/auth/verify`, `POST /api/auth/login` | Auth state, capability list, token → cookie exchange |
-| Sessions and traces | `GET /api/sessions`, `GET /api/sessions/{id}/traces`, `GET /api/traces/{id}`, `GET /api/conversations/{id}`, `POST /api/sessions/search` | Session list, per-session traces, single call detail, semantic search |
+| Sessions and traces | `GET /api/sessions`, `GET /api/sessions/{id}/traces`, `GET /api/sessions/{id}/resources`, `GET /api/traces/{id}`, `GET /api/conversations/{id}`, `POST /api/sessions/search` | Session list, per-session traces and process resources, single call detail, semantic search |
 | Metrics | `GET /api/timeseries`, `GET /api/metrics/latency`, `GET /api/agent-names` | Token time series, latency percentiles, Agent filter values |
 | Interruptions | `GET /api/interruptions`, `/count`, `/stats`, `/session-counts`, `/conversation-counts`, `POST /api/interruptions/{id}/resolve` | Triage and resolution |
 | Agent health | `GET /api/agent-health`, `DELETE /api/agent-health/{pid}`, `POST /api/agent-health/{pid}/restart` | Live Agent state and recovery actions |
@@ -120,6 +120,21 @@ Time ranges are nanosecond epochs (`start_ns`, `end_ns`), matching the CLI's `--
 NOW=$(date +%s%N); AGO=$((NOW - 3600000000000))
 curl -s "http://127.0.0.1:7396/api/sessions?start_ns=$AGO&end_ns=$NOW" | python3 -m json.tool | head
 ```
+
+Fetch the raw CPU/RSS points and activity intervals for one Session:
+
+```bash
+curl -s "http://127.0.0.1:7396/api/sessions/<SESSION_ID>/resources?max_points=2000" | python3 -m json.tool
+```
+
+Each sample is process-level and contains an epoch-nanosecond timestamp, PID, CPU percentage, and
+resident memory in bytes. For a multi-process Agent, the Dashboard sums the PIDs associated with
+the Session. This is execution-context data rather than strict per-Session attribution: a shared
+Agent process can serve more than one Session at the same time. LLM intervals use captured request
+and response timestamps; a Tool Call interval is inferred from the LLM response that requested the
+tool to the next LLM request carrying the matching tool result. Gaps not covered by an LLM call or
+a matched Tool Call are returned as `idle`; unmatched Tool Calls are not assigned a fabricated end
+timestamp.
 
 ## Prometheus metrics
 

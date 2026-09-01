@@ -122,6 +122,17 @@ pub struct SessionQuery {
     pub include_auxiliary: Option<bool>,
 }
 
+/// Query parameters for a Session resource timeline.
+#[derive(Debug, Deserialize)]
+pub struct SessionResourceQuery {
+    /// Optional lower timestamp bound in Unix epoch nanoseconds.
+    pub start_ns: Option<i64>,
+    /// Optional upper timestamp bound in Unix epoch nanoseconds.
+    pub end_ns: Option<i64>,
+    /// Maximum number of raw samples returned after stride-based downsampling.
+    pub max_points: Option<usize>,
+}
+
 /// GET /api/sessions?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns a list of gen_ai.session_id values with aggregated stats.
@@ -181,6 +192,51 @@ pub async fn list_traces_by_session(
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
+    }
+}
+
+/// GET /api/sessions/{session_id}/resources
+///
+/// Returns process-level CPU/RSS observations during the Session together
+/// with LLM and inferred Tool Call intervals on the same epoch-nanosecond clock.
+#[get("/sessions/{session_id}/resources")]
+pub async fn get_session_resources(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<SessionResourceQuery>,
+) -> impl Responder {
+    const DEFAULT_MAX_POINTS: usize = 2_000;
+    const MAX_POINTS_LIMIT: usize = 10_000;
+
+    if matches!((query.start_ns, query.end_ns), (Some(start), Some(end)) if start > end) {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "start_ns must not exceed end_ns"}));
+    }
+    let max_points = query.max_points.unwrap_or(DEFAULT_MAX_POINTS);
+    if max_points == 0 || max_points > MAX_POINTS_LIMIT {
+        return HttpResponse::BadRequest().json(json!({
+            "error": format!("max_points must be between 1 and {MAX_POINTS_LIMIT}")
+        }));
+    }
+
+    let db_path = data.storage_path.clone();
+    let session_id = path.into_inner();
+    let start_ns = query.start_ns;
+    let end_ns = query.end_ns;
+    let loaded = web::block(move || {
+        let store = GenAISqliteStore::new_with_path(&db_path).map_err(|error| error.to_string())?;
+        store
+            .get_session_resource_timeline(&session_id, start_ns, end_ns, max_points)
+            .map_err(|error| error.to_string())
+    })
+    .await;
+
+    match loaded {
+        Ok(Ok(Some(timeline))) => HttpResponse::Ok().json(timeline),
+        Ok(Ok(None)) => HttpResponse::NotFound().json(json!({"error": "session not found"})),
+        Ok(Err(error)) => HttpResponse::InternalServerError().json(json!({"error": error})),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(json!({"error": format!("resource query worker failed: {error}")})),
     }
 }
 
@@ -2027,11 +2083,22 @@ mod tests {
     async fn genai_query_handlers_return_persisted_data() {
         let db_path = unique_handler_db("genai_queries");
         write_completed_conversation_event(&db_path, "conv-handler");
+        GenAISqliteStore::new_with_path(&db_path)
+            .unwrap()
+            .insert_resource_samples(&[crate::storage::sqlite::ResourceSample {
+                timestamp_ns: 1_700_000_000_000_000_250,
+                pid: 1234,
+                agent_name: Some("claude".to_string()),
+                cpu_percent: 42.5,
+                memory_bytes: 256 * 1024 * 1024,
+            }])
+            .unwrap();
         let app = awtest::init_service(
             App::new()
                 .app_data(test_app_state_with_storage(db_path.clone()))
                 .service(list_sessions)
                 .service(list_traces_by_session)
+                .service(get_session_resources)
                 .service(get_trace_detail)
                 .service(get_conversation_events)
                 .service(list_agent_names)
@@ -2064,6 +2131,37 @@ mod tests {
         assert_eq!(traces.status(), StatusCode::OK);
         let traces_body = service_response_json(traces).await;
         assert_eq!(traces_body.as_array().unwrap().len(), 1);
+
+        let resources = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/sessions/{session_id}/resources"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resources.status(), StatusCode::OK);
+        let resources_body = service_response_json(resources).await;
+        assert_eq!(resources_body["samples"].as_array().map(Vec::len), Some(1));
+        assert_eq!(resources_body["samples"][0]["cpu_percent"], 42.5);
+        assert_eq!(resources_body["phases"][0]["kind"], "llm");
+
+        let invalid_resources = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/sessions/{session_id}/resources?max_points=0"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(invalid_resources.status(), StatusCode::BAD_REQUEST);
+
+        let missing_resources = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/sessions/missing/resources")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing_resources.status(), StatusCode::NOT_FOUND);
 
         let detail = awtest::call_service(
             &app,

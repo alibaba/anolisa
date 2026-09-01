@@ -86,6 +86,11 @@ sudo systemctl reload agentsight.service
 
 ![展开会话查看其中的对话](../../../../images/agentsight/zh/dashboard-session-expanded.png)
 
+展开的 Session 还会展示关联 Agent 进程的 CPU 与 RSS 内存曲线。蓝色背景区间表示采集到的 LLM 调用，
+紫色区间表示已匹配结果的 Tool Call，橙色区间表示观测活动之间的空闲时间；关联多个 PID 时会汇总展示。
+该图表达的是进程级运行环境，因此共享 Agent 进程同时服务多个 Session 时，无法拆分成严格准确的单
+Session 资源消耗。
+
 当该会话启用了 Tokenless 时，「节省 Token」列才会有数值。
 
 ## 会话列表

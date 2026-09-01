@@ -217,6 +217,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
             web::scope("/api")
                 .service(handlers::list_sessions)
                 .service(handlers::list_traces_by_session)
+                .service(handlers::get_session_resources)
                 .service(handlers::get_trace_detail)
                 .service(handlers::get_conversation_events)
                 .service(handlers::evaluate_grader)
@@ -335,6 +336,11 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
         "GET",
         "/api/sessions/{session_id}/traces",
         "Traces of a session",
+    ),
+    (
+        "GET",
+        "/api/sessions/{session_id}/resources",
+        "Process resource timeline of a session",
     ),
     ("GET", "/api/traces/{trace_id}", "Trace detail"),
     (

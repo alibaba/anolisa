@@ -117,6 +117,21 @@ impl GenAISqliteStore {
             // migration blocks below, which guarantees the columns exist first.
         )?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_resource_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                agent_name TEXT,
+                cpu_percent REAL NOT NULL,
+                memory_bytes INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_pid_timestamp
+                ON agent_resource_samples(pid, timestamp_ns);
+            CREATE INDEX IF NOT EXISTS idx_resource_timestamp
+                ON agent_resource_samples(timestamp_ns);",
+        )?;
+
         // ── Forward-compatible migrations ──────────────────────────────────────
         // Each block checks for a column's existence before ALTER TABLE, making
         // all migrations idempotent and safe to run on both old and new databases.
@@ -395,30 +410,50 @@ impl GenAISqliteStore {
         let pct = percent.clamp(0.0, 1.0);
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        let count: i64 =
+        let event_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))?;
+        let resource_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM agent_resource_samples", [], |row| {
+                row.get(0)
+            })?;
 
-        if count == 0 {
+        if event_count == 0 && resource_count == 0 {
             return Ok(());
         }
 
-        let delete_count = ((count as f64) * pct).max(1.0) as i64;
+        let event_delete_count = if event_count > 0 {
+            ((event_count as f64) * pct).max(1.0) as i64
+        } else {
+            0
+        };
+        let resource_delete_count = if resource_count > 0 {
+            ((resource_count as f64) * pct).max(1.0) as i64
+        } else {
+            0
+        };
 
         log::info!(
-            "Pruning {} of {} records ({:.1}%)",
-            delete_count,
-            count,
+            "Pruning {event_delete_count}/{event_count} GenAI events and \
+             {resource_delete_count}/{resource_count} resource samples ({:.1}%)",
             pct * 100.0
         );
 
-        let deleted = conn.execute(
+        let deleted_events = conn.execute(
             "DELETE FROM genai_events WHERE id IN (
                 SELECT id FROM genai_events ORDER BY id ASC LIMIT ?1
             )",
-            params![delete_count],
+            params![event_delete_count],
+        )?;
+        let deleted_resources = conn.execute(
+            "DELETE FROM agent_resource_samples WHERE id IN (
+                SELECT id FROM agent_resource_samples ORDER BY id ASC LIMIT ?1
+            )",
+            params![resource_delete_count],
         )?;
 
-        log::info!("Deleted {deleted} records");
+        log::info!(
+            "Deleted {deleted_events} GenAI events and {deleted_resources} resource samples"
+        );
 
         Ok(())
     }
