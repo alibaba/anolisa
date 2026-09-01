@@ -76,7 +76,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 - **OpenClaw 插件** — 通过 Protocol v2 Core 执行 PreTool RTK 改写和 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与受信 Retrieve
 - **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + Protocol v2 PostTool；Common BeforeModel 在受信 Retrieve 接入前透传 Schema，旧版 Copilot Shell 透传 Pipeline 输出
-- **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core；无受信 Retrieve，因此 PostTool 仅应用无损结果
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex

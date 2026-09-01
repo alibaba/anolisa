@@ -11,7 +11,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 |------|----|------------|--------------|--------------|------|--------|
 | cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换无损 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
-| Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并要求 Agent 重试 | 替换结果字符串 | 在响应压缩后尝试 | — |
+| Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的无损结果或追加错误指引 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
@@ -51,9 +51,9 @@ Common BeforeModel Hook 同样使用 Protocol v2，并声明没有受信 Retriev
 Schema 信息，因此这条 Common 路径会原样返回 Tools、不产生 Schema 压缩 Stats 记录，也不会
 发出不可恢复 Marker。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
 
-旧版 OpenClaw、Hermes 和 DeepSeek Harness 集成仍使用各自的专用响应路径，其阈值与能力见
-下文；content-aware build/log 路径尚未接入这些 Adapter。独立 `compress-response` 命令也
-继续作为显式 JSON 清理入口。
+OpenClaw 与 Hermes 已把 PostTool 决策委托给 Core。DeepSeek Harness 仍使用专用响应路径；
+content-aware build/log 路径尚未接入。独立 `compress-response` 命令也继续作为显式 JSON
+清理入口。
 
 对于 JSON 响应清理，共享与旧版 Adapter 按以下方式分类工具：
 
@@ -63,15 +63,15 @@ Schema 信息，因此这条 Common 路径会原样返回 Tools、不产生 Sche
 | Shell/exec | 字符串 65,536 字符、数组保留 128 项、深度 8 |
 | 其他结构化工具 | 字符串 1,048,576 字符、数组保留 65,536 项、深度 32 |
 
-OpenClaw 与 Hermes 仍保留现有 Adapter 侧 200 字符门禁；Common Hook 的该门禁已经归 Core。
-TOON 只处理至少 500 字符的 Payload，并且要求选中的宿主槽支持文本；更短 Payload 保留前一
-阶段结果。独立 `compress-toon` CLI 和 SDK TOON 路径使用相同默认阈值，CLI 可通过
-`--min-toon-chars` 为单次调用降低阈值。Codex 和 Qwen Code 当前的 PostToolUse 契约不能替换
-原始模型可见输出，因此不运行响应压缩或 TOON。
+Common Hook、OpenClaw 与 Hermes 的 PostTool 大小门禁、基于工具来源的阈值和 TOON 选择均归
+Core。只有宿主槽支持文本且 Core 找到更小的合法表示时才会使用 TOON。独立
+`compress-toon` CLI 和 SDK TOON 路径继续使用文档规定的默认门槛，CLI 可通过
+`--min-toon-chars` 为单次调用降低阈值。Codex 和 Qwen Code 当前的 PostToolUse 契约不能
+替换原始模型可见输出，因此不运行响应压缩或 TOON。
 
-Common PreTool Rewrite Hook 仍直接调用 RTK，尚未把 v2 `output_optimization: "rtk"` 传给
-后续 PostTool 进程；OpenClaw 也存在相同的逐调用状态缺口。完整状态迁移留到 Adapter 阶段，
-当前 PostTool 请求使用 `output_optimization: "none"`。
+Common Hook 与 OpenClaw 会把 RTK 所有权传给匹配的 PostTool 调用。Hermes 为兼容旧宿主版本
+采用阻止后建议重试；最终结果 Hook 会从 Hermes 实际执行的命令中识别带 Attribution 的 RTK
+Wrapper。因此三者都会让 RTK 输出绕过第二次压缩。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
@@ -287,7 +287,9 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 
 ### Hermes
 
-Plugin 在 Hermes 新会话中生效。重启 Hermes 后执行一个 Shell 工具任务验证。
+Plugin 在 Hermes 新会话中生效。重启 Hermes 后先执行 Shell 工具任务验证阻止后重试改写，
+再执行返回 JSON 的工具验证结果替换。Hermes 无法发布受信 Retrieve Tool，因此需要恢复能力
+的压缩会原样透传。
 
 ### Qoder
 

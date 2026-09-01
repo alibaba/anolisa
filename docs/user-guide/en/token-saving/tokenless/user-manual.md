@@ -65,9 +65,9 @@ Retrieve: visible-Marker authorization → byte-identical Stash read
 ```
 
 This is a capability map, not a pipeline that every framework runs. For example, the content-aware
-protocol path currently serves Cosh-NG, Qoder, supported Claude Code releases, and OpenCode;
-OpenClaw, Hermes, and DeepSeek Harness retain dedicated JSON response paths. Codex and Qwen Code do
-not replace post-tool output under their current host contracts. See
+protocol path currently serves Cosh-NG, OpenClaw, Hermes, Qoder, supported Claude Code releases,
+and OpenCode; DeepSeek Harness retains a dedicated JSON response path. Codex and Qwen Code do not
+replace post-tool output under their current host contracts. See
 [Agent integration](framework-integration.md).
 
 ## Behaviors to understand
@@ -134,7 +134,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 |-----------|-------------|-------------------|
 | cosh | Extension | Hard-disabled Tool Ready, rewrite, Schema; Cosh-NG replaces eligible pipeline output, while legacy Copilot Shell passes post-tool output through |
 | OpenClaw | Plugin | Hard-disabled Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
-| Hermes | Plugin | Hard-disabled Tool Ready, block-and-retry rewrite, result replacement with response + TOON; no Schema |
+| Hermes | Plugin | Hard-disabled Tool Ready, Core-owned block-and-retry rewrite, lossless result replacement with Core-selected TOON; no Schema/Retrieve |
 | Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response pipeline through `updatedToolOutput`; no Schema |
 | Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
 | Codex | Plugin | Hard-disabled Tool Ready, RTK rewrite, environment-failure diagnostics; no response/TOON replacement or Schema |

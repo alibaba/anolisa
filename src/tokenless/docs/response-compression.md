@@ -90,7 +90,7 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
 `ContentType::Json -> JsonCompressor`；清理、截断、Structured Slot 恢复、Compact JSON 与
 可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
-Common Hook 与 OpenClaw Plugin 都不声明受信 Retrieve 能力，因此只接受无损 JSON 候选；需要截断的候选以
+Common Hook、OpenClaw 与 Hermes Plugin 都不声明受信 Retrieve 能力，因此只接受无损 JSON 候选；需要截断的候选以
 `recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK 操作错误由 CLI 以退出码 1
 返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过 Protocol v2 调用 Core，由 Core
 执行 RTK；Adapter 按 Tool Call ID 暂存 `output_optimization: "rtk"`，并在对应 PostTool 调用中
@@ -102,22 +102,24 @@ PostTool 事件时遗留的状态会在后续 PreTool 调用中按 24 小时 TTL
 ### 路径 3：Hermes Agent 插件（`transform_tool_result` hook）
 
 ```
-工具执行完成
+pre_tool_call 将 Shell 参数发送给 Tokenless Core
    ↓
-Hermes 触发 transform_tool_result 事件
+旧版兼容模式：阻止原调用并建议执行 Core 返回的 RTK 命令
    ↓
-检查：是否为内容检索工具（Read/Glob/...）→ 跳过
+Hermes 执行重试命令并触发 transform_tool_result
    ↓
-检查：响应长度 < 200 字符 → 跳过
+Adapter 映射 Status、Content Origin 和 RTK Wrapper 事实
    ↓
-Step 1：tokenless compress-response（零截断语义清理）
+tokenless compress 执行 PostTool 路由与 JSON-only Pipeline
    ↓
-Step 2：tokenless compress-toon（无损 TOON 编码）
+Core 返回 Applied / Tool Error / Passthrough 等 Disposition
    ↓
-两步均采用 fail-open 策略
-   ↓
-返回压缩后的结果字符串
+Adapter 仅替换 Applied 输出或追加错误指引；其他结果原样透传
 ```
+
+Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON 选择或最终大小仲裁。
+Hermes 无法发布受信 Retrieve Tool，因此 Core 只会应用无损候选；需要截断恢复能力的候选
+直接透传。为兼容只支持 Block 的 Hermes 版本，Adapter 不要求 `pre_tool_call modify`。
 
 ### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
 

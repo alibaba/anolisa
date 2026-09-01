@@ -15,7 +15,7 @@ Agent adapters are available for:
 
 - **OpenClaw plugin** — delegates PreTool RTK rewriting and PostTool optimization to Protocol v2 Core.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
-- **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and registered but hard-disabled Tool Ready via Hermes's native plugin system.
+- **Hermes Agent plugin** — delegates block-and-suggest command rewriting and model-bound result optimization to Core through Hermes's native plugin system.
 - **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, and response compression via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
@@ -39,7 +39,7 @@ retrieval, and attribution.
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | Protocol v2 RTK ✅, transcript PostTool ✅, Schema/Retrieve unavailable in the host |
 | copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Protocol v2 PostTool; Common BeforeModel passes schemas through until trusted Retrieve is available |
-| Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
+| Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Core-owned command rewriting/response/TOON ✅, lossless-only PostTool, Schema/Retrieve unavailable |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
@@ -526,20 +526,25 @@ owns those decisions.
 
 ## Hermes Agent Plugin
 
-The plugin registers hooks at three Hermes events, covering five strategies:
+The plugin registers hooks at three Hermes events while Core owns the lifecycle policy:
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Tool Ready | `pre_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
-| Command rewriting | `pre_tool_call` | Blocks original command, suggests `rtk`-rewritten version (one extra round-trip) | ✅ Active |
-| Response compression | `transform_tool_result` | Compresses tool results via `tokenless compress-response` | ✅ Active |
-| TOON encoding | `transform_tool_result` | Pipeline step after response compression — encodes JSON to TOON format | ✅ Active |
+| Command rewriting | `pre_tool_call` | Sends the command to Core, then blocks and suggests the returned RTK form | ✅ Active |
+| PostTool optimization | `transform_tool_result` | Sends the final model-bound result to Core and applies only accepted lossless output | ✅ Active |
 | Session tracking | `on_session_start` | Propagates agent/session IDs for stats recording | ✅ Active |
-| Schema compression | — | Not supported by Hermes hook system (no hook exposes tool schemas) | ⏳ Blocked |
+| Schema/Retrieve | — | Hermes exposes neither a schema-transform seam nor trusted Marker visibility | — |
 
-**How command rewriting works in Hermes**: Hermes's `pre_tool_call` hook can only block tool execution (not modify arguments), so the plugin blocks the original shell command and returns a message suggesting the RTK-rewritten version. The agent then re-executes with the optimized command, adding one extra tool-call round-trip. This is safe — `rtk rewrite` only does text substitution and never executes the command.
+**How command rewriting works in Hermes**: to remain compatible with Hermes releases that only
+support blocking, the plugin asks Core for a rewrite, blocks the original shell command, and tells
+the agent to retry with the returned command. The retry adds one tool-call round-trip. The final
+hook recognizes Core's attributed RTK wrapper from the command Hermes actually executed, so RTK
+output bypasses a second compression pass without correlating two different tool-call IDs.
 
-Each hook degrades gracefully — if the corresponding binary is not installed, that hook is silently skipped.
+Hermes cannot publish a trusted Retrieve tool, so Core applies only lossless cleanup or TOON output;
+truncation candidates pass through. If the Tokenless operation is unavailable or fails, the hook
+leaves the host value unchanged.
 
 ### Install
 

@@ -12,7 +12,7 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 |-----------|-------|------------|------------------|-------------------|------|--------|
 | cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces lossless JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
-| Hermes | `hermes` | Hard-disabled | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
+| Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted lossless results or adds error guidance | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
@@ -54,10 +54,9 @@ transformation removes or rewrites schema information, so this Common path passe
 unchanged, emits no schema-compression Stats rows, and never emits unrecoverable Markers. OpenCode's
 separate per-tool definition path and the direct `compress-schema` command are unchanged.
 
-Legacy OpenClaw, Hermes, and DeepSeek Harness integrations still use their dedicated response paths.
-Their response thresholds and feature sets are described below; the content-aware build/log path
-does not run there yet. The standalone `compress-response` command also remains the explicit JSON
-cleanup interface.
+OpenClaw and Hermes now delegate their PostTool decisions to Core. DeepSeek Harness still uses its
+dedicated response path; the content-aware build/log path does not run there yet. The standalone
+`compress-response` command also remains the explicit JSON cleanup interface.
 
 For JSON response cleanup, shared and legacy adapters classify tools as follows:
 
@@ -67,17 +66,17 @@ For JSON response cleanup, shared and legacy adapters classify tools as follows:
 | Shell/exec | 65,536-character strings, 128 retained array items, depth 8 |
 | Other structured tools | 1,048,576-character strings, 65,536 retained array items, depth 32 |
 
-OpenClaw and Hermes still apply their existing adapter-side 200-character gates. In the Common Hook,
-that gate now belongs to Core. TOON runs only on payloads of at least 500 characters and only when
-the selected host slot accepts text; smaller payloads keep the prior candidate. The same default
-minimum applies to the standalone `compress-toon` CLI and SDK TOON path, while the CLI can lower it
-per call with `--min-toon-chars`. Codex and Qwen Code do not run response compression or TOON because
-their current PostToolUse contracts cannot replace the original model-visible output.
+The PostTool size gate, tool-origin thresholds, and TOON selection belong to Core for Common Hooks,
+OpenClaw, and Hermes. TOON runs only when the selected host slot accepts text and Core finds a
+smaller valid representation. The standalone `compress-toon` CLI and SDK TOON path retain their
+documented default minimum, while the CLI can lower it per call with `--min-toon-chars`. Codex and
+Qwen Code do not run response compression or TOON because their current PostToolUse contracts
+cannot replace the original model-visible output.
 
-The Common PreTool rewrite hook still invokes RTK directly and does not yet carry v2
-`output_optimization: "rtk"` into the later PostTool process. OpenClaw has the same per-call state
-gap. Their complete state migration is deferred to the adapter phase; the current PostTool request
-uses `output_optimization: "none"`.
+Common Hooks and OpenClaw carry RTK ownership into the matching PostTool call. Hermes supports older
+host releases by blocking and suggesting a retry; its final-result hook recognizes the attributed
+RTK wrapper from the command Hermes actually executed. All three therefore bypass a second
+compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
@@ -306,7 +305,9 @@ The install script uses OpenClaw's unsafe-install override as described above. R
 
 ### Hermes
 
-The plugin takes effect in a new Hermes session. Restart Hermes and run a shell-tool task.
+The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the
+block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. Hermes cannot
+publish a trusted Retrieve tool, so compression that requires recovery passes through unchanged.
 
 ### Qoder
 
