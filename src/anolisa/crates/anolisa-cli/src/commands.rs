@@ -563,8 +563,8 @@ fn adapter_command_scope(args: &adapter::AdapterArgs) -> CommandScope {
         adapter::AdapterCommands::Scan | adapter::AdapterCommands::Status { .. } => {
             CommandScope::ReadOnly
         }
-        // Both adapter mutations take the install lock before planning, so
-        // their previews still require the same privilege as real execution.
+        // Keep adapter previews privileged in system mode for compatibility
+        // with the existing mutation authorization policy.
         adapter::AdapterCommands::Enable { .. } | adapter::AdapterCommands::Disable { .. } => {
             CommandScope::ModeScopedMutation {
                 dry_run: DryRunPolicy::PrivilegedPreview,
@@ -945,7 +945,7 @@ mod tests {
                 Some(DryRunPolicy::PrivilegedPreview)
             );
             let err = validate_global_args_with_euid(&ctx, policy, 1000, true)
-                .expect_err("adapter previews take the privileged install lock");
+                .expect_err("adapter previews retain the system root policy");
             assert_eq!(err.code(), "PERMISSION_DENIED");
             validate_global_args_with_euid(&ctx, policy, 0, true)
                 .expect("root should reach the adapter preview handler");

@@ -597,6 +597,10 @@ fn enable_status_disable_happy_path() {
         EnableOutcome::Enabled(c) => *c,
         EnableOutcome::Planned { .. } => panic!("expected enabled, got plan"),
     };
+    assert!(
+        world.layout.lock_file.is_file(),
+        "apply must retain the existing install-lock boundary"
+    );
     assert_eq!(claim.component, COMPONENT);
     assert_eq!(claim.framework, FRAMEWORK);
     assert_eq!(claim.plugin_id.as_deref(), Some(COMPONENT));
@@ -1431,6 +1435,8 @@ fn dry_run_enable_does_not_register_or_persist() {
     let world = stage();
     world.apply_env(&guard, None);
     let manager = world.manager();
+    assert!(!world.layout.lock_file.exists());
+    assert!(!world.layout.central_log.exists());
 
     let outcome = manager
         .enable(COMPONENT, Some(FRAMEWORK), true)
@@ -1457,6 +1463,14 @@ fn dry_run_enable_does_not_register_or_persist() {
             .join("registry")
             .join(COMPONENT)
             .exists()
+    );
+    assert!(
+        !world.layout.lock_file.exists(),
+        "dry-run must not create the install lock file"
+    );
+    assert!(
+        !world.layout.central_log.exists(),
+        "dry-run probes must not create operation records"
     );
 }
 
@@ -1662,6 +1676,8 @@ fn dry_run_disable_leaves_state_unchanged() {
         .expect("enable");
     let state_path = world.layout.state_dir.join("installed.toml");
     let state_bytes_before = std::fs::read(&state_path).expect("read state file");
+    let log_bytes_before = std::fs::read(&world.layout.central_log).expect("read central log");
+    std::fs::remove_file(&world.layout.lock_file).expect("remove released seed lock file");
     assert!(
         world
             .load_state()
@@ -1701,6 +1717,15 @@ fn dry_run_disable_leaves_state_unchanged() {
         state_bytes_before, state_bytes_after,
         "installed.toml must be byte-identical after dry-run disable"
     );
+    assert!(
+        !world.layout.lock_file.exists(),
+        "dry-run disable must not recreate the install lock file"
+    );
+    assert_eq!(
+        std::fs::read(&world.layout.central_log).expect("read central log after dry-run"),
+        log_bytes_before,
+        "dry-run disable must not append operation records"
+    );
     // Double-check: receipt still present and status unchanged.
     let state_after = world.load_state();
     let claim_after = state_after
@@ -1724,6 +1749,7 @@ fn dry_run_disable_leaves_state_unchanged() {
         .expect("real disable");
     assert!(!real.dry_run);
     assert!(real.claim_removed, "real disable must remove receipt");
+    assert!(world.layout.lock_file.is_file());
     assert!(
         world
             .load_state()

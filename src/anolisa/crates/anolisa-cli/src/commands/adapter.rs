@@ -39,14 +39,20 @@ use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus};
 use anolisa_core::adapter::driver::{AdapterStatusReport, DriverPlan};
 use anolisa_core::adapter::manager::{
-    AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOptions, EnableOutcome, ScanEntry,
-    ScanReport, StatusReport,
+    AdapterManager, AdapterSourceStatus, EnableOptions, ScanEntry, ScanReport, StatusReport,
 };
+use anolisa_core::execution::{CommandOutcomeStatus, ExecutionIntent};
 use anolisa_core::manifest::{AdapterNotice, NoticeLevel, NoticeWhen};
 
 use crate::commands::common;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
+
+use self::application::{
+    AdapterApplicationOutcome, AdapterApplied, AdapterPreview, AdapterRequest,
+};
+
+mod application;
 
 /// CLI arguments for the `adapter` sub-surface.
 #[derive(Parser)]
@@ -350,22 +356,21 @@ fn handle_enable(
     profiles: Vec<String>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
-    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
-    let manager = common::build_adapter_manager_from_view(ctx, &view);
-    let outcome = manager
-        .enable_with_options(
-            &component,
+    let outcome = application::run(
+        AdapterRequest::Enable {
+            component,
             framework,
-            ctx.dry_run,
-            EnableOptions {
+            options: EnableOptions {
                 allow_unsafe_plugin_install,
                 profiles,
             },
-        )
-        .map_err(|e| map_err(COMMAND, e))?;
+            intent: execution_intent(ctx.dry_run),
+        },
+        ctx,
+    )?;
 
     match outcome {
-        EnableOutcome::Planned { plan, notices } => {
+        AdapterApplicationOutcome::Preview(AdapterPreview::Enable { plan, notices }) => {
             if ctx.json {
                 let payload = EnablePayload {
                     component: plan.component.clone(),
@@ -390,8 +395,25 @@ fn handle_enable(
             print_notices(&notices, true, ctx.quiet);
             Ok(())
         }
-        EnableOutcome::Enabled(claim) => {
-            let notices = post_enable_notices(&claim);
+        AdapterApplicationOutcome::Applied {
+            result: AdapterApplied::Enable { claim, notices },
+            outcome,
+        } => {
+            match outcome.status() {
+                CommandOutcomeStatus::Completed => {}
+                CommandOutcomeStatus::Partial { reason } => {
+                    return Err(CliError::Degraded {
+                        command: COMMAND.to_string(),
+                        reason: reason.clone(),
+                    });
+                }
+                CommandOutcomeStatus::Failed { reason } => {
+                    return Err(CliError::Runtime {
+                        command: COMMAND.to_string(),
+                        reason: reason.clone(),
+                    });
+                }
+            }
             if ctx.json {
                 let payload = EnablePayload {
                     component: claim.component.clone(),
@@ -410,6 +432,11 @@ fn handle_enable(
             print_notices(&notices, false, ctx.quiet);
             Ok(())
         }
+        AdapterApplicationOutcome::Preview(AdapterPreview::Disable(_))
+        | AdapterApplicationOutcome::Applied {
+            result: AdapterApplied::Disable(_),
+            ..
+        } => unreachable!("an enable request cannot return a disable result"),
     }
 }
 
@@ -423,84 +450,89 @@ fn handle_disable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter disable";
-    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
-    let manager = common::build_adapter_manager_from_view(ctx, &view);
-    let outcome: DisableOutcome = manager
-        .disable(&component, framework, ctx.dry_run)
-        .map_err(|e| map_err(COMMAND, e))?;
+    let outcome = application::run(
+        AdapterRequest::Disable {
+            component,
+            framework,
+            intent: execution_intent(ctx.dry_run),
+        },
+        ctx,
+    )?;
 
-    if outcome.dry_run {
-        if ctx.json {
-            let payload = DisablePayload {
-                component: outcome.component.clone(),
-                framework: outcome.framework.clone(),
-                dry_run: true,
-                claim_removed: false,
-                cleanup_complete: outcome.report.cleanup_complete,
-                messages: outcome.report.messages.clone(),
-                notices: outcome.notices.iter().map(NoticeRow::from).collect(),
+    match outcome {
+        AdapterApplicationOutcome::Preview(AdapterPreview::Disable(outcome)) => {
+            if ctx.json {
+                let payload = DisablePayload {
+                    component: outcome.component.clone(),
+                    framework: outcome.framework.clone(),
+                    dry_run: true,
+                    claim_removed: false,
+                    cleanup_complete: outcome.report.cleanup_complete,
+                    messages: outcome.report.messages.clone(),
+                    notices: outcome.notices.iter().map(NoticeRow::from).collect(),
+                };
+                return render_json(COMMAND, payload);
+            }
+            let target = disable_target(&outcome.component, outcome.framework.as_deref());
+            println!("[dry-run] would disable {target}:");
+            for msg in &outcome.report.messages {
+                println!("  - {msg}");
+            }
+            print_notices(&outcome.notices, true, ctx.quiet);
+            Ok(())
+        }
+        AdapterApplicationOutcome::Applied {
+            result: AdapterApplied::Disable(result),
+            outcome,
+        } => {
+            let terminal_error = match outcome.status() {
+                CommandOutcomeStatus::Completed => None,
+                CommandOutcomeStatus::Partial { reason } => Some(CliError::Degraded {
+                    command: COMMAND.to_string(),
+                    reason: reason.clone(),
+                }),
+                CommandOutcomeStatus::Failed { reason } => Some(CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: reason.clone(),
+                }),
             };
-            return render_json(COMMAND, payload);
+
+            if ctx.json {
+                if let Some(err) = terminal_error {
+                    return Err(err);
+                }
+                let payload = DisablePayload {
+                    component: result.component.clone(),
+                    framework: result.framework.clone(),
+                    dry_run: false,
+                    claim_removed: result.claim_removed,
+                    cleanup_complete: result.report.cleanup_complete,
+                    messages: result.report.messages.clone(),
+                    notices: result.notices.iter().map(NoticeRow::from).collect(),
+                };
+                return render_json(COMMAND, payload);
+            }
+
+            let target = disable_target(&result.component, result.framework.as_deref());
+            if result.claim_removed {
+                println!("Disabled {target}.");
+            } else if result.report.cleanup_complete {
+                println!("Nothing to disable for {target}.");
+            } else {
+                println!("Disable of {target} did not complete cleanly:");
+            }
+            for msg in &result.report.messages {
+                println!("  - {msg}");
+            }
+            print_notices(&result.notices, false, ctx.quiet);
+            terminal_error.map_or(Ok(()), Err)
         }
-        let target = disable_target(&outcome);
-        println!("[dry-run] would disable {target}:");
-        for msg in &outcome.report.messages {
-            println!("  - {msg}");
-        }
-        print_notices(&outcome.notices, true, ctx.quiet);
-        return Ok(());
+        AdapterApplicationOutcome::Preview(AdapterPreview::Enable { .. })
+        | AdapterApplicationOutcome::Applied {
+            result: AdapterApplied::Enable { .. },
+            ..
+        } => unreachable!("a disable request cannot return an enable result"),
     }
-
-    // Cleanup that did not complete is a degraded outcome: the receipt was
-    // kept (marked cleanup_failed) so the operator can retry. Surface a
-    // non-zero exit rather than a silent success.
-    let degraded = (!outcome.report.cleanup_complete).then(|| CliError::Degraded {
-        command: COMMAND.to_string(),
-        reason: format!(
-            "adapter '{}' cleanup incomplete; receipt kept for retry",
-            outcome.component
-        ),
-    });
-
-    if ctx.json {
-        if let Some(err) = degraded {
-            return Err(err);
-        }
-        let payload = DisablePayload {
-            component: outcome.component.clone(),
-            framework: outcome.framework.clone(),
-            dry_run: false,
-            claim_removed: outcome.claim_removed,
-            cleanup_complete: outcome.report.cleanup_complete,
-            messages: outcome.report.messages.clone(),
-            notices: outcome.notices.iter().map(NoticeRow::from).collect(),
-        };
-        return render_json(COMMAND, payload);
-    }
-
-    let target = disable_target(&outcome);
-    if outcome.claim_removed {
-        println!("Disabled {target}.");
-    } else if outcome.report.cleanup_complete {
-        println!("Nothing to disable for {target}.");
-    } else {
-        println!("Disable of {target} did not complete cleanly:");
-    }
-    for msg in &outcome.report.messages {
-        println!("  - {msg}");
-    }
-    print_notices(&outcome.notices, false, ctx.quiet);
-    degraded.map_or(Ok(()), Err)
-}
-
-/// The `post_enable` notices persisted in a receipt.
-fn post_enable_notices(claim: &AdapterClaim) -> Vec<AdapterNotice> {
-    claim
-        .notices
-        .iter()
-        .filter(|notice| notice.when == NoticeWhen::PostEnable)
-        .cloned()
-        .collect()
 }
 
 /// Print notices for human output. Suppressed entirely under `--quiet`.
@@ -543,10 +575,18 @@ fn escape_notice_for_terminal(value: &str) -> String {
 
 /// Human-facing `component/framework` label for a disable outcome, falling
 /// back to the component alone when no framework was resolved.
-fn disable_target(outcome: &DisableOutcome) -> String {
-    match &outcome.framework {
-        Some(f) => format!("{}/{}", outcome.component, f),
-        None => outcome.component.clone(),
+fn disable_target(component: &str, framework: Option<&str>) -> String {
+    match framework {
+        Some(framework) => format!("{component}/{framework}"),
+        None => component.to_string(),
+    }
+}
+
+fn execution_intent(dry_run: bool) -> ExecutionIntent {
+    if dry_run {
+        ExecutionIntent::Plan
+    } else {
+        ExecutionIntent::Apply
     }
 }
 
@@ -684,6 +724,12 @@ mod tests {
     struct TestCli {
         #[command(subcommand)]
         command: AdapterCommands,
+    }
+
+    #[test]
+    fn global_dry_run_maps_to_execution_intent() {
+        assert_eq!(execution_intent(true), ExecutionIntent::Plan);
+        assert_eq!(execution_intent(false), ExecutionIntent::Apply);
     }
 
     #[test]

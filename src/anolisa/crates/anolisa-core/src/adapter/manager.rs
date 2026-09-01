@@ -796,7 +796,8 @@ impl AdapterManager {
     /// when `None` and exactly one framework is present). When `dry_run`,
     /// returns the plan without mutating any state.
     ///
-    /// Takes the install lock for the whole operation.
+    /// Apply takes the install lock before loading state; dry-run remains
+    /// read-only and does not create or acquire the lock file.
     ///
     /// # Errors
     ///
@@ -833,7 +834,11 @@ impl AdapterManager {
         dry_run: bool,
         options: EnableOptions,
     ) -> Result<EnableOutcome, AdapterError> {
-        let _lock = InstallLock::acquire(&self.layout.lock_file)?;
+        let _lock = if dry_run {
+            None
+        } else {
+            Some(InstallLock::acquire(&self.layout.lock_file)?)
+        };
         let mut state = self.load_state()?;
 
         let (manifest, scoped_datadir_roots, contract_datadir_root, rpm_provenance) =
@@ -969,7 +974,8 @@ impl AdapterManager {
             component.to_string(),
             label.clone(),
             vec![resource_root.clone()],
-        );
+        )
+        .with_invocation_logging(!dry_run);
         let probe_ctx = DriverCtx {
             component: component.to_string(),
             framework: framework.clone(),
@@ -1010,7 +1016,8 @@ impl AdapterManager {
             component.to_string(),
             label.clone(),
             allowed_roots,
-        );
+        )
+        .with_invocation_logging(!dry_run);
         let ctx = DriverCtx {
             component: component.to_string(),
             framework: framework.clone(),
@@ -1247,7 +1254,8 @@ impl AdapterManager {
     /// descriptive plan without mutating framework state, adapter receipts,
     /// or `installed.toml`.
     ///
-    /// Takes the install lock for the whole operation.
+    /// Apply takes the install lock before loading state; dry-run remains
+    /// read-only and does not create or acquire the lock file.
     ///
     /// # Errors
     ///
@@ -1261,7 +1269,11 @@ impl AdapterManager {
         framework: Option<&str>,
         dry_run: bool,
     ) -> Result<DisableOutcome, AdapterError> {
-        let _lock = InstallLock::acquire(&self.layout.lock_file)?;
+        let _lock = if dry_run {
+            None
+        } else {
+            Some(InstallLock::acquire(&self.layout.lock_file)?)
+        };
         let mut state = self.load_state()?;
 
         let framework = match framework {
@@ -1343,7 +1355,8 @@ impl AdapterManager {
             component.to_string(),
             label.clone(),
             vec![resource_root.clone()],
-        );
+        )
+        .with_invocation_logging(!dry_run);
         let probe_ctx = DriverCtx {
             component: component.to_string(),
             framework: framework.clone(),
@@ -1374,7 +1387,8 @@ impl AdapterManager {
             component.to_string(),
             label.clone(),
             allowed_roots,
-        );
+        )
+        .with_invocation_logging(!dry_run);
         let ctx = DriverCtx {
             component: component.to_string(),
             framework: framework.clone(),
@@ -2585,6 +2599,9 @@ struct ManagerOps {
     /// under. Populated from the driver's `allowed_external_roots` plus
     /// the resource root.
     allowed_roots: Vec<PathBuf>,
+    /// Read-only previews may probe framework capabilities but must not
+    /// persist those invocations as operation records.
+    record_invocations: bool,
 }
 
 /// Persists incremental receipt facts while the Manager holds the enable
@@ -2631,12 +2648,21 @@ impl ManagerOps {
             component,
             label,
             allowed_roots,
+            record_invocations: true,
         }
+    }
+
+    fn with_invocation_logging(mut self, enabled: bool) -> Self {
+        self.record_invocations = enabled;
+        self
     }
 
     /// Record one framework CLI invocation. Best-effort; a log failure
     /// never propagates.
     fn record(&self, cmd: &FrameworkCommand, output: &CliOutput) {
+        if !self.record_invocations {
+            return;
+        }
         let severity = if output.success() {
             Severity::Debug
         } else {
