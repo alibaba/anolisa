@@ -675,7 +675,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cosh-cli"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "chrono",
  "clap",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-core"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-gateway"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "agent-client-protocol",
  "bincode",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-gateway-contracts"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-platform"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "bincode",
  "chrono",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-shell"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "chrono",
  "nix 0.29.0",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-types"
-version = "0.22.3"
+version = "0.23.0"
 dependencies = [
  "bincode",
  "chrono",

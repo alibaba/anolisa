@@ -6,6 +6,17 @@
 
 ## [未发布]
 
+## [0.23.0] — 2026-09-02
+
+### 新增
+- `/hooks` 面板现在逐条列出每个 Shell Hook 的 ID、来源与信任状态，与 Agent Hook 的展示方式保持一致 (#2999)
+
+### 变更
+- cosh-ng 不再依赖系统 OpenSSL 运行时：HTTPS 改用纯 Rust TLS 栈并继续信任宿主机系统证书库，Linux 安装不再需要 openssl-libs / openssl1.1 系统包，macOS 源码构建也不再要求 OpenSSL 头文件 (#3030)
+
+### 修复
+- 秘密脱敏现在按词边界识别：`sk-hynix`、`npm_package_version` 等普通文本在本地证据中保持可见，而紧邻 CJK 文本的短凭据以及结构化的 Cookie/Bearer/JWT 形态，无论经由哪种 shell 或入口路径产生，都会被一致地排除出原生历史并在日志中脱敏 (#2996)
+
 ## [0.22.3] — 2026-08-31
 
 ### 修复

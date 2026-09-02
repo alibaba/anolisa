@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-09-02
+
+### Added
+- The `/hooks` slash panel now lists individual shell hooks with their source and trust state, matching how agent hooks are displayed (#2999)
+
+### Changed
+- cosh-ng no longer depends on the system OpenSSL runtime: HTTPS now runs on a pure-Rust TLS stack that still trusts the host OS certificate store, so Linux installs no longer require the openssl-libs / openssl1.1 system packages and source builds succeed on macOS without OpenSSL headers (#3030)
+
+### Fixed
+- Secret redaction now respects word boundaries: ordinary text such as `sk-hynix` or `npm_package_version` stays visible in local evidence, while short credentials next to CJK text and structured Cookie/Bearer/JWT forms are consistently kept out of native shell history and redacted from journals, no matter which shell or entry path produced the output (#2996)
+
 ## [0.22.3] — 2026-08-31
 
 ### Fixed
