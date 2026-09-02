@@ -281,6 +281,9 @@ fn redacts_embedded_cookie_headers_and_keeps_bare_token_prose() {
         "curl -H Cookie:session=$COOKIE_VALUE --region cn",
         "curl -s${HEADER_OPTION}Cookie:session=quoted-cookie-value-42 --region cn",
         r#"curl ${HEADER_OPTION}"Cookie: session=dynamic-option-secret-42" --region cn"#,
+        r#"curl ${HEADER_OPTION#*;}"Cookie: session=parameter-pattern-secret-42" https://example.test"#,
+        r#"curl ${HEADER_OPTION#*|}"Cookie: session=parameter-pipe-secret-42" https://example.test"#,
+        r#"curl ${HEADER_OPTION:-$(printf '}' >/dev/null; printf -- -H)}"Cookie: session=parameter-nested-secret-42""#,
         "curl -H 'Cookie: session='<(printf quoted-cookie-value-42) --region cn",
         "request Cookie:session=quoted-cookie-value-42; other=second-cookie-value",
         "Cookie: first=first-cookie-value\ncurl -H 'Cookie: session='$(printf quoted-cookie-value-42)",
@@ -302,6 +305,8 @@ fn redacts_embedded_cookie_headers_and_keeps_bare_token_prose() {
         r#"curl --sH"Cookie: session=quoted-cookie-value-42""#,
         r#"tool -s'Hx'Cookie:session=quoted-cookie-value-42"#,
         r#"curl --header-label="Cookie: session=quoted-cookie-value-42""#,
+        r#"curl ${HEADER_OPTION#*;}"Crookie: session=parameter-pattern-secret-42""#,
+        r#"curl ${HEADER_OPTION:-$(printf '}' >/dev/null; printf -- -H)}"Crookie: session=parameter-nested-secret-42""#,
     ] {
         assert_eq!(
             redact_sensitive_text(input),

@@ -141,6 +141,8 @@ fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
         "curl '-HCookie: session=whole-option-secret-42'",
         r#"curl ${HEADER_OPTION}"Cookie: session=dynamic-option-secret-42" https://example.test"#,
         r#"curl ${HEADER_OPTION}'Cookie: session=dynamic-option-secret-42' https://example.test"#,
+        r#"curl ${HEADER_OPTION#*;}"Cookie: session=parameter-pattern-secret-42" https://example.test"#,
+        r#"curl ${HEADER_OPTION#*|}"Cookie: session=parameter-pipe-secret-42" https://example.test"#,
         r#"curl $(printf -- -H)"Cookie: session=dynamic-option-secret-42" https://example.test"#,
         r#"curl `printf -- -H`"Cookie: session=dynamic-option-secret-42" https://example.test"#,
         r#"curl $(true; printf -- -H)"Cookie: session=semicolon-dynamic-secret-42" https://example.test"#,
@@ -180,6 +182,7 @@ fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
         r#"tool -s'Hx'Cookie:session=quoted-cookie-value-42"#,
         r#"curl --header-label="Cookie: session=quoted-cookie-value-42""#,
         r#"curl ${HEADER_OPTION}"Crookie: session=dynamic-option-secret-42""#,
+        r#"curl ${HEADER_OPTION#*;}"Crookie: session=parameter-pattern-secret-42""#,
         r#"echo $HOME; tool xCookie:session=dynamic-option-secret-42"#,
         r#"echo $(printf x); tool xCookie:session=dynamic-option-secret-42"#,
     ];

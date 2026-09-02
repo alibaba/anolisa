@@ -155,10 +155,7 @@ fn is_cookie_header_candidate_start(bytes: &[u8], start: usize) -> CandidateStar
         return CandidateStartResult::Match(ShellContext::Unquoted);
     }
 
-    let word_start = bytes[..start]
-        .iter()
-        .rposition(|byte| is_shell_word_boundary(*byte))
-        .map_or(0, |boundary| boundary + 1);
+    let word_start = shell_word_start(bytes, start);
     match decode_static_option_prefix(&bytes[word_start..start]) {
         StaticOptionPrefix::Decoded {
             bytes: option_prefix,
@@ -169,6 +166,50 @@ fn is_cookie_header_candidate_start(bytes: &[u8], start: usize) -> CandidateStar
         StaticOptionPrefix::Dynamic => CandidateStartResult::Dynamic,
         StaticOptionPrefix::Decoded { .. } => CandidateStartResult::NoMatch,
     }
+}
+
+fn shell_word_start(bytes: &[u8], end: usize) -> usize {
+    let mut word_start = 0;
+    let mut cursor = 0;
+    while cursor < end {
+        if bytes[cursor] == b'$' && bytes.get(cursor + 1) == Some(&b'{') {
+            cursor = parameter_expansion_end(bytes, cursor + 2, end);
+            continue;
+        }
+        if is_shell_word_boundary(bytes[cursor]) {
+            word_start = cursor + 1;
+        }
+        cursor += 1;
+    }
+    word_start
+}
+
+fn parameter_expansion_end(bytes: &[u8], mut cursor: usize, end: usize) -> usize {
+    let mut depth = 1usize;
+    while cursor < end {
+        match bytes[cursor] {
+            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
+                depth += 1;
+                cursor += 2;
+            }
+            // Quotes and nested substitutions require the complete shell
+            // grammar to prove which brace closes this expansion. Consume
+            // the remaining prefix so the caller treats it as dynamic.
+            b'\'' | b'"' | b'`' => return end,
+            b'$' if bytes.get(cursor + 1) == Some(&b'(') => return end,
+            b'<' | b'>' if bytes.get(cursor + 1) == Some(&b'(') => return end,
+            b'}' => {
+                depth -= 1;
+                cursor += 1;
+                if depth == 0 {
+                    return cursor;
+                }
+            }
+            b'\\' => cursor = skip_shell_escape(bytes, cursor),
+            _ => cursor += 1,
+        }
+    }
+    end
 }
 
 fn decode_static_option_prefix(raw_prefix: &[u8]) -> StaticOptionPrefix {

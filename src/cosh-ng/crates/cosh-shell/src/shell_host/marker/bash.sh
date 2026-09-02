@@ -290,8 +290,8 @@ _cosh_command_has_secret() {
   local dynamic_cookie_header_pattern='(\$|`)[^;&|]*'
   dynamic_cookie_header_pattern+="${cookie_key}[[:space:]]*:[[:space:]]*[^=[:space:];,]+[[:space:]]*=[^[:space:]]*"
   # Operators inside a closed substitution do not terminate its outer word.
-  local dynamic_substitution_cookie_header_pattern='(\$\(.*\)|`[^`]*`)[^[:space:];&|]*'
-  dynamic_substitution_cookie_header_pattern+="${cookie_key}[[:space:]]*:[[:space:]]*[^=[:space:];,]+[[:space:]]*=[^[:space:]]*"
+  local dynamic_expansion_cookie_header_pattern='(\$\{.*\}|\$\(.*\)|`[^`]*`)[^[:space:];&|]*'
+  dynamic_expansion_cookie_header_pattern+="${cookie_key}[[:space:]]*:[[:space:]]*[^=[:space:];,]+[[:space:]]*=[^[:space:]]*"
   # Quote removal and backslash escapes can construct a static Cookie prefix
   # even when the raw command does not contain a contiguous `Cookie:` token.
   local static_cookie_input="${lower//\\/}"
@@ -305,7 +305,7 @@ _cosh_command_has_secret() {
      || "$static_cookie_input" =~ $cookie_header_pattern
      || "$static_cookie_input" =~ $attached_cookie_header_pattern
      || "$static_cookie_input" =~ $dynamic_cookie_header_pattern
-     || "$static_cookie_input" =~ $dynamic_substitution_cookie_header_pattern ]]; then
+     || "$static_cookie_input" =~ $dynamic_expansion_cookie_header_pattern ]]; then
     return 0
   fi
   return 1
