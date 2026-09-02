@@ -9,6 +9,42 @@
 
 ## [未发布]
 
+## [0.3.9] - 2026-09-02
+
+### 新增
+
+- 已应用和失败的 `anolisa update self` 操作现会连同版本与应用模式上下文写入
+  中央操作日志。管理员可通过 `anolisa logs` 审计这些操作；生成的 bug report
+  仅包含失败记录，并会从已处理的更新 URL 中移除 credential；preview 与已是
+  最新版本的 no-op 仍不会写入日志
+  ([#2994](https://github.com/alibaba/anolisa/pull/2994))。
+
+### 变更
+
+- 新提供的 Raw repository 配置不再声明未使用的 `cache_ttl_secs` 和
+  `offline_fallback` setting。包含任一字段的现有配置仍保持兼容；Raw resolution
+  会继续获取当前 distribution index，并在 index 不可用时失败
+  ([#3002](https://github.com/alibaba/anolisa/pull/3002))。
+
+### 修复
+
+- 全局与命令级 sandbox uninstall dry-run 现都会显示计划中的 package 变更而不
+  实际应用；system mode 的 Telemetry mutation preview 会在权限检查或产生副作用
+  前返回
+  ([#2922](https://github.com/alibaba/anolisa/pull/2922)、
+  [#2926](https://github.com/alibaba/anolisa/pull/2926))。
+- 没有 preview 实现的命令现会在 dispatch 前拒绝全局 `--dry-run`。Sandbox
+  remove、kernel install 和 security install 会以 `INVALID_ARGUMENT` 拒绝两种
+  dry-run 写法，并确认没有执行任何操作，不再进入 mutation、权限检查或
+  not-implemented 路径
+  ([#2952](https://github.com/alibaba/anolisa/pull/2952)、
+  [#2957](https://github.com/alibaba/anolisa/pull/2957)、
+  [#2961](https://github.com/alibaba/anolisa/pull/2961))。
+- 独立安装器现会检测 PATH 是否仍将 `anolisa` 解析到另一份安装，报告新旧路径
+  与版本，并提供可直接执行的 PATH 修复命令或对应的 npm/Homebrew 卸载命令，
+  不再输出无条件的成功提示
+  ([#2944](https://github.com/alibaba/anolisa/pull/2944))。
+
 ## [0.3.8] - 2026-08-26
 
 ### 新增

@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-09-02
+
+### Added
+
+- Applied and failed `anolisa update self` operations now enter the central
+  operation log with their version and apply-mode context. Administrators can
+  audit them through `anolisa logs`, while generated bug reports include only
+  failed records and redact credentials from handled update URLs; previews and
+  already-current no-ops remain log-free
+  ([#2994](https://github.com/alibaba/anolisa/pull/2994)).
+
+### Changed
+
+- Newly shipped Raw repository configurations no longer advertise the unused
+  `cache_ttl_secs` and `offline_fallback` settings. Existing configurations
+  containing either field remain compatible, while Raw resolution continues
+  to fetch the current distribution index and fail when it is unavailable
+  ([#3002](https://github.com/alibaba/anolisa/pull/3002)).
+
+### Fixed
+
+- Global and command-local sandbox uninstall dry-runs now show the planned
+  package changes without applying them, while system-mode telemetry mutation
+  previews return before privilege checks or side effects
+  ([#2922](https://github.com/alibaba/anolisa/pull/2922),
+  [#2926](https://github.com/alibaba/anolisa/pull/2926)).
+- Commands without a preview implementation now reject global `--dry-run`
+  before dispatch. Sandbox remove plus kernel and security install reject both
+  dry-run forms with `INVALID_ARGUMENT` and confirm that no action was taken,
+  instead of reaching mutation, privilege, or not-implemented paths
+  ([#2952](https://github.com/alibaba/anolisa/pull/2952),
+  [#2957](https://github.com/alibaba/anolisa/pull/2957),
+  [#2961](https://github.com/alibaba/anolisa/pull/2961)).
+- The standalone installer now detects when PATH still resolves `anolisa` to
+  another installation, reports both paths and versions, and provides a
+  directly runnable PATH fix or matching npm/Homebrew removal command instead
+  of printing an unqualified success message
+  ([#2944](https://github.com/alibaba/anolisa/pull/2944)).
+
 ## [0.3.8] - 2026-08-26
 
 ### Added

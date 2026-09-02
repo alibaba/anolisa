@@ -143,7 +143,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Aug 26 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Sep 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Dry-runs now preview supported commands and reject unsupported requests before effects.
+- Self-updates now write redacted central operation-log records.
+- Raw repository defaults no longer advertise inactive cache settings.
+- The installer now reports CLI installations shadowed by PATH.
+
+* Wed Aug 26 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.8-1
 - GitHub releases now include verified prebuilt CLI archives for three supported targets.
 - Raw installs now preserve runtime ${VAR} references in rendered file content.
 
