@@ -14,12 +14,10 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
 BuildRequires:  gcc
-BuildRequires:  openssl-devel
 BuildRequires:  systemd-rpm-macros
 Requires(post):   lua
 Requires(postun): lua
 Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
-Requires:       openssl-libs
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell

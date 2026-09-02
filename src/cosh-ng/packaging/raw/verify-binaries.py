@@ -140,7 +140,7 @@ def verify_elf(path: Path, arch: str) -> None:
         if linked:
             raise ValueError(
                 f"dynamically links OpenSSL ({', '.join(linked)}); "
-                "build with --features cosh-core/vendored-openssl"
+                "cosh-ng must be built with rustls rather than native-tls"
             )
 
 

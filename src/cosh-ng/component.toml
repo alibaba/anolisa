@@ -20,7 +20,7 @@ requires_os = "linux"
 requires_arch = ["x86_64", "aarch64"]
 
 [dependencies]
-runtime = ["openssl-libs"]
+runtime = []
 
 [[health_checks]]
 name = "launcher"
