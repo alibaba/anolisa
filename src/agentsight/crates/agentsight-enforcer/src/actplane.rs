@@ -44,6 +44,10 @@ pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
 struct ActiveBinding {
     binding: Binding,
     credential_policy: Option<CredentialExfiltrationPolicy>,
+    /// When the target process runs inside a PID namespace, this holds the
+    /// global kernel PID resolved by [`resolve_kernel_pid`].  `None` when
+    /// the namespace PID equals the kernel PID (root namespace).
+    kernel_pid: Option<i32>,
     reasons: Vec<String>,
     rule_names: Vec<String>,
     label_names: HashMap<u64, String>,
@@ -153,13 +157,21 @@ impl ActPlaneBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn cleanup_binding(&self, request: &ApplyPolicy, id: u32) -> Vec<String> {
+    fn cleanup_binding(
+        &self,
+        request: &ApplyPolicy,
+        id: u32,
+        kernel_pid: Option<i32>,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         let control_pid = std::process::id() as i32;
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
             errors.push(format!("unbind control pid: {error}"));
         }
-        if let Err(error) = self.engine.unbind_pid_from_domain(request.root_pid, id) {
+        // Use the resolved kernel PID when the target runs in a PID namespace;
+        // fall back to the namespace PID stored in the request otherwise.
+        let effective_pid = kernel_pid.unwrap_or(request.root_pid);
+        if let Err(error) = self.engine.unbind_pid_from_domain(effective_pid, id) {
             errors.push(format!("unbind target pid: {error}"));
         }
         if let Err(error) = self.reload.clear_runtime_state() {
@@ -219,8 +231,15 @@ impl ActPlaneBackend {
                 )
             })?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
+        let kernel_pid = resolve_kernel_pid(request.root_pid);
+        if kernel_pid != request.root_pid {
+            eprintln!(
+                "PID namespace detected: namespace pid {} -> kernel pid {}",
+                request.root_pid, kernel_pid
+            );
+        }
         self.engine
-            .seed_label_in_domain(request.root_pid, id, label)
+            .seed_label_in_domain(kernel_pid, id, label)
             .map_err(|error| kernel_error("seed target process domain", error))?;
 
         let control_pid = std::process::id() as i32;
@@ -238,8 +257,13 @@ impl ActPlaneBackend {
             label_mask: u64::MAX,
             ..CapState::default()
         };
+        let kpid = if kernel_pid != request.root_pid {
+            Some(kernel_pid)
+        } else {
+            None
+        };
         if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
-            let cleanup = self.cleanup_binding(&request, id);
+            let cleanup = self.cleanup_binding(&request, id, kpid);
             return Err(kernel_error_with_cleanup(
                 "bind control process",
                 error,
@@ -250,7 +274,7 @@ impl ActPlaneBackend {
             .reload
             .append_policy_delta(control_pid, id, &compiled.bytes)
         {
-            let cleanup = self.cleanup_binding(&request, id);
+            let cleanup = self.cleanup_binding(&request, id, kpid);
             return Err(kernel_error_with_cleanup(
                 "append policy delta",
                 error,
@@ -258,7 +282,7 @@ impl ActPlaneBackend {
             ));
         }
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
-            let cleanup = self.cleanup_binding(&request, id);
+            let cleanup = self.cleanup_binding(&request, id, kpid);
             return Err(kernel_error_with_cleanup(
                 "unbind control process",
                 error,
@@ -277,6 +301,7 @@ impl ActPlaneBackend {
             ActiveBinding {
                 binding: binding.clone(),
                 credential_policy,
+                kernel_pid: kpid,
                 reasons: compiled.reasons,
                 rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
                 label_names: compiled
@@ -327,7 +352,7 @@ impl ActPlaneBackend {
         else {
             return Err(BackendError::MissingBinding(binding_id));
         };
-        let cleanup = self.cleanup_binding(&active.binding.request, id);
+        let cleanup = self.cleanup_binding(&active.binding.request, id, active.kernel_pid);
         if !cleanup.is_empty() {
             return Err(BackendError::KernelFailure(cleanup.join("; ")));
         }
@@ -510,7 +535,8 @@ impl Drop for ActPlaneBackend {
             .map(|(domain_id, binding)| (*domain_id, binding.clone()))
             .collect::<Vec<_>>();
         for (domain_id, binding) in active {
-            let errors = self.cleanup_binding(&binding.binding.request, domain_id);
+            let errors =
+                self.cleanup_binding(&binding.binding.request, domain_id, binding.kernel_pid);
             if errors.is_empty() {
                 self.state.bindings().remove(&domain_id);
             } else {
@@ -1119,6 +1145,47 @@ fn kernel_error_with_cleanup(
     BackendError::KernelFailure(message)
 }
 
+/// Translate a potentially namespace-local PID to the global kernel PID.
+///
+/// When a process runs inside a PID namespace (containers, WSL2, etc.),
+/// `/proc/<pid>/status` contains an `NSpid:` line listing the PID at each
+/// nesting level — the first value is always the global kernel PID.  BPF
+/// helpers like `bpf_get_current_pid_tgid()` return that global PID, so
+/// `cap_task` entries must be keyed by it for `handle_fork` lookups to
+/// succeed.
+///
+/// Returns `ns_pid` unchanged when running in the root namespace (no
+/// `NSpid` line, or only one level listed).
+///
+/// **Assumption**: the enforcer process runs in the root PID namespace,
+/// so host `/proc/<pid>/status` exposes the full `NSpid` chain.  If the
+/// enforcer is ever deployed inside a sidecar container sharing the
+/// target's PID namespace, this function becomes a no-op and a
+/// different identity resolution strategy is needed.
+fn resolve_kernel_pid(ns_pid: i32) -> i32 {
+    let path = format!("/proc/{ns_pid}/status");
+    let status = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return ns_pid,
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            let mut parts = rest.split_whitespace();
+            if let Some(first) = parts.next() {
+                // Only translate when there are multiple levels (i.e. we are
+                // inside a nested PID namespace).
+                if parts.next().is_some() {
+                    if let Ok(global) = first.parse::<i32>() {
+                        return global;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    ns_pid
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -1153,6 +1220,7 @@ mod tests {
                 domain_id: Some(7),
             },
             credential_policy: Some(credential_policy()),
+            kernel_pid: None,
             reasons: vec!["credential reached an external sink".into()],
             rule_names: vec!["block-exfiltration".into()],
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
