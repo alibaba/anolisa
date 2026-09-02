@@ -2,7 +2,8 @@
 // byte-identical to the pre-split marker.rs; golden coverage lives in
 // osc_tests.rs and tests/shell_host/marker.rs.
 pub(in crate::shell_host) fn zsh_marker_script() -> &'static str {
-    r#"
+    concat!(
+        r#"
 if [[ -n "${COSH_OSC_MARKER_LOADED:-}" ]]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -381,33 +382,9 @@ _cosh_restore_handoff_pager_policy() {
   done
   return 0
 }
-_cosh_command_has_secret() {
-  local lower="${(L)1}"
-  case "$lower" in
-    *"-----begin "*"private key-----"*|*"bearer "*|*"://"*":"*"@"*|*ghp_*|*github_pat_*|*glpat-*|*npm_*|*hf_*|*xox?-*|*aiza*)
-      return 0
-      ;;
-    *ltai????????????*)
-      return 0
-      ;;
-    *akia????????????????*|*asia????????????????*)
-      return 0
-      ;;
-    sk-*|sk_live_*|sk_test_*|*" sk-"*|*"=sk-"*|*":sk-"*|*"\"sk-"*|*"'sk-"*|*" sk_live_"*|*" sk_test_"*|*"=sk_live_"*|*"=sk_test_"*)
-      return 0
-      ;;
-  esac
-  local key
-  for key in password passwd passphrase token access_token access-token refresh_token refresh-token id_token id-token secret client_secret client-secret api_key api-key apikey access_key_id access-key-id access_key_secret access-key-secret security_token security-token authorization cookie set-cookie; do
-    case "$lower" in
-      *"$key="*|*"$key:"*|*"--$key "*|*"--$key="*)
-        return 0
-        ;;
-    esac
-  done
-  return 1
-}
-_cosh_zshaddhistory_marker() {
+"#,
+        include_str!("zsh_secret_detector.zsh"),
+        r#"_cosh_zshaddhistory_marker() {
   setopt localoptions noxtrace
   local command="${1%$'\n'}"
   if _cosh_is_handoff_wrapper "$command"; then
@@ -695,5 +672,6 @@ autoload -Uz add-zsh-hook
 add-zsh-hook zshaddhistory _cosh_zshaddhistory_marker
 add-zsh-hook preexec _cosh_preexec_marker
 add-zsh-hook precmd _cosh_precmd_marker
-"#
+"#,
+    )
 }

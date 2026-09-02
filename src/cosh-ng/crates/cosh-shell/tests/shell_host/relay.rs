@@ -1370,6 +1370,9 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
     let edited_secret = "history-edited-secret-value";
     let access_key = "LTAI5tExampleAccessKey";
     let url_password = "history-url-password";
+    let empty_user_url_password = "history-empty-user-url-password";
+    let dynamic_option_secret = "history-dynamic-option-secret";
+    let nested_dynamic_option_secret = "history-nested-dynamic-option-secret";
     let mut config = ShellHostConfig::new("bash-secret-history-test", &work_dir);
     config.native_mode = false;
     let output = run_raw_relay_bash_with_actions(
@@ -1385,6 +1388,26 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!(": https://user:{url_password}@example.test")),
             RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": http://:{empty_user_url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("HEADER_OPTION=-H"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": ${{HEADER_OPTION}}\"Cookie: session={dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true; printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true && printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(printf -- -H | cat)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!("history > {}", shell_arg(&history_snapshot))),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line("exit"),
@@ -1399,17 +1422,26 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
     assert!(!history.contains(edited_secret), "{history}");
     assert!(!history.contains(access_key), "{history}");
     assert!(!history.contains(url_password), "{history}");
+    assert!(!history.contains(empty_user_url_password), "{history}");
+    assert!(!history.contains(dynamic_option_secret), "{history}");
+    assert!(!history.contains(nested_dynamic_option_secret), "{history}");
     assert!(!journal.contains(secret), "{journal}");
     assert!(!journal.contains(edited_secret), "{journal}");
     assert!(!journal.contains(access_key), "{journal}");
     assert!(!journal.contains(url_password), "{journal}");
+    assert!(!journal.contains(empty_user_url_password), "{journal}");
+    assert!(!journal.contains(dynamic_option_secret), "{journal}");
+    assert!(!journal.contains(nested_dynamic_option_secret), "{journal}");
     assert!(ledger_from_output(&output)
         .blocks
         .iter()
         .all(|block| !block.command.contains(secret)
             && !block.command.contains(edited_secret)
             && !block.command.contains(access_key)
-            && !block.command.contains(url_password)));
+            && !block.command.contains(url_password)
+            && !block.command.contains(empty_user_url_password)
+            && !block.command.contains(dynamic_option_secret)
+            && !block.command.contains(nested_dynamic_option_secret)));
 }
 
 #[test]
@@ -1428,6 +1460,9 @@ fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
     let secret = "history-secret-value";
     let access_key = "LTAI5tExampleAccessKey";
     let url_password = "history-url-password";
+    let empty_user_url_password = "history-empty-user-url-password";
+    let dynamic_option_secret = "history-dynamic-option-secret";
+    let nested_dynamic_option_secret = "history-nested-dynamic-option-secret";
     let mut config = ShellHostConfig::new("zsh-secret-history-test", &work_dir);
     config.native_mode = false;
     let output = run_raw_relay_zsh_with_actions(
@@ -1438,6 +1473,26 @@ fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
             RawRelayAction::line(format!(": {access_key}")),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!(": https://user:{url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": http://:{empty_user_url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("HEADER_OPTION=-H"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": ${{HEADER_OPTION}}\"Cookie: session={dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true; printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true && printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(printf -- -H | cat)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!("fc -l -100 > {}", shell_arg(&history_snapshot))),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -1452,15 +1507,24 @@ fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
     assert!(!history.contains(secret), "{history}");
     assert!(!history.contains(access_key), "{history}");
     assert!(!history.contains(url_password), "{history}");
+    assert!(!history.contains(empty_user_url_password), "{history}");
+    assert!(!history.contains(dynamic_option_secret), "{history}");
+    assert!(!history.contains(nested_dynamic_option_secret), "{history}");
     assert!(!journal.contains(secret), "{journal}");
     assert!(!journal.contains(access_key), "{journal}");
     assert!(!journal.contains(url_password), "{journal}");
+    assert!(!journal.contains(empty_user_url_password), "{journal}");
+    assert!(!journal.contains(dynamic_option_secret), "{journal}");
+    assert!(!journal.contains(nested_dynamic_option_secret), "{journal}");
     assert!(ledger_from_output(&output)
         .blocks
         .iter()
         .all(|block| !block.command.contains(secret)
             && !block.command.contains(access_key)
-            && !block.command.contains(url_password)));
+            && !block.command.contains(url_password)
+            && !block.command.contains(empty_user_url_password)
+            && !block.command.contains(dynamic_option_secret)
+            && !block.command.contains(nested_dynamic_option_secret)));
 }
 
 #[test]

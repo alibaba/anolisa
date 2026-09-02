@@ -53,45 +53,39 @@ fn shell_function<'a>(script: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn bash_secret_detector_matches_canonical_jwt_shape() {
-    if Command::new("bash").arg("--version").output().is_err() {
-        return;
-    }
-    let script = include_str!("../../src/shell_host/marker/bash.sh");
-    let function = shell_function(script, "_cosh_command_has_secret");
-    let command = format!("{function}\n_cosh_command_has_secret \"$1\"");
-    for input in [
+fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
+    let detectors = [
+        ("bash", include_str!("../../src/shell_host/marker/bash.sh")),
+        (
+            "zsh",
+            include_str!("../../src/shell_host/marker/zsh_secret_detector.zsh"),
+        ),
+    ];
+    let sensitive = [
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
         "inspect eyJabcde.fghijk.lmnopq now",
-    ] {
-        let status = Command::new("bash")
-            .args(["-c", command.as_str(), "cosh-marker-test", input])
-            .status()
-            .expect("run bash JWT detector");
-        assert!(status.success(), "secret not detected: {input}");
-    }
-    for input in [
-        "xeyJabcde.fghijk.lmnopq",
-        "eyJabcd.fghijk.lmnopq",
-        "eyJabcde.fghi.lmnopq",
-    ] {
-        let status = Command::new("bash")
-            .args(["-c", command.as_str(), "cosh-marker-test", input])
-            .status()
-            .expect("run bash JWT control");
-        assert!(!status.success(), "safe control rejected: {input}");
-    }
-}
-
-#[test]
-fn bash_secret_detector_matches_canonical_assignment_shape() {
-    if Command::new("bash").arg("--version").output().is_err() {
-        return;
-    }
-    let script = include_str!("../../src/shell_host/marker/bash.sh");
-    let function = shell_function(script, "_cosh_command_has_secret");
-    let command = format!("{function}\n_cosh_command_has_secret \"$1\"");
-    for input in [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "Bearer abc",
+        "https://user:password@example.test/path",
+        "http://:s3cr3t42@example.test/",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
+        "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+        "glpat-abcdefghijklmnop",
+        "npm_abcdefghijklmnopqrstuvwxyz123456",
+        "hf_abcdefghijklmnopqrstuvwxyz123456",
+        "xoxb-1234567890abcdefghijklmnop",
+        "AIzaabcdefghijklmnopqrstuvwxyz123456",
+        "LTAI5tExampleAccessKey",
+        "AKIA1234567890ABCDEF",
+        "ASIA1234567890ABCDEF",
+        "sk-fbaa6",
+        "sk-abc123",
+        "sk_live_abcdefghijklmnop",
+        "sk_test_abcdefghijklmnop",
+        "key是sk-abc123",
+        "（sk-abc123）",
+        "密钥为sk-abc123",
+        "key：sk-abc123",
         "你好 \"token\" = TEST_ONLY_RECOVERY_SECRET",
         "inspect 'client-secret' : TEST_ONLY_RECOVERY_SECRET",
         "你好 AWS_SECRET_ACCESS_KEY=TEST_ONLY_RECOVERY_SECRET",
@@ -101,26 +95,115 @@ fn bash_secret_detector_matches_canonical_assignment_shape() {
         "你好 DASHSCOPE_API_KEY = TEST_ONLY_RECOVERY_SECRET",
         "你好 GITHUB_TOKEN = TEST_ONLY_RECOVERY_SECRET",
         "你好 ALIBABA_CLOUD_ACCESS_KEY_ID = TEST_ONLY_RECOVERY_SECRET",
-    ] {
-        let status = Command::new("bash")
-            .args(["-c", command.as_str(), "cosh-marker-test", input])
-            .status()
-            .expect("run Bash assignment detector");
-        assert!(status.success(), "secret not detected: {input}");
-    }
-    for input in [
+        "MEMORY_OPENAI_API_KEY=TEST_ONLY_RECOVERY_SECRET",
+        "MY_TOKEN=TEST_ONLY_RECOVERY_SECRET",
+        "FOO_PASSWORD=TEST_ONLY_RECOVERY_SECRET",
+        "AUTH_REFRESH_TOKEN=TEST_ONLY_RECOVERY_SECRET",
+        "AUTHTOKEN=TEST_ONLY_RECOVERY_SECRET",
+        "myAccessToken=TEST_ONLY_RECOVERY_SECRET",
+        "dbPassword=TEST_ONLY_RECOVERY_SECRET",
+        "serviceSecret=TEST_ONLY_RECOVERY_SECRET",
+        "customApiKey=TEST_ONLY_RECOVERY_SECRET",
+        "你好 MY_OPENAI_API_KEY = public-name",
+        "tool --password 'correct horse battery staple'",
+        "tool --access-token=TEST_ONLY_RECOVERY_SECRET",
+        "curl --cookie session=supersecret",
+        "tool --set-cookie csrf=supersecret",
+        "curl --cookie=session=supersecret",
+        "TOKEN=$SECRET",
+        "API_KEY=${VALUE}",
+        "tool --password \"$PASSWORD\"",
+        "tool --token '$TOKEN'",
+        r"token=\escaped",
+        "TOKEN=`secret-command`",
+        "TOKEN=秘密123",
+        "cookie=session-secret",
+        "set_cookie=session-secret",
+        r#"{"cookie":"json-cookie-secret"}"#,
+        "Cookie: session=session-secret",
+        "Set-Cookie: session=session-secret; Path=/",
+        r"curl -H Cookie:\ session=quoted-cookie-value-42",
+        r"curl -H Cookie\:session=quoted-cookie-value-42",
+        "curl -H Cookie':'session=quoted-cookie-value-42",
+        "curl -H Coo'kie:'session=quoted-cookie-value-42",
+        r"curl -H Set\-Cookie\:csrf=quoted-cookie-value-42",
+        r#"curl -H"Cookie: session=quoted-cookie-value-42""#,
+        "curl -H'Cookie: session=quoted-cookie-value-42'",
+        "curl -HCookie:session=quoted-cookie-value-42",
+        r#"curl --header="Set-Cookie: csrf=quoted-cookie-value-42""#,
+        r"curl -HCookie\:session=quoted-cookie-value-42",
+        "curl -sH'Cookie: session=quoted-cookie-value-42'",
+        r#"curl -fsSLH"Cookie: session=quoted-cookie-value-42""#,
+        r"curl -sHCookie\:session=quoted-cookie-value-42",
+        "curl -s'H'Cookie:session=quoted-cookie-value-42",
+        r"curl -s\HCookie:session=quoted-cookie-value-42",
+        r#"curl "-HCookie: session=whole-option-secret-42""#,
+        "curl '-HCookie: session=whole-option-secret-42'",
+        r#"curl ${HEADER_OPTION}"Cookie: session=dynamic-option-secret-42" https://example.test"#,
+        r#"curl ${HEADER_OPTION}'Cookie: session=dynamic-option-secret-42' https://example.test"#,
+        r#"curl $(printf -- -H)"Cookie: session=dynamic-option-secret-42" https://example.test"#,
+        r#"curl `printf -- -H`"Cookie: session=dynamic-option-secret-42" https://example.test"#,
+        r#"curl $(true; printf -- -H)"Cookie: session=semicolon-dynamic-secret-42" https://example.test"#,
+        r#"curl $(true && printf -- -H)"Cookie: session=and-dynamic-secret-42" https://example.test"#,
+        r#"curl $(printf -- -H | cat)"Cookie: session=pipe-dynamic-secret-42" https://example.test"#,
+        r#"curl `true; printf -- -H`"Cookie: session=backtick-dynamic-secret-42" https://example.test"#,
+        r#"curl $(printf %s "$(printf -- -H)")"Cookie: session=nested-dynamic-secret-42" https://example.test"#,
+    ];
+    let safe = [
+        "sk-hynix 内存条什么价格",
+        "npm_package_version 怎么读",
+        "cookie: 头是干什么的",
+        "cookie: header meaning",
+        "bearer 是什么认证方式",
+        "shf_test 文件在哪",
+        "xsk-abc123",
+        "ghp_documentation",
+        "npm_package_identifier",
+        "hf_model_name",
+        "https://example.test/path:docs@example",
+        "http://:@example.test/",
+        "eyJabcd.fghijk.lmnopq",
+        "eyJabcde.fghi.lmnopq",
+        "xeyJabcde.fghijk.lmnopq",
         "你好 token candidate",
         "inspect monkey = value",
         "inspect token =",
         "你好 AWS_ACCESS_KEY_ID candidate",
         "你好 AWS_ACCESS_KEY_ID =",
-        "你好 MY_OPENAI_API_KEY = public-name",
-    ] {
-        let status = Command::new("bash")
-            .args(["-c", command.as_str(), "cosh-marker-test", input])
-            .status()
-            .expect("run Bash assignment control");
-        assert!(!status.success(), "safe control rejected: {input}");
+        "你好 MY_OPENAI_API_KEY_LABEL = public-name",
+        "你好 MY_TOKEN_COUNT = 5",
+        r"curl -H Cookie\:header-meaning",
+        r"curl -H Crookie\:session=quoted-cookie-value-42",
+        r#"tool x-H"Cookie: session=quoted-cookie-value-42""#,
+        r#"tool x-sH"Cookie: session=quoted-cookie-value-42""#,
+        r#"curl --sH"Cookie: session=quoted-cookie-value-42""#,
+        r#"tool -s'Hx'Cookie:session=quoted-cookie-value-42"#,
+        r#"curl --header-label="Cookie: session=quoted-cookie-value-42""#,
+        r#"curl ${HEADER_OPTION}"Crookie: session=dynamic-option-secret-42""#,
+        r#"echo $HOME; tool xCookie:session=dynamic-option-secret-42"#,
+        r#"echo $(printf x); tool xCookie:session=dynamic-option-secret-42"#,
+    ];
+
+    for (shell, script) in detectors {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let function = shell_function(script, "_cosh_command_has_secret");
+        let command = format!("{function}\n_cosh_command_has_secret \"$1\"");
+        for input in sensitive {
+            let status = Command::new(shell)
+                .args(["-c", command.as_str(), "cosh-marker-test", input])
+                .status()
+                .unwrap_or_else(|error| panic!("run {shell} secret detector: {error}"));
+            assert!(status.success(), "{shell}: secret not detected: {input}");
+        }
+        for input in safe {
+            let status = Command::new(shell)
+                .args(["-c", command.as_str(), "cosh-marker-test", input])
+                .status()
+                .unwrap_or_else(|error| panic!("run {shell} secret control: {error}"));
+            assert!(!status.success(), "{shell}: safe control rejected: {input}");
+        }
     }
 }
 
