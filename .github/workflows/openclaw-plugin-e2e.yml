@@ -138,7 +138,12 @@ jobs:
           name: agent-sec-cli-wheel
           path: src/agent-sec-core/target/wheels
 
+      # The `latest` entry tracks whatever OpenClaw release is current, so it
+      # can break on upstream changes unrelated to this repository. Keep it
+      # non-blocking: report the failure as a warning instead of failing CI.
       - name: Run OpenClaw plugin E2E
+        id: e2e
+        continue-on-error: ${{ matrix.openclaw.label == 'latest' }}
         env:
           OPENCLAW_VERSION: ${{ matrix.openclaw.version }}
           OPENCLAW_EXPECTED_VERSION: ${{ matrix.openclaw.expected-version }}
@@ -152,6 +157,11 @@ jobs:
           # without depending on an external inference backend.
           PROMPT_SCANNER_SCAN_MODE: fast
         run: scripts/ci/run-openclaw-plugin-e2e.sh
+
+      - name: Report non-blocking E2E failure
+        if: steps.e2e.outcome == 'failure'
+        run: |
+          echo "::warning title=OpenClaw ${{ matrix.openclaw.label }} E2E failed (non-blocking)::This matrix entry tracks the latest OpenClaw release and does not gate CI. Inspect the uploaded evidence artifact to decide whether the plugin needs an update."
 
       - name: Upload E2E evidence
         if: always()
