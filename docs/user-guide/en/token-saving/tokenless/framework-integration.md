@@ -34,25 +34,23 @@ smaller, not by itself that the host removed the original from its model request
 ## Adapter processing rules
 
 The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one Protocol v2
-`post_tool` request to `tokenless compress`. It declares output replacement but no trusted
-agent-facing Retrieve capability. Core therefore applies only lossless JSON candidates and returns
-the original for every non-`applied` disposition. It currently routes:
+`post_tool` request to `tokenless compress`. It does not expose a marker-authorized recovery path,
+so Core accepts only lossless candidates and returns the original for every non-`applied`
+disposition. It currently routes:
 
 | Content | Current shared-hook behavior |
 |---------|------------------------------|
 | JSON | Lossless structural cleanup; TOON may be selected for text-capable replacement slots |
-| JSON requiring string, array, or depth truncation | Rejected with `recoverability_unavailable` because the Common Hook cannot publish an authorized Retrieve tool |
+| JSON requiring string, array, or depth truncation | Rejected with `recoverability_unavailable` because the Common Hook has no marker-authorized recovery path |
 | Build/test/package logs, long plain text, diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching domain compressor is connected |
 
 Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
 selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
 skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
 
-The Common BeforeModel hook also uses Protocol v2 and declares no trusted Retrieve capability.
-Core returns transformed tools only when the result is lossless. Every current `SchemaCompressor`
-transformation removes or rewrites schema information, so this Common path passes tools through
-unchanged, emits no schema-compression Stats rows, and never emits unrecoverable Markers. OpenCode's
-separate per-tool definition path and the direct `compress-schema` command are unchanged.
+The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
+transformations are lossy, so Core passes the tools through unchanged. OpenCode's separate per-tool
+definition path and the direct `compress-schema` command are unchanged.
 
 OpenClaw and Hermes now delegate their PostTool decisions to Core. DeepSeek Harness still uses its
 dedicated response path; the content-aware build/log path does not run there yet. The standalone
@@ -306,8 +304,8 @@ The install script uses OpenClaw's unsafe-install override as described above. R
 ### Hermes
 
 The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the
-block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. Hermes cannot
-publish a trusted Retrieve tool, so compression that requires recovery passes through unchanged.
+block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. Hermes has no
+marker-authorized recovery path, so compression that requires recovery passes through unchanged.
 
 ### Qoder
 

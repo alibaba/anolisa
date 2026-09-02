@@ -87,7 +87,7 @@ jq -n \
       output_optimization: "none",
       capabilities: {
         replace_output: true,
-        publish_retrieve_tool: true,
+        retrieval_available: false,
         replace_with_text: true
       }
     }
@@ -100,7 +100,7 @@ jq -n \
 
 | `operation` | 必填 `input` 事实 | 结果 |
 |-------------|-------------------|------|
-| `before_model` | `tools`、排除工具后的模型可见上下文、Retrieve Tool 名称，以及工具替换/发布能力 | 变换后的工具、排序后的可见 Marker Hash，以及可选 Retrieve 声明 |
+| `before_model` | `tools`、排除工具后的模型可见上下文、工具替换能力，以及 Integration 是否已有 Marker 授权恢复 | 变换后的工具与排序后的可见 Marker Hash |
 | `pre_tool` | 工具名、参数、明确的命令字段，以及参数替换/阻止能力 | 参数、`passthrough`/`replace_arguments`/`block_and_suggest` Action，以及 `none`/`rtk` 输出优化状态 |
 | `post_tool` | Result Kind、工具名、内容、状态、明确 Content Origin、上游输出优化状态和输出能力 | Output、Disposition、检测类型、实际操作、Recoverability、Token 计数和 Stash Keys |
 | `retrieve` | Hash 或 Marker，以及模型当前可见的 Marker 集合 | 授权后的规范化 Hash 和字节级一致 Payload |

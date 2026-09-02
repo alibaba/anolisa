@@ -35,8 +35,10 @@ Content detection, thresholds, TOON selection, diagnostics, authorization, and S
 in Rust Core rather than Python configuration.
 
 The SDK never stores a process-global current session. `before_model` returns the exact visible
-marker set plus an optional Core-owned Retrieve declaration. The adapter retains the marker set in
-framework session state, and `retrieve` authorizes only a marker in that set. Host applications
+marker set. An adapter declares whether it has a marker-authorized recovery path and owns any
+Agent-facing command or tool declaration. AgentScope keeps its Retrieve tool static across model
+calls, retains the marker set in framework session state, and `retrieve` authorizes only a marker
+in that set. Host applications
 retain raw tool values for UI and business logic and pass only copied, final model-visible text to
 `post_tool`. Retrieve output never enters PostTool again.
 

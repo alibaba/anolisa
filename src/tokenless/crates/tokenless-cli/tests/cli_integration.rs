@@ -1776,7 +1776,7 @@ fn spawn_with_stdin(
         .unwrap()
 }
 
-fn post_tool_request_json(content: &str, publish_retrieve_tool: bool, session_id: &str) -> String {
+fn post_tool_request_json(content: &str, retrieval_available: bool, session_id: &str) -> String {
     serde_json::json!({
         "protocol_version": 2,
         "operation": "post_tool",
@@ -1794,7 +1794,7 @@ fn post_tool_request_json(content: &str, publish_retrieve_tool: bool, session_id
             "output_optimization": "none",
             "capabilities": {
                 "replace_output": true,
-                "publish_retrieve_tool": publish_retrieve_tool,
+                "retrieval_available": retrieval_available,
                 "replace_with_text": false
             }
         }
@@ -1871,10 +1871,9 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
                 }
             }],
             "visible_context": {"messages": []},
-            "retrieve_tool_name": "tokenless_retrieve",
             "capabilities": {
                 "replace_tools": true,
-                "publish_retrieve_tool": true
+                "retrieval_available": true
             }
         }
     });
@@ -1892,7 +1891,7 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(response["result"]["retrieve_tool"].is_object());
+    assert!(response["result"].get("retrieve_tool").is_none());
 
     let retrieve = serde_json::json!({
         "protocol_version": 2,

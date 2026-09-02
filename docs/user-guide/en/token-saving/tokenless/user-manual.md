@@ -43,8 +43,8 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
-| Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel currently passes schemas through because these transformations are lossy and it has no trusted Retrieve; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Protocol v2 routes successful PostTool JSON to `JsonCompressor`, then accepts only a smaller end-to-end result | Non-JSON domains currently pass through; Common Hooks declare no trusted Retrieve and therefore apply only lossless candidates |
+| Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
+| Content-aware response compression | Protocol v2 routes successful PostTool JSON to `JsonCompressor`, then accepts only a smaller end-to-end result | Non-JSON domains currently pass through; recoverable truncation requires Agent-facing recovery that verifies the current Marker set |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |

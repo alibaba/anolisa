@@ -16,10 +16,9 @@ fn requests() -> Vec<RequestEnvelope> {
             request: Request::BeforeModel(BeforeModelRequest {
                 tools: vec![json!({"name": "read"})],
                 visible_context: json!({"messages": []}),
-                retrieve_tool_name: "tokenless_retrieve".into(),
                 capabilities: BeforeModelCapabilities {
                     replace_tools: true,
-                    publish_retrieve_tool: true,
+                    retrieval_available: true,
                 },
             }),
         },
@@ -46,7 +45,7 @@ fn requests() -> Vec<RequestEnvelope> {
                 output_optimization: OutputOptimization::None,
                 capabilities: PostToolCapabilities {
                     replace_output: true,
-                    publish_retrieve_tool: false,
+                    retrieval_available: false,
                     replace_with_text: true,
                 },
             }),
@@ -80,7 +79,6 @@ fn all_response_operations_round_trip_with_fixed_envelope() {
         Response::BeforeModel(BeforeModelResponse {
             tools: vec![],
             visible_markers: vec![],
-            retrieve_tool: None,
         }),
         Response::PreTool(PreToolResponse {
             arguments: json!({}),
@@ -125,6 +123,16 @@ fn operation_payloads_are_isolated_and_strict() {
     assert!(RequestEnvelope::from_json(&value.to_string()).is_err());
 
     let mut value: serde_json::Value =
+        serde_json::from_str(&requests()[0].to_json().unwrap()).unwrap();
+    value["input"]["retrieve_tool_name"] = json!("tokenless_retrieve");
+    assert!(RequestEnvelope::from_json(&value.to_string()).is_err());
+
+    let mut value: serde_json::Value =
+        serde_json::from_str(&requests()[0].to_json().unwrap()).unwrap();
+    value["input"]["capabilities"]["publish_retrieve_tool"] = json!(true);
+    assert!(RequestEnvelope::from_json(&value.to_string()).is_err());
+
+    let mut value: serde_json::Value =
         serde_json::from_str(&requests()[2].to_json().unwrap()).unwrap();
     value["unexpected"] = json!(true);
     assert!(RequestEnvelope::from_json(&value.to_string()).is_err());
@@ -143,6 +151,17 @@ fn operation_payloads_are_isolated_and_strict() {
     };
     let mut value: serde_json::Value = serde_json::from_str(&response.to_json().unwrap()).unwrap();
     value["result"]["unexpected"] = json!(true);
+    assert!(ResponseEnvelope::from_json(&value.to_string()).is_err());
+
+    let response = ResponseEnvelope {
+        attribution: attribution(),
+        response: Response::BeforeModel(BeforeModelResponse {
+            tools: vec![],
+            visible_markers: vec![],
+        }),
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&response.to_json().unwrap()).unwrap();
+    value["result"]["retrieve_tool"] = json!(null);
     assert!(ResponseEnvelope::from_json(&value.to_string()).is_err());
 }
 

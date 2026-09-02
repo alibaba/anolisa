@@ -62,10 +62,11 @@ OpenClaw 的 PreTool 同样调用一次 `tokenless compress`，并把 Core 返�
 匹配的 PostTool Request 携带该状态，Core 负责直接透传 RTK 输出。Ledger 按 24 小时 TTL、
 1024 条上限和 Session 结束事件清理。
 
-OpenClaw 不声明受信 Retrieve，因此需要恢复的 Lossy Candidate 以
-`recoverability_unavailable` 透传。`tool_result_persist` 只同步改写 OpenClaw 自己持久化的
-transcript；它不替换同一轮模型已经收到的实时结果。Plugin 只处理 String、结构化 Slot 或
-单个 Text Block，并保留 Tool Result Envelope；Media 和多个 Block 原样透传。
+OpenClaw 不提供 Marker 授权恢复路径，因此需要恢复的 Lossy Candidate 以
+`recoverability_unavailable` 透传。本地 `tokenless retrieve` 是受信运维入口，不能替代 Agent
+授权。`tool_result_persist` 只同步改写 OpenClaw 自己持久化的 transcript；它不替换同一轮模型
+已经收到的实时结果。Plugin 只处理 String、结构化 Slot 或单个 Text Block，并保留 Tool Result
+Envelope；Media 和多个 Block 原样透传。
 
 ### 路径 2：共享 PostTool Hook（Protocol v2）
 
@@ -90,9 +91,10 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
 `ContentType::Json -> JsonCompressor`；清理、截断、Structured Slot 恢复、Compact JSON 与
 可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
-Common Hook、OpenClaw 与 Hermes Plugin 都不声明受信 Retrieve 能力，因此只接受无损 JSON 候选；需要截断的候选以
-`recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK 操作错误由 CLI 以退出码 1
-返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过 Protocol v2 调用 Core，由 Core
+Common Hook、OpenClaw 与 Hermes Plugin 都不提供 Marker 授权恢复路径，因此只接受无损 JSON
+候选；需要截断的候选以 `recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK
+操作错误由 CLI 以退出码 1 返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过
+Protocol v2 调用 Core，由 Core
 执行 RTK；Adapter 按 Tool Call ID 暂存 `output_optimization: "rtk"`，并在对应 PostTool 调用中
 消费该状态，使 RTK 输出绕过二次压缩。缺少稳定 Tool Call ID 时保持原命令不变；宿主未发送
 PostTool 事件时遗留的状态会在后续 PreTool 调用中按 24 小时 TTL 和 1024 个文件上限清理。
@@ -118,8 +120,8 @@ Adapter 仅替换 Applied 输出或追加错误指引；其他结果原样透传
 ```
 
 Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON 选择或最终大小仲裁。
-Hermes 无法发布受信 Retrieve Tool，因此 Core 只会应用无损候选；需要截断恢复能力的候选
-直接透传。为兼容只支持 Block 的 Hermes 版本，Adapter 不要求 `pre_tool_call modify`。
+Hermes 不提供 Marker 授权恢复路径，因此 Core 只应用无损候选。为兼容只支持 Block 的 Hermes
+版本，Adapter 不要求 `pre_tool_call modify`。
 
 ### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
 

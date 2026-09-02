@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 import sys
 import types
 import unittest
@@ -29,21 +28,6 @@ class _CompressionResult:
 class _Runtime:
     def __init__(self, data_dir=None, **_kwargs):
         self.data_dir = str(data_dir or "/tmp/tokenless-test")
-
-    @staticmethod
-    def _retrieve_tool_declaration_json(name):
-        return json.dumps(
-            {
-                "name": name,
-                "description": "Restore visible Tokenless content.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"hash_or_marker": {"type": "string"}},
-                    "required": ["hash_or_marker"],
-                    "additionalProperties": False,
-                },
-            }
-        )
 
 
 @dataclass
@@ -179,32 +163,36 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.content[0]["text"], "short")
 
-    async def test_model_proxy_tracks_markers_and_core_retrieve_declaration(
+    async def test_model_proxy_keeps_retrieve_tool_static_while_markers_change(
         self,
     ) -> None:
         marker = "0123456789abcdef01234567"
+        marker_sets = iter((frozenset(), frozenset({marker})))
 
         async def before_model(request):
             self.assertNotIn(
                 "tokenless_retrieve",
                 [tool.get("function", {}).get("name") for tool in request.tools],
             )
+            self.assertTrue(request.capabilities.retrieval_available)
             return core.BeforeModelResponse(
                 tools=request.tools,
-                visible_markers=frozenset({marker}),
-                retrieve_tool=self.integration.sdk.retrieve_tool_declaration(),
+                visible_markers=next(marker_sets),
             )
 
         self.integration.sdk.before_model = before_model
-        _, kwargs = await self.agent.model(
+        _, first = await self.agent.model(
             [],
             tools=[
                 registered.json_schema for registered in self.toolkit.tools.values()
             ],
         )
+        self.assertEqual(self.toolkit.visible_markers, frozenset())
+        _, second = await self.agent.model([], tools=first["tools"])
         self.assertEqual(self.toolkit.visible_markers, frozenset({marker}))
+        self.assertEqual(first["tools"], second["tools"])
         self.assertEqual(
-            kwargs["tools"][-1]["function"]["parameters"]["required"],
+            second["tools"][-1]["function"]["parameters"]["required"],
             ["hash_or_marker"],
         )
 

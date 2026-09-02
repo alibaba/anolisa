@@ -171,7 +171,7 @@ class HermesLifecycleTest(unittest.TestCase):
             request["input"]["capabilities"],
             {
                 "replace_output": True,
-                "publish_retrieve_tool": False,
+                "retrieval_available": False,
                 "replace_with_text": True,
             },
         )

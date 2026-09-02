@@ -41,8 +41,8 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
-| Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | 这些变换均为有损且 Common BeforeModel 没有受信 Retrieve，因此当前原样返回 Schema；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | Protocol v2 把成功的 PostTool JSON 路由给 `JsonCompressor`，只接受端到端更小的结果 | 非 JSON 内容域当前透传；Common Hook 不声明受信 Retrieve，因此只应用无损候选 |
+| Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
+| Content-aware 响应压缩 | Protocol v2 把成功的 PostTool JSON 路由给 `JsonCompressor`，只接受端到端更小的结果 | 非 JSON 内容域当前透传；可恢复截断要求 Agent-facing 恢复验证当前 Marker 集合 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 真正提交给 Shell 的命令会变化；无规则或被拒绝时透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |

@@ -510,10 +510,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let compression_on = config.is_compression_enabled();
             let needs_stash = match &request.request {
                 Request::BeforeModel(value) => {
-                    compression_on && value.capabilities.publish_retrieve_tool
+                    compression_on && value.capabilities.retrieval_available
                 }
                 Request::PostTool(value) => {
-                    compression_on && value.capabilities.publish_retrieve_tool
+                    compression_on && value.capabilities.retrieval_available
                 }
                 Request::Retrieve(_) => true,
                 Request::PreTool(_) => false,

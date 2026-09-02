@@ -26,14 +26,18 @@ from anolisa_tokenless import (
     PreToolRequest,
     ResultKind,
     RetrieveRequest,
-    RetrieveToolDeclaration,
     TokenlessConfig,
     TokenlessError,
     TokenlessSdk,
     ToolResultStatus,
 )
 
-from tokenless_agentscope._contracts import ToolContract, build_tool_contracts
+from tokenless_agentscope._contracts import (
+    RetrieveToolDeclaration,
+    ToolContract,
+    build_tool_contracts,
+    retrieve_tool_declaration,
+)
 
 _STATE_KEY = "anolisa_tokenless"
 
@@ -167,7 +171,6 @@ class TokenlessMiddleware(MiddlewareBase):
         rtk_enabled: bool = True,
         tool_contracts: Mapping[str, ToolContract] | None = None,
         _config: TokenlessConfig | None = None,
-        _publish_retrieval_tool: bool = True,
     ) -> None:
         config = _config or TokenlessConfig(
             data_dir=data_dir,
@@ -178,11 +181,10 @@ class TokenlessMiddleware(MiddlewareBase):
         self.data_dir = config.data_dir
         self.retrieve_tool_name = config.retrieve_tool_name
         self._tool_contracts = build_tool_contracts(tool_contracts)
-        self._publish_retrieval_tool = _publish_retrieval_tool
         self.sdk = TokenlessSdk(config)
         self._session_markers: dict[str, frozenset[str]] = {}
         self._session_agents: dict[str, str] = {}
-        self._retrieve_declaration = self.sdk.retrieve_tool_declaration()
+        self._retrieve_declaration = retrieve_tool_declaration(self.retrieve_tool_name)
         self._retrieve_tool = _new_retrieve_tool(
             self.sdk,
             self._retrieve_declaration,
@@ -196,8 +198,8 @@ class TokenlessMiddleware(MiddlewareBase):
         return self._retrieve_tool
 
     async def list_tools(self) -> list[ToolBase]:
-        """Publish retrieval while model middleware controls its visibility."""
-        return [self._retrieve_tool] if self._publish_retrieval_tool else []
+        """Return the static retrieval tool owned by this middleware."""
+        return [self._retrieve_tool]
 
     async def register_tools(self, toolkit: Toolkit) -> None:
         """Register retrieval when the installed Toolkit supports mutation."""
@@ -238,10 +240,9 @@ class TokenlessMiddleware(MiddlewareBase):
                 visible_context=json.dumps(
                     input_kwargs["messages"], ensure_ascii=False, default=str
                 ),
-                retrieve_tool_name=self.retrieve_tool_name,
                 capabilities=BeforeModelCapabilities(
                     replace_tools=True,
-                    publish_retrieve_tool=True,
+                    retrieval_available=True,
                 ),
                 attribution=Attribution(agent_id, agent.state.session_id),
             )
@@ -254,8 +255,7 @@ class TokenlessMiddleware(MiddlewareBase):
             self._session_agents,
         )
         tools = list(transformed.tools)
-        if transformed.retrieve_tool is not None:
-            tools.append(transformed.retrieve_tool.as_function_tool())
+        tools.append(self._retrieve_declaration.as_function_tool())
         return await next_handler(**{**input_kwargs, "tools": tools})
 
     async def on_acting(
@@ -340,7 +340,7 @@ class TokenlessMiddleware(MiddlewareBase):
                     output_optimization=optimization,
                     capabilities=PostToolCapabilities(
                         replace_output=True,
-                        publish_retrieve_tool=True,
+                        retrieval_available=True,
                         replace_with_text=True,
                     ),
                     attribution=attribution,
@@ -410,46 +410,32 @@ class TokenlessAgentScope:
 
     def app_options(self) -> dict[str, Callable[..., Any]]:
         """Return AgentScope App factories with isolated session storage."""
-        if not hasattr(MiddlewareBase, "list_tools"):
+        if not hasattr(ToolBase, "call"):
             raise RuntimeError(
-                "AgentScope 2.0.0 App cannot inject Agent middleware and tools; "
-                "use direct Agent construction or AgentScope 2.0.1 or later."
+                "AgentScope App integration requires AgentScope 2.0.3 or later; "
+                "direct Agent integration remains supported."
             )
         if self.config.data_dir is None:
             raise ValueError("TokenlessConfig.data_dir is required for AgentScope App")
 
-        async def middleware_factory(
+        def new_middleware(
             user_id: str, agent_id: str, session_id: str
-        ) -> list[MiddlewareBase]:
+        ) -> TokenlessMiddleware:
             config = replace(
                 self.config,
                 data_dir=self._app_data_dir(user_id, agent_id, session_id),
             )
-            return [
-                TokenlessMiddleware(
-                    _config=config,
-                    tool_contracts=self._tool_contracts,
-                    _publish_retrieval_tool=False,
-                )
-            ]
-
-        async def tool_factory(
-            user_id: str, agent_id: str, session_id: str
-        ) -> list[ToolBase]:
-            config = replace(
-                self.config,
-                data_dir=self._app_data_dir(user_id, agent_id, session_id),
-            )
-            middleware = TokenlessMiddleware(
+            return TokenlessMiddleware(
                 _config=config,
                 tool_contracts=self._tool_contracts,
             )
-            return [middleware.retrieve_tool]
 
-        return {
-            "extra_agent_middlewares": middleware_factory,
-            "extra_agent_tools": tool_factory,
-        }
+        async def middleware_factory(
+            user_id: str, agent_id: str, session_id: str
+        ) -> list[MiddlewareBase]:
+            return [new_middleware(user_id, agent_id, session_id)]
+
+        return {"extra_agent_middlewares": middleware_factory}
 
     def _app_data_dir(self, user_id: str, agent_id: str, session_id: str) -> Path:
         identity = json.dumps(

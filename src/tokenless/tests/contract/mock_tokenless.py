@@ -51,6 +51,7 @@ def respond_before_model(request: dict, behavior: str) -> int:
         or not isinstance(input_data.get("tools"), list)
         or "visible_context" not in input_data
         or not isinstance(input_data.get("capabilities"), dict)
+        or input_data["capabilities"].get("retrieval_available") is not False
     ):
         return 3
 
@@ -64,7 +65,7 @@ def respond_before_model(request: dict, behavior: str) -> int:
         return 4
     envelope(
         request,
-        {"tools": tools, "visible_markers": [], "retrieve_tool": None},
+        {"tools": tools, "visible_markers": []},
     )
     return 0
 
@@ -119,6 +120,7 @@ def respond_post_tool(request: dict, behavior: str) -> int:
         not isinstance(input_data, dict)
         or not isinstance(input_data.get("content"), str)
         or not isinstance(input_data.get("capabilities"), dict)
+        or input_data["capabilities"].get("retrieval_available") is not False
         or "content_origin" not in input_data
         or "output_optimization" not in input_data
     ):
@@ -194,8 +196,7 @@ def main() -> int:
             request_log.write(json.dumps(request) + "\n")
     if (
         request.get("protocol_version") != 2
-        or request.get("operation")
-        not in {"before_model", "pre_tool", "post_tool"}
+        or request.get("operation") not in {"before_model", "pre_tool", "post_tool"}
         or not isinstance(request.get("attribution"), dict)
         or set(request) != {"protocol_version", "operation", "attribution", "input"}
     ):

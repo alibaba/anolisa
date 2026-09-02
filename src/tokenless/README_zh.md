@@ -74,9 +74,9 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 ### Agent Adapter
 
-- **OpenClaw 插件** — 通过 Protocol v2 Core 执行 PreTool RTK 改写和 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与受信 Retrieve
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + Protocol v2 PostTool；Common BeforeModel 在受信 Retrieve 接入前透传 Schema，旧版 Copilot Shell 透传 Pipeline 输出
-- **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core；无受信 Retrieve，因此 PostTool 仅应用无损结果
+- **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + 无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
+- **Hermes Agent 插件** — 把阻止后建议式命令重写和无损模型可见结果优化委托给 Core；无 Schema/Retrieve
 - **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
@@ -89,8 +89,9 @@ OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_cal
 `tokenless compress`，`tool_result_persist` 把 OpenClaw 自己持久化的 Tool Result 交给同一
 Protocol v2 入口。Core 持有 RTK、JSON 检测、清理、TOON、阈值、诊断与最终仲裁；Plugin
 把 PreTool 返回的 `output_optimization` 传到匹配的 PostTool，因此不会二次压缩 RTK 输出。
-OpenClaw 没有受信 Retrieve 能力，需要恢复的候选会原样透传。该 PostTool Hook 只改写持久化
-transcript，不会改变同一轮中模型已经看到的实时结果；Media 与多个 Content Block 也会透传。
+本地 CLI 恢复命令是受信运维入口，不等价于 Agent 的 Marker 授权，因此 OpenClaw 只应用无损
+候选。该 PostTool Hook 只改写持久化 transcript，不会改变同一轮中模型已经看到的实时结果；
+Media 与多个 Content Block 也会透传。
 
 该 Adapter 要求 OpenClaw Plugin API `2026.4.22` 或更高版本；支持兼容性检查的宿主会在
 安装阶段根据 Package Metadata 强制执行该下限。OpenClaw 配置只包含
@@ -158,11 +159,10 @@ dsh --profile <profile>
 
 ### `compress` 压缩入口
 
-共享 Agent Hook 会向 `tokenless compress` 发送严格的 Protocol v2 生命周期请求。
+共享 Agent Hook 会向 `tokenless compress` 发送严格的生命周期请求。
 Tagged Envelope 选择 `before_model`、`pre_tool`、`post_tool` 或 `retrieve`；只有成功且未旁路的
-PostTool JSON 会进入 Runtime 内部 Pipeline。Common Hook 没有受信 Retrieve 能力，因此 Core
-只应用无损 PostTool 候选，并拒绝无法恢复的截断。当前 `SchemaCompressor` 的变换均为有损，
-因此本迁移阶段 Common BeforeModel 会原样返回 Tools，也不会产生 Schema 压缩 Stats 记录。
+PostTool JSON 会进入 Runtime 内部 Pipeline。Common Hook 没有 Marker 授权恢复路径，因此 Core
+只应用无损 PostTool 候选，并透传有损 Schema 变换。
 请求/响应契约和可执行示例见
 [CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
 
@@ -357,7 +357,7 @@ agent = Agent(
 )
 ```
 
-AgentScope App 从 2.0.1 开始支持。它会在配置的绝对基础目录下，为每个
+AgentScope App 从 2.0.3 开始支持。它会在配置的绝对基础目录下，为每个
 user/agent/session 派生独立的 Tokenless 数据目录：
 
 ```python
@@ -366,12 +366,15 @@ from agentscope.app import create_app
 app = create_app(..., **integration.app_options())
 ```
 
+`app_options()` 只提供一个 Middleware Factory。AgentScope 通过该 Middleware 实例的
+`list_tools()` 发布静态 Retrieve Tool，并在 `AgentState.middle_context` 中持久化 Marker 授权。
+
 如果应用已经定义 `tokenless_retrieve`，应在 `TokenlessConfig` 中设置唯一的
 `retrieve_tool_name`；App 组装阶段不会把其他工具暴露给该 factory，无法预先检查重名。
 
-AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此该补丁版本只支持
-直接构造 Agent。原有 `TokenlessMiddleware` 2.x API 继续保留兼容；新代码应使用
-`TokenlessAgentScope`，避免依赖特定补丁版本的 Toolkit 动态修改或 Tool 自动收集行为。
+AgentScope 2.0.0 至 2.0.2 只支持直接构造 Agent；这些版本的 App API 尚未同时提供由
+Middleware 发布 Tool 和持久化 Middleware 状态的能力。原有 `TokenlessMiddleware` 2.x API
+继续保留兼容；新代码应使用 `TokenlessAgentScope`。
 
 AgentScope 为已知的 Shell、文件和 API 工具提供显式契约。每个自定义工具都必须注册
 `ToolContract`：从 `COMMAND_OUTPUT`、`FILE_CONTENT` 或 `API_RESPONSE` 中选择来源，
@@ -379,10 +382,10 @@ AgentScope 为已知的 Shell、文件和 API 工具提供显式契约。每个�
 Model 边界快速失败，不会根据输出文本猜测来源。压缩阈值、TOON 选择、诊断和 Retrieve
 授权都保留在 Rust Core。
 
-只在模型当前可见 Marker 时才会发布只读 Retrieve Tool，并且它只接受本次模型调用保留
-的精确 Marker 集合中的 Hash。直接构造 Agent 时，每个用户或租户必须显式传入不同的
-绝对 `data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用
-有明确生命周期策略，否则保留默认一小时 Stash TTL，且不要依赖跨节点恢复。
+只读 Retrieve Tool 的声明保持静态，并在模型调用之间留在工具列表中；它只接受本次模型
+调用保留的精确 Marker 集合中的 Hash。直接构造 Agent 时，每个用户或租户必须显式传入
+不同的绝对 `data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非
+应用有明确生命周期策略，否则保留默认一小时 Stash TTL，且不要依赖跨节点恢复。
 
 两个 AgentScope Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、
 环境错误提示和逐调用归属。原生 Wheel 内置 RTK 并直接链接 TOON，不搜索系统可执行文件。

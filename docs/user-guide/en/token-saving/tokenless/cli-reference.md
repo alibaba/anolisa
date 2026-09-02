@@ -91,7 +91,7 @@ jq -n \
       output_optimization: "none",
       capabilities: {
         replace_output: true,
-        publish_retrieve_tool: true,
+        retrieval_available: false,
         replace_with_text: true
       }
     }
@@ -104,7 +104,7 @@ Operations:
 
 | `operation` | Required `input` facts | Result |
 |-------------|------------------------|--------|
-| `before_model` | `tools`, model-visible context without tools, Retrieve tool name, and tool replacement/publication capabilities | Transformed tools, sorted visible Marker hashes, and an optional Retrieve declaration |
+| `before_model` | `tools`, model-visible context without tools, tool replacement capability, and whether the integration has marker-authorized recovery | Transformed tools and sorted visible Marker hashes |
 | `pre_tool` | Tool name, arguments, explicit command field, and argument replacement/block capabilities | Arguments, `passthrough`/`replace_arguments`/`block_and_suggest` action, and `none`/`rtk` output optimization state |
 | `post_tool` | Result kind, tool name, content, status, explicit content origin, carried output optimization, and output capabilities | Output, disposition, detected type, applied operations, recoverability, token counts, and Stash keys |
 | `retrieve` | Hash or Marker plus the Marker set currently visible to the model | Normalized hash and byte-identical payload after authorization |

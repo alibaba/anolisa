@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from anolisa_tokenless import ContentOrigin
 
@@ -24,6 +25,45 @@ class ToolContract:
             and self.content_origin is not ContentOrigin.COMMAND_OUTPUT
         ):
             raise ValueError("command_field requires command_output content origin")
+
+
+@dataclass(frozen=True)
+class RetrieveToolDeclaration:
+    """AgentScope-owned declaration for marker-authorized retrieval."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+    def as_function_tool(self) -> dict[str, Any]:
+        """Returns the declaration in AgentScope's model-tool format."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
+
+
+def retrieve_tool_declaration(name: str) -> RetrieveToolDeclaration:
+    """Builds the static AgentScope retrieval tool declaration."""
+    return RetrieveToolDeclaration(
+        name=name,
+        description="Restore content referenced by a visible Tokenless marker.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "hash_or_marker": {
+                    "type": "string",
+                    "description": "A visible <<tokenless:HASH>> marker or its hash",
+                }
+            },
+            "required": ["hash_or_marker"],
+            "additionalProperties": False,
+        },
+    )
 
 
 _COMMAND_TOOLS = frozenset(

@@ -5,7 +5,7 @@
 //! cross-process transports.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// The protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -146,9 +146,9 @@ pub struct BeforeModelCapabilities {
     /// The host can replace tool declarations.
     #[serde(default)]
     pub replace_tools: bool,
-    /// The host can publish the returned Retrieve tool declaration.
+    /// Agent-facing recovery enforces visibility of the current Marker.
     #[serde(default)]
-    pub publish_retrieve_tool: bool,
+    pub retrieval_available: bool,
 }
 
 /// Input for the BeforeModel lifecycle operation.
@@ -159,44 +159,8 @@ pub struct BeforeModelRequest {
     pub tools: Vec<Value>,
     /// Model-visible request context with tool declarations removed.
     pub visible_context: Value,
-    /// Name to use for a conditionally published Retrieve tool.
-    pub retrieve_tool_name: String,
     /// Host capabilities for applying the result.
     pub capabilities: BeforeModelCapabilities,
-}
-
-/// Declaration of the agent-facing Retrieve tool.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetrieveToolDeclaration {
-    /// Tool name selected by the adapter.
-    pub name: String,
-    /// Human-readable behavior summary.
-    pub description: String,
-    /// JSON Schema accepted by the tool.
-    pub input_schema: Value,
-}
-
-impl RetrieveToolDeclaration {
-    /// Builds the canonical declaration used to publish marker-scoped retrieval.
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: "Restore content referenced by a visible Tokenless marker.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "hash_or_marker": {
-                        "type": "string",
-                        "description": "A visible <<tokenless:HASH>> marker or its hash"
-                    }
-                },
-                "required": ["hash_or_marker"],
-                "additionalProperties": false
-            }),
-        }
-    }
 }
 
 /// Result of the BeforeModel lifecycle operation.
@@ -207,9 +171,6 @@ pub struct BeforeModelResponse {
     pub tools: Vec<Value>,
     /// Sorted, deduplicated lowercase markers visible to the model.
     pub visible_markers: Vec<String>,
-    /// Retrieve declaration to publish, when both needed and supported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retrieve_tool: Option<RetrieveToolDeclaration>,
 }
 
 /// Host capabilities relevant to PreTool.
@@ -327,9 +288,9 @@ pub struct PostToolCapabilities {
     /// The host can replace the model-visible output.
     #[serde(default)]
     pub replace_output: bool,
-    /// A trusted agent-facing Retrieve tool is available.
+    /// Agent-facing recovery enforces visibility of the current Marker.
     #[serde(default)]
-    pub publish_retrieve_tool: bool,
+    pub retrieval_available: bool,
     /// The replacement slot accepts arbitrary text.
     #[serde(default)]
     pub replace_with_text: bool,
@@ -367,7 +328,7 @@ pub enum Disposition {
     Passthrough,
     /// A candidate did not save both characters and tokens.
     NoSavings,
-    /// A lossy candidate was rejected because no trusted Retrieve path exists.
+    /// A lossy candidate was rejected because no marker-authorized recovery path exists.
     RecoverabilityUnavailable,
     /// The pipeline exhausted its time budget.
     Timeout,

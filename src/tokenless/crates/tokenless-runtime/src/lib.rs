@@ -230,12 +230,6 @@ pub enum RuntimeError {
         /// Normalized hash rejected before the stash read.
         hash: String,
     },
-    /// The configured Retrieve tool name collides with a host declaration.
-    #[error("retrieve tool name conflicts with an existing tool: {name}")]
-    RetrieveToolConflict {
-        /// Conflicting tool name.
-        name: String,
-    },
     /// The PostTool domain compressor failed.
     #[error("{0}")]
     Pipeline(String),
@@ -803,7 +797,7 @@ pub fn compress_response_with_store(
         output_optimization: OutputOptimization::None,
         capabilities: PostToolCapabilities {
             replace_output: true,
-            publish_retrieve_tool: options.stash_enabled
+            retrieval_available: options.stash_enabled
                 && compression_enabled
                 && stash_store.is_some(),
             replace_with_text: false,

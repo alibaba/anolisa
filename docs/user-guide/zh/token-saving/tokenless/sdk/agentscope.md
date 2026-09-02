@@ -14,8 +14,8 @@ OpenCode 等产品 Adapter 单独记录在 [Agent 集成](../framework-integrati
 | AgentScope 版本 | 支持的入口 |
 |-----------------|------------|
 | 1.0.11 至 1.0.x | Tokenless Toolkit 加 `install(..., session_id=...)` |
-| 2.0.0 | 通过 `integration.tools` 和 `integration.middlewares` 直接构造 Agent |
-| 2.0.1 至 2.0.x | 直接构造 Agent，或通过 `integration.app_options()` 接入 App |
+| 2.0.0 至 2.0.2 | 通过 `integration.tools` 和 `integration.middlewares` 直接构造 Agent |
+| 2.0.3 至 2.0.x | 直接构造 Agent，或通过 `integration.app_options()` 接入 App |
 
 ## 安装
 
@@ -103,7 +103,7 @@ agent = Agent(
 
 ## AgentScope App
 
-AgentScope App 从 2.0.1 开始支持。`app_options()` 会在配置的绝对基础目录下，为每个
+AgentScope App 从 2.0.3 开始支持。`app_options()` 会在配置的绝对基础目录下，为每个
 user/agent/session 派生独立的 Tokenless 数据目录：
 
 ```python
@@ -116,8 +116,11 @@ integration = TokenlessAgentScope(
 app = create_app(..., **integration.app_options())
 ```
 
-AgentScope 2.0.0 尚未提供 App 级 Agent Middleware 或 Tool 注入，因此只支持直接构造
-Agent。
+`app_options()` 只提供一个 Middleware Factory。AgentScope 通过该 Middleware 实例的
+`list_tools()` 发布静态 Retrieve Tool，并在 `AgentState.middle_context` 中持久化 Marker 授权。
+
+AgentScope 2.0.0 至 2.0.2 只支持直接构造 Agent；这些版本的 App API 尚未同时提供由
+Middleware 发布 Tool 和持久化 Middleware 状态的能力。
 
 ## 配置与行为
 
@@ -136,9 +139,9 @@ Model 边界快速失败，绝不通过输出文本猜测 Origin。
 集成会原样转发中间流式 Chunk 并保留框架对象，只转换复制后的调用参数和最终模型可见
 文本。Tokenless 优化失败或 UTF-8 结果没有严格变小时保留原文，`DataBlock` 永不修改。
 
-集成还提供默认名为 `tokenless_retrieve` 的恢复 Tool。只有 Marker 对当前模型可见时才会
-向模型发布该 Tool，并且只接受当前 Model Call 精确保留的 Marker 集合中的完整 Marker
-或 24 位十六进制 Hash。Retrieve 输出会绕过 PostTool。
+集成还提供默认名为 `tokenless_retrieve` 的恢复 Tool。它的声明是静态的，并在模型调用之间
+保留在工具列表中，因此 Marker 可见性变化不会造成工具列表抖动。它只接受当前 Model Call
+精确保留的 Marker 集合中的完整 Marker 或 24 位十六进制 Hash。Retrieve 输出会绕过 PostTool。
 
 每个用户或租户必须传入独立的绝对 `data_dir`。`TOKENLESS_DATA_DIR` 只是进程级回退，
 不得由多个租户共用；也不要依赖跨节点恢复。Stash 条目使用当前固定的一小时 TTL。

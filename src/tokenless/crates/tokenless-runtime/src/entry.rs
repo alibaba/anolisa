@@ -15,8 +15,7 @@ use tokenless_protocol::{
     AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, Disposition, Operation,
     OutputOptimization, PostToolRequest, PostToolResponse, PreToolAction, PreToolRequest,
     PreToolResponse, Recoverability, Request, RequestEnvelope, Response, ResponseEnvelope,
-    ResultKind, RetrieveRequest, RetrieveResponse, RetrieveToolDeclaration, TOKENIZER_ID,
-    ToolResultStatus, estimate_tokens,
+    ResultKind, RetrieveRequest, RetrieveResponse, TOKENIZER_ID, ToolResultStatus, estimate_tokens,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{OperationType, StatsRecorder};
@@ -164,17 +163,6 @@ pub(crate) fn before_model_with_store(
     options: &EntryOptions,
     stash_store: Option<&Arc<dyn StashStore>>,
 ) -> Result<BeforeModelOutcome, RuntimeError> {
-    if request.capabilities.publish_retrieve_tool
-        && request
-            .tools
-            .iter()
-            .any(|tool| tool_name(tool).is_some_and(|name| name == request.retrieve_tool_name))
-    {
-        return Err(RuntimeError::RetrieveToolConflict {
-            name: request.retrieve_tool_name.clone(),
-        });
-    }
-
     let input = serde_json::to_string(&request.tools).map_err(RuntimeError::Serialize)?;
     if input.len() > MAX_INPUT_BYTES {
         return Err(RuntimeError::InputTooLarge {
@@ -184,7 +172,7 @@ pub(crate) fn before_model_with_store(
     let attached_store = if request.capabilities.replace_tools
         && options.compression_enabled
         && options.stash_enabled
-        && request.capabilities.publish_retrieve_tool
+        && request.capabilities.retrieval_available
     {
         stash_store
     } else {
@@ -234,12 +222,6 @@ pub(crate) fn before_model_with_store(
     collect_markers(&request.visible_context, &mut markers);
     collect_markers(&Value::Array(tools.clone()), &mut markers);
     let visible_markers = markers.into_iter().collect::<Vec<_>>();
-    let retrieve_tool = if request.capabilities.publish_retrieve_tool && !visible_markers.is_empty()
-    {
-        Some(RetrieveToolDeclaration::new(&request.retrieve_tool_name))
-    } else {
-        None
-    };
     let measured = matches!(
         compression.disposition,
         Disposition::Applied | Disposition::DryRun
@@ -258,7 +240,6 @@ pub(crate) fn before_model_with_store(
         response: BeforeModelResponse {
             tools,
             visible_markers,
-            retrieve_tool,
         },
         stats: EntryStats {
             operation: OperationType::CompressSchema,
@@ -282,12 +263,6 @@ pub(crate) fn before_model_with_store(
         stash_size: compression.stash_size,
         artifact_keys: emitted_keys,
     })
-}
-
-fn tool_name(tool: &Value) -> Option<&str> {
-    tool.get("name")
-        .and_then(Value::as_str)
-        .or_else(|| tool.get("function")?.get("name")?.as_str())
 }
 
 fn collect_markers(value: &Value, markers: &mut BTreeSet<String>) {
@@ -604,7 +579,7 @@ pub(crate) fn post_tool_with_store(
     };
     let attached_store = request
         .capabilities
-        .publish_retrieve_tool
+        .retrieval_available
         .then_some(stash_store)
         .flatten();
 
@@ -1344,16 +1319,14 @@ mod tests {
                 }
             })],
             visible_context: json!({"messages": []}),
-            retrieve_tool_name: "tokenless_retrieve".into(),
             capabilities: BeforeModelCapabilities {
                 replace_tools: true,
-                publish_retrieve_tool: false,
+                retrieval_available: false,
             },
         };
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.tools, request.tools);
         assert!(outcome.response.visible_markers.is_empty());
-        assert!(outcome.response.retrieve_tool.is_none());
         assert_eq!(
             outcome.stats.disposition,
             Disposition::RecoverabilityUnavailable
@@ -1362,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn before_model_publishes_sorted_markers_only_with_capability() {
+    fn before_model_returns_sorted_markers_with_recovery_available() {
         let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
         let request = BeforeModelRequest {
             tools: vec![json!({
@@ -1379,17 +1352,12 @@ mod tests {
                     "<<tokenless:abcdef0123456789abcdef01>>"
                 ]
             }),
-            retrieve_tool_name: "tokenless_retrieve".into(),
             capabilities: BeforeModelCapabilities {
                 replace_tools: true,
-                publish_retrieve_tool: true,
+                retrieval_available: true,
             },
         };
         let outcome = before_model_with_store(&request, &options(), Some(&store)).unwrap();
-        assert_eq!(
-            outcome.response.retrieve_tool.unwrap().name,
-            "tokenless_retrieve"
-        );
         assert!(
             outcome
                 .response
@@ -1410,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn before_model_obeys_replace_capability_and_checks_publish_conflicts() {
+    fn before_model_obeys_replace_capability_without_owning_tool_names() {
         let tool = json!({
             "type": "function",
             "function": {
@@ -1422,21 +1390,18 @@ mod tests {
         let mut request = BeforeModelRequest {
             tools: vec![tool.clone()],
             visible_context: json!({}),
-            retrieve_tool_name: "tokenless_retrieve".into(),
             capabilities: BeforeModelCapabilities {
                 replace_tools: false,
-                publish_retrieve_tool: false,
+                retrieval_available: false,
             },
         };
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.tools, vec![tool]);
         assert_eq!(outcome.stats.disposition, Disposition::Passthrough);
 
-        request.capabilities.publish_retrieve_tool = true;
-        assert!(matches!(
-            before_model_with_store(&request, &options(), None),
-            Err(RuntimeError::RetrieveToolConflict { .. })
-        ));
+        request.capabilities.retrieval_available = true;
+        let outcome = before_model_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.tools, request.tools);
     }
 
     #[test]
@@ -1454,7 +1419,7 @@ mod tests {
                 output_optimization: optimization,
                 capabilities: PostToolCapabilities {
                     replace_output: true,
-                    publish_retrieve_tool: false,
+                    retrieval_available: false,
                     replace_with_text: true,
                 },
             };
@@ -1519,7 +1484,7 @@ mod tests {
         let failing: Arc<dyn StashStore> = Arc::new(FailingStore);
         let failing_request = PostToolRequest {
             capabilities: PostToolCapabilities {
-                publish_retrieve_tool: true,
+                retrieval_available: true,
                 ..lossy.capabilities
             },
             ..lossy.clone()
@@ -1532,7 +1497,7 @@ mod tests {
         let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
         let recoverable = PostToolRequest {
             capabilities: PostToolCapabilities {
-                publish_retrieve_tool: true,
+                retrieval_available: true,
                 ..lossy.capabilities
             },
             ..lossy
@@ -1553,7 +1518,7 @@ mod tests {
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,
-                publish_retrieve_tool: false,
+                retrieval_available: false,
                 replace_with_text: true,
             },
         }

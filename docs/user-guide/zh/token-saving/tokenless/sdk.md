@@ -129,10 +129,9 @@ async def main() -> None:
             BeforeModelRequest(
                 tools=(tool,),
                 visible_context="",
-                retrieve_tool_name="tokenless_retrieve",
                 capabilities=BeforeModelCapabilities(
                     replace_tools=True,
-                    publish_retrieve_tool=True,
+                    retrieval_available=True,
                 ),
                 attribution=model_attribution,
             )
@@ -152,7 +151,7 @@ async def main() -> None:
                 output_optimization=OutputOptimization.NONE,
                 capabilities=PostToolCapabilities(
                     replace_output=True,
-                    publish_retrieve_tool=True,
+                    retrieval_available=True,
                     replace_with_text=True,
                 ),
                 attribution=Attribution("my-agent", "session-42", "tool-7"),
@@ -164,7 +163,6 @@ async def main() -> None:
             BeforeModelRequest(
                 tools=(),
                 visible_context=result.output,
-                retrieve_tool_name="tokenless_retrieve",
                 capabilities=BeforeModelCapabilities(True, True),
                 attribution=model_attribution,
             )
@@ -196,17 +194,16 @@ request = await sdk.before_model(
     BeforeModelRequest(
         tools=tuple(model_tools),
         visible_context=visible_context,
-        retrieve_tool_name="tokenless_retrieve",
         capabilities=BeforeModelCapabilities(True, True),
         attribution=attribution,
     )
 )
 ```
 
-`before_model()` 压缩 OpenAI Function Calling 工具，在转换后的工具和可见 Context 中扫描
-`<<tokenless:HASH>>` Marker，并且只在至少一个 Marker 可见时返回由 Core 生成的独立
-Retrieve 声明。Adapter 把该声明加入宿主的模型工具。启用发布能力时，`request.tools`
-不得包含同名工具。
+`before_model()` 只在 `retrieval_available` 确认 Integration 具有验证当前 Marker 集合的
+Agent-facing 恢复路径时压缩 OpenAI Function Calling 工具；受信本地运维命令并不足够。Core
+从转换后的工具和可见 Context 扫描 `<<tokenless:HASH>>` Marker，返回精确授权集合，但不命名
+也不发布 Agent Tool。
 
 #### 工具调用前
 
@@ -276,9 +273,10 @@ config = TokenlessConfig(
 ```
 
 `data_dir` 必须是可写的绝对路径。每个租户或安全边界应使用不同目录；
-`TOKENLESS_DATA_DIR` 只是进程级回退。`retrieve_tool_name` 选择 Core 生成的声明名称；
-`rtk_enabled` 控制 SDK 是否为 PreTool 解析 Wheel 内置 RTK。压缩阈值、内容检测、TOON 选择、
-诊断、授权和 Stash 策略都属于 Core 行为，不是 Python 配置。
+`TOKENLESS_DATA_DIR` 只是进程级回退。`retrieve_tool_name` 为 AgentScope 等 Framework Layer
+选择 Integration 自有的 Tool 名称，Core 不接收该值；`rtk_enabled` 控制 SDK 是否为 PreTool
+解析 Wheel 内置 RTK。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
+行为，不是 Python 配置。
 
 ### Runtime 直接调用示例
 

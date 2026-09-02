@@ -87,7 +87,7 @@ impl PostToolPipeline {
 
         let attached_store = if config.stash_enabled
             && config.compression_enabled
-            && request.capabilities.publish_retrieve_tool
+            && request.capabilities.retrieval_available
         {
             stash_store
         } else {
@@ -282,7 +282,7 @@ mod tests {
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,
-                publish_retrieve_tool: true,
+                retrieval_available: true,
                 replace_with_text: true,
             },
         }

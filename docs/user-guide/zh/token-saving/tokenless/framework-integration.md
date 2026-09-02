@@ -32,24 +32,21 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 ## Adapter 处理规则
 
 共享 Cosh-NG、Qoder、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
-发送一个 Protocol v2 `post_tool` 请求。它声明输出替换能力，但不声明受信 Agent-facing
-Retrieve 能力。因此 Core 只应用无损 JSON 候选，并对所有非 `applied` Disposition 返回原文。
-当前路由如下：
+发送一个 Protocol v2 `post_tool` 请求。它不提供 Marker 授权恢复路径，因此 Core 只接受无损
+候选，并对所有非 `applied` Disposition 返回原文。当前路由如下：
 
 | 内容 | 当前共享 Hook 行为 |
 |------|--------------------|
 | JSON | 无损结构清理；文本替换槽还会考虑 TOON |
-| 需要字符串、数组或深度截断的 JSON | Common Hook 无法发布经过授权的 Retrieve Tool，因此以 `recoverability_unavailable` 拒绝候选 |
+| 需要字符串、数组或深度截断的 JSON | Common Hook 没有 Marker 授权恢复路径，因此以 `recoverability_unavailable` 拒绝候选 |
 | 构建/测试/包管理日志、长纯文本、Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
 Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显不是 JSON 的 Skill 文件，避免
 无意义地启动子进程。
 
-Common BeforeModel Hook 同样使用 Protocol v2，并声明没有受信 Retrieve 能力。只有 Core
-证明结果无损时才返回变换后的 Tools。当前 `SchemaCompressor` 的每一种变换都会移除或改写
-Schema 信息，因此这条 Common 路径会原样返回 Tools、不产生 Schema 压缩 Stats 记录，也不会
-发出不可恢复 Marker。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
+Common BeforeModel Hook 同样没有 Marker 授权恢复路径。当前 Schema 变换均为有损，因此 Core
+原样返回 Tools。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
 
 OpenClaw 与 Hermes 已把 PostTool 决策委托给 Core。DeepSeek Harness 仍使用专用响应路径；
 content-aware build/log 路径尚未接入。独立 `compress-response` 命令也继续作为显式 JSON
@@ -288,8 +285,8 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 ### Hermes
 
 Plugin 在 Hermes 新会话中生效。重启 Hermes 后先执行 Shell 工具任务验证阻止后重试改写，
-再执行返回 JSON 的工具验证结果替换。Hermes 无法发布受信 Retrieve Tool，因此需要恢复能力
-的压缩会原样透传。
+再执行返回 JSON 的工具验证结果替换。Hermes 没有 Marker 授权恢复路径，因此需要恢复的压缩
+会原样透传。
 
 ### Qoder
 

@@ -133,10 +133,14 @@ class TokenlessConfig:
 
 @dataclass(frozen=True)
 class BeforeModelCapabilities:
-    """Host capabilities relevant to BeforeModel."""
+    """Host capabilities relevant to BeforeModel.
+
+    ``retrieval_available`` requires Agent-facing recovery that verifies the
+    current Marker set; a trusted local operator command is not sufficient.
+    """
 
     replace_tools: bool
-    publish_retrieve_tool: bool
+    retrieval_available: bool
 
 
 @dataclass(frozen=True)
@@ -145,38 +149,16 @@ class BeforeModelRequest:
 
     tools: tuple[Any, ...]
     visible_context: Any
-    retrieve_tool_name: str
     capabilities: BeforeModelCapabilities
     attribution: Attribution
 
 
 @dataclass(frozen=True)
-class RetrieveToolDeclaration:
-    """Canonical declaration for the marker-authorized Retrieve tool."""
-
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-
-    def as_function_tool(self) -> dict[str, Any]:
-        """Returns an OpenAI-compatible function declaration."""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.input_schema,
-            },
-        }
-
-
-@dataclass(frozen=True)
 class BeforeModelResponse:
-    """Transformed tools, visible markers, and optional Retrieve declaration."""
+    """Transformed tools and the marker authorization set."""
 
     tools: tuple[Any, ...]
     visible_markers: frozenset[str]
-    retrieve_tool: RetrieveToolDeclaration | None
 
 
 @dataclass(frozen=True)
@@ -217,10 +199,14 @@ class PreToolResponse:
 
 @dataclass(frozen=True)
 class PostToolCapabilities:
-    """Host capabilities relevant to PostTool."""
+    """Host capabilities relevant to PostTool.
+
+    ``retrieval_available`` requires Agent-facing recovery that verifies the
+    current Marker set; a trusted local operator command is not sufficient.
+    """
 
     replace_output: bool
-    publish_retrieve_tool: bool
+    retrieval_available: bool
     replace_with_text: bool
 
 
@@ -301,10 +287,9 @@ class TokenlessSdk:
                 {
                     "tools": request.tools,
                     "visible_context": request.visible_context,
-                    "retrieve_tool_name": request.retrieve_tool_name,
                     "capabilities": {
                         "replace_tools": request.capabilities.replace_tools,
-                        "publish_retrieve_tool": request.capabilities.publish_retrieve_tool,
+                        "retrieval_available": request.capabilities.retrieval_available,
                     },
                 }
             ),
@@ -356,7 +341,7 @@ class TokenlessSdk:
                     "output_optimization": request.output_optimization,
                     "capabilities": {
                         "replace_output": request.capabilities.replace_output,
-                        "publish_retrieve_tool": request.capabilities.publish_retrieve_tool,
+                        "retrieval_available": request.capabilities.retrieval_available,
                         "replace_with_text": request.capabilities.replace_with_text,
                     },
                 }
@@ -397,13 +382,6 @@ class TokenlessSdk:
         value = _json_object(response)
         return RetrieveResponse(hash=value["hash"], payload=value["payload"])
 
-    def retrieve_tool_declaration(self) -> RetrieveToolDeclaration:
-        """Returns Core's canonical declaration for the configured Retrieve tool."""
-        value = _json_object(
-            self.runtime._retrieve_tool_declaration_json(self.config.retrieve_tool_name)
-        )
-        return _retrieve_tool_declaration(value)
-
     def _resolve_rtk(self) -> Path:
         resource = files("anolisa_tokenless").joinpath("_bin", "rtk")
         if not isinstance(resource, Path):
@@ -437,26 +415,9 @@ def _json_object(value: str) -> dict[str, Any]:
     return decoded
 
 
-def _retrieve_tool_declaration(value: dict[str, Any]) -> RetrieveToolDeclaration:
-    input_schema = value["input_schema"]
-    if not isinstance(input_schema, dict):
-        raise TypeError("Core returned a non-object Retrieve input schema")
-    return RetrieveToolDeclaration(
-        name=value["name"],
-        description=value["description"],
-        input_schema=input_schema,
-    )
-
-
 def _before_model_response(value: str) -> BeforeModelResponse:
     decoded = _json_object(value)
-    declaration = decoded.get("retrieve_tool")
     return BeforeModelResponse(
         tools=tuple(decoded["tools"]),
         visible_markers=frozenset(decoded["visible_markers"]),
-        retrieve_tool=(
-            _retrieve_tool_declaration(declaration)
-            if isinstance(declaration, dict)
-            else None
-        ),
     )

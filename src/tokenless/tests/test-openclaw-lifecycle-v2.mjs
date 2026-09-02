@@ -373,7 +373,7 @@ test("PostTool restores structured output and maps content origins", () => {
     undefined,
   );
   assert.equal(requests()[0].request.input.content_origin, "file_content");
-  assert.equal(requests()[0].request.input.capabilities.publish_retrieve_tool, false);
+  assert.equal(requests()[0].request.input.capabilities.retrieval_available, false);
 });
 
 test("PostTool preserves a text tool-result envelope", () => {
@@ -442,9 +442,9 @@ test("PostTool appends Core diagnostics without replacing the tool error", () =>
   assert.equal(requests()[0].request.input.content_origin, "command_output");
 });
 
-test("PostTool rejects lossy output without Retrieve and fails open at the process boundary", () => {
+test("PostTool rejects lossy output without authorized recovery and fails open", () => {
   assert.equal(persist("web_fetch", "call-lossy", "lossy payload"), undefined);
-  assert.equal(requests()[0].request.input.capabilities.publish_retrieve_tool, false);
+  assert.equal(requests()[0].request.input.capabilities.retrieval_available, false);
 
   rmSync(requestLog, { force: true });
   writeFileSync(behaviorFile, "exit");

@@ -133,10 +133,9 @@ async def main() -> None:
             BeforeModelRequest(
                 tools=(tool,),
                 visible_context="",
-                retrieve_tool_name="tokenless_retrieve",
                 capabilities=BeforeModelCapabilities(
                     replace_tools=True,
-                    publish_retrieve_tool=True,
+                    retrieval_available=True,
                 ),
                 attribution=model_attribution,
             )
@@ -156,7 +155,7 @@ async def main() -> None:
                 output_optimization=OutputOptimization.NONE,
                 capabilities=PostToolCapabilities(
                     replace_output=True,
-                    publish_retrieve_tool=True,
+                    retrieval_available=True,
                     replace_with_text=True,
                 ),
                 attribution=Attribution("my-agent", "session-42", "tool-7"),
@@ -168,7 +167,6 @@ async def main() -> None:
             BeforeModelRequest(
                 tools=(),
                 visible_context=result.output,
-                retrieve_tool_name="tokenless_retrieve",
                 capabilities=BeforeModelCapabilities(True, True),
                 attribution=model_attribution,
             )
@@ -202,17 +200,17 @@ request = await sdk.before_model(
     BeforeModelRequest(
         tools=tuple(model_tools),
         visible_context=visible_context,
-        retrieve_tool_name="tokenless_retrieve",
         capabilities=BeforeModelCapabilities(True, True),
         attribution=attribution,
     )
 )
 ```
 
-`before_model()` compresses OpenAI Function Calling tools, scans the transformed tools and visible
-context for `<<tokenless:HASH>>` markers, and returns a separate Core-owned Retrieve declaration
-only when at least one marker is visible. The adapter adds that declaration to the host's model
-tools. It must not include a tool with the same name in `request.tools` while publication is enabled.
+`before_model()` compresses OpenAI Function Calling tools when `retrieval_available` confirms that
+the integration has Agent-facing recovery which verifies the current Marker set. A trusted local
+operator command is not sufficient. Core scans the transformed tools and visible context for
+`<<tokenless:HASH>>` markers and returns the exact authorization set; it does not name or publish an
+Agent tool.
 
 #### Before a tool call
 
@@ -284,9 +282,10 @@ config = TokenlessConfig(
 
 `data_dir` must be absolute and writable. Use a different directory for every tenant or security
 boundary; `TOKENLESS_DATA_DIR` is only a process-wide fallback. `retrieve_tool_name` selects the
-Core-generated declaration name. `rtk_enabled` controls whether the SDK resolves packaged RTK for
-PreTool. Compression thresholds, content detection, TOON selection, diagnostics, authorization,
-and Stash policy are Core behavior and are not Python configuration.
+integration-owned tool name for framework layers such as AgentScope; Core does not receive it.
+`rtk_enabled` controls whether the SDK resolves packaged RTK for PreTool. Compression thresholds,
+content detection, TOON selection, diagnostics, authorization, and Stash policy are Core behavior
+and are not Python configuration.
 
 ### Direct Runtime examples
 

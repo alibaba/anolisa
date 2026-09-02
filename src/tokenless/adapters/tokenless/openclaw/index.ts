@@ -486,7 +486,8 @@ export default {
               output_optimization: outputOptimization,
               capabilities: {
                 replace_output: true,
-                publish_retrieve_tool: false,
+                // The trusted operator CLI does not enforce Agent Marker visibility.
+                retrieval_available: false,
                 replace_with_text: slot.replaceWithText,
               },
             },

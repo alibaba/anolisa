@@ -64,10 +64,9 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         request = BeforeModelRequest(
             tools=(tool, {"type": "web_search"}),
             visible_context="",
-            retrieve_tool_name="tokenless_retrieve",
             capabilities=BeforeModelCapabilities(
                 replace_tools=True,
-                publish_retrieve_tool=True,
+                retrieval_available=True,
             ),
             attribution=self.attribution,
         )
@@ -82,9 +81,6 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(marker)
         assert marker is not None
         self.assertIn(marker.group(1), result.visible_markers)
-        self.assertIsNotNone(result.retrieve_tool)
-        assert result.retrieve_tool is not None
-        self.assertEqual(result.retrieve_tool.name, "tokenless_retrieve")
 
         recovered = await sdk.retrieve(
             RetrieveRequest(
@@ -98,16 +94,6 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             await sdk.retrieve(
                 RetrieveRequest(marker.group(1), frozenset(), self.attribution)
             )
-
-    def test_retrieve_declaration_is_owned_by_core(self) -> None:
-        sdk = self.sdk(rtk_enabled=False)
-        declaration = sdk.retrieve_tool_declaration()
-        self.assertEqual(declaration.name, "tokenless_retrieve")
-        self.assertEqual(declaration.input_schema["required"], ["hash_or_marker"])
-        self.assertEqual(
-            declaration.as_function_tool()["function"]["parameters"],
-            declaration.input_schema,
-        )
 
     def test_config_contains_only_runtime_resources(self) -> None:
         with self.assertRaisesRegex(ValueError, "absolute path"):
@@ -167,7 +153,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         sdk = self.sdk(rtk_enabled=False)
         capabilities = PostToolCapabilities(
             replace_output=True,
-            publish_retrieve_tool=True,
+            retrieval_available=True,
             replace_with_text=True,
         )
         attribution = Attribution("sdk-agent", "sdk-session", "call-8")
@@ -232,7 +218,7 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 output_optimization=OutputOptimization.NONE,
                 capabilities=PostToolCapabilities(
                     replace_output=True,
-                    publish_retrieve_tool=True,
+                    retrieval_available=True,
                     replace_with_text=True,
                 ),
                 attribution=Attribution("sdk-agent", "sdk-session", "call-9"),

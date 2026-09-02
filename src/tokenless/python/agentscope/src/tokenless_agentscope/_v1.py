@@ -29,7 +29,11 @@ from anolisa_tokenless import (
     ToolResultStatus,
 )
 
-from tokenless_agentscope._contracts import ToolContract, build_tool_contracts
+from tokenless_agentscope._contracts import (
+    ToolContract,
+    build_tool_contracts,
+    retrieve_tool_declaration,
+)
 
 
 class _TokenlessToolkit(Toolkit):
@@ -121,17 +125,17 @@ class _ModelProxy:
                 BeforeModelRequest(
                     tools=tuple(model_tools),
                     visible_context=json.dumps(prompt, ensure_ascii=False, default=str),
-                    retrieve_tool_name=retrieve_name,
                     capabilities=BeforeModelCapabilities(
                         replace_tools=True,
-                        publish_retrieve_tool=True,
+                        retrieval_available=True,
                     ),
                     attribution=self._integration._attribution(),
                 )
             )
             model_tools = list(transformed.tools)
-            if transformed.retrieve_tool is not None:
-                model_tools.append(transformed.retrieve_tool.as_function_tool())
+            model_tools.append(
+                self._integration._retrieve_declaration.as_function_tool()
+            )
             kwargs = dict(kwargs)
             kwargs["tools"] = model_tools
             self._toolkit.visible_markers = transformed.visible_markers
@@ -159,7 +163,9 @@ class TokenlessAgentScope:
         self.config = config or TokenlessConfig()
         self.sdk = TokenlessSdk(self.config)
         self._tool_contracts = build_tool_contracts(tool_contracts)
-        self._retrieve_declaration = self.sdk.retrieve_tool_declaration()
+        self._retrieve_declaration = retrieve_tool_declaration(
+            self.config.retrieve_tool_name
+        )
         self._installed_agent: Any | None = None
         self._session_id: str | None = None
 
@@ -275,7 +281,7 @@ class TokenlessAgentScope:
                     output_optimization=optimization,
                     capabilities=PostToolCapabilities(
                         replace_output=True,
-                        publish_retrieve_tool=True,
+                        retrieval_available=True,
                         replace_with_text=True,
                     ),
                     attribution=self._attribution(tool_call["id"]),

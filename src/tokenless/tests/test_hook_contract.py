@@ -155,6 +155,9 @@ class ResponseHookContract(unittest.TestCase):
                 result = self.run_case(agent, "applied")
                 self.assertEqual(result.envelope, self.expected_replacement(agent))
                 self.assertEqual(result.spawns, ["compress"])
+                self.assertFalse(
+                    result.requests[0]["input"]["capabilities"]["retrieval_available"]
+                )
 
     def test_fail_open_classes_pass_through(self):
         for agent in self.REPLACEMENT_AGENTS:
@@ -232,6 +235,9 @@ class SchemaHookContract(unittest.TestCase):
                 result = self.run_case(agent, "applied")
                 self.assertEqual(result.envelope, expected)
                 self.assertEqual(result.spawns, ["compress"])
+                self.assertFalse(
+                    result.requests[0]["input"]["capabilities"]["retrieval_available"]
+                )
 
     def test_no_savings_wraps_the_original(self):
         # The historical schema-hook behavior: a well-formed response whose

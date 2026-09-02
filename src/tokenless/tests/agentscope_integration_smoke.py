@@ -261,23 +261,75 @@ async def main() -> None:
         assert len(retrieved) == 2
         assert retrieved[0].content[0].text == _RECOVERY_PAYLOAD
 
-        if version == (2, 0, 0):
+        if version < (2, 0, 3):
             try:
                 integration.app_options()
             except RuntimeError:
                 pass
             else:
-                raise AssertionError("AgentScope 2.0.0 App options must be rejected")
+                raise AssertionError(
+                    "AgentScope before 2.0.3 App options must be rejected"
+                )
         else:
             options = integration.app_options()
+            assert set(options) == {"extra_agent_middlewares"}
             middleware_factory = options["extra_agent_middlewares"]
-            tool_factory = options["extra_agent_tools"]
             app_middlewares = await middleware_factory("user", "agent", "session")
-            app_tools = await tool_factory("user", "agent", "session")
-            assert await app_middlewares[0].list_tools() == []
+            app_tools = await app_middlewares[0].list_tools()
             assert app_tools[0].name == "tenant_tokenless_retrieve"
-            assert app_middlewares[0].data_dir == app_tools[0]._sdk.config.data_dir
+            assert app_tools[0] is app_middlewares[0].retrieve_tool
+
+            app_toolkit = Toolkit(tools=[LargeResultTool(), *app_tools])
+            app_agent = Agent(
+                name="app-smoke",
+                system_prompt="Exercise App retrieval.",
+                model=CaptureModel(),
+                toolkit=app_toolkit,
+                middlewares=app_middlewares,
+            )
+            app_call = ToolCallBlock(
+                id="call-app-large",
+                name="large_result",
+                input="{}",
+            )
+            app_events = [event async for event in app_agent._acting(app_call)]
+            app_response = app_events[-1]
+            app_marker = re.search(
+                r"<<tokenless:([0-9a-f]{24})>>",
+                app_response.content[0].text,
+            )
+            assert app_marker is not None
+
+            async def app_model_boundary(**_kwargs):
+                return None
+
+            await app_middlewares[0].on_model_call(
+                app_agent,
+                {
+                    "messages": [app_response],
+                    "tools": [],
+                    "tool_choice": None,
+                    "current_model": object(),
+                },
+                app_model_boundary,
+            )
+            app_retrieve = ToolCallBlock(
+                id="call-app-retrieve",
+                name="tenant_tokenless_retrieve",
+                input=json.dumps({"hash_or_marker": app_marker.group(1)}),
+            )
+            app_retrieved = [
+                event
+                async for event in app_toolkit.call_tool(
+                    app_retrieve,
+                    app_agent.state,
+                )
+            ]
+            assert app_retrieved[0].content[0].text == _RECOVERY_PAYLOAD
+
             other = await middleware_factory("user", "agent", "other-session")
+            other_tools = await other[0].list_tools()
+            assert other_tools[0] is other[0].retrieve_tool
             assert other[0].data_dir != app_middlewares[0].data_dir
 
 

@@ -601,11 +601,10 @@ def build_before_model_request(
         "input": {
             "tools": tools,
             "visible_context": visible_context,
-            "retrieve_tool_name": "tokenless_retrieve",
             "capabilities": {
                 "replace_tools": True,
-                # Common Hooks have no trusted agent-facing Retrieve entry.
-                "publish_retrieve_tool": False,
+                # A local CLI is not marker-scoped Agent authorization.
+                "retrieval_available": False,
             },
         },
     }
@@ -652,8 +651,8 @@ def build_post_tool_request(
 ) -> dict:
     """Build a Protocol v2 PostTool transport request.
 
-    Common Hooks intentionally declare no trusted Retrieve capability, so
-    Core may apply lossless cleanup but rejects lossy candidates.
+    Common Hooks cannot enforce marker-scoped authorization for a command
+    recovery path, so Core must reject lossy candidates.
     """
     return {
         "protocol_version": 2,
@@ -668,7 +667,7 @@ def build_post_tool_request(
             "output_optimization": output_optimization,
             "capabilities": {
                 "replace_output": replace_output,
-                "publish_retrieve_tool": False,
+                "retrieval_available": False,
                 "replace_with_text": replace_with_text,
             },
         },

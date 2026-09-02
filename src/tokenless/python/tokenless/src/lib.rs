@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokenless_protocol::{
     Attribution as ProtocolAttribution, BeforeModelRequest, PostToolRequest, PreToolRequest,
-    RetrieveRequest, RetrieveToolDeclaration,
+    RetrieveRequest,
 };
 use tokenless_runtime::{
     Attribution, CompressOptions, CompressResult, RuntimeConfig, TokenlessRuntime as NativeRuntime,
@@ -399,11 +399,6 @@ impl PyTokenlessRuntime {
                 .map_err(to_python_error)
                 .and_then(encode_lifecycle_payload)
         })
-    }
-
-    #[staticmethod]
-    fn _retrieve_tool_declaration_json(name: &str) -> PyResult<String> {
-        encode_lifecycle_payload(RetrieveToolDeclaration::new(name))
     }
 
     #[pyo3(signature = (

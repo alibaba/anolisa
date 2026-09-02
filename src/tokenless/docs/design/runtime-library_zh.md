@@ -32,9 +32,10 @@ OpenAI Function Calling JSON，但生命周期操作是 Tokenless 自身契约�
 携带本次执行的归属信息。内容检测、阈值、TOON 选择、诊断、授权和 Stash 策略都保留在
 Rust Core，而不是 Python 配置中。
 
-SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合和可选的
-Core-owned Retrieve 声明。Adapter 把 Marker 集合保存在框架 Session 状态中，`retrieve`
-只授权该集合中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
+SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 Marker 集合。Adapter
+声明自己是否已有 Marker 授权恢复路径，并持有面向 Agent 的命令或 Tool 声明。AgentScope
+在模型调用之间保持 Retrieve Tool 静态，把 Marker 集合保存在框架 Session 状态中；`retrieve` 只授权该集合
+中的 Marker。宿主应用继续保存原始工具结果供 UI 和业务逻辑使用，只把复制
 后的最终模型可见文本传给 `post_tool`；Retrieve 输出禁止再次进入 PostTool。
 
 非法输入、内置 RTK 缺失、生命周期操作失败、挂载失败和工具重名会快速失败。Passthrough、

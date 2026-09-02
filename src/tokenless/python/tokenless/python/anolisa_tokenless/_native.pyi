@@ -89,8 +89,6 @@ class TokenlessRuntime:
         session_id: str | None = None,
         tool_use_id: str | None = None,
     ) -> str: ...
-    @staticmethod
-    def _retrieve_tool_declaration_json(name: str) -> str: ...
     def compress_response(
         self,
         input: str,

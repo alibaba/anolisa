@@ -13,7 +13,7 @@ GUIDES=(
 GUIDE_FRAGMENTS=(
     '| 1.0.11'
     '| 2.0.0'
-    '| 2.0.1'
+    '| 2.0.3'
     'TokenlessAgentScope'
     'TokenlessConfig'
     'ToolContract'
@@ -76,8 +76,9 @@ PY
 run_smoke v1-minimum 'agentscope==1.0.11'
 run_smoke v1-latest 'agentscope>=1.0.11,<1.1'
 run_smoke v2-minimum 'agentscope==2.0.0'
-run_smoke v2-app-minimum 'agentscope==2.0.1'
-run_smoke v2-tool-abi 'agentscope==2.0.3'
+run_smoke v2-direct-2-0-1 'agentscope==2.0.1'
+run_smoke v2-direct-2-0-2 'agentscope==2.0.2'
+run_smoke v2-app-minimum 'agentscope==2.0.3'
 run_smoke v2-latest 'agentscope>=2,<2.1'
 
 EXPECTED_VERSION="$(sed -n \

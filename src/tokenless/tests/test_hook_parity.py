@@ -3,7 +3,7 @@
 
 Replays the tests/contract corpus through the current hooks against the
 real `tokenless` debug binary and compares every envelope with the Protocol
-v2 goldens. The baseline includes Core-owned lossless-only policy for Common
+v2 goldens. The baseline includes marker-authorized recovery policy for Common
 Hooks and JSON-only PostTool dispatch.
 
 Requires target/debug/tokenless — run `cargo build -p tokenless-cli` first

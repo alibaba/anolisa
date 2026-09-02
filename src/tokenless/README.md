@@ -37,8 +37,8 @@ retrieval, and attribution.
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
-| OpenClaw plugin | — | Protocol v2 RTK ✅, transcript PostTool ✅, Schema/Retrieve unavailable in the host |
-| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Protocol v2 PostTool; Common BeforeModel passes schemas through until trusted Retrieve is available |
+| OpenClaw plugin | — | RTK ✅, lossless transcript PostTool ✅, Schema/Retrieve unavailable in the host |
+| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, lossless PostTool; Common BeforeModel passes schemas through without authorized Retrieve |
 | Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Core-owned command rewriting/response/TOON ✅, lossless-only PostTool, Schema/Retrieve unavailable |
 | Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
@@ -268,14 +268,11 @@ Agent adapters may apply separate pre-check thresholds; see the
 
 ### compress
 
-Shared Agent hooks send a strict Protocol v2 lifecycle request to `tokenless compress`.
-The tagged envelope selects `before_model`, `pre_tool`, `post_tool`, or
+Shared Agent hooks send a lifecycle request to `tokenless compress`. The tagged envelope selects `before_model`, `pre_tool`, `post_tool`, or
 `retrieve`; only successful, non-bypassed PostTool JSON enters the Runtime-owned
-Pipeline. Common Hooks have no trusted Retrieve capability, so Core applies
-lossless PostTool candidates and rejects truncation that cannot be recovered.
-The current `SchemaCompressor` transformations are lossy, so Common BeforeModel
-passes tools through unchanged and creates no schema-compression Stats rows in
-this migration phase. See the
+Pipeline. Common Hooks do not expose a marker-authorized recovery path, so Core
+applies only lossless PostTool candidates and passes lossy Schema transformations
+through unchanged. See the
 [CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#compress)
 for the request/response contract and an executable example.
 
@@ -408,7 +405,7 @@ The adapter provides hooks that are auto-discovered by copilot-shell via the cos
 | Tool Ready (hard-disabled) | PreToolUse (all tools) | `tool_ready_hook.sh` | Silent pass-through; no check, repair, context, or block |
 | Command rewriting | PreToolUse (Shell) | `rewrite_hook.py` | Rewrite commands via RTK |
 | Response compression + attribution + TOON | PostToolUse | `compress_response_hook.py` | Compress + env error attribution + TOON |
-| Schema compression | BeforeModel | `compress_schema_hook.py` | Protocol v2 passthrough until the Common Hook can publish trusted Retrieve |
+| Schema compression | BeforeModel | `compress_schema_hook.py` | Passes through lossy transformations until the host exposes marker-authorized recovery |
 
 ### Install
 
@@ -492,12 +489,12 @@ The plugin translates two OpenClaw events into Protocol v2 lifecycle operations:
 | Tool Ready | `before_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | PreTool | `before_tool_call` | Sends `exec` arguments to Core and applies the returned RTK rewrite | ✅ Active |
 | PostTool | `tool_result_persist` | Rewrites supported OpenClaw-owned transcript tool results | ✅ Active |
-| BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor trusted Marker visibility | — |
+| BeforeModel / Retrieve | — | OpenClaw exposes neither a reliable schema-transform seam nor marker-authorized recovery | — |
 
 Core owns RTK execution, JSON detection, cleanup, TOON selection, thresholds, diagnostics, and final
 arbitration. The plugin carries Core's per-call `output_optimization` from PreTool into the matching
-PostTool request, so RTK output is not compressed twice. It declares no trusted Retrieve capability,
-therefore candidates that require recovery pass through unchanged.
+PostTool request, so RTK output is not compressed twice. The local CLI recovery command is a trusted
+operator entry rather than Agent authorization, so the plugin applies only lossless candidates.
 
 `tool_result_persist` is a synchronous OpenClaw transcript seam. It can replace a persisted string,
 a structured value, or a single text block while preserving the surrounding Tool Result envelope;
@@ -532,9 +529,9 @@ The plugin registers hooks at three Hermes events while Core owns the lifecycle 
 |---|---|---|---|
 | Tool Ready | `pre_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `pre_tool_call` | Sends the command to Core, then blocks and suggests the returned RTK form | ✅ Active |
-| PostTool optimization | `transform_tool_result` | Sends the final model-bound result to Core and applies only accepted lossless output | ✅ Active |
+| PostTool optimization | `transform_tool_result` | Sends the final model-bound result to Core and applies accepted lossless output | ✅ Active |
 | Session tracking | `on_session_start` | Propagates agent/session IDs for stats recording | ✅ Active |
-| Schema/Retrieve | — | Hermes exposes neither a schema-transform seam nor trusted Marker visibility | — |
+| Schema/Retrieve | — | Hermes exposes neither a schema-transform seam nor marker-authorized recovery | — |
 
 **How command rewriting works in Hermes**: to remain compatible with Hermes releases that only
 support blocking, the plugin asks Core for a rewrite, blocks the original shell command, and tells
@@ -542,9 +539,8 @@ the agent to retry with the returned command. The retry adds one tool-call round
 hook recognizes Core's attributed RTK wrapper from the command Hermes actually executed, so RTK
 output bypasses a second compression pass without correlating two different tool-call IDs.
 
-Hermes cannot publish a trusted Retrieve tool, so Core applies only lossless cleanup or TOON output;
-truncation candidates pass through. If the Tokenless operation is unavailable or fails, the hook
-leaves the host value unchanged.
+Hermes does not expose marker-authorized recovery, so Core applies only lossless cleanup or TOON
+output. If the Tokenless operation is unavailable or fails, the hook leaves the host value unchanged.
 
 ### Install
 
@@ -743,7 +739,7 @@ agent = Agent(
 )
 ```
 
-AgentScope App is supported from 2.0.1. It derives an isolated Tokenless data
+AgentScope App is supported from 2.0.3. It derives an isolated Tokenless data
 directory for every user/agent/session below the configured absolute base
 directory:
 
@@ -753,15 +749,18 @@ from agentscope.app import create_app
 app = create_app(..., **integration.app_options())
 ```
 
+`app_options()` supplies one Middleware factory. AgentScope publishes that
+Middleware instance's static Retrieve Tool through `list_tools()` and persists
+Marker authorization in `AgentState.middle_context`.
+
 Set a unique `retrieve_tool_name` in `TokenlessConfig` if the application
 already defines `tokenless_retrieve`; App assembly does not expose the other
 tools to this factory for a preflight collision check.
 
-AgentScope 2.0.0 does not expose App-level Agent middleware or Tool injection,
-so that patch release supports direct Agent construction only. The existing
-`TokenlessMiddleware` 2.x API remains available for compatibility; new code
-should use `TokenlessAgentScope` so it does not depend on patch-specific
-Toolkit mutation or automatic Tool collection.
+AgentScope 2.0.0 through 2.0.2 support direct Agent construction only; their App
+APIs do not provide both Middleware-owned Tool publication and persisted
+Middleware state. The existing `TokenlessMiddleware` 2.x API remains available
+for compatibility; new code should use `TokenlessAgentScope`.
 
 AgentScope supplies explicit contracts for its known shell, file, and API tools.
 Register every custom tool with `ToolContract`: select `COMMAND_OUTPUT`,
@@ -771,9 +770,10 @@ at the model boundary rather than guessing from output text. Compression
 thresholds, TOON selection, diagnostics, and retrieval authorization remain in
 Rust Core.
 
-The read-only retrieval Tool is published to the
-model only when a marker is visible and accepts only a hash from the exact
-marker set retained for that model call. Pass a different absolute `data_dir`
+The read-only retrieval Tool has a static declaration and remains in the model
+tool list across calls, avoiding tool-list churn when Marker visibility changes.
+It accepts only a hash from the exact Marker set retained for the current model
+call. Pass a different absolute `data_dir`
 to each user or tenant for direct Agents;
 `TOKENLESS_DATA_DIR` is only a process-wide fallback when `data_dir` is omitted.
 Retain the default one-hour stash TTL unless the application has a deliberate
