@@ -8,6 +8,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use anolisa_core::NotSupportedServiceManager;
 use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, ManagementRelation, ProviderBinding,
 };
@@ -110,6 +112,32 @@ struct DoctorComponent {
     dependencies: Vec<DoctorDependency>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     fix_plan: Vec<FixSuggestion>,
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+/// Doctor fields shared with the snapshot conformance suite.
+pub(super) struct DoctorConformanceProjection {
+    /// Resolved component identity.
+    pub(super) name: String,
+    /// Aggregate doctor status.
+    pub(super) status: String,
+    /// State root scope projected by doctor.
+    pub(super) scope: String,
+    /// Whether this record wins multi-root precedence.
+    pub(super) active: bool,
+    /// Whether the current invocation may mutate this record.
+    pub(super) mutable_by_current_invocation: bool,
+    /// Higher-precedence scope hiding this record.
+    pub(super) shadowed_by: Option<String>,
+    /// State file that supplied this record.
+    pub(super) state_path: Option<String>,
+    /// Lifecycle status recorded in state.
+    pub(super) state_status: Option<String>,
+    /// Component version projected from state.
+    pub(super) version: Option<String>,
+    /// Finding codes emitted by the production diagnosis path.
+    pub(super) finding_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -398,6 +426,75 @@ fn collect_doctor_snapshot(
         ProbeEvidence::NotRequested,
     )
     .map_err(snapshot_cli_error)
+}
+
+#[cfg(test)]
+/// Collects the production doctor snapshot with command-specific probes disabled.
+pub(super) fn snapshot_for_conformance(
+    record: &crate::commands::state_view::ScopedInstalledObject<'_>,
+    rpm_query: &dyn PackageQuery,
+    observed_at: &str,
+) -> Result<ComponentSnapshot, CliError> {
+    let resolver_env = ResolverEnv::default();
+    let service = NotSupportedServiceManager::new("conformance probe disabled".to_string());
+    let probe_ctx = DoctorProbeContext {
+        layout: &record.root.layout,
+        resolver_env: &resolver_env,
+        rpm_query,
+        system_service: &service,
+        user_service: &service,
+        dry_run: false,
+    };
+    collect_doctor_snapshot(record, None, None, &probe_ctx, observed_at)
+}
+
+#[cfg(test)]
+/// Projects a snapshot through the production doctor diagnosis path.
+pub(super) fn projection_for_conformance(
+    snapshot: &ComponentSnapshot,
+    layout: &FsLayout,
+    rpm_query: &dyn PackageQuery,
+    checked_at: &str,
+) -> Result<DoctorConformanceProjection, CliError> {
+    let resolver_env = ResolverEnv::default();
+    let service = NotSupportedServiceManager::new("conformance probe disabled".to_string());
+    let probe_ctx = DoctorProbeContext {
+        layout,
+        resolver_env: &resolver_env,
+        rpm_query,
+        system_service: &service,
+        user_service: &service,
+        dry_run: false,
+    };
+    let remediation_scope = match snapshot.request().scope() {
+        InstallationScope::System => StateScope::System,
+        InstallationScope::User { .. } => StateScope::User,
+    };
+    let mut component = diagnose_component(
+        snapshot,
+        remediation_scope,
+        None,
+        None,
+        &probe_ctx,
+        checked_at,
+    )?;
+    component.status = component_status(&component);
+    Ok(DoctorConformanceProjection {
+        name: component.name,
+        status: component.status,
+        scope: component.scope,
+        active: component.active,
+        mutable_by_current_invocation: component.mutable_by_current_invocation,
+        shadowed_by: component.shadowed_by,
+        state_path: component.state_path,
+        state_status: component.state_status,
+        version: component.version,
+        finding_codes: component
+            .findings
+            .into_iter()
+            .map(|finding| finding.code)
+            .collect(),
+    })
 }
 
 fn collect_doctor_native_package(

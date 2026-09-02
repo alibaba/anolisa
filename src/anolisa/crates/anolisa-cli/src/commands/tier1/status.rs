@@ -592,6 +592,32 @@ fn collect_status_snapshot(
     .map_err(StatusSnapshotError::from)
 }
 
+#[cfg(test)]
+/// Collects the production status snapshot with adapter probes disabled.
+pub(super) fn snapshot_for_conformance(
+    record: &crate::commands::state_view::ScopedInstalledObject<'_>,
+    rpm_query: Option<&dyn PackageQuery>,
+    observed_at: &str,
+) -> Result<ComponentSnapshot, StatusSnapshotError> {
+    collect_status_snapshot(
+        record,
+        &AdapterScanEvidence::NotRequested,
+        &[],
+        None,
+        rpm_query,
+        observed_at,
+    )
+}
+
+#[cfg(test)]
+/// Projects a snapshot through the production status record path.
+pub(super) fn projection_for_conformance(
+    snapshot: &ComponentSnapshot,
+    checked_at: &str,
+) -> Result<ComponentRecord, StatusSnapshotError> {
+    record_from_snapshot(snapshot, checked_at)
+}
+
 fn collect_native_package(
     installation: &Installation,
     query: Option<&dyn PackageQuery>,

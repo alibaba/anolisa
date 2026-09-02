@@ -192,6 +192,21 @@ struct CheckSummary {
     errors: usize,
 }
 
+struct CheckedComponent {
+    snapshot: ComponentSnapshot,
+    report: ComponentCheck,
+}
+
+impl CheckedComponent {
+    fn into_report(self) -> ComponentCheck {
+        let Self {
+            snapshot: _snapshot,
+            report,
+        } = self;
+        report
+    }
+}
+
 /// Cache envelope stored under `cache_dir/update-check.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UpdateCheckCache {
@@ -408,15 +423,18 @@ fn run_update_check(inputs: CheckInputs<'_>) -> Result<UpdateCheckReport, CliErr
         None,
         AggregateSelection::ActiveOnly,
     ) {
-        components.push(check_component(
-            inputs.query,
-            inputs.component_index,
-            inputs.rpm_backend,
-            &record,
-            inputs.arch,
-            &observed_at,
-            &mut summary,
-        )?);
+        components.push(
+            check_component(
+                inputs.query,
+                inputs.component_index,
+                inputs.rpm_backend,
+                &record,
+                inputs.arch,
+                &observed_at,
+                &mut summary,
+            )?
+            .into_report(),
+        );
     }
 
     // Profile defaults absent from ANOLISA state are surfaced as a gap (issue
@@ -609,7 +627,7 @@ fn check_component(
     arch: &str,
     observed_at: &str,
     summary: &mut CheckSummary,
-) -> Result<ComponentCheck, CliError> {
+) -> Result<CheckedComponent, CliError> {
     let state_snapshot = update_check_snapshot(record, ProbeEvidence::NotRequested)?;
     let installation = active_snapshot_installation(&state_snapshot)?;
     let component = installation.name.clone();
@@ -619,7 +637,7 @@ fn check_component(
     let (manager, identity, relation, last_observed) = match &installation.binding {
         ProviderBinding::Owned { artifact } => {
             summary.unsupported += 1;
-            return Ok(ComponentCheck {
+            let report = ComponentCheck {
                 component,
                 package: artifact.raw_package.clone(),
                 ownership: Some("owned".to_string()),
@@ -629,6 +647,10 @@ fn check_component(
                 error: None,
                 absent_from_state: false,
                 backfill_rpm_metadata: false,
+            };
+            return Ok(CheckedComponent {
+                snapshot: state_snapshot,
+                report,
             });
         }
         ProviderBinding::Delegated {
@@ -658,13 +680,16 @@ fn check_component(
                 Ok(package) => (package, true),
                 Err(reason) => {
                     summary.errors += 1;
-                    return Ok(component_error(
-                        component,
-                        None,
-                        ownership_label,
-                        recorded_version,
-                        reason,
-                    ));
+                    return Ok(CheckedComponent {
+                        snapshot: state_snapshot,
+                        report: component_error(
+                            component,
+                            None,
+                            ownership_label,
+                            recorded_version,
+                            reason,
+                        ),
+                    });
                 }
             }
         }
@@ -699,13 +724,16 @@ fn check_component(
         // error, not a crash — the rest of the check continues.
         ProbeEvidence::Absent { .. } => {
             summary.errors += 1;
-            return Ok(component_error(
-                component,
-                Some(package),
-                ownership_label,
-                recorded_version.clone(),
-                "package recorded in ANOLISA state is not present in rpmdb; run `anolisa forget` or reinstall".to_string(),
-            ));
+            return Ok(CheckedComponent {
+                snapshot,
+                report: component_error(
+                    component,
+                    Some(package),
+                    ownership_label,
+                    recorded_version.clone(),
+                    "package recorded in ANOLISA state is not present in rpmdb; run `anolisa forget` or reinstall".to_string(),
+                ),
+            });
         }
         ProbeEvidence::Present {
             value:
@@ -713,35 +741,45 @@ fn check_component(
             ..
         } => {
             summary.errors += 1;
-            return Ok(component_error(
-                component,
-                Some(package),
-                ownership_label,
-                recorded_version.clone(),
-                "rpmdb reports multiple installed versions for this package".to_string(),
-            ));
+            return Ok(CheckedComponent {
+                snapshot,
+                report: component_error(
+                    component,
+                    Some(package),
+                    ownership_label,
+                    recorded_version.clone(),
+                    "rpmdb reports multiple installed versions for this package".to_string(),
+                ),
+            });
         }
         ProbeEvidence::Unavailable { .. }
             if matches!(query_error, Some(PackageQueryError::CommandMissing { .. })) =>
         {
             summary.errors += 1;
-            return Ok(component_error(
-                component,
-                Some(package),
-                ownership_label,
-                recorded_version.clone(),
-                "rpm/dnf not found; cannot query the installed version".to_string(),
-            ));
+            return Ok(CheckedComponent {
+                snapshot,
+                report: component_error(
+                    component,
+                    Some(package),
+                    ownership_label,
+                    recorded_version.clone(),
+                    "rpm/dnf not found; cannot query the installed version".to_string(),
+                ),
+            });
         }
         ProbeEvidence::Unavailable { reason, .. } => {
             summary.errors += 1;
-            return Ok(component_error(
-                component,
-                Some(package),
-                ownership_label,
-                recorded_version.clone(),
-                format!("rpm query failed: {reason}"),
-            ));
+            let reason = reason.clone();
+            return Ok(CheckedComponent {
+                snapshot,
+                report: component_error(
+                    component,
+                    Some(package),
+                    ownership_label,
+                    recorded_version.clone(),
+                    format!("rpm query failed: {reason}"),
+                ),
+            });
         }
         ProbeEvidence::NotRequested => {
             return Err(CliError::Runtime {
@@ -755,7 +793,7 @@ fn check_component(
     };
     let installed_evr = installed.1;
 
-    Ok(match repo_upgrade(query, &package, arch, &installed.0) {
+    let report = match repo_upgrade(query, &package, arch, &installed.0) {
         Ok(Some(available)) => {
             summary.updates += 1;
             ComponentCheck {
@@ -799,7 +837,36 @@ fn check_component(
                 format!("repo candidate query failed: {err}"),
             )
         }
-    })
+    };
+    Ok(CheckedComponent { snapshot, report })
+}
+
+#[cfg(test)]
+/// Returns the snapshot and report produced by one production component check.
+pub(in crate::commands::tier1) fn checked_component_for_conformance(
+    record: &ScopedInstalledObject<'_>,
+    query: &dyn PackageQuery,
+    observed_at: &str,
+) -> Result<(ComponentSnapshot, ComponentCheck), CliError> {
+    let checked = check_component(
+        query,
+        None,
+        None,
+        record,
+        "x86_64",
+        observed_at,
+        &mut CheckSummary::default(),
+    )?;
+    Ok((checked.snapshot, checked.report))
+}
+
+#[cfg(test)]
+/// Assembles update-check evidence supplied directly by a conformance fixture.
+pub(in crate::commands::tier1) fn snapshot_with_native_for_conformance(
+    record: &ScopedInstalledObject<'_>,
+    native_package: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
+) -> Result<ComponentSnapshot, CliError> {
+    update_check_snapshot(record, native_package)
 }
 
 fn update_check_snapshot(

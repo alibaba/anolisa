@@ -9,6 +9,8 @@ pub mod forget;
 pub mod install;
 pub mod list;
 pub mod logs;
+#[cfg(test)]
+mod observation_conformance;
 pub(crate) mod recovery;
 pub mod repair;
 pub mod restart;
