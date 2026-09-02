@@ -21,6 +21,10 @@ JSONL 接口。
 交互程序、管道、重定向、任务控制、bash/zsh 配置和 `Ctrl+C` 都会在前台终端中
 照常工作。
 
+使用 Bash 执行隔离命令时，运行 `cosh --isolated -c '<command>'`。
+Bash 无法禁用退出脚本，因此隔离模式下的 Bash login 调用会以状态码 2 拒绝。
+详见 [Shell 启动选项](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/interactive-mode.md)。
+
 ## 安装
 
 在 Alibaba Cloud Linux 4 上，通过 ANOLISA CLI 和 RPM backend 把 cosh-ng

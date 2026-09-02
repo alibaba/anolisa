@@ -22,6 +22,18 @@ Integration is selected at startup. Enhanced is the default. Set
 `shell.integration = "native"` in the user config for persistent hook-free
 sessions, or use the environment variable for one launch.
 
+For command or redirected-stdin execution, place `--isolated` before shell-owned
+options: `cosh --isolated -c '<command>'`. Bash skips startup files and removes
+`BASH_ENV` and `ENV` from its environment. Bash login invocations (`--login`,
+`-l`/`+l`, combined forms such as `-lc`, or login argv[0] such as `-cosh`) are
+rejected before shell startup with status 2: Bash cannot disable `.bash_logout`
+independently. Use a non-login invocation for isolated commands. Command and
+script arguments that happen to contain login flags are preserved.
+
+On this exec path, isolated Zsh accepts no shell-owned arguments; otherwise
+Cosh returns status 2 before starting Zsh. Interactive TUI startup continues
+to use its existing isolation handling.
+
 ## Input and editing
 
 - Native integration sends every input byte to the foreground bash or zsh.

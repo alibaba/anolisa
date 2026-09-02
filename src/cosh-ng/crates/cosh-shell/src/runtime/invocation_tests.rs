@@ -79,3 +79,102 @@ fn raw_non_interactive_escape_hatches_keep_their_legacy_passthrough() {
         );
     }
 }
+
+#[test]
+fn owned_flags_gate_on_terminals_and_translate_isolation() {
+    for args in [
+        vec!["--resume"],
+        vec!["--resume", "00000000-0000-4000-8000-000000000000"],
+        vec!["--isolated"],
+        vec!["--shell", "zsh", "--isolated"],
+        vec!["--shell=bash"],
+    ] {
+        assert!(
+            matches!(classify("cosh", &args, ALL_TTY), Invocation::Tui(_)),
+            "args {args:?}"
+        );
+    }
+
+    for args in [
+        vec!["--resume"],
+        vec!["--resume", "00000000-0000-4000-8000-000000000000"],
+    ] {
+        let invocation = classify("cosh", &args, (false, true, true));
+        assert_eq!(
+            exec_args(invocation),
+            os(&args),
+            "args {args:?} must reach the inner shell verbatim"
+        );
+    }
+
+    match classify("cosh", &["--isolated"], (false, true, true)) {
+        Invocation::ExecShell(plan) => {
+            assert!(plan.isolated);
+            assert!(plan.args.is_empty());
+        }
+        other => panic!("expected ExecShell, got {other:?}"),
+    }
+
+    match classify(
+        "cosh",
+        &["--shell", "zsh", "--isolated"],
+        (false, true, true),
+    ) {
+        Invocation::ExecShell(plan) => {
+            assert_eq!(plan.shell_override, Some(OsString::from("zsh")));
+            assert!(plan.isolated);
+            assert!(plan.args.is_empty());
+        }
+        other => panic!("expected ExecShell, got {other:?}"),
+    }
+}
+
+#[test]
+fn isolated_metadata_is_consumed_only_before_shell_owned_argv() {
+    match classify(
+        "cosh",
+        &["--isolated", "-c", "printf ok", "--isolated"],
+        ALL_TTY,
+    ) {
+        Invocation::ExecShell(plan) => {
+            assert!(plan.isolated);
+            assert_eq!(plan.args, os(&["-c", "printf ok", "--isolated"]));
+        }
+        other => panic!("expected ExecShell, got {other:?}"),
+    }
+}
+
+#[test]
+fn normalize_raw_diverts_only_command_string_and_double_dash() {
+    assert_eq!(
+        normalize_raw_invocation(&os(&["raw", "cosh-core", "-c", "echo ok"])),
+        Some(os(&["-c", "echo ok"]))
+    );
+    assert_eq!(
+        normalize_raw_invocation(&os(&["raw", "--shell", "bash", "cosh-core", "-c", "x"])),
+        Some(os(&["--shell", "bash", "-c", "x"]))
+    );
+    // A non-dash token after `-c` stays verbatim (it is `-c` payload,
+    // not an adapter).
+    assert_eq!(
+        normalize_raw_invocation(&os(&["raw", "fake", "-c", "cosh-core"])),
+        Some(os(&["-c", "cosh-core"]))
+    );
+    assert_eq!(
+        normalize_raw_invocation(&os(&["raw", "--", "echo", "ok"])),
+        Some(os(&["--", "echo", "ok"]))
+    );
+    // Explicit TUI request: raw-surface flags and bare launches stay on
+    // the TUI path.
+    assert_eq!(normalize_raw_invocation(&os(&["raw", "--run"])), None);
+    assert_eq!(
+        normalize_raw_invocation(&os(&["raw", "fake", "--run"])),
+        None
+    );
+    assert_eq!(normalize_raw_invocation(&os(&["raw", "cosh-core"])), None);
+    assert_eq!(
+        normalize_raw_invocation(&os(&["raw", "fake", "--resume"])),
+        None
+    );
+    assert_eq!(normalize_raw_invocation(&os(&["-c", "echo ok"])), None);
+}
