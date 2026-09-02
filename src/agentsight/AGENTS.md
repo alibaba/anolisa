@@ -269,7 +269,7 @@ React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm
 
 ## 10. Configuration
 
-`AgentsightConfig`（`src/config.rs`），关键环境变量：SLS_*（阿里云日志服务导出）、`AGENTSIGHT_TOKENIZER_PATH`、`AGENTSIGHT_CHROME_TRACE`、`RUST_LOG`、`AGENTSIGHT_SSL_REATTACH_TTL_SECS`（SSL uprobe 陈旧重挂载 TTL，默认 300 秒；用于内核静默注销 uprobe consumer 的 serverless/overlayfs 场景，如 ACS；设为 `0` 表示每次匹配进程都强制重挂载，仅供测试）。
+`AgentsightConfig`（`src/config.rs`），关键环境变量：SLS_*（阿里云日志服务导出）、`AGENTSIGHT_TOKENIZER_PATH`、`AGENTSIGHT_CHROME_TRACE`、`RUST_LOG`、`AGENTSIGHT_SSL_REATTACH_TTL_SECS`（SSL uprobe 陈旧重挂载 TTL，默认 30 秒；用于内核静默注销 uprobe consumer 的 serverless/overlayfs 场景，如 ACS；设为 `0` 表示每次匹配进程都强制重挂载，仅供测试）。
 
 ### 配置文件加载语义
 

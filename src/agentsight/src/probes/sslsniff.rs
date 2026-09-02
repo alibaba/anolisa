@@ -50,17 +50,33 @@ const POLL_TIMEOUT_MS: u64 = 100;
 /// without any userspace-visible error (observed on serverless/overlayfs
 /// hosts), leaving the `Link` objects alive but the probes silent. Userspace
 /// cannot query liveness, so re-attach on TTL expiry is the recovery path.
-const STALE_REATTACH_TTL: Duration = Duration::from_secs(300);
+///
+/// 300s was too coarse for short-lived processes (e.g. a `qwen -p` headless
+/// call lives for seconds): a process that execs within the window after a
+/// silent deregistration saw the stale attachment and skipped the re-attach,
+/// so its traffic was silently missed (#3034). 30s shrinks the window by 10x;
+/// the churn cost is bounded by the number of distinct SSL library inodes,
+/// not by the exec rate.
+const STALE_REATTACH_TTL: Duration = Duration::from_secs(30);
 
 /// Effective stale re-attach TTL, resolved once per `SslSniff` at
 /// construction. `AGENTSIGHT_SSL_REATTACH_TTL_SECS` overrides the default
 /// (0 forces a re-attach on every matching exec; used by tests).
-fn stale_reattach_ttl() -> Duration {
-    std::env::var("AGENTSIGHT_SSL_REATTACH_TTL_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+/// Parse the TTL from an optional env-var string, falling back to the
+/// default on absence or parse failure. Extracted so tests never touch the
+/// process environment (which would be unsound under the parallel harness).
+fn parse_reattach_ttl(raw: Option<&str>) -> Duration {
+    raw.and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(STALE_REATTACH_TTL)
+}
+
+fn stale_reattach_ttl() -> Duration {
+    parse_reattach_ttl(
+        std::env::var("AGENTSIGHT_SSL_REATTACH_TTL_SECS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Per-inode uprobe attachment state used for stale re-attach.
@@ -1580,5 +1596,19 @@ mod tests {
         // Not a maps line at all.
         assert_eq!(parse_maps_line("rubbish"), None);
         assert_eq!(parse_maps_line(""), None);
+    }
+
+    /// The default re-attach TTL must cover short-lived processes (#3034).
+    /// Discriminating: reverting the constant to 300s makes this fail.
+    /// The env override must still work after the default change.
+    #[test]
+    fn stale_reattach_ttl_default_and_override() {
+        assert_eq!(parse_reattach_ttl(None), Duration::from_secs(30));
+        assert_eq!(parse_reattach_ttl(Some("60")), Duration::from_secs(60));
+        assert_eq!(parse_reattach_ttl(Some("0")), Duration::from_secs(0));
+        assert_eq!(
+            parse_reattach_ttl(Some("not-a-number")),
+            Duration::from_secs(30)
+        );
     }
 }
