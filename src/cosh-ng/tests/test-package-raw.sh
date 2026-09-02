@@ -172,8 +172,8 @@ python3 - "$OPENSSL_LINKED" <<'PY'
 import struct
 import sys
 
-# Minimal ELF carrying DT_NEEDED libssl.so.1.1, as a non-vendored release
-# build of cosh-core does.
+# Minimal ELF carrying DT_NEEDED libssl.so.1.1, used to verify the
+# packaging validator rejects any OpenSSL-linked binary.
 strings = b"\0libssl.so.1.1\0"
 dynamic = struct.pack("<qQqQqQ", 1, 1, 5, 0x1000, 0, 0)
 vaddr = 0x1000

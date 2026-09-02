@@ -59,7 +59,7 @@ jobs:
               dnf_install nodejs npm
               ;;
             cosh-ng)
-              dnf install -y rust cargo openssl-devel pkgconfig systemd-rpm-macros
+              dnf install -y rust cargo pkgconfig systemd-rpm-macros
               rustc --version | awk '{
                 split($2, v, ".")
                 if (v[1] < 1 || (v[1] == 1 && v[2] < 88)) exit 1

@@ -1381,35 +1381,6 @@ check_ebpf_deps() {
     fi
 }
 
-install_cosh_ng_native_deps() {
-    step "Native dependencies (for cosh-ng)"
-
-    local missing=()
-    if ! cmd_exists pkg-config; then
-        if [[ "$PKG_BASE" == "rpm" ]]; then
-            missing+=("pkgconf-pkg-config")
-        else
-            missing+=("pkg-config")
-        fi
-    fi
-
-    if [[ "$PKG_BASE" == "rpm" ]]; then
-        rpm -q openssl-devel &>/dev/null || missing+=("openssl-devel")
-    else
-        dpkg -s libssl-dev &>/dev/null 2>&1 || missing+=("libssl-dev")
-    fi
-
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        ok "cosh-ng native dependencies already installed"
-        return 0
-    fi
-
-    info "Installing: ${missing[*]}"
-    # shellcheck disable=SC2086
-    as_root $PKG_INSTALL "${missing[@]}"
-    ok "cosh-ng native dependencies installed"
-}
-
 # ─── top-level dep installer ───
 
 install_just() {
@@ -1456,9 +1427,6 @@ do_install_deps() {
         if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: check/install Rust toolchain if needed"
         fi
-        if want_component cosh-ng; then
-            echo "DRY-RUN: check/install pkg-config and OpenSSL development files"
-        fi
         if want_component tokenless; then
             echo "DRY-RUN: check/install just if needed"
         fi
@@ -1496,10 +1464,6 @@ do_install_deps() {
 
     if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
         install_rust
-    fi
-
-    if want_component cosh-ng; then
-        install_cosh_ng_native_deps
     fi
 
     if want_component tokenless; then
@@ -2021,11 +1985,6 @@ source_build_runtime_dependencies() {
     local component
     while IFS= read -r component; do
         case "$component" in
-            cosh-ng)
-                # Prebuilt cosh-ng vendors OpenSSL; a source build links
-                # against the host development package.
-                echo 'cosh-ng|openssl|system-package|pkg-config --exists openssl|openssl-devel|libssl-dev|||'
-                ;;
             sight)
                 echo 'sight|node|language-runtime|node --version|nodejs|nodejs||>=20|'
                 ;;

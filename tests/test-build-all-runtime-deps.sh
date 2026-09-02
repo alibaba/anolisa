@@ -127,9 +127,8 @@ test_manifest_parser_covers_component_dependencies() {
     local source_dependency
     COMPONENTS=(cosh-ng)
     source_dependency="$(source_build_runtime_dependencies)"
-    [[ "$source_dependency" == \
-        'cosh-ng|openssl|system-package|pkg-config --exists openssl|openssl-devel|libssl-dev|||' ]] || \
-        fail "cosh-ng source build did not require the host OpenSSL headers"
+    [[ -z "$source_dependency" ]] || \
+        fail "cosh-ng source build no longer requires OpenSSL headers"
 
     source_dependency="$(runtime_dependency_for_source_build \
         'sec-core|nodejs|system-package|node --version|nodejs|nodejs||||')"

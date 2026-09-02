@@ -1244,7 +1244,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config ripgrep
+          sudo apt-get install -y pkg-config ripgrep
 
       - name: Run process and PTY integration tests
         env:
@@ -1281,7 +1281,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config ripgrep shellcheck
+          sudo apt-get install -y pkg-config ripgrep shellcheck
 
       - name: Check formatting
         run: |
@@ -1325,7 +1325,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y pkg-config
 
       - name: Build release workspace
         run: |

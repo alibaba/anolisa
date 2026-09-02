@@ -153,7 +153,6 @@ cargo metadata \
         --release \
         --workspace \
         --locked \
-        --features cosh-core/vendored-openssl \
         --manifest-path src/cosh-ng/Cargo.toml
 )
 
