@@ -19,11 +19,17 @@ LABEL org.opencontainers.image.title="AgentSight" \
 
 RUN sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
 
-# rpm-build.sh emits arch dirs in RPM naming (x86_64/aarch64); copy the whole
-# tree and glob one level down so Docker's TARGETARCH naming (amd64/arm64)
-# mismatch cannot break the build.
+# rpm-build.sh emits arch dirs in RPM naming (x86_64/aarch64); map Docker's
+# TARGETARCH (amd64/arm64) onto it so a multi-arch build context (both
+# rpms/x86_64/ and rpms/aarch64/ present) cannot match two RPMs at once.
 COPY rpms/ /tmp/rpms/
-RUN dnf install -y /tmp/rpms/*/agentsight-*.rpm && dnf clean all && rm -rf /tmp/rpms
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) rpm_arch=x86_64 ;; \
+      arm64) rpm_arch=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}"; exit 1 ;; \
+    esac && \
+    dnf install -y /tmp/rpms/"${rpm_arch}"/agentsight-*.rpm && dnf clean all && rm -rf /tmp/rpms
 
 # Dashboard API + UI. Keep it inside the cluster; reach it via port-forward.
 EXPOSE 7396
