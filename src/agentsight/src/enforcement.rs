@@ -15,5 +15,7 @@ pub use client::{
 pub use coordinator::{EnforcementCoordinator, EnforcementCoordinatorError};
 pub(crate) use coordinator::{IngestionGenerationLease, IngestionLease};
 pub use store::{EnforcementStore, EnforcementStoreError};
-pub(crate) use target::{canonical_policy_file, read_process_start_time};
+pub(crate) use target::{
+    canonical_policy_file, read_process_start_time, resolve_and_read_target, resolve_to_host_pid,
+};
 pub use transition::{PolicyTransition, TransitionDirection, TransitionKey, TransitionPhase};
