@@ -17,6 +17,21 @@ pub(crate) enum TargetValidationError {
 }
 
 /// Reads the Linux process start time after excluding protected service processes.
+///
+/// If `pid` is a namespace-local PID (e.g. from a container), it is first
+/// resolved to the host PID via [`resolve_to_host_pid`] using `expected_start_time`
+/// for disambiguation.  The returned tuple is `(host_pid, start_time)` so callers
+/// can use the resolved PID for BPF map seeding.
+pub(crate) fn resolve_and_read_target(
+    pid: i32,
+    expected_start_time: u64,
+) -> Result<(i32, u64), TargetValidationError> {
+    let host_pid = resolve_to_host_pid(pid, expected_start_time);
+    let start_time = read_process_start_time(host_pid)?;
+    Ok((host_pid, start_time))
+}
+
+/// Reads the Linux process start time after excluding protected service processes.
 pub(crate) fn read_process_start_time(pid: i32) -> Result<u64, TargetValidationError> {
     if pid <= 1 || pid == std::process::id() as i32 {
         return Err(TargetValidationError::ProtectedProcess(pid));
@@ -95,6 +110,99 @@ fn invalid_path(path: &Path, message: impl Into<String>) -> TargetValidationErro
     }
 }
 
+/// Resolve a potentially namespace-local PID to the global (init namespace)
+/// kernel PID.  The enforcer must run in the init PID namespace.
+///
+/// 1. Fast path: `/proc/<pid>/stat` exists and `start_time` matches → host PID.
+/// 2. Slow path: scan `/proc/*/status` for a process whose innermost NSpid
+///    equals `input_pid` and whose start_time matches.
+/// 3. Fallback: return input unchanged.
+pub(crate) fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
+    // Fast path: pid valid in host /proc and start_time matches.
+    if let Ok(pst) = proc_start_time(input_pid) {
+        if pst == input_start_time {
+            return first_nspid(input_pid).unwrap_or(input_pid);
+        }
+    }
+
+    // Slow path: scan /proc for NSpid inner match + start_time match.
+    let Ok(proc_dir) = fs::read_dir("/proc") else {
+        return input_pid;
+    };
+    for entry in proc_dir.flatten() {
+        let name = entry.file_name();
+        let Ok(host_pid) = name.to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if host_pid <= 0 {
+            continue;
+        }
+        let nspid = read_nspid_chain(host_pid);
+        if nspid.len() < 2 {
+            continue;
+        }
+        if *nspid.last().unwrap() != input_pid {
+            continue;
+        }
+        if let Ok(pst) = proc_start_time(host_pid) {
+            if pst == input_start_time {
+                return nspid[0];
+            }
+        }
+    }
+    input_pid
+}
+
+fn read_nspid_chain(pid: i32) -> Vec<i32> {
+    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return vec![];
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            return rest
+                .split_whitespace()
+                .filter_map(|s| s.parse::<i32>().ok())
+                .collect();
+        }
+    }
+    vec![]
+}
+
+fn first_nspid(pid: i32) -> Option<i32> {
+    read_nspid_chain(pid).first().copied()
+}
+
+fn proc_start_time(pid: i32) -> Result<u64, ()> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
+    let after = &stat[stat.rfind(')').ok_or(())? + 2..];
+    after
+        .split_ascii_whitespace()
+        .nth(19)
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or(())
+}
+
+/// Check whether the current process is in the init PID namespace.
+#[allow(dead_code)] // Used by agentsight-enforcer crate (actplane.rs has its own copy).
+pub(crate) fn is_init_pid_namespace() -> bool {
+    let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
+        return false;
+    };
+    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
+        return false;
+    };
+    let result = self_ns == init_ns;
+    if !result {
+        eprintln!(
+            "agentsight: not in init PID namespace (self={}, pid1={}); \
+             file_delete_guard disabled",
+            self_ns.display(),
+            init_ns.display(),
+        );
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +272,78 @@ mod tests {
             canonical_policy_file(file.path()).unwrap(),
             file.path().canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn resolve_to_host_pid_fast_path_returns_self_for_current_process() {
+        // In the root namespace the current process PID is its own host PID.
+        let pid = std::process::id() as i32;
+        let pst = proc_start_time(pid).expect("own start time");
+        assert_eq!(resolve_to_host_pid(pid, pst), pid);
+    }
+
+    #[test]
+    fn resolve_to_host_pid_returns_input_for_nonexistent_pid() {
+        // A PID that definitely doesn't exist should fall through to fallback.
+        assert_eq!(resolve_to_host_pid(2_000_000_000, 0), 2_000_000_000);
+    }
+
+    #[test]
+    fn resolve_to_host_pid_rejects_pid_with_wrong_start_time() {
+        // Own PID exists but wrong start_time → should not match fast path.
+        let pid = std::process::id() as i32;
+        let result = resolve_to_host_pid(pid, 999_999_999);
+        // Falls through to slow path; no NSpid inner match → returns input.
+        assert_eq!(result, pid);
+    }
+
+    #[test]
+    fn read_nspid_chain_returns_at_least_self() {
+        let pid = std::process::id() as i32;
+        let chain = read_nspid_chain(pid);
+        assert!(!chain.is_empty(), "NSpid chain should not be empty");
+        assert_eq!(chain[0], pid, "first NSpid should be host PID");
+    }
+
+    #[test]
+    fn read_nspid_chain_returns_empty_for_invalid_pid() {
+        assert!(read_nspid_chain(2_000_000_000).is_empty());
+    }
+
+    #[test]
+    fn proc_start_time_succeeds_for_self() {
+        let pst = proc_start_time(std::process::id() as i32);
+        assert!(pst.is_ok());
+        assert!(pst.unwrap() > 0);
+    }
+
+    #[test]
+    fn proc_start_time_fails_for_nonexistent_pid() {
+        assert!(proc_start_time(2_000_000_000).is_err());
+    }
+
+    #[test]
+    fn is_init_pid_namespace_returns_true_in_test_runner() {
+        // Test runner runs on the host (init ns), so this should be true.
+        assert!(is_init_pid_namespace());
+    }
+
+    #[test]
+    fn resolve_and_read_target_succeeds_for_live_process() {
+        // Spawn a short-lived child and resolve it.
+        use std::process::Command;
+        let mut child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let pst = proc_start_time(pid).expect("child start time");
+        let (host_pid, start_time) = resolve_and_read_target(pid, pst).expect("resolve");
+        assert_eq!(host_pid, pid);
+        assert_eq!(start_time, pst);
+        // cleanup
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
