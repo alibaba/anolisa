@@ -274,9 +274,10 @@ make opencode-install
 
 ### DeepSeek Harness 插件
 
-DSH 原生 Bundle 通过 `tools/post-execute` 压缩成功的单文本块 JSON 工具结果。
-Tokenless CLI 只有返回更短的合法 JSON 时才会替换结果，内容读取类工具默认保持
-原样。关闭响应压缩、跳过压缩或压缩无收益时，环境错误归因仍会工作。
+DSH 原生 Bundle 通过 `tools/post-execute` 把可替换的单文本工具结果交给 Tokenless
+PostTool Core。内容检测、JSON 清理、TOON 选择、最终接受和环境错误诊断均由 Core
+负责。DSH 没有 Marker 授权恢复路径，因此有损候选会被拒绝，内容读取结果保持原样。
+关闭响应压缩后，错误指引仍会工作。
 
 需要启用多个 DSH profile 时，应在同一条命令中重复传入 `--profile`。
 

@@ -646,11 +646,12 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 
 ## DeepSeek Harness Plugin
 
-The native DSH bundle compresses successful single-block JSON tool results
-through `tools/post-execute` and keeps the original result unless the Tokenless
-CLI returns strictly smaller valid JSON. Content-retrieval tools remain
-lossless by default. Environment-error attribution stays active when response
-compression is disabled, skipped, or unable to reduce the result.
+The native DSH bundle sends replaceable single-text tool results through
+Tokenless PostTool Core on `tools/post-execute`. Core owns content detection,
+JSON cleanup, TOON selection, acceptance, and environment-error diagnostics.
+DSH has no Marker-authorized recovery path, so lossy candidates are rejected
+and content-retrieval results remain unchanged. Error guidance stays active
+when response compression is disabled.
 
 Enable the bundle for every desired DSH profile in one command by repeating
 `--profile`:

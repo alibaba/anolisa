@@ -62,9 +62,9 @@ Retrieve：可见 Marker 授权 → 字节级一致的 Stash Read
 ```
 
 这是能力示意，不是所有框架都会完整执行的固定流水线。例如 content-aware Protocol 路径
-当前服务于 Cosh-NG、OpenClaw、Hermes、Qoder、受支持的 Claude Code 版本和 OpenCode；
-DeepSeek Harness 保留专用 JSON 响应路径。Codex 和 Qwen Code 当前宿主契约不能替换工具后
-输出。具体见 [Agent 集成](framework-integration.md)。
+当前服务于 Cosh-NG、OpenClaw、Hermes、Qoder、受支持的 Claude Code 版本、OpenCode 和
+DeepSeek Harness。Codex 和 Qwen Code 当前宿主契约不能替换工具后输出。具体见
+[Agent 集成](framework-integration.md)。
 
 ## 需要特别理解的行为
 

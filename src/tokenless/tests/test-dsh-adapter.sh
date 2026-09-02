@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the native dsh bundle without requiring a dsh installation.
+# Exercise the native DSH bundle without requiring a DSH installation.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,25 +20,31 @@ import { join } from 'node:path'
 
 const [root, tmp] = process.argv.slice(2)
 const binary = join(tmp, 'tokenless')
-const argsFile = join(tmp, 'argv.json')
+const logFile = join(tmp, 'requests.jsonl')
 const missingBinary = join(tmp, 'missing-tokenless')
 writeFileSync(
   binary,
   '#!/usr/bin/env node\n' +
-    'const { writeFileSync } = require("node:fs");\n' +
+    'const { appendFileSync } = require("node:fs");\n' +
     'process.stdin.setEncoding("utf8"); let input = "";\n' +
     'process.stdin.on("data", chunk => input += chunk);\n' +
     'process.stdin.on("end", () => {\n' +
-    '  if (process.env.TOKENLESS_TEST_ARGS) writeFileSync(process.env.TOKENLESS_TEST_ARGS, JSON.stringify(process.argv.slice(2)));\n' +
-    '  if (process.env.TOKENLESS_TEST_MODE === "fail") process.exit(7);\n' +
-    '  if (process.env.TOKENLESS_TEST_MODE === "timeout") { setTimeout(() => {}, 10000); return; }\n' +
-    '  if (process.env.TOKENLESS_TEST_MODE === "same") process.stdout.write(input);\n' +
-    '  else if (process.env.TOKENLESS_TEST_MODE === "invalid") process.stdout.write("{");\n' +
-    '  else process.stdout.write("{\\"ok\\":true}");\n' +
+    '  const request = JSON.parse(input);\n' +
+    '  appendFileSync(process.env.TOKENLESS_TEST_LOG, JSON.stringify({ argv: process.argv.slice(2), request }) + "\\n");\n' +
+    '  const mode = process.env.TOKENLESS_TEST_MODE;\n' +
+    '  if (mode === "fail") process.exit(7);\n' +
+    '  if (mode === "timeout") { setTimeout(() => {}, 10000); return; }\n' +
+    '  if (mode === "invalid") { process.stdout.write("{"); return; }\n' +
+    '  const result = mode === "applied"\n' +
+    '    ? { output: "{\\"ok\\":true}", disposition: "applied" }\n' +
+    '    : mode === "tool-error"\n' +
+    '      ? { output: request.input.content, disposition: "tool_error", additional_context: "Install the missing dependency and retry." }\n' +
+    '      : { output: request.input.content, disposition: "passthrough" };\n' +
+    '  process.stdout.write(JSON.stringify({ protocol_version: mode === "wrong-version" ? 1 : 2, operation: mode === "wrong-operation" ? "pre_tool" : "post_tool", attribution: request.attribution, result }));\n' +
     '});\n',
 )
 chmodSync(binary, 0o755)
-process.env.TOKENLESS_TEST_ARGS = argsFile
+process.env.TOKENLESS_TEST_LOG = logFile
 
 const pluginPath = join(root, 'adapters/tokenless/dsh/dist/index.js')
 const plugin = await import(`file://${pluginPath}`)
@@ -48,7 +54,8 @@ const cordisPatch = readFileSync(
 )
 assert.match(cordisPatch, /name:\s+['"]@anolisa\/dsh-tokenless['"]/)
 assert.doesNotMatch(cordisPatch, /name:\s+\.\/dist\/index\.js/)
-function register(config) {
+
+function register(config = {}) {
   let callback
   const ctx = {
     on(event, listener) {
@@ -61,387 +68,378 @@ function register(config) {
   return callback
 }
 
-const listener = register({ tokenlessBin: binary })
-assert.equal(plugin.name, 'anolisa-tokenless')
-assert.deepEqual(plugin.inject, ['tools'])
+function clearRequests() {
+  if (existsSync(logFile)) unlinkSync(logFile)
+}
 
+function requests() {
+  if (!existsSync(logFile)) return []
+  return readFileSync(logFile, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
+function success(text = '{"long":"this payload is intentionally long"}', value = { ok: true }) {
+  return {
+    isError: false,
+    value,
+    content: [{ type: 'text', text }],
+  }
+}
+
+const downstreamContext = {
+  id: 'downstream-context',
+  role: 'user',
+  content: [{ type: 'text', text: 'downstream policy context' }],
+}
 const exec = {
   name: 'api_call',
   callId: 'call-1',
   signal: new AbortController().signal,
   agent: { id: 'session-1' },
 }
-const longText = '{"long":"this payload is intentionally long"}'
-const result = (text = longText, value) => ({
-  isError: false,
-  ...(value === undefined ? {} : { value }),
-  content: [{ type: 'text', text }],
-})
-const clearArgs = () => {
-  if (existsSync(argsFile)) unlinkSync(argsFile)
-}
-const args = () => JSON.parse(readFileSync(argsFile, 'utf8'))
-const downstreamContext = {
-  id: 'downstream-context',
-  role: 'user',
-  content: [{ type: 'text', text: 'downstream policy context' }],
-}
+const listener = register({ tokenlessBin: binary })
+assert.equal(plugin.name, 'anolisa-tokenless')
+assert.deepEqual(plugin.inject, ['tools'])
 
-// A compression win must still run and compose the downstream waterfall.
-process.env.TOKENLESS_TEST_MODE = 'compress'
-clearArgs()
+// DSH contributes host facts; Core owns detection, compression, and selection.
+process.env.TOKENLESS_TEST_MODE = 'applied'
+clearRequests()
 let nextCalled = false
-const compressed = await listener(exec, result(), async () => {
+const applied = await listener(exec, success(), async () => {
   nextCalled = true
   return { kind: 'accept', additionalContexts: [downstreamContext] }
 })
 assert.equal(nextCalled, true)
-assert.equal(compressed.kind, 'accept')
-assert.deepEqual(compressed.content, [{ type: 'text', text: '{"ok":true}' }])
-assert.deepEqual(compressed.additionalContexts, [downstreamContext])
-assert.deepEqual(args(), [
-  'compress-response',
-  '--agent-id', 'dsh',
-  '--truncate-strings-at', '1048576',
-  '--truncate-arrays-at', '65536',
-  '--max-depth', '32',
-  '--session-id', 'session-1',
-  '--tool-use-id', 'call-1',
-])
+assert.deepEqual(applied.content, [{ type: 'text', text: '{"ok":true}' }])
+assert.deepEqual(applied.additionalContexts, [downstreamContext])
+assert.deepEqual(requests(), [{
+  argv: ['compress'],
+  request: {
+    protocol_version: 2,
+    operation: 'post_tool',
+    attribution: {
+      agent_id: 'dsh',
+      session_id: 'session-1',
+      tool_use_id: 'call-1',
+    },
+    input: {
+      result_kind: 'tool',
+      tool_name: 'api_call',
+      content: '{"long":"this payload is intentionally long"}',
+      status: 'success',
+      content_origin: 'api_response',
+      output_optimization: 'none',
+      capabilities: {
+        replace_output: true,
+        retrieval_available: false,
+        replace_with_text: true,
+      },
+    },
+  },
+}])
 
-// Downstream blocks and canonical-value replacements must pass through intact.
-clearArgs()
-const block = await listener(exec, result(), async () => ({
-  kind: 'block',
-  feedback: [{ type: 'text', text: 'policy blocked this result' }],
-  additionalContexts: [downstreamContext],
+// Plain text still reaches Core instead of being classified by the adapter.
+process.env.TOKENLESS_TEST_MODE = 'passthrough'
+clearRequests()
+const plainDecision = { kind: 'accept' }
+const plain = await listener(exec, success('ordinary plain text'), async () => plainDecision)
+assert.strictEqual(plain, plainDecision)
+assert.equal(requests()[0].request.input.content, 'ordinary plain text')
+
+// A downstream content projection is the model-visible input sent to Core.
+clearRequests()
+await listener(exec, success('original'), async () => ({
+  kind: 'accept',
+  content: [{ type: 'text', text: 'downstream replacement' }],
 }))
-assert.deepEqual(block, {
-  kind: 'block',
-  feedback: [{ type: 'text', text: 'policy blocked this result' }],
-  additionalContexts: [downstreamContext],
-})
-assert.equal(existsSync(argsFile), false)
+assert.equal(requests()[0].request.input.content, 'downstream replacement')
 
-const valueDecision = { kind: 'accept', value: { canonical: true }, additionalContexts: [downstreamContext] }
-const valueResult = await listener(exec, result(), async () => valueDecision)
-assert.strictEqual(valueResult, valueDecision)
-assert.equal(existsSync(argsFile), false)
-
-let mixedNextCalled = false
-const mixed = await listener(exec, {
-  isError: false,
-  content: [
-    { type: 'text', text: longText },
-    { type: 'image', attachment: { id: 'image-1' } },
-  ],
-}, async () => {
-  mixedNextCalled = true
-  return { kind: 'accept' }
-})
-assert.equal(mixedNextCalled, true)
-assert.deepEqual(mixed, { kind: 'accept' })
-
-let abortedNextCalled = false
-const aborted = await listener({
-  ...exec,
-  signal: AbortSignal.abort(),
-}, result(), async () => {
-  abortedNextCalled = true
-  return { kind: 'accept' }
-})
-assert.equal(abortedNextCalled, true)
-assert.deepEqual(aborted, { kind: 'accept' })
-
-// DSH bash exposes failures in canonical result.value, not display content.
-const bashExec = { ...exec, name: 'Bash' }
-const canonicalFailureResult = {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 1,
-    timedOut: false,
-    stdout: { text: '', truncated: false },
-    stderr: { text: 'permission denied while opening protected file', truncated: false },
-  },
-  content: [{ type: 'text', text: '```console\ncat protected\n[exit code: 1]\n```' }],
-}
-const canonicalFailure = await listener(bashExec, canonicalFailureResult, async () => ({ kind: 'accept' }))
-assert.equal(canonicalFailure.additionalContexts?.length, 1)
-assert.match(canonicalFailure.additionalContexts[0].content[0].text, /ENV_PERMISSION/)
-
-// A downstream canonical replacement is the final result. Attribution must
-// describe that replacement, never the stale result seen before next().
-clearArgs()
-const recoveredDecision = {
-  kind: 'accept',
-  value: {
-    kind: 'foreground',
-    exitCode: 0,
-    timedOut: false,
-    stdout: { text: 'recovered', truncated: false },
-    stderr: { text: '', truncated: false },
-  },
-  additionalContexts: [downstreamContext],
-}
-const recovered = await listener(bashExec, canonicalFailureResult, async () => recoveredDecision)
-assert.strictEqual(recovered, recoveredDecision)
-assert.equal(existsSync(argsFile), false)
-
-const replacementFailureDecision = {
-  kind: 'accept',
-  value: {
-    kind: 'foreground',
-    exitCode: 1,
-    timedOut: false,
-    stdout: { text: '', truncated: false },
-    stderr: { text: 'permission denied after replacement', truncated: false },
-  },
-  additionalContexts: [downstreamContext],
-}
-const replacementFailure = await listener(bashExec, result(), async () => replacementFailureDecision)
-assert.strictEqual(replacementFailure.value, replacementFailureDecision.value)
-assert.equal(replacementFailure.additionalContexts.length, 2)
-assert.strictEqual(replacementFailure.additionalContexts[0], downstreamContext)
-assert.match(replacementFailure.additionalContexts[1].content[0].text, /ENV_PERMISSION/)
-assert.equal(existsSync(argsFile), false)
-
-const zeroExit = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 0,
-    timedOut: false,
-    stdout: { text: 'permission denied in searched documentation', truncated: false },
-    stderr: { text: '', truncated: false },
-  },
-  content: [{ type: 'text', text: 'permission denied in searched documentation' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(zeroExit.additionalContexts, undefined)
-
-const timedOut = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 124,
-    timedOut: true,
-    stdout: { text: '', truncated: false },
-    stderr: { text: 'connection timed out', truncated: false },
-  },
-  content: [{ type: 'text', text: '```console\nnetwork call\n```' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(timedOut.additionalContexts?.length, 1)
-assert.match(timedOut.additionalContexts[0].content[0].text, /ENV_NETWORK/)
-
-const unclassifiedTimeout = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 124,
-    timedOut: true,
-    stdout: { text: '', truncated: false },
-    stderr: { text: 'command stopped after timeout', truncated: false },
-  },
-  content: [{ type: 'text', text: 'command stopped after timeout' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(unclassifiedTimeout.additionalContexts, undefined)
-
-const nonnumericExit = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 'N/A',
-    timedOut: false,
-    stdout: { text: '', truncated: false },
-    stderr: { text: 'permission denied appears in ordinary data', truncated: false },
-  },
-  content: [{ type: 'text', text: 'ordinary successful result' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(nonnumericExit.additionalContexts, undefined)
-
-const errorObject = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 1,
-    timedOut: false,
-    stderr: { text: '', truncated: false },
-    error: { code: 'EACCES', errno: 13 },
-  },
-  content: [{ type: 'text', text: 'command failed' }],
-}, async () => ({ kind: 'accept' }))
-assert.match(errorObject.additionalContexts[0].content[0].text, /ENV_PERMISSION/)
-
-const stdoutOnly = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 1,
-    timedOut: false,
-    stdout: { text: 'permission denied appears in command output', truncated: false },
-    stderr: { text: '', truncated: false },
-  },
-  content: [{ type: 'text', text: 'command failed' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(stdoutOnly.additionalContexts, undefined)
-
-// Successful non-shell tools own their value schema. Shell-shaped business
-// data must never be reinterpreted as a host-level execution failure.
-for (const value of [
-  {
-    kind: 'audit-record',
-    exitCode: 1,
-    stderr: { text: 'permission denied was captured in the historical record' },
-  },
-  {
-    kind: 'latency-record',
-    timedOut: true,
-    stderr: { text: 'connection timed out was the recorded outcome' },
-  },
-  {
-    kind: 'archived-result',
-    success: false,
-    error: { message: 'ENOENT: archived log no longer present' },
-  },
-]) {
-  const businessResult = await listener(exec, result(longText, value), async () => ({ kind: 'accept' }))
-  assert.equal(businessResult.additionalContexts, undefined)
-}
-
-const customShellListener = register({
-  tokenlessBin: binary,
-  shellTools: ['custom_process'],
-})
-const customShellFailure = await customShellListener({ ...exec, name: 'custom_process' }, {
-  isError: false,
-  value: {
-    exitCode: 1,
-    stderr: { text: 'permission denied', truncated: false },
-  },
-  content: [{ type: 'text', text: 'custom process failed' }],
-}, async () => ({ kind: 'accept' }))
-assert.match(customShellFailure.additionalContexts[0].content[0].text, /ENV_PERMISSION/)
-
-const successfulMatch = await listener(exec, {
-  isError: false,
-  content: [{ type: 'text', text: 'search result: permission denied' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(successfulMatch.additionalContexts, undefined)
-
-const env = await listener(exec, {
-  isError: true,
-  error: { message: 'command not found: jq' },
-  content: [{ type: 'text', text: 'command not found: jq' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(env.additionalContexts?.length, 1)
-assert.equal(env.additionalContexts[0].role, 'user')
-assert.equal(env.additionalContexts[0].source.kind, 'plugin')
-assert.match(env.additionalContexts[0].content[0].text, /ENV_DEPENDENCY_MISSING/)
-assert.equal(typeof env.additionalContexts[0].id, 'string')
-
-const dashMissing = await listener(bashExec, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 127,
-    timedOut: false,
-    stderr: { text: '/bin/sh: 1: jq: not found', truncated: false },
-    stdout: { text: '', truncated: false },
-  },
-  content: [{ type: 'text', text: '/bin/sh: 1: jq: not found' }],
-}, async () => ({ kind: 'accept' }))
-assert.match(dashMissing.additionalContexts[0].content[0].text, /ENV_DEPENDENCY_MISSING/)
-
-// Compression controls never suppress failure attribution.
-clearArgs()
-const disabledListener = register({
-  tokenlessBin: binary,
-  responseCompressionEnabled: false,
-})
-const disabledFailure = await disabledListener({ ...exec, name: 'Grep' }, {
-  isError: true,
-  error: { message: 'cannot open output for writing' },
-  content: [{ type: 'text', text: 'cannot open output for writing' }],
-}, async () => ({ kind: 'accept' }))
-assert.match(disabledFailure.additionalContexts[0].content[0].text, /ENV_PERMISSION/)
-assert.equal(existsSync(argsFile), false)
-
-// Code Mode sub-calls keep attribution but skip compression and stash writes.
-clearArgs()
-const parentFailure = await listener({ ...bashExec, parent: {} }, {
-  isError: false,
-  value: {
-    kind: 'foreground',
-    exitCode: 1,
-    timedOut: false,
-    stderr: { text: 'permission denied', truncated: false },
-    stdout: { text: '', truncated: false },
-  },
-  content: [{ type: 'text', text: 'permission denied' }],
-}, async () => ({ kind: 'accept' }))
-assert.equal(parentFailure.additionalContexts?.length, 1)
-assert.equal(existsSync(argsFile), false)
-
-// Missing binaries, non-zero exits, timeouts, and invalid/no-op output fail open.
-async function failOpen(mode, callback = listener) {
-  process.env.TOKENLESS_TEST_MODE = mode
-  clearArgs()
-  let called = false
-  const original = result()
-  const decision = await callback(exec, original, async () => {
-    called = true
-    return { kind: 'accept', content: original.content }
-  })
-  assert.equal(called, true)
-  assert.deepEqual(decision.content, original.content)
-  if (mode !== 'timeout') assert.equal(existsSync(argsFile), mode !== 'missing')
-}
-process.env.TOKENLESS_TEST_MODE = 'fail'
-await failOpen('fail')
-process.env.TOKENLESS_TEST_MODE = 'same'
-await failOpen('same')
-process.env.TOKENLESS_TEST_MODE = 'invalid'
-await failOpen('invalid')
-const timeoutListener = register({ tokenlessBin: binary, timeoutMs: 20 })
-process.env.TOKENLESS_TEST_MODE = 'timeout'
-await failOpen('timeout', timeoutListener)
-const missingListener = register({ tokenlessBin: missingBinary })
-await failOpen('missing', missingListener)
-
-// Keep the dsh taxonomy and thresholds in parity with the shared source.
-process.env.TOKENLESS_TEST_MODE = 'compress'
+// Content origin is an explicit host translation, not an adapter policy knob.
 const categories = JSON.parse(readFileSync(
   join(root, 'adapters/tokenless/common/hooks/tool_categories.json'),
   'utf8',
 ))
 for (const name of categories.layer_1_skip.tools) {
-  clearArgs()
-  await listener({ ...exec, name }, result(), async () => ({ kind: 'accept', content: result().content }))
-  assert.equal(existsSync(argsFile), false, `skip tool ${name} must not invoke tokenless`)
+  clearRequests()
+  await listener({ ...exec, name }, success(), async () => ({ kind: 'accept' }))
+  assert.equal(requests()[0].request.input.content_origin, 'file_content', name)
 }
-const shellArgs = [
-  'compress-response',
-  '--agent-id', 'dsh',
-  '--truncate-strings-at', String(categories.layer_2_shell.thresholds.truncate_strings_at),
-  '--truncate-arrays-at', String(categories.layer_2_shell.thresholds.truncate_arrays_at),
-  '--max-depth', String(categories.layer_2_shell.thresholds.max_depth),
-  '--session-id', 'session-1',
-  '--tool-use-id', 'call-1',
-]
 for (const name of categories.layer_2_shell.tools) {
-  clearArgs()
-  await listener({ ...exec, name }, result(), async () => ({ kind: 'accept', content: result().content }))
-  assert.deepEqual(args(), shellArgs, `shell tool ${name} must use shared thresholds`)
+  clearRequests()
+  await listener({ ...exec, name }, success(undefined, { exitCode: 0 }), async () => ({ kind: 'accept' }))
+  assert.equal(requests()[0].request.input.content_origin, 'command_output', name)
 }
-clearArgs()
-await listener(exec, result(), async () => ({ kind: 'accept', content: result().content }))
-assert.deepEqual(args().slice(0, 9), [
-  'compress-response',
-  '--agent-id', 'dsh',
-  '--truncate-strings-at', String(categories.layer_3_api.thresholds.truncate_strings_at),
-  '--truncate-arrays-at', String(categories.layer_3_api.thresholds.truncate_arrays_at),
-  '--max-depth', String(categories.layer_3_api.thresholds.max_depth),
-])
+clearRequests()
+await listener(exec, success(), async () => ({ kind: 'accept' }))
+assert.equal(requests()[0].request.input.content_origin, 'api_response')
 
-console.log('native dsh adapter tests passed')
+// Unsafe replacement shapes and a blocking downstream policy remain untouched.
+clearRequests()
+const block = {
+  kind: 'block',
+  feedback: [{ type: 'text', text: 'policy blocked this result' }],
+  additionalContexts: [downstreamContext],
+}
+assert.strictEqual(await listener(exec, success(), async () => block), block)
+assert.equal(requests().length, 0)
+
+const mixedDecision = { kind: 'accept' }
+assert.strictEqual(await listener(exec, {
+  isError: false,
+  value: { ok: true },
+  content: [
+    { type: 'text', text: 'text' },
+    { type: 'image', attachment: { id: 'image-1' } },
+  ],
+}, async () => mixedDecision), mixedDecision)
+assert.equal(requests().length, 0)
+
+const valueDecision = {
+  kind: 'accept',
+  value: { canonical: true },
+  additionalContexts: [downstreamContext],
+}
+assert.strictEqual(await listener(exec, success(), async () => valueDecision), valueDecision)
+assert.equal(requests().length, 0)
+
+// Raw and structured command failures delegate diagnosis to Core.
+process.env.TOKENLESS_TEST_MODE = 'tool-error'
+clearRequests()
+const rawFailure = await listener(exec, {
+  isError: true,
+  error: { message: 'command not found: jq', info: { name: 'Error', code: 'FAILED' } },
+  content: [{ type: 'text', text: 'jq could not run' }],
+}, async () => ({ kind: 'accept', additionalContexts: [downstreamContext] }))
+assert.equal(rawFailure.additionalContexts.length, 2)
+assert.strictEqual(rawFailure.additionalContexts[0], downstreamContext)
+assert.match(rawFailure.additionalContexts[1].content[0].text, /Install the missing dependency/)
+assert.equal(rawFailure.additionalContexts[1].source.plugin, 'anolisa-tokenless')
+let request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.capabilities.replace_output, false)
+assert.equal(request.input.capabilities.replace_with_text, false)
+assert.match(request.input.content, /command not found: jq/)
+
+clearRequests()
+await listener(exec, {
+  isError: true,
+  error: { message: 'generic failure' },
+  content: [{ type: 'text', text: 'stale display content' }],
+}, async () => ({
+  kind: 'accept',
+  content: [{ type: 'text', text: 'permission denied after downstream replacement' }],
+}))
+assert.match(requests()[0].request.input.content, /permission denied after downstream replacement/)
+assert.doesNotMatch(requests()[0].request.input.content, /stale display content/)
+
+const bashExec = { ...exec, name: 'Bash' }
+clearRequests()
+const commandFailure = await listener(bashExec, success('rendered command output', {
+  kind: 'foreground',
+  exitCode: 1,
+  timedOut: false,
+  stdout: { text: 'command stdout must not drive diagnosis', truncated: false },
+  stderr: { text: 'permission denied', truncated: false },
+}), async () => ({ kind: 'accept' }))
+assert.equal(commandFailure.additionalContexts.length, 1)
+request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.content_origin, 'command_output')
+assert.equal(request.input.content, 'permission denied')
+
+clearRequests()
+await listener(bashExec, success('permission denied\n[exit code: 1]', {
+  kind: 'foreground',
+  exitCode: 1,
+  timedOut: false,
+  stdout: { text: 'permission denied', truncated: false },
+  stderr: { text: '', truncated: false },
+}), async () => ({ kind: 'accept' }))
+request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.content_origin, 'command_output')
+assert.equal(request.input.capabilities.replace_output, false)
+assert.equal(request.input.content, 'permission denied')
+
+clearRequests()
+await listener(bashExec, success('(no output)\n[exit code: 1]', {
+  kind: 'foreground',
+  exitCode: 1,
+  timedOut: false,
+  stdout: { text: '', truncated: false },
+  stderr: { text: '', truncated: false },
+}), async () => ({ kind: 'accept' }))
+request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.content, '')
+
+const pwshExec = { ...exec, name: 'pwsh' }
+clearRequests()
+await listener(pwshExec, success('rendered PowerShell output', {
+  kind: 'foreground',
+  exitCode: 1,
+  signal: null,
+  timedOut: false,
+  stdout: { text: '', truncated: false },
+  stderr: { text: 'access denied', truncated: false },
+}), async () => ({ kind: 'accept' }))
+request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.content_origin, 'command_output')
+assert.equal(request.input.capabilities.replace_output, false)
+
+clearRequests()
+await listener(bashExec, success('[killed by signal: SIGTERM]', {
+  kind: 'foreground',
+  exitCode: null,
+  signal: 'SIGTERM',
+  timedOut: false,
+  stdout: { text: '', truncated: false },
+  stderr: { text: '', truncated: false },
+}), async () => ({ kind: 'accept' }))
+request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.content_origin, 'command_output')
+assert.equal(request.input.capabilities.replace_output, false)
+assert.equal(request.input.content, 'terminated by signal: SIGTERM')
+
+// Shell-shaped business data from an API tool remains a successful result.
+process.env.TOKENLESS_TEST_MODE = 'applied'
+clearRequests()
+const businessResult = await listener(exec, success('business record', {
+  exitCode: 1,
+  timedOut: true,
+  stderr: { text: 'archived failure text' },
+}), async () => ({ kind: 'accept' }))
+assert.deepEqual(businessResult.content, [{ type: 'text', text: '{"ok":true}' }])
+assert.equal(requests()[0].request.input.status, 'success')
+
+// A downstream command value is authoritative and can still receive guidance.
+process.env.TOKENLESS_TEST_MODE = 'tool-error'
+clearRequests()
+const replacementValue = {
+  kind: 'foreground',
+  exitCode: 1,
+  stderr: { text: 'connection refused', truncated: false },
+}
+const replacementFailure = await listener(bashExec, success(), async () => ({
+  kind: 'accept',
+  value: replacementValue,
+  additionalContexts: [downstreamContext],
+}))
+assert.strictEqual(replacementFailure.value, replacementValue)
+assert.equal(replacementFailure.additionalContexts.length, 2)
+request = requests()[0].request
+assert.equal(request.input.status, 'error')
+assert.equal(request.input.capabilities.replace_output, false)
+assert.equal(request.input.content, 'connection refused')
+
+// Let DSH validate an invalid downstream value instead of rejecting in Tokenless.
+const circularError = {}
+circularError.self = circularError
+const circularValue = {
+  kind: 'foreground',
+  exitCode: 1,
+  stderr: { text: 'permission denied', truncated: false },
+  error: circularError,
+}
+clearRequests()
+const circularFailure = await listener(bashExec, success(), async () => ({
+  kind: 'accept',
+  value: circularValue,
+}))
+assert.strictEqual(circularFailure.value, circularValue)
+assert.match(requests()[0].request.input.content, /permission denied/)
+
+// DSH cancellation is distinguished from a tool error when it reaches the seam.
+process.env.TOKENLESS_TEST_MODE = 'passthrough'
+clearRequests()
+await listener(exec, {
+  isError: true,
+  error: {
+    message: 'operation aborted',
+    info: { name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' },
+  },
+  content: [{ type: 'text', text: 'operation aborted' }],
+}, async () => ({ kind: 'accept' }))
+assert.equal(requests()[0].request.input.status, 'interrupted')
+
+clearRequests()
+let abortedNextCalled = false
+const abortedDecision = { kind: 'accept' }
+const aborted = await listener({
+  ...exec,
+  signal: AbortSignal.abort(),
+}, success(), async () => {
+  abortedNextCalled = true
+  return abortedDecision
+})
+assert.equal(abortedNextCalled, true)
+assert.strictEqual(aborted, abortedDecision)
+assert.equal(requests().length, 0)
+
+// Code Mode child success is not replaceable, but failures still get guidance.
+clearRequests()
+const parentDecision = { kind: 'accept' }
+assert.strictEqual(await listener(
+  { ...exec, parent: {} },
+  success(),
+  async () => parentDecision,
+), parentDecision)
+assert.equal(requests().length, 0)
+
+process.env.TOKENLESS_TEST_MODE = 'tool-error'
+const parentFailure = await listener({ ...bashExec, parent: {} }, success('failed', {
+  exitCode: 1,
+  stderr: { text: 'permission denied', truncated: false },
+}), async () => ({ kind: 'accept' }))
+assert.equal(parentFailure.additionalContexts.length, 1)
+
+// Disabling compression does not disable Core-owned error diagnostics.
+const disabledListener = register({
+  tokenlessBin: binary,
+  responseCompressionEnabled: false,
+})
+clearRequests()
+assert.strictEqual(await disabledListener(exec, success(), async () => plainDecision), plainDecision)
+assert.equal(requests().length, 0)
+const disabledFailure = await disabledListener(exec, {
+  isError: true,
+  error: { message: 'permission denied' },
+  content: [{ type: 'text', text: 'permission denied' }],
+}, async () => ({ kind: 'accept' }))
+assert.equal(disabledFailure.additionalContexts.length, 1)
+
+// Missing binaries, non-zero exits, timeouts, and malformed responses fail open.
+async function failOpen(mode, callback = listener) {
+  process.env.TOKENLESS_TEST_MODE = mode
+  clearRequests()
+  const decision = { kind: 'accept', content: success().content }
+  const actual = await callback(exec, success(), async () => decision)
+  assert.strictEqual(actual, decision)
+}
+await failOpen('fail')
+await failOpen('invalid')
+await failOpen('wrong-version')
+await failOpen('wrong-operation')
+const timeoutListener = register({ tokenlessBin: binary, timeoutMs: 20 })
+await failOpen('timeout', timeoutListener)
+const missingListener = register({ tokenlessBin: missingBinary })
+await failOpen('missing', missingListener)
+assert.equal(requests().length, 0)
+
+// Attribution remains configurable without restoring compression policy knobs.
+process.env.TOKENLESS_TEST_MODE = 'passthrough'
+clearRequests()
+const attributedListener = register({ tokenlessBin: binary, agentId: 'custom-dsh' })
+await attributedListener({
+  name: 'api_call',
+  signal: new AbortController().signal,
+}, success(), async () => ({ kind: 'accept' }))
+assert.deepEqual(requests()[0].request.attribution, { agent_id: 'custom-dsh' })
+
+console.log('native DSH adapter tests passed')
 NODE

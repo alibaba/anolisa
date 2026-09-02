@@ -1,7 +1,7 @@
 {
   "name": "@anolisa/dsh-tokenless",
   "version": "@VERSION@",
-  "description": "Native DeepSeek Harness response compression for Tokenless",
+  "description": "Native DeepSeek Harness lifecycle integration for Tokenless",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {

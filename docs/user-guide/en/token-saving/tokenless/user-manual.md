@@ -66,8 +66,8 @@ Retrieve: visible-Marker authorization → byte-identical Stash read
 
 This is a capability map, not a pipeline that every framework runs. For example, the content-aware
 protocol path currently serves Cosh-NG, OpenClaw, Hermes, Qoder, supported Claude Code releases,
-and OpenCode; DeepSeek Harness retains a dedicated JSON response path. Codex and Qwen Code do not
-replace post-tool output under their current host contracts. See
+OpenCode, and DeepSeek Harness. Codex and Qwen Code do not replace post-tool output under their
+current host contracts. See
 [Agent integration](framework-integration.md).
 
 ## Behaviors to understand

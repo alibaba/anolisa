@@ -15,7 +15,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
-| DeepSeek Harness | `dsh` | 未注册 | 未注册 | 只在结果更小时替换已接受的单文本块 JSON 结果 | 未注册 | 未注册 |
+| DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core | 对可替换文本由 Core 选择 | 未注册 |
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 
@@ -48,11 +48,10 @@ Core 策略。Hook 只把宿主对象映射为 v2 字段；它可以跳过明显
 Common BeforeModel Hook 同样没有 Marker 授权恢复路径。当前 Schema 变换均为有损，因此 Core
 原样返回 Tools。OpenCode 独立的逐工具定义路径和直接 `compress-schema` 命令不受影响。
 
-OpenClaw 与 Hermes 已把 PostTool 决策委托给 Core。DeepSeek Harness 仍使用专用响应路径；
-content-aware build/log 路径尚未接入。独立 `compress-response` 命令也继续作为显式 JSON
-清理入口。
+OpenClaw、Hermes 与 DeepSeek Harness 已把 PostTool 决策委托给 Core。独立
+`compress-response` 命令继续作为显式 JSON 清理入口。
 
-对于 JSON 响应清理，共享与旧版 Adapter 按以下方式分类工具：
+对于 JSON 响应清理，Adapter 按以下方式把宿主工具映射为 Core 的内容 Origin：
 
 | 类别 | Adapter 默认行为 |
 |------|------------------|
@@ -90,12 +89,12 @@ dsh --profile web
 和解析后的 DSH home 写入 adapter receipt。后续 status、disable 和 re-enable 会
 继续操作同一棵 profile 目录树。
 
-Plugin 在 DSH 的 `tools/post-execute` waterfall 上运行。只有成功结果包含一个文本块，
-且文本是 JSON object 或 array 时，才会尝试执行 `tokenless compress-response`。
-CLI 返回更短的合法 JSON 后才会替换内容。多文本块、图片、普通文本、非法 JSON、
-错误结果、Code Mode 子调用和默认内容读取类工具不参与压缩。CLI 缺失、失败或
-超时也会保留原始内容。当前原生路径不执行 TOON 第二阶段，也没有启动子进程前的
-最小尺寸门控。
+Plugin 在 DSH 的 `tools/post-execute` Waterfall 上运行，并把包含一个文本块、可替换的
+根调用结果发送给 `tokenless compress`。内容检测、JSON 清理、TOON 选择、大小门禁、
+基于工具来源的阈值和最终接受均由 Core 负责。非 JSON 与文件内容结果会透传。DSH 没有
+Marker 授权恢复路径，因此 Core 会拒绝有损候选。多文本块、图片、Code Mode 子调用的
+成功结果，以及后续 Waterfall Listener 已替换的 Canonical Value 均保持不变。CLI 缺失、
+失败或超时也会保留原始内容。
 
 在 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 中覆盖安装后的 row，然后重启
 对应的 DSH profile。
@@ -106,7 +105,6 @@ CLI 返回更短的合法 JSON 后才会替换内容。多文本块、图片、�
     responseCompressionEnabled: true
     timeoutMs: 5000
     maxBuffer: 4194304
-    noStash: false
 ```
 
 后续 DSH patch layer 会替换该 row 的完整 `config` 值。Plugin 会为省略的 key 提供
@@ -116,29 +114,15 @@ CLI 返回更短的合法 JSON 后才会替换内容。多文本块、图片、�
 |--------|--------|------|
 | `responseCompressionEnabled` | `true` | 控制响应压缩。设为 `false` 后，环境错误归因仍保持启用。 |
 | `tokenlessBin` | `$TOKENLESS_BIN`，随后使用 `tokenless` | 选择 Tokenless CLI 可执行文件。非空 Plugin 配置优先于环境变量。 |
-| `skipTools` | 下文列出的内容读取类集合 | 跳过匹配工具的压缩。配置数组会替换默认集合，空数组表示不跳过任何工具。错误归因仍保持启用。 |
-| `shellTools` | 下文列出的 Shell 和 process 集合 | 选择 Shell 阈值，也决定哪些工具的结构化 `value` 可以用于失败归因。配置数组会替换默认集合。 |
-| `truncateStringsAt` | Shell 为 `65536`，其他工具为 `1048576` | 覆盖全部工具类别的字符串保留上限。只接受正整数。 |
-| `truncateArraysAt` | Shell 为 `128`，其他工具为 `65536` | 覆盖全部工具类别的数组保留上限。只接受正整数。 |
-| `maxDepth` | Shell 为 `8`，其他工具为 `32` | 覆盖全部工具类别的 JSON 最大深度。只接受正整数。 |
 | `timeoutMs` | `3000` | 限制一次 Tokenless 子进程的运行时间，单位为毫秒。只接受正整数。 |
 | `maxBuffer` | `2097152` | 限制捕获的子进程输出，单位为 byte。只接受正整数。 |
-| `agentId` | `dsh` | 设置 Tokenless 统计记录中的 `--agent-id`。 |
-| `noStash` | `false` | 设为 `true` 时传入 `--no-stash`。默认允许把删除的数组项写入 Stash。 |
+| `agentId` | `dsh` | 设置 Tokenless 统计记录中的 Agent Attribution。 |
 
-默认 `skipTools` 集合包括 `Read`、`read`、`read_file`、`read_many_files`、`Glob`、
-`glob`、`search_file`、`list_directory`、`list_dir`、`Grep`、`grep`、`grep_code`、
-`grep_search`、`search_files`、`Lsp`、`lsp`、`NotebookRead`、`notebook_read` 和
-`notebookread`。
-
-默认 `shellTools` 集合包括 `Bash`、`bash`、`Shell`、`shell`、`exec`、`terminal`、
-`run_shell_command`、`run_in_terminal`、`get_terminal_output`、`execute_command` 和
-`process`。
-
-DSH 使用 `isError` 标记的原始失败可以为任何工具追加依赖、权限、路径、网络或包
-错误归因。结构化输出只会为 `shellTools` 分类。归因独立于压缩，关闭或跳过压缩、
-压缩没有得到更短结果时仍会生效。后续 waterfall listener 替换 canonical `value`
-后，Tokenless 会按替换值重新分类，不会沿用已经被替换结果的旧归因。
+Plugin 把 DSH 内置的读取/搜索工具映射为 `file_content`，命令工具映射为
+`command_output`，未知工具映射为 `api_response`。这些映射只描述宿主事实，后续策略由
+Core 决定。即使压缩关闭，DSH 原始失败和结构化命令失败仍会交给 Core 做环境诊断。
+后续 Waterfall Listener 替换 Canonical `value` 后，Tokenless 只检查该替换值，且不会对其
+应用内容压缩。
 
 ## 通过 anolisa 管理（推荐）
 
