@@ -490,10 +490,11 @@ impl TokenStore {
             )",
             self.table_name, self.table_name
         );
-        let deleted = self
-            .conn
-            .execute(&sql, params![limit as i64])
-            .map_err(|e| anyhow::anyhow!("Failed to delete oldest token records: {e}"))?;
+        // Propagate the rusqlite error unwrapped (like the sibling stores) so a
+        // transient SQLITE_BUSY/SQLITE_LOCKED stays downcastable and the startup
+        // purge's lock-retry classifier can recognize it; wrapping it in a
+        // formatted `anyhow!` here would erase the cause and make the retry a no-op.
+        let deleted = self.conn.execute(&sql, params![limit as i64])?;
         Ok(deleted)
     }
 
