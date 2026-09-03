@@ -17,6 +17,7 @@ use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Read,
     mem::{self, MaybeUninit},
     path::Path,
     slice,
@@ -483,44 +484,51 @@ impl SslSniff {
                     Ok(ls) => Ok(ls),
                     Err(sym_err) => {
                         log::debug!(
-                            "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                            "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to the offset table"
                         );
+                        // Consult the offset table before the byte-pattern scan.
+                        // A lookup costs a stat() plus, only when the size already
+                        // matches a known build, a 64 KiB head read; the scan reads
+                        // the whole binary. Probing in the opposite order charged
+                        // every unsupported agent binary its own size in resident
+                        // memory before the table could answer, which exhausted the
+                        // service memory cap during startup attach on hosts running
+                        // several large harnesses (#2981).
+                        if let Some(off) = CODEX_OFFSET_TABLE
+                            .as_ref()
+                            .and_then(|table| table.lookup(path))
+                        {
+                            log::info!(
+                                "[attach_process] pid={pid}: codex offset table matched for {path} \
+                                 (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
+                                off.ssl_write,
+                                off.ssl_read,
+                                off.ssl_do_handshake
+                            );
+                            return match attach_static_ssl_by_offset(
+                                &mut self.skel,
+                                path,
+                                &off,
+                                true,
+                                -1,
+                            ) {
+                                Ok(links) => AttachOutcome::Attached(links),
+                                Err(e) => {
+                                    log::warn!(
+                                        "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
+                                    );
+                                    AttachOutcome::Failed
+                                }
+                            };
+                        }
                         match find_static_ssl_offsets(path) {
                             Some(off) => {
                                 attach_static_ssl_by_offset(&mut self.skel, path, &off, false, -1)
                             }
                             None => {
-                                // Tier 3: codex offset table lookup (for static-pie binaries
-                                // like Codex CLI that statically link OpenSSL/BoringSSL without symbols)
-                                if let Some(ref table) = *CODEX_OFFSET_TABLE {
-                                    if let Some(off) = table.lookup(path) {
-                                        log::info!(
-                                            "[attach_process] pid={pid}: codex offset table matched for {path} \
-                                         (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
-                                            off.ssl_write,
-                                            off.ssl_read,
-                                            off.ssl_do_handshake
-                                        );
-                                        return match attach_static_ssl_by_offset(
-                                            &mut self.skel,
-                                            path,
-                                            &off,
-                                            true,
-                                            -1,
-                                        ) {
-                                            Ok(links) => AttachOutcome::Attached(links),
-                                            Err(e) => {
-                                                log::warn!(
-                                                    "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
-                                                );
-                                                AttachOutcome::Failed
-                                            }
-                                        };
-                                    }
-                                }
                                 log::warn!(
                                     "[attach_process] pid={pid}: SSL detection failed for {path} \
-                                 (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
+                                 (no SSL_* in .dynsym, not in the codex offset table, and no byte-pattern match), skipping"
                                 );
                                 return AttachOutcome::Untraceable;
                             }
@@ -687,29 +695,103 @@ pub(super) struct StaticSslOffsets {
     pub read_is_ex: bool,
 }
 
-fn find_pattern(haystack: &[u8], pattern: &[u8]) -> Option<usize> {
-    if pattern.is_empty() || pattern.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(pattern.len()).position(|w| w == pattern)
-}
-
-/// Find all occurrences of `pattern` in `haystack`.
-fn find_all_patterns(haystack: &[u8], pattern: &[u8]) -> Vec<usize> {
-    if pattern.is_empty() || pattern.len() > haystack.len() {
-        return Vec::new();
-    }
-    let mut results = Vec::new();
-    let mut pos = 0;
-    while pos + pattern.len() <= haystack.len() {
-        if let Some(off) = find_pattern(&haystack[pos..], pattern) {
-            results.push(pos + off);
-            pos += off + 1;
-        } else {
-            break;
+/// Appends the absolute offset of every pattern match starting in `window`
+/// below `limit`, one vector per entry of `patterns`, in ascending order.
+///
+/// Walks the window once and tests every pattern at each position, rather than
+/// walking it once per pattern. The signatures are all function prologues that
+/// share a leading byte run, so each comparison rejects a position on its first
+/// byte and the extra signatures cost close to nothing. Walking per pattern
+/// instead means a binary matching none of them is scanned once for every
+/// signature before it can be rejected, on the synchronous attach path.
+fn collect_pattern_hits(
+    window: &[u8],
+    patterns: &[&[u8]],
+    base: usize,
+    limit: usize,
+    hits: &mut [Vec<usize>],
+) {
+    for pos in 0..limit.min(window.len()) {
+        let tail = &window[pos..];
+        for (slot, pattern) in hits.iter_mut().zip(patterns) {
+            if tail.len() >= pattern.len() && &tail[..pattern.len()] == *pattern {
+                slot.push(base + pos);
+            }
         }
     }
-    results
+}
+
+/// Bytes read per window by [`scan_file_patterns`].
+///
+/// Caps the scan's peak memory. Agent binaries reach hundreds of megabytes (a
+/// Codex build is ~264 MiB, node ~120 MiB), more than the whole budget the
+/// service runs under, so the image must never be held in one piece (#2981).
+const SCAN_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+/// Absolute offsets of every occurrence of each pattern in the file at `path`.
+///
+/// Returns one vector per entry of `patterns`, in the same order and each
+/// ascending. The file is streamed in [`SCAN_CHUNK_BYTES`] windows overlapping
+/// by `max_pattern_len - 1` bytes, so a match straddling a window boundary is
+/// still reported, and reported only once.
+///
+/// # Errors
+///
+/// Returns `None` when `patterns` is empty, or the file cannot be opened or read.
+fn scan_file_patterns(path: &str, patterns: &[&[u8]]) -> Option<Vec<Vec<usize>>> {
+    let overlap = patterns.iter().map(|p| p.len()).max()?.checked_sub(1)?;
+    let mut file = fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
+    let mut hits = vec![Vec::new(); patterns.len()];
+    // Absolute offset that `buf[0]` maps to, and how many leading bytes of `buf`
+    // are the previous window's carried-over tail.
+    let mut base = 0usize;
+    let mut carry = 0usize;
+    loop {
+        let read = fill_buf(&mut file, &mut buf[carry..])?;
+        let filled = carry + read;
+        if filled == 0 {
+            break;
+        }
+        // A match beginning inside the trailing `overlap` bytes may run past this
+        // window, so defer it to the next round; on the final window nothing is
+        // left to wait for, so every start counts.
+        let last = filled < buf.len();
+        let start_limit = if last { filled } else { filled - overlap };
+        collect_pattern_hits(&buf[..filled], patterns, base, start_limit, &mut hits);
+        if last {
+            break;
+        }
+        buf.copy_within(filled - overlap..filled, 0);
+        base += filled - overlap;
+        carry = overlap;
+    }
+    Some(hits)
+}
+
+/// Reads until `dst` is full or the file ends, returning the byte count.
+///
+/// `Read::read` is free to return short of the request before EOF, and a short
+/// window would split a pattern that is actually present, so the fill has to be
+/// driven to completion rather than trusted to one call.
+///
+/// # Errors
+///
+/// Returns `None` on any I/O error other than an interrupted call.
+fn fill_buf(file: &mut fs::File, mut dst: &mut [u8]) -> Option<usize> {
+    let mut total = 0;
+    while !dst.is_empty() {
+        match file.read(dst) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                dst = &mut dst[n..];
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    Some(total)
 }
 
 fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
@@ -742,10 +824,19 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     const ADJACENCY_THRESHOLD: usize = 0x1000; // 4KB
     let verbose = config::verbose();
 
-    let data = fs::read(path).ok()?;
+    // One streaming pass collects every pattern at once: the file is read in
+    // bounded windows, so a hundreds-of-megabytes binary costs a few MiB here
+    // instead of its own size.
+    let mut patterns: Vec<&[u8]> = vec![READ_PAT, WRITE_PAT];
+    patterns.extend_from_slice(HANDSHAKE_PATS);
+    let mut hits = scan_file_patterns(path, &patterns)?;
+    // Drain the fixed slots high-index-first so the remaining vectors are
+    // exactly the handshake variants.
+    let write_matches = hits.remove(1);
+    let read_matches = hits.remove(0);
+    let handshake_hits = hits;
 
     // --- SSL_read: expect unique match ---
-    let read_matches = find_all_patterns(&data, READ_PAT);
     if read_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_read pattern not found in {path}");
@@ -765,10 +856,7 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     };
 
     // --- SSL_do_handshake: collect matches across all known variants ---
-    let mut hs_matches: Vec<usize> = HANDSHAKE_PATS
-        .iter()
-        .flat_map(|pat| find_all_patterns(&data, pat))
-        .collect();
+    let mut hs_matches: Vec<usize> = handshake_hits.into_iter().flatten().collect();
     if hs_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_do_handshake pattern not found in {path}");
@@ -797,7 +885,6 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     };
 
     // --- SSL_write: adjacency verification ---
-    let write_matches = find_all_patterns(&data, WRITE_PAT);
     if write_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_write pattern not found in {path}");
@@ -1506,6 +1593,76 @@ mod tests {
         );
         with_static_ssl_fixture("write-far", &img, |path| {
             assert!(find_static_ssl_offsets(path).is_none());
+        });
+    }
+
+    #[test]
+    fn static_ssl_offsets_still_resolves_past_one_scan_window() {
+        // Guards Claude Code: its Bun single-file executable is the case the
+        // byte-pattern path exists for, and it is far larger than one window.
+        // The patterns sit in the final window, so a resolution here proves the
+        // scan neither stops early nor loses the absolute offset.
+        let img = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        let pad = SCAN_CHUNK_BYTES + 0x3000;
+        let mut padded = vec![0u8; pad];
+        padded.extend_from_slice(&img);
+        with_static_ssl_fixture("past-window", &padded, |path| {
+            let off = find_static_ssl_offsets(path).expect("large image must still resolve");
+            assert_eq!(off.ssl_do_handshake, pad + 0x100);
+            assert_eq!(off.ssl_read, pad + 0x2000);
+            assert_eq!(off.ssl_write, pad + 0x2100);
+        });
+    }
+
+    #[test]
+    fn scan_file_patterns_finds_match_straddling_window_boundary() {
+        // A pattern laid across the window edge is only found if the windows
+        // overlap; without the carry it would be split and silently missed.
+        let start = SCAN_CHUNK_BYTES - READ_PAT_T.len() / 2;
+        let mut img = vec![0u8; SCAN_CHUNK_BYTES + 0x1000];
+        img[start..start + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        with_static_ssl_fixture("straddle", &img, |path| {
+            let hits = scan_file_patterns(path, &[READ_PAT_T]).expect("scan must succeed");
+            assert_eq!(hits[0], vec![start]);
+        });
+    }
+
+    #[test]
+    fn collect_pattern_hits_finds_every_signature_in_one_walk() {
+        // Distinct signatures at distinct positions must all be reported from a
+        // single walk, and a window matching none of them must yield nothing —
+        // the rejection case that used to cost one walk per signature.
+        let mut window = vec![0u8; 0x400];
+        window[0x10..0x10 + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        window[0x200..0x200 + WRITE_PAT_T.len()].copy_from_slice(WRITE_PAT_T);
+        let patterns: [&[u8]; 2] = [READ_PAT_T, WRITE_PAT_T];
+        let mut hits = vec![Vec::new(); patterns.len()];
+        collect_pattern_hits(&window, &patterns, 0x1000, window.len(), &mut hits);
+        assert_eq!(hits[0], vec![0x1000 + 0x10]);
+        assert_eq!(hits[1], vec![0x1000 + 0x200]);
+
+        let mut empty = vec![Vec::new(); patterns.len()];
+        collect_pattern_hits(&vec![0u8; 0x400], &patterns, 0, 0x400, &mut empty);
+        assert!(empty.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn scan_file_patterns_reports_each_match_once() {
+        // Overlapping windows must not double-count a match that lands inside
+        // the carried-over tail.
+        let offsets = [
+            0usize,
+            SCAN_CHUNK_BYTES - READ_PAT_T.len(),
+            SCAN_CHUNK_BYTES,
+            SCAN_CHUNK_BYTES + 0x800,
+        ];
+        let mut img = vec![0u8; SCAN_CHUNK_BYTES * 2];
+        for &off in &offsets {
+            img[off..off + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        }
+        with_static_ssl_fixture("once", &img, |path| {
+            let hits = scan_file_patterns(path, &[READ_PAT_T]).expect("scan must succeed");
+            assert_eq!(hits[0], offsets.to_vec());
         });
     }
 
