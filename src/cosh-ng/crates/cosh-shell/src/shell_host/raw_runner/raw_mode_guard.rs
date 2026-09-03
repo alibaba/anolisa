@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use nix::libc;
 
+use super::raw_mode_guard_watchdog::{dismiss_watchdog, spawn_terminal_watchdog};
+
 static SIGNAL_OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
 static SIGNAL_OUTPUT_IS_TTY: AtomicBool = AtomicBool::new(false);
 static SIGNAL_RECOVERY_ARMED: AtomicBool = AtomicBool::new(false);
@@ -107,6 +109,10 @@ pub(super) struct RawModeGuard {
     original_flags: i32,
     active: bool,
     recovery_armed: bool,
+    /// PID of the watchdog subprocess that restores terminal state if this
+    /// process is killed (SIGKILL). `None` when no watchdog was spawned
+    /// (e.g. non-stdin fd or fork failure).
+    watchdog_pid: Option<libc::pid_t>,
 }
 
 impl RawModeGuard {
@@ -127,6 +133,7 @@ impl RawModeGuard {
             original_flags,
             active: true,
             recovery_armed: false,
+            watchdog_pid: None,
         }
     }
 
@@ -153,21 +160,40 @@ impl RawModeGuard {
         if original_flags < 0 {
             return Err(io::Error::last_os_error());
         }
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
 
+        // Probe termios before any modification so the watchdog receives a
+        // clean snapshot.
         let original_termios = if unsafe { libc::isatty(fd) } == 1 {
             let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
             if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    libc::fcntl(fd, libc::F_SETFL, original_flags);
-                }
-                return Err(error);
+                return Err(io::Error::last_os_error());
             }
+            Some(original)
+        } else {
+            None
+        };
 
-            let mut raw = original;
+        // Fork the watchdog before modifying the fd so the child holds a
+        // snapshot of the original state. Only stdin with a real tty gets a
+        // watchdog — other fds don't need one and the fork cost isn't free.
+        // Fork failure is non-fatal: the in-process recovery path (signal
+        // handlers, Drop) still covers catchable signals.
+        let watchdog_pid = if fd == libc::STDIN_FILENO && original_termios.is_some() {
+            spawn_terminal_watchdog(original_termios, original_flags, fd, output_fd)
+        } else {
+            None
+        };
+
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
+            // Clean up watchdog on failure to avoid an orphaned child.
+            if let Some(pid) = watchdog_pid {
+                dismiss_watchdog(pid);
+            }
+            return Err(io::Error::last_os_error());
+        }
+
+        if let Some(ref original) = original_termios {
+            let mut raw = *original;
             unsafe {
                 libc::cfmakeraw(&mut raw);
             }
@@ -176,12 +202,12 @@ impl RawModeGuard {
                 unsafe {
                     libc::fcntl(fd, libc::F_SETFL, original_flags);
                 }
+                if let Some(pid) = watchdog_pid {
+                    dismiss_watchdog(pid);
+                }
                 return Err(error);
             }
-            Some(original)
-        } else {
-            None
-        };
+        }
 
         let recovery_armed = fd == libc::STDIN_FILENO && original_termios.is_some();
         if recovery_armed {
@@ -195,6 +221,7 @@ impl RawModeGuard {
             original_flags,
             active: true,
             recovery_armed,
+            watchdog_pid,
         }))
     }
 }
@@ -273,6 +300,13 @@ impl Drop for RawModeGuard {
             }
             if self.recovery_armed {
                 disarm_signal_recovery();
+            }
+            // Dismiss the watchdog after all terminal state has been
+            // restored. The watchdog's own restore is idempotent, so a
+            // race between this dismiss and a simultaneous parent death
+            // is harmless.
+            if let Some(pid) = self.watchdog_pid {
+                dismiss_watchdog(pid);
             }
         }
     }
