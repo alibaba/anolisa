@@ -1,11 +1,13 @@
 //! Streamable HTTP transport for configured MCP servers.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{json, Value};
 
+use super::headers::CustomHeaders;
 use super::{
     expand_env_vars, oauth, roots_response, validate_http_endpoint, MAX_MCP_MESSAGE_BYTES,
 };
@@ -13,12 +15,36 @@ use super::{
 pub(super) const SESSION_EXPIRED_ERROR: &str = "MCP HTTP session expired";
 pub(super) const LEGACY_FALLBACK_ERROR: &str = "MCP server requires legacy HTTP+SSE transport";
 
+/// Builds the recovery hint appended to 401 errors. Custom headers are a
+/// generic map, so their presence alone cannot establish the authentication
+/// method: the server may expect OAuth alongside a non-auth header (for
+/// example a tenant id), or the header itself may be the credential. With no
+/// bearer or OAuth credential loaded, both recovery paths are offered.
+fn unauthorized_hint(
+    server_name: &str,
+    bearer_token: Option<&str>,
+    has_oauth_credentials: bool,
+    custom_headers: &CustomHeaders,
+) -> String {
+    if bearer_token.is_some() || has_oauth_credentials {
+        return String::new();
+    }
+    if custom_headers.is_empty() {
+        format!("; run 'cosh-core mcp login {server_name}'")
+    } else {
+        format!(
+            "; run 'cosh-core mcp login {server_name}' if the server uses OAuth, or verify the custom header values for '{server_name}'"
+        )
+    }
+}
+
 /// Stateful HTTP connection that carries the MCP session between requests.
 pub(super) struct HttpConnection {
     client: reqwest::Client,
     endpoint: reqwest::Url,
     server_name: String,
     bearer_token: Option<String>,
+    custom_headers: CustomHeaders,
     oauth_credentials: Option<oauth::OAuthCredentials>,
     session_id: Option<String>,
     initialized: bool,
@@ -32,11 +58,13 @@ impl HttpConnection {
         server_name: &str,
         endpoint: &str,
         bearer_token: Option<&str>,
+        headers: &HashMap<String, String>,
         oauth_resource: Option<&str>,
         workspace_root: std::path::PathBuf,
     ) -> Result<Self, String> {
         let endpoint = validate_http_endpoint(&expand_env_vars(endpoint))?;
         let oauth_resource = oauth_resource.map(expand_env_vars);
+        let custom_headers = CustomHeaders::from_config(headers)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -52,6 +80,7 @@ impl HttpConnection {
             endpoint,
             server_name: server_name.to_string(),
             bearer_token: bearer_token.map(expand_env_vars),
+            custom_headers,
             oauth_credentials,
             session_id: None,
             initialized: false,
@@ -149,11 +178,13 @@ impl HttpConnection {
                     self.server_name
                 ));
             }
-            let login_hint = if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                && self.bearer_token.is_none()
-                && self.oauth_credentials.is_none()
-            {
-                format!("; run 'cosh-core mcp login {}'", self.server_name)
+            let login_hint = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                unauthorized_hint(
+                    &self.server_name,
+                    self.bearer_token.as_deref(),
+                    self.oauth_credentials.is_some(),
+                    &self.custom_headers,
+                )
             } else {
                 String::new()
             };
@@ -197,6 +228,7 @@ impl HttpConnection {
         } else if let Some(credentials) = &self.oauth_credentials {
             request = request.bearer_auth(&credentials.access_token);
         }
+        request = self.custom_headers.apply(request);
         request
             .send()
             .await
@@ -253,6 +285,7 @@ impl HttpConnection {
         } else if let Some(credentials) = &self.oauth_credentials {
             request = request.bearer_auth(&credentials.access_token);
         }
+        request = self.custom_headers.apply(request);
         let response = request
             .send()
             .await
@@ -416,6 +449,7 @@ impl HttpConnection {
         } else if let Some(credentials) = &self.oauth_credentials {
             request = request.bearer_auth(&credentials.access_token);
         }
+        request = self.custom_headers.apply(request);
         let response = request
             .send()
             .await
@@ -448,6 +482,7 @@ pub(super) struct LegacyHttpConnection {
     post_endpoint: reqwest::Url,
     server_name: String,
     bearer_token: Option<String>,
+    custom_headers: CustomHeaders,
     oauth_credentials: Option<oauth::OAuthCredentials>,
     sse_stream: SseStream,
     line: Vec<u8>,
@@ -463,11 +498,13 @@ impl LegacyHttpConnection {
         server_name: &str,
         endpoint: &str,
         bearer_token: Option<&str>,
+        headers: &HashMap<String, String>,
         oauth_resource: Option<&str>,
         workspace_root: std::path::PathBuf,
     ) -> Result<Self, String> {
         let sse_endpoint = validate_http_endpoint(&expand_env_vars(endpoint))?;
         let oauth_resource = oauth_resource.map(expand_env_vars);
+        let custom_headers = CustomHeaders::from_config(headers)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -483,6 +520,7 @@ impl LegacyHttpConnection {
             post_endpoint: sse_endpoint,
             server_name: server_name.to_string(),
             bearer_token: bearer_token.map(expand_env_vars),
+            custom_headers,
             oauth_credentials,
             sse_stream: Box::pin(futures::stream::empty()),
             line: Vec::new(),
@@ -608,21 +646,24 @@ impl LegacyHttpConnection {
     }
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(token) = &self.bearer_token {
+        let request = if let Some(token) = &self.bearer_token {
             request.bearer_auth(token)
         } else if let Some(credentials) = &self.oauth_credentials {
             request.bearer_auth(&credentials.access_token)
         } else {
             request
-        }
+        };
+        self.custom_headers.apply(request)
     }
 
     fn authentication_error(&self, status: reqwest::StatusCode, action: &str) -> String {
-        let login_hint = if status == reqwest::StatusCode::UNAUTHORIZED
-            && self.bearer_token.is_none()
-            && self.oauth_credentials.is_none()
-        {
-            format!("; run 'cosh-core mcp login {}'", self.server_name)
+        let login_hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+            unauthorized_hint(
+                &self.server_name,
+                self.bearer_token.as_deref(),
+                self.oauth_credentials.is_some(),
+                &self.custom_headers,
+            )
         } else {
             String::new()
         };
@@ -776,7 +817,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::super::McpClient;
-    use crate::config::McpServerConfig;
+    use crate::config::{McpOAuthConfig, McpServerConfig};
 
     async fn read_request(
         reader: &mut BufReader<OwnedReadHalf>,
@@ -838,6 +879,7 @@ mod tests {
             "test",
             "file:///tmp/server",
             None,
+            &HashMap::new(),
             None,
             std::path::PathBuf::from("/tmp/workspace"),
         ) {
@@ -853,6 +895,7 @@ mod tests {
             "test",
             "http://mcp.example.com/mcp",
             None,
+            &HashMap::new(),
             None,
             std::path::PathBuf::from("/tmp/workspace"),
         ) {
@@ -901,6 +944,7 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             bearer_token: Some("test-token".to_string()),
+            headers: HashMap::new(),
             oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
@@ -1013,6 +1057,7 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             bearer_token: Some("test-token".to_string()),
+            headers: HashMap::new(),
             oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
@@ -1027,6 +1072,160 @@ mod tests {
             client.call_tool("echo", json!({})).await.unwrap().output,
             "called"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_custom_headers_alongside_bearer_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            let (_, headers, message) = read_request(&mut reader).await;
+            let message = message.unwrap();
+            assert_eq!(message["method"], "initialize");
+            assert_eq!(headers["private-token"], "secret");
+            assert_eq!(headers["authorization"], "Bearer test-token");
+            // The reserved protocol header stays owned by the transport even
+            // when the custom header map tries to override it.
+            assert_eq!(headers["content-type"], "application/json");
+            write_response(
+                &mut write_half,
+                "200 OK",
+                Some("application/json"),
+                Some("test-session"),
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}}"#,
+            )
+            .await;
+
+            let (_, headers, message) = read_request(&mut reader).await;
+            let message = message.unwrap();
+            assert_eq!(message["method"], "notifications/initialized");
+            assert_eq!(headers["private-token"], "secret");
+            write_response(&mut write_half, "202 Accepted", None, None, "").await;
+
+            let (_, headers, message) = read_request(&mut reader).await;
+            let message = message.unwrap();
+            assert_eq!(message["method"], "tools/list");
+            assert_eq!(headers["private-token"], "secret");
+            write_response(
+                &mut write_half,
+                "200 OK",
+                Some("application/json"),
+                None,
+                r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#,
+            )
+            .await;
+        });
+
+        let config = McpServerConfig {
+            command: String::new(),
+            url: Some(format!("http://{address}/mcp")),
+            args: Vec::new(),
+            env: HashMap::new(),
+            bearer_token: Some("test-token".to_string()),
+            headers: HashMap::from([
+                ("PRIVATE-TOKEN".to_string(), "secret".to_string()),
+                ("Content-Type".to_string(), "text/plain".to_string()),
+            ]),
+            oauth: Default::default(),
+            timeout_ms: 1_000,
+            startup_timeout_ms: 1_000,
+            allowed_tools: None,
+        };
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (_, tools) = McpClient::connect("test", &config, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 0);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthorized_with_headers_offers_both_recovery_paths() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            let (_, headers, message) = read_request(&mut reader).await;
+            let message = message.unwrap();
+            assert_eq!(message["method"], "initialize");
+            assert_eq!(headers["private-token"], "secret");
+            write_response(&mut write_half, "401 Unauthorized", None, None, "").await;
+        });
+
+        let config = McpServerConfig {
+            command: String::new(),
+            url: Some(format!("http://{address}/mcp")),
+            args: Vec::new(),
+            env: HashMap::new(),
+            bearer_token: None,
+            headers: HashMap::from([("PRIVATE-TOKEN".to_string(), "secret".to_string())]),
+            oauth: Default::default(),
+            timeout_ms: 1_000,
+            startup_timeout_ms: 1_000,
+            allowed_tools: None,
+        };
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        // A unique server name keeps the OAuth credential lookup empty so
+        // the custom headers stay the only configured authentication.
+        let error = McpClient::connect("r3032-header-auth", &config, &workspace)
+            .await
+            .err()
+            .expect("connection should fail");
+        assert!(error.contains("mcp login"), "got: {error}");
+        assert!(error.contains("custom header values"), "got: {error}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preserves_oauth_login_hint_with_non_auth_custom_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            let (_, headers, message) = read_request(&mut reader).await;
+            let message = message.unwrap();
+            assert_eq!(message["method"], "initialize");
+            assert_eq!(headers["x-tenant"], "acme");
+            write_response(&mut write_half, "401 Unauthorized", None, None, "").await;
+        });
+
+        // OAuth is the authentication method; X-Tenant is a non-auth header
+        // whose presence must not hide the login hint behind.
+        let config = McpServerConfig {
+            command: String::new(),
+            url: Some(format!("http://{address}/mcp")),
+            args: Vec::new(),
+            env: HashMap::new(),
+            bearer_token: None,
+            headers: HashMap::from([("X-Tenant".to_string(), "acme".to_string())]),
+            oauth: McpOAuthConfig {
+                scopes: vec!["mcp:read".to_string()],
+                ..Default::default()
+            },
+            timeout_ms: 1_000,
+            startup_timeout_ms: 1_000,
+            allowed_tools: None,
+        };
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        // A unique server name keeps the OAuth credential lookup empty so
+        // the 401 arrives before any login has happened.
+        let error = McpClient::connect("r3032-oauth-tenant", &config, &workspace)
+            .await
+            .err()
+            .expect("connection should fail");
+        assert!(error.contains("mcp login"), "got: {error}");
+        assert!(error.contains("custom header values"), "got: {error}");
         server.await.unwrap();
     }
 
@@ -1079,6 +1278,7 @@ mod tests {
             let (request_method, headers, _) = read_request(&mut reader).await;
             assert_eq!(request_method, "GET");
             assert_eq!(headers["last-event-id"], "stream-1");
+            assert_eq!(headers["private-token"], "resume-secret");
             let event = r#"data: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}
 
 "#;
@@ -1098,6 +1298,7 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             bearer_token: Some("test-token".to_string()),
+            headers: HashMap::from([("PRIVATE-TOKEN".to_string(), "resume-secret".to_string())]),
             oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
@@ -1149,6 +1350,7 @@ mod tests {
             let (request_method, headers, body) = read_request(&mut reader).await;
             assert_eq!(request_method, "DELETE");
             assert_eq!(headers["mcp-session-id"], "test-session");
+            assert_eq!(headers["private-token"], "close-secret");
             assert!(body.is_none());
             write_response(&mut write_half, "405 Method Not Allowed", None, None, "").await;
         });
@@ -1159,6 +1361,7 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             bearer_token: Some("test-token".to_string()),
+            headers: HashMap::from([("PRIVATE-TOKEN".to_string(), "close-secret".to_string())]),
             oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
@@ -1188,8 +1391,9 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, mut sse_writer) = stream.into_split();
             let mut sse_reader = BufReader::new(read_half);
-            let (method, _, body) = read_request(&mut sse_reader).await;
+            let (method, headers, body) = read_request(&mut sse_reader).await;
             assert_eq!(method, "GET");
+            assert_eq!(headers["private-token"], "legacy-secret");
             assert!(body.is_none());
             sse_writer
                 .write_all(
@@ -1203,8 +1407,9 @@ mod tests {
             let (read_half, mut post_writer) = stream.into_split();
             let mut post_reader = BufReader::new(read_half);
 
-            let (_, _, message) = read_request(&mut post_reader).await;
+            let (_, headers, message) = read_request(&mut post_reader).await;
             assert_eq!(message.unwrap()["method"], "initialize");
+            assert_eq!(headers["private-token"], "legacy-secret");
             write_response(&mut post_writer, "202 Accepted", None, None, "").await;
             write_sse_chunk(
                 &mut sse_writer,
@@ -1232,6 +1437,7 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             bearer_token: Some("test-token".to_string()),
+            headers: HashMap::from([("PRIVATE-TOKEN".to_string(), "legacy-secret".to_string())]),
             oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
@@ -1242,6 +1448,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tools.len(), 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthorized_with_headers_offers_both_recovery_paths_over_legacy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            // The streamable initialize is rejected to trigger the legacy
+            // HTTP+SSE fallback.
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let (method, _, message) = read_request(&mut reader).await;
+            assert_eq!(method, "POST");
+            assert_eq!(message.unwrap()["method"], "initialize");
+            write_response(&mut write_half, "405 Method Not Allowed", None, None, "").await;
+
+            // The legacy SSE open is rejected with 401 while custom headers
+            // are the only configured authentication.
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let (method, headers, body) = read_request(&mut reader).await;
+            assert_eq!(method, "GET");
+            assert_eq!(headers["private-token"], "legacy-secret");
+            assert!(body.is_none());
+            write_response(&mut write_half, "401 Unauthorized", None, None, "").await;
+        });
+
+        let config = McpServerConfig {
+            command: String::new(),
+            url: Some(format!("http://{address}/mcp")),
+            args: Vec::new(),
+            env: HashMap::new(),
+            bearer_token: None,
+            headers: HashMap::from([("PRIVATE-TOKEN".to_string(), "legacy-secret".to_string())]),
+            oauth: Default::default(),
+            timeout_ms: 1_000,
+            startup_timeout_ms: 1_000,
+            allowed_tools: None,
+        };
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        // A unique server name keeps the OAuth credential lookup empty so
+        // the custom headers stay the only configured authentication.
+        let error = McpClient::connect("r3032-legacy-header", &config, &workspace)
+            .await
+            .err()
+            .expect("connection should fail");
+        assert!(error.contains("mcp login"), "got: {error}");
+        assert!(error.contains("custom header values"), "got: {error}");
         server.await.unwrap();
     }
 }

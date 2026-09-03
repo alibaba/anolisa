@@ -245,6 +245,7 @@ done
                 args: vec![server.to_string_lossy().into_owned()],
                 env: std::collections::HashMap::new(),
                 bearer_token: None,
+                headers: std::collections::HashMap::new(),
                 oauth: Default::default(),
                 timeout_ms: 1_000,
                 startup_timeout_ms: 1_000,
