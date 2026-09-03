@@ -294,7 +294,11 @@ impl SysomProvider {
             self.sign_request("POST", API_PATH, &sign_headers, &hashed_payload, &creds);
 
         // Build reqwest request
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .map_err(|e| format!("HTTP client build failed: {e}"))?;
         let mut req = client
             .post(&url)
             .header("host", &self.endpoint)
