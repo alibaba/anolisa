@@ -44,7 +44,7 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Protocol v2 routes successful PostTool JSON to `JsonCompressor`, then accepts only a smaller end-to-end result | Non-JSON domains currently pass through; recoverable truncation requires Agent-facing recovery that verifies the current Marker set |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`, then only a smaller end-to-end result is accepted | Non-JSON domains currently pass through; recoverable truncation requires either Marker-authorized framework retrieval or a supported Marker command path |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
@@ -103,8 +103,11 @@ Active response and schema truncation stash the removed payload in
 <<tokenless:0123456789abcdef01234567>>
 ```
 
-The payload can be recovered locally through the trusted `tokenless retrieve` command. Protocol v2
-agent-facing retrieval first requires the requested Marker to be present in the model's current
+The payload can be recovered locally through the trusted `tokenless retrieve` command. Supported
+CLI adapters put that exact command in the Marker and let the model run it through an existing
+shell tool; they enable recoverable compression only when bare `tokenless` is resolvable on the
+shell `PATH`. DSH also requires that command to resolve to the same executable selected for its Core
+call. AgentScope instead authorizes its static retrieval Tool against the model's current
 `visible_markers` set. The old stateless MCP server was removed because it had no trustworthy
 model-visibility context. Recovery is unavailable when:
 
@@ -114,6 +117,8 @@ model-visibility context. Recovery is unavailable when:
 - The entry exceeded its TTL.
 - The 10,000-live-entry capacity evicted an older entry.
 - The caller uses a different Stash database path.
+- In DSH, bare `tokenless` is missing from a stable absolute `PATH` entry or resolves to a different
+  executable than `tokenlessBin`/`TOKENLESS_BIN`.
 
 Stash does not make all compression reversible. Removed `debug`/`trace` fields, `null` and empty values, schema `title`/`examples`, and Markdown formatting are not stored for retrieval. Validate critical payloads with representative data before enabling active compression.
 
@@ -132,14 +137,15 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 
 | Agent product | Integration | Current code path |
 |-----------|-------------|-------------------|
-| cosh | Extension | Hard-disabled Tool Ready, rewrite, Schema; Cosh-NG replaces eligible pipeline output, while legacy Copilot Shell passes post-tool output through |
+| cosh | Extension | Hard-disabled Tool Ready, rewrite, Schema; Cosh-NG replaces eligible pipeline output and supports Marker command recovery, while legacy Copilot Shell passes post-tool output through |
 | OpenClaw | Plugin | Hard-disabled Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
-| Hermes | Plugin | Hard-disabled Tool Ready, Core-owned block-and-retry rewrite, lossless result replacement with Core-selected TOON; no Schema/Retrieve |
-| Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response pipeline through `updatedToolOutput`; no Schema |
-| Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
+| Hermes | Plugin | Hard-disabled Tool Ready, Core-owned block-and-retry rewrite, result replacement with Core-selected TOON, Marker command recovery; no Schema |
+| Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response pipeline and Marker command recovery through `updatedToolOutput`; no Schema |
+| Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement and Marker command recovery on Claude Code 2.1.121 or later; conditional TOON; no Schema |
 | Codex | Plugin | Hard-disabled Tool Ready, RTK rewrite, environment-failure diagnostics; no response/TOON replacement or Schema |
-| OpenCode | Plugin | Hard-disabled Tool Ready, Bash rewrite, tool-output replacement with response + TOON, Schema |
+| OpenCode | Plugin | Hard-disabled Tool Ready, Bash rewrite, tool-output replacement with response + TOON, Marker command recovery, Schema |
 | Qwen Code | Extension | Hard-disabled Tool Ready, rewrite; current host lacks post-tool replacement and skips the declared BeforeModel event |
+| DeepSeek Harness | Native plugin | Single-text result replacement, Marker command recovery, and environment-error attribution; no Schema or command rewrite |
 
 ## Supported Agent development frameworks
 

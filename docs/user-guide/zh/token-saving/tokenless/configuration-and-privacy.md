@@ -98,6 +98,13 @@ tokenless stats disable
 
 空值视为未设置。`TOKENLESS_DATA_DIR` 可以指向尚不存在的目录；Tokenless 会先规范化其最近的已存在父目录，再创建目标目录。文件级覆盖项只能位于规范化后的真实用户 home 或选定的数据目录下，且已存在的数据库软链接会被拒绝。该变量不会迁移 `~/.tokenless/config.json` 或 SLS JSONL 输出。
 
+DeepSeek Harness 是默认数据库位置的例外：它的沙箱会移除继承的 `TOKENLESS_*` 变量，并且
+可能无法访问 home 目录。未设置 `TOKENLESS_DATA_DIR` 时，Adapter 使用会话工作区下的
+`.tokenless`，并为该目录以及 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 发布受控 Shell
+别名。默认工作区目录包含内容为 `*` 的 `.gitignore`，因此完整工具文本、Stash Payload 和
+SQLite sidecar 不会被 `git add -A` 暂存。Adapter 不会修改自定义路径；应确保 DSH Shell
+沙箱可以访问它们，并按数据策略将其排除在源码管理或备份之外。
+
 ## 本地与外部数据
 
 | 数据 | 默认路径 | 默认内容 | 保留方式 | 如何停止新增 |

@@ -406,6 +406,106 @@ fn get_stash_db_path_default() {
 }
 
 #[test]
+fn get_data_dir_uses_managed_dsh_override_only_in_dsh_shell() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let managed = tempfile::tempdir().unwrap();
+    let explicit = tempfile::tempdir().unwrap();
+    let previous_data_dir = std::env::var_os("TOKENLESS_DATA_DIR");
+    let previous_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
+    let previous_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
+    let previous_dsh_shell = std::env::var_os("DSH_SHELL");
+    let previous_dsh_data_dir = std::env::var_os("DSH_TOKENLESS_DATA_DIR");
+    let previous_dsh_stats_db = std::env::var_os("DSH_TOKENLESS_STATS_DB");
+    let previous_dsh_stash_db = std::env::var_os("DSH_TOKENLESS_STASH_DB");
+    let managed_stats = managed.path().join("managed-stats.db");
+    let managed_stash = managed.path().join("managed-stash.db");
+    let explicit_stats = explicit.path().join("explicit-stats.db");
+    let explicit_stash = explicit.path().join("explicit-stash.db");
+
+    unsafe {
+        std::env::remove_var("TOKENLESS_DATA_DIR");
+        std::env::remove_var("TOKENLESS_STATS_DB");
+        std::env::remove_var("TOKENLESS_STASH_DB");
+        std::env::set_var("DSH_SHELL", "1");
+        std::env::set_var("DSH_TOKENLESS_DATA_DIR", managed.path());
+        std::env::set_var("DSH_TOKENLESS_STATS_DB", &managed_stats);
+        std::env::set_var("DSH_TOKENLESS_STASH_DB", &managed_stash);
+    }
+    let managed_result = get_data_dir(home.path().to_str().unwrap());
+    let managed_paths = DatabasePathResolver {
+        home: std::sync::OnceLock::from(home.path().to_string_lossy().into_owned()),
+        data_dir: std::sync::OnceLock::new(),
+    };
+    let managed_stats_result = get_db_path_with(&managed_paths);
+    let managed_stash_result = get_stash_db_path_with(&managed_paths, None);
+
+    unsafe {
+        std::env::remove_var("DSH_SHELL");
+    }
+    let ignored_result = get_data_dir(home.path().to_str().unwrap());
+
+    unsafe {
+        std::env::set_var("DSH_SHELL", "1");
+        std::env::set_var("TOKENLESS_DATA_DIR", explicit.path());
+        std::env::set_var("TOKENLESS_STATS_DB", &explicit_stats);
+        std::env::set_var("TOKENLESS_STASH_DB", &explicit_stash);
+    }
+    let explicit_result = get_data_dir(home.path().to_str().unwrap());
+    let explicit_paths = DatabasePathResolver {
+        home: std::sync::OnceLock::from(home.path().to_string_lossy().into_owned()),
+        data_dir: std::sync::OnceLock::new(),
+    };
+    let explicit_stats_result = get_db_path_with(&explicit_paths);
+    let explicit_stash_result = get_stash_db_path_with(&explicit_paths, None);
+
+    unsafe {
+        match previous_data_dir {
+            Some(value) => std::env::set_var("TOKENLESS_DATA_DIR", value),
+            None => std::env::remove_var("TOKENLESS_DATA_DIR"),
+        }
+        match previous_stats_db {
+            Some(value) => std::env::set_var("TOKENLESS_STATS_DB", value),
+            None => std::env::remove_var("TOKENLESS_STATS_DB"),
+        }
+        match previous_stash_db {
+            Some(value) => std::env::set_var("TOKENLESS_STASH_DB", value),
+            None => std::env::remove_var("TOKENLESS_STASH_DB"),
+        }
+        match previous_dsh_shell {
+            Some(value) => std::env::set_var("DSH_SHELL", value),
+            None => std::env::remove_var("DSH_SHELL"),
+        }
+        match previous_dsh_data_dir {
+            Some(value) => std::env::set_var("DSH_TOKENLESS_DATA_DIR", value),
+            None => std::env::remove_var("DSH_TOKENLESS_DATA_DIR"),
+        }
+        match previous_dsh_stats_db {
+            Some(value) => std::env::set_var("DSH_TOKENLESS_STATS_DB", value),
+            None => std::env::remove_var("DSH_TOKENLESS_STATS_DB"),
+        }
+        match previous_dsh_stash_db {
+            Some(value) => std::env::set_var("DSH_TOKENLESS_STASH_DB", value),
+            None => std::env::remove_var("DSH_TOKENLESS_STASH_DB"),
+        }
+    }
+
+    assert_eq!(managed_result.unwrap(), managed.path().canonicalize().unwrap());
+    assert_eq!(managed_stats_result.unwrap(), managed_stats);
+    assert_eq!(managed_stash_result.unwrap(), managed_stash);
+    assert_eq!(
+        ignored_result.unwrap(),
+        home.path().canonicalize().unwrap().join(".tokenless")
+    );
+    assert_eq!(
+        explicit_result.unwrap(),
+        explicit.path().canonicalize().unwrap()
+    );
+    assert_eq!(explicit_stats_result.unwrap(), explicit_stats);
+    assert_eq!(explicit_stash_result.unwrap(), explicit_stash);
+}
+
+#[test]
 fn get_stash_db_path_with_valid_override() {
     let guard = match TempDbGuard::new() { Some(g) => g, None => return };
     // Use the temp stash path as an explicit override; get_stash_db_path

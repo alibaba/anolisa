@@ -42,7 +42,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | Protocol v2 把成功的 PostTool JSON 路由给 `JsonCompressor`，只接受端到端更小的结果 | 非 JSON 内容域当前透传；可恢复截断要求 Agent-facing 恢复验证当前 Marker 集合 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 会路由给 `JsonCompressor`，只接受端到端更小的结果 | 非 JSON 内容域当前透传；可恢复截断需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 真正提交给 Shell 的命令会变化；无规则或被拒绝时透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
@@ -99,9 +99,12 @@ anolisa adapter disable tokenless <framework>
 <<tokenless:0123456789abcdef01234567>>
 ```
 
-本地可以通过受信 `tokenless retrieve` 命令取回。Protocol v2 的 Agent-facing Retrieve 会先
-要求请求 Marker 存在于模型当前的 `visible_markers` 集合。旧的无状态 MCP Server 无法获得
-可信模型可见性上下文，因此已经删除。以下情况会失去可恢复性：
+本地可以通过受信 `tokenless retrieve` 命令取回。受支持的 CLI Adapter 会把这条精确命令
+写入 Marker，让模型通过已有 Shell Tool 执行；只有裸 `tokenless` 能从 Shell 的 `PATH`
+解析时，Adapter 才启用可恢复压缩；DSH 还要求它解析到 Core 调用选中的同一个可执行文件。
+AgentScope 则使用静态恢复 Tool，并对照模型当前的
+`visible_markers` 集合授权。旧的无状态 MCP Server 无法获得可信模型可见性上下文，因此已经
+删除。以下情况会失去可恢复性：
 
 - 使用了 `--no-stash`。
 - 压缩处于 dry-run 模式。
@@ -109,6 +112,8 @@ anolisa adapter disable tokenless <framework>
 - 条目已经超过 TTL。
 - 有效条目超过 10,000 个后，较早条目被容量策略淘汰。
 - 调用方使用了不同的 Stash 数据库路径。
+- 在 DSH 中，裸 `tokenless` 不存在于稳定的绝对 `PATH` 项中，或解析到与
+  `tokenlessBin`/`TOKENLESS_BIN` 不同的可执行文件。
 
 Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、`null` 和空值、Schema `title`/`examples` 以及 Markdown 格式不会保存供取回。启用实际压缩前，应使用有代表性的数据验证关键 Payload。
 
@@ -125,14 +130,15 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 | Agent 产品 | 集成方式 | 当前代码路径 |
 |------|----------|--------------|
-| cosh | Extension | Tool Ready（已硬关闭）、命令重写、Schema；Cosh-NG 替换符合条件的 Pipeline 输出，旧版 Copilot Shell 透传工具后输出 |
+| cosh | Extension | Tool Ready（已硬关闭）、命令重写、Schema；Cosh-NG 替换符合条件的 Pipeline 输出并支持 Marker 命令恢复，旧版 Copilot Shell 透传工具后输出 |
 | OpenClaw | Plugin | Tool Ready（已硬关闭）、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
-| Hermes | Plugin | Tool Ready（已硬关闭）、Core-owned 阻止后重试改写、用 Core 选择的 TOON 替换无损结果；无 Schema/Retrieve |
-| Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `updatedToolOutput` 交付响应 Pipeline；无 Schema |
-| Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
+| Hermes | Plugin | Tool Ready（已硬关闭）、Core-owned 阻止后重试改写、用 Core 选择的 TOON 替换结果、Marker 命令恢复；无 Schema |
+| Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `updatedToolOutput` 交付响应 Pipeline 和 Marker 命令恢复；无 Schema |
+| Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应并支持 Marker 命令恢复；条件式 TOON；无 Schema |
 | Codex | Plugin | Tool Ready（已硬关闭）、RTK 命令重写、环境失败诊断；不替换响应/TOON，无 Schema |
-| OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Schema |
+| OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Marker 命令恢复、Schema |
 | Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写；当前宿主缺少工具后替换能力，并跳过声明的 BeforeModel 事件 |
+| DeepSeek Harness | 原生 Plugin | 单文本结果替换、Marker 命令恢复和环境错误归因；无 Schema 或命令重写 |
 
 ## 支持的 Agent 开发框架
 

@@ -33,6 +33,8 @@ def run_case(
     stdin_text: str,
     agent_env: dict,
     behavior: str | None,
+    *,
+    tokenless_on_path: bool = True,
 ) -> ContractResult:
     """Run one (hook, agent, behavior) case hermetically.
 
@@ -58,6 +60,7 @@ def run_case(
                 "TOKENLESS_MOCK_LOG": spawn_log,
                 "TOKENLESS_MOCK_REQUEST_LOG": request_log,
             },
+            tokenless_on_path=tokenless_on_path,
         )
         try:
             with open(spawn_log) as f:

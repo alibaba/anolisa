@@ -68,6 +68,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 例如：面板显示压缩率 60%，若工具响应占总消耗 20%，实际节省率为 60% × 20% = **12%**。这也是为何在总消耗 1500 万 Token 的实验中节省量观感偏小——tokenless 只作用于其中约 300 万 Token 的工具响应部分。
 
 > Stash 使压缩**端到端无损**：可适度收紧截断阈值换取更高 inline 节省，需要原文时经 `<<tokenless:KEY>>` 标记取回，不影响正确性。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。至少 33 项且全为 Object 的数组使用 Record Reduction：完整数组进入 Stash，默认保留首尾、错误、结构/数值异常并稳定采样至 32 条基础预算；其他数组截断默认保留头部 32 项与尾部 8 项。完整参数见用户手册 CLI 参考。
+> 对支持实时结果替换的 Agent，Marker 会直接提示模型通过已有 Shell Tool 执行 `tokenless retrieve '<<tokenless:KEY>>'`；成功的恢复结果原样返回，不会再次压缩。
 > 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
 
 ## 集成路径
@@ -75,14 +76,14 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 ### Agent Adapter
 
 - **OpenClaw 插件** — 通过 Core 执行 PreTool RTK 改写和无损 transcript PostTool 优化；宿主不支持 BeforeModel Schema 与授权 Retrieve
-- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + 无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
-- **Hermes Agent 插件** — 把阻止后建议式命令重写和无损模型可见结果优化委托给 Core；无 Schema/Retrieve
-- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline
-- **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写；Cosh-NG 支持响应压缩和 Marker 命令恢复，旧 copilot-shell 保持无损 PostTool；Common BeforeModel 在授权 Retrieve 接入前透传 Schema
+- **Hermes Agent 插件** — 把阻止后建议式命令重写和模型可见结果优化委托给 Core，并通过已有 Shell Tool 支持 Marker 命令恢复；无 Schema 压缩
+- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 通过 `updatedToolOutput` 交付响应 Pipeline + Marker 命令恢复
+- **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON；2.1.121 及以上版本支持 Marker 命令恢复
 - **Codex 插件** — Tool Ready（已硬关闭）+ RTK 命令重写 + 环境失败诊断；Codex
   协议不支持替换原始输出，因此不追加压缩副本
-- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
-- **DeepSeek Harness 插件**。通过 DSH 原生 `tools/post-execute` 接入响应压缩和环境错误归因
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
+- **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
@@ -159,10 +160,13 @@ dsh --profile <profile>
 
 ### `compress` 压缩入口
 
-共享 Agent Hook 会向 `tokenless compress` 发送严格的生命周期请求。
-Tagged Envelope 选择 `before_model`、`pre_tool`、`post_tool` 或 `retrieve`；只有成功且未旁路的
-PostTool JSON 会进入 Runtime 内部 Pipeline。Common Hook 没有 Marker 授权恢复路径，因此 Core
-只应用无损 PostTool 候选，并透传有损 Schema 变换。
+共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
+PostTool JSON 会进入 Runtime 内部 Pipeline。Claude Code 2.1.121 及以上版本、Qoder CLI、
+OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
+PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有 Shell Tool 执行精确的
+`tokenless retrieve` 命令。Hook 只识别成功执行、参数为
+有效 Hash 或 Marker 的单条恢复命令，并让其结果绕过压缩，避免二次处理。旧 copilot-shell 和
+不能替换结果的宿主保持无损模式。BeforeModel Schema 压缩仍需要独立的授权恢复能力。
 请求/响应契约和可执行示例见
 [CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#compress)。
 
@@ -262,6 +266,8 @@ Session，再传入启用 Tokenless 的 Session。
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
 RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
+响应中包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
+`tokenless retrieve` 命令；成功的恢复结果会绕过压缩并原样返回。
 
 ```bash
 make opencode-install
@@ -276,8 +282,16 @@ make opencode-install
 
 DSH 原生 Bundle 通过 `tools/post-execute` 把可替换的单文本工具结果交给 Tokenless
 PostTool Core。内容检测、JSON 清理、TOON 选择、最终接受和环境错误诊断均由 Core
-负责。DSH 没有 Marker 授权恢复路径，因此有损候选会被拒绝，内容读取结果保持原样。
-关闭响应压缩后，错误指引仍会工作。
+负责。缩减结果包含 Retrieve Marker 时，模型可以通过已有 Shell Tool 执行其中的
+`tokenless retrieve` 命令。Adapter 从 `exec.arguments.command` 检查成功执行的单条恢复命令，
+并让其结果绕过 Core 压缩、原样返回。只有裸 `tokenless` 能从 Shell 的 `PATH` 解析到
+`tokenlessBin` 或 `TOKENLESS_BIN` 为 Core 选中的同一个可执行文件时，Adapter 才启用可恢复压缩；
+仅给 Plugin 配置绝对路径，或让裸命令指向另一个二进制，都不足以执行 Marker 恢复。
+DSH 会从模型 Shell 命令中清除继承的 `TOKENLESS_*` 环境变量，因此 Adapter 会把选定的状态目录
+以及可选统计库和 Stash 库覆盖作为受控 DSH Shell 信息发布，并让 Core 使用相同路径。默认目录
+是会话工作区中的 `.tokenless`，其中包含自忽略的 `.gitignore`；如需覆盖，应在启动 DSH 前设置
+`TOKENLESS_DATA_DIR`、`TOKENLESS_STATS_DB` 或 `TOKENLESS_STASH_DB`，且路径必须可从 DSH Shell
+沙箱访问。关闭响应压缩后，错误指引仍会工作。
 
 需要启用多个 DSH profile 时，应在同一条命令中重复传入 `--profile`。
 

@@ -170,6 +170,9 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(
             self.requests()[-1]["input"]["output_optimization"], "rtk"
         )
+        self.assertFalse(
+            self.requests()[-1]["input"]["capabilities"]["retrieval_available"]
+        )
 
         second = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
         self.assertIn("hookSpecificOutput", second)

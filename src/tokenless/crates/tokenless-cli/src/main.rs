@@ -337,13 +337,31 @@ pub fn get_home_dir() -> String {
     tokenless_stats::get_home_dir()
 }
 
+/// Read a state override, including its DSH-managed shell alias.
+fn state_path_override(primary: &str, dsh_managed: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            if std::env::var("DSH_SHELL").as_deref() == Ok("1") {
+                std::env::var(dsh_managed)
+                    .ok()
+                    .filter(|path| !path.is_empty())
+            } else {
+                None
+            }
+        })
+}
+
 /// Resolve the directory containing tokenless SQLite databases.
 ///
 /// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only and may be an
-/// absolute directory outside the real home. An invalid explicit override is
-/// returned as an error so state never silently moves back to the default.
+/// absolute directory outside the real home. DSH's managed shell supplies the
+/// same path through `DSH_TOKENLESS_DATA_DIR` because it removes inherited
+/// `TOKENLESS_*` variables. An invalid explicit override is returned as an
+/// error so state never silently moves back to the default.
 fn get_data_dir(home: &str) -> Result<PathBuf, String> {
-    let override_path = std::env::var("TOKENLESS_DATA_DIR").ok();
+    let override_path = state_path_override("TOKENLESS_DATA_DIR", "DSH_TOKENLESS_DATA_DIR");
     let home = (!home.is_empty()).then(|| Path::new(home));
     resolve_data_dir(home, override_path.as_deref()).map_err(|error| error.to_string())
 }
@@ -377,14 +395,11 @@ impl DatabasePathResolver {
 fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
     let home = paths.home();
     let data_dir = paths.data_dir();
-    match std::env::var("TOKENLESS_STATS_DB") {
-        Ok(env_path) if !env_path.is_empty() => {
-            match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
-                Ok(path) => return Ok(path),
-                Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"),
-            }
+    if let Some(env_path) = state_path_override("TOKENLESS_STATS_DB", "DSH_TOKENLESS_STATS_DB") {
+        match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
+            Ok(path) => return Ok(path),
+            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"),
         }
-        _ => {}
     }
     let data_dir = data_dir.map_err(str::to_string)?;
     let path = data_dir.join("stats.db");
@@ -443,9 +458,7 @@ fn get_stash_db_path_with(
             Err(reason) => eprintln!("[tokenless] rejecting --stash-db {p}: {reason}"),
         }
     }
-    if let Ok(env_path) = std::env::var("TOKENLESS_STASH_DB")
-        && !env_path.is_empty()
-    {
+    if let Some(env_path) = state_path_override("TOKENLESS_STASH_DB", "DSH_TOKENLESS_STASH_DB") {
         match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
             Ok(path) => return Ok(path),
             Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {reason}"),

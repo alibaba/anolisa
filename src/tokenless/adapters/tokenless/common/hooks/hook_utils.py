@@ -189,6 +189,28 @@ SKIP_TOOLS: set[str] = set(_tool_categories.get("layer_1_skip", {}).get("tools",
 # These tools produce text output that can be safely truncated if too long.
 SHELL_TOOLS: set[str] = set(_tool_categories.get("layer_2_shell", {}).get("tools", []))
 
+_TOKENLESS_RETRIEVE_COMMAND_RE = re.compile(
+    r"^[ \t]*(?:\"tokenless\"|'tokenless'|tokenless)[ \t]+retrieve[ \t]+"
+    r"(?:\"(?:[0-9a-f]{24}|<<tokenless:[0-9a-f]{24}>>)\"|"
+    r"'(?:[0-9a-f]{24}|<<tokenless:[0-9a-f]{24}>>)'|[0-9a-f]{24})[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def tokenless_retrieve_command_available() -> bool:
+    """Return whether a Marker command can invoke bare ``tokenless``."""
+    return shutil.which("tokenless") is not None
+
+
+def is_tokenless_retrieve_command(tool_name: str, arguments: object) -> bool:
+    """Recognize the exact local recovery command emitted by Tokenless markers."""
+    if tool_name not in SHELL_TOOLS or not isinstance(arguments, dict):
+        return False
+    command = arguments.get("command")
+    if not isinstance(command, str):
+        return False
+    return _TOKENLESS_RETRIEVE_COMMAND_RE.fullmatch(command) is not None
+
 # Layer 3: API tools (zero-truncation).
 # These tools return structured data or API responses that should not be truncated.
 # No explicit set needed; tools not in SKIP_TOOLS or SHELL_TOOLS are Layer 3.
@@ -644,22 +666,21 @@ def build_post_tool_request(
     status: str,
     content_origin: str,
     output_optimization: str,
+    *,
+    result_kind: str,
+    retrieval_available: bool,
     session_id: str = "",
     tool_use_id: str = "",
     replace_output: bool = False,
     replace_with_text: bool = False,
 ) -> dict:
-    """Build a Protocol v2 PostTool transport request.
-
-    Common Hooks cannot enforce marker-scoped authorization for a command
-    recovery path, so Core must reject lossy candidates.
-    """
+    """Build a Protocol v2 PostTool transport request."""
     return {
         "protocol_version": 2,
         "operation": "post_tool",
         "attribution": _attribution(agent_id, session_id, tool_use_id),
         "input": {
-            "result_kind": "tool",
+            "result_kind": result_kind,
             "tool_name": tool_name,
             "content": content,
             "status": status,
@@ -667,7 +688,7 @@ def build_post_tool_request(
             "output_optimization": output_optimization,
             "capabilities": {
                 "replace_output": replace_output,
-                "retrieval_available": False,
+                "retrieval_available": retrieval_available,
                 "replace_with_text": replace_with_text,
             },
         },

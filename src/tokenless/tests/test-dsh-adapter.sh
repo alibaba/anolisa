@@ -12,7 +12,9 @@ import assert from 'node:assert/strict'
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   readFileSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -22,6 +24,7 @@ const [root, tmp] = process.argv.slice(2)
 const binary = join(tmp, 'tokenless')
 const logFile = join(tmp, 'requests.jsonl')
 const missingBinary = join(tmp, 'missing-tokenless')
+const originalPath = process.env.PATH
 writeFileSync(
   binary,
   '#!/usr/bin/env node\n' +
@@ -30,7 +33,7 @@ writeFileSync(
     'process.stdin.on("data", chunk => input += chunk);\n' +
     'process.stdin.on("end", () => {\n' +
     '  const request = JSON.parse(input);\n' +
-    '  appendFileSync(process.env.TOKENLESS_TEST_LOG, JSON.stringify({ argv: process.argv.slice(2), request }) + "\\n");\n' +
+    '  appendFileSync(process.env.TOKENLESS_TEST_LOG, JSON.stringify({ argv: process.argv.slice(2), dataDir: process.env.TOKENLESS_DATA_DIR, statsDb: process.env.TOKENLESS_STATS_DB, stashDb: process.env.TOKENLESS_STASH_DB, request }) + "\\n");\n' +
     '  const mode = process.env.TOKENLESS_TEST_MODE;\n' +
     '  if (mode === "fail") process.exit(7);\n' +
     '  if (mode === "timeout") { setTimeout(() => {}, 10000); return; }\n' +
@@ -45,6 +48,7 @@ writeFileSync(
 )
 chmodSync(binary, 0o755)
 process.env.TOKENLESS_TEST_LOG = logFile
+process.env.PATH = `${tmp}:${originalPath}`
 
 const pluginPath = join(root, 'adapters/tokenless/dsh/dist/index.js')
 const plugin = await import(`file://${pluginPath}`)
@@ -57,14 +61,21 @@ assert.doesNotMatch(cordisPatch, /name:\s+\.\/dist\/index\.js/)
 
 function register(config = {}) {
   let callback
+  let shellEnvContributor
   const ctx = {
     on(event, listener) {
       assert.equal(event, 'tools/post-execute')
       callback = listener
     },
+    shellEnv: {
+      register(contributor) {
+        shellEnvContributor = contributor
+      },
+    },
   }
   plugin.apply(ctx, config)
   assert.equal(typeof callback, 'function')
+  callback.shellEnvContributor = shellEnvContributor
   return callback
 }
 
@@ -98,11 +109,31 @@ const exec = {
   name: 'api_call',
   callId: 'call-1',
   signal: new AbortController().signal,
-  agent: { id: 'session-1' },
+  agent: {
+    id: 'session-1',
+    session: { header: { cwd: tmp } },
+  },
 }
+delete process.env.TOKENLESS_DATA_DIR
+delete process.env.TOKENLESS_STATS_DB
+delete process.env.TOKENLESS_STASH_DB
 const listener = register({ tokenlessBin: binary })
 assert.equal(plugin.name, 'anolisa-tokenless')
-assert.deepEqual(plugin.inject, ['tools'])
+assert.deepEqual(plugin.inject, ['tools', 'shellEnv'])
+assert.deepEqual(listener.shellEnvContributor.variables, {
+  DSH_TOKENLESS_DATA_DIR: {
+    description: 'Workspace-local Tokenless state used by Marker recovery.',
+  },
+  DSH_TOKENLESS_STATS_DB: {
+    description: 'Tokenless statistics database selected by the DSH host.',
+  },
+  DSH_TOKENLESS_STASH_DB: {
+    description: 'Tokenless Stash database selected by the DSH host.',
+  },
+})
+assert.deepEqual(listener.shellEnvContributor.resolve(exec), {
+  DSH_TOKENLESS_DATA_DIR: join(tmp, '.tokenless'),
+})
 
 // DSH contributes host facts; Core owns detection, compression, and selection.
 process.env.TOKENLESS_TEST_MODE = 'applied'
@@ -115,8 +146,10 @@ const applied = await listener(exec, success(), async () => {
 assert.equal(nextCalled, true)
 assert.deepEqual(applied.content, [{ type: 'text', text: '{"ok":true}' }])
 assert.deepEqual(applied.additionalContexts, [downstreamContext])
+assert.equal(readFileSync(join(tmp, '.tokenless', '.gitignore'), 'utf8'), '*\n')
 assert.deepEqual(requests(), [{
   argv: ['compress'],
+  dataDir: join(tmp, '.tokenless'),
   request: {
     protocol_version: 2,
     operation: 'post_tool',
@@ -134,12 +167,108 @@ assert.deepEqual(requests(), [{
       output_optimization: 'none',
       capabilities: {
         replace_output: true,
-        retrieval_available: false,
+        retrieval_available: true,
         replace_with_text: true,
       },
     },
   },
 }])
+
+// A CLI found only through an absolute plugin path cannot support the bare
+// command emitted by a Marker.
+const isolatedPath = join(tmp, 'isolated-path')
+mkdirSync(isolatedPath)
+symlinkSync(process.execPath, join(isolatedPath, 'node'))
+process.env.PATH = isolatedPath
+clearRequests()
+await listener(exec, success('ordinary output'), async () => ({ kind: 'accept' }))
+assert.equal(
+  requests()[0].request.input.capabilities.retrieval_available,
+  false,
+)
+process.env.PATH = `${tmp}:${originalPath}`
+
+// A different bare CLI cannot recover payloads written by the selected CLI.
+const mismatchedPath = join(tmp, 'mismatched-path')
+mkdirSync(mismatchedPath)
+symlinkSync(process.execPath, join(mismatchedPath, 'node'))
+writeFileSync(join(mismatchedPath, 'tokenless'), '#!/bin/sh\nexit 1\n')
+chmodSync(join(mismatchedPath, 'tokenless'), 0o755)
+process.env.PATH = mismatchedPath
+clearRequests()
+await listener(exec, success('ordinary output'), async () => ({ kind: 'accept' }))
+assert.equal(
+  requests()[0].request.input.capabilities.retrieval_available,
+  false,
+)
+process.env.PATH = `${tmp}:${originalPath}`
+
+// Relative PATH entries cannot identify the future Shell call's executable
+// because DSH runs that call from the session workspace, not the plugin cwd.
+const pluginCwd = join(tmp, 'plugin-cwd')
+const relativeWorkspace = join(tmp, 'relative-workspace')
+mkdirSync(pluginCwd)
+mkdirSync(relativeWorkspace)
+symlinkSync(binary, join(pluginCwd, 'tokenless'))
+const originalCwd = process.cwd()
+process.chdir(pluginCwd)
+process.env.PATH = `.:${originalPath}`
+clearRequests()
+await listener({
+  ...exec,
+  agent: {
+    ...exec.agent,
+    session: { header: { cwd: relativeWorkspace } },
+  },
+}, success('ordinary output'), async () => ({ kind: 'accept' }))
+assert.equal(
+  requests()[0].request.input.capabilities.retrieval_available,
+  false,
+)
+process.chdir(originalCwd)
+process.env.PATH = `${tmp}:${originalPath}`
+
+// DSH receives file-level database overrides under managed names while Core
+// keeps the original host environment.
+const customDataDir = join(tmp, 'custom-state')
+process.env.TOKENLESS_DATA_DIR = customDataDir
+process.env.TOKENLESS_STATS_DB = join(customDataDir, 'custom-stats.db')
+process.env.TOKENLESS_STASH_DB = join(customDataDir, 'custom-stash.db')
+assert.deepEqual(listener.shellEnvContributor.resolve(exec), {
+  DSH_TOKENLESS_DATA_DIR: customDataDir,
+  DSH_TOKENLESS_STATS_DB: join(customDataDir, 'custom-stats.db'),
+  DSH_TOKENLESS_STASH_DB: join(customDataDir, 'custom-stash.db'),
+})
+clearRequests()
+await listener(exec, success('ordinary output'), async () => ({ kind: 'accept' }))
+assert.equal(requests()[0].statsDb, join(customDataDir, 'custom-stats.db'))
+assert.equal(requests()[0].stashDb, join(customDataDir, 'custom-stash.db'))
+delete process.env.TOKENLESS_DATA_DIR
+delete process.env.TOKENLESS_STATS_DB
+delete process.env.TOKENLESS_STASH_DB
+
+// Existing adapter-owned ignore rules are preserved while the state-wide rule
+// is appended before Core can persist complete tool output.
+const existingWorkspace = join(tmp, 'existing-workspace')
+mkdirSync(join(existingWorkspace, '.tokenless'), { recursive: true })
+writeFileSync(join(existingWorkspace, '.tokenless', '.gitignore'), '*.tmp\n')
+process.env.TOKENLESS_TEST_MODE = 'passthrough'
+clearRequests()
+const existingDecision = { kind: 'accept' }
+const existingResult = await listener(
+  {
+    ...exec,
+    agent: { ...exec.agent, session: { header: { cwd: existingWorkspace } } },
+  },
+  success('ordinary output'),
+  async () => existingDecision,
+)
+assert.strictEqual(existingResult, existingDecision)
+assert.equal(requests().length, 1)
+assert.equal(
+  readFileSync(join(existingWorkspace, '.tokenless', '.gitignore'), 'utf8'),
+  '*.tmp\n*\n',
+)
 
 // Plain text still reaches Core instead of being classified by the adapter.
 process.env.TOKENLESS_TEST_MODE = 'passthrough'
@@ -148,6 +277,65 @@ const plainDecision = { kind: 'accept' }
 const plain = await listener(exec, success('ordinary plain text'), async () => plainDecision)
 assert.strictEqual(plain, plainDecision)
 assert.equal(requests()[0].request.input.content, 'ordinary plain text')
+
+// Successful marker-directed recovery is labeled so Core cannot compress it again.
+process.env.TOKENLESS_TEST_MODE = 'passthrough'
+const marker = '<<tokenless:0123456789abcdef01234567>>'
+for (const command of [
+  `tokenless retrieve '${marker}'`,
+  `tokenless retrieve "${marker}"`,
+  'tokenless retrieve ABCDEF0123456789ABCDEF01',
+]) {
+  clearRequests()
+  const decision = { kind: 'accept' }
+  const retrieve = await listener(
+    { ...exec, name: 'Bash', arguments: { command } },
+    success('full payload', { exitCode: 0 }),
+    async () => decision,
+  )
+  assert.strictEqual(retrieve, decision)
+  const sentRequest = requests()[0].request
+  assert.equal(sentRequest.input.result_kind, 'retrieve', command)
+  assert.equal(sentRequest.input.capabilities.retrieval_available, false, command)
+}
+
+// Similar shell syntax remains an ordinary recoverable tool result.
+for (const command of [
+  `relative/tokenless retrieve '${marker}'`,
+  `/usr/bin/tokenless retrieve '${marker}'`,
+  `'/usr/local/bin/tokenless' retrieve '${marker}'`,
+  `'/tmp/tokenless test/tokenless' retrieve '${marker}'`,
+  `tokenless retrieve ${marker}`,
+  'tokenless retrieve 0123456789abcdef01234567 # comment',
+  'tokenless retrieve 0123456789abcdef0123456\\7',
+  "tokenless retrieve $'0123456789abcdef01234567'",
+  'tokenless retrieve\n0123456789abcdef01234567',
+  'tokenless retrieve 0123456789abcdef01234567\u00a0',
+  `tokenless retrieve '${marker}' | jq .`,
+  `tokenless retrieve '${marker}' > recovered.json`,
+  `tokenless retrieve '${marker}'; echo done`,
+  `tokenless retrieve '${marker}' extra`,
+  'tokenless retrieve <<tokenless:not-a-hash>>',
+]) {
+  clearRequests()
+  await listener(
+    { ...exec, name: 'Bash', arguments: { command } },
+    success('ordinary output', { exitCode: 0 }),
+    async () => ({ kind: 'accept' }),
+  )
+  const sentRequest = requests()[0].request
+  assert.equal(sentRequest.input.result_kind, 'tool', command)
+  assert.equal(sentRequest.input.capabilities.retrieval_available, true, command)
+}
+
+clearRequests()
+await listener(
+  { ...exec, name: 'web_search', arguments: { command: `tokenless retrieve '${marker}'` } },
+  success('ordinary output', { exitCode: 0 }),
+  async () => ({ kind: 'accept' }),
+)
+assert.equal(requests()[0].request.input.result_kind, 'tool')
+assert.equal(requests()[0].request.input.capabilities.retrieval_available, true)
 
 // A downstream content projection is the model-visible input sent to Core.
 clearRequests()
@@ -235,7 +423,11 @@ await listener(exec, {
 assert.match(requests()[0].request.input.content, /permission denied after downstream replacement/)
 assert.doesNotMatch(requests()[0].request.input.content, /stale display content/)
 
-const bashExec = { ...exec, name: 'Bash' }
+const bashExec = {
+  ...exec,
+  name: 'Bash',
+  arguments: { command: `tokenless retrieve '${marker}'` },
+}
 clearRequests()
 const commandFailure = await listener(bashExec, success('rendered command output', {
   kind: 'foreground',
@@ -247,6 +439,8 @@ const commandFailure = await listener(bashExec, success('rendered command output
 assert.equal(commandFailure.additionalContexts.length, 1)
 request = requests()[0].request
 assert.equal(request.input.status, 'error')
+assert.equal(request.input.result_kind, 'tool')
+assert.equal(request.input.capabilities.retrieval_available, false)
 assert.equal(request.input.content_origin, 'command_output')
 assert.equal(request.input.content, 'permission denied')
 

@@ -10,13 +10,13 @@ product adapters. The Python SDK and its AgentScope-specific child document live
 
 | Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces lossless JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
+| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
-| Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted lossless results or adds error guidance | Core-selected for replaceable text | — |
+| Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
-| DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core | Core-selected for replaceable text | — |
+| DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
 
@@ -33,15 +33,16 @@ smaller, not by itself that the host removed the original from its model request
 
 ## Adapter processing rules
 
-The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one Protocol v2
-`post_tool` request to `tokenless compress`. It does not expose a marker-authorized recovery path,
-so Core accepts only lossless candidates and returns the original for every non-`applied`
-disposition. It currently routes:
+The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one
+`post_tool` request to `tokenless compress`. When the host can replace the result and bare
+`tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
+with the existing shell tool. Otherwise Core accepts only lossless candidates. Every non-`applied`
+disposition keeps the original. The hook currently routes:
 
 | Content | Current shared-hook behavior |
 |---------|------------------------------|
 | JSON | Lossless structural cleanup; TOON may be selected for text-capable replacement slots |
-| JSON requiring string, array, or depth truncation | Rejected with `recoverability_unavailable` because the Common Hook has no marker-authorized recovery path |
+| JSON requiring record reduction or string, array, or depth truncation | Applied only when Marker command recovery is available; otherwise rejected with `recoverability_unavailable` |
 | Build/test/package logs, long plain text, diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching domain compressor is connected |
 
 Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
@@ -102,10 +103,22 @@ The plugin runs on DSH's `tools/post-execute` waterfall and sends replaceable
 root results containing one text block to `tokenless compress`. Core owns
 content detection, JSON cleanup, TOON selection, size gates, tool-origin
 thresholds, and final acceptance. Non-JSON and file-content results pass
-through. DSH has no Marker-authorized recovery path, so Core rejects lossy
-candidates. Multiple blocks, images, Code Mode child successes, and canonical
+through. When bare `tokenless` resolves on DSH's shell `PATH` to the same
+executable selected for the Core call, a Marker can ask the model to run a
+standalone `tokenless retrieve` command; its successful output bypasses
+compression. Multiple blocks, images, Code Mode child successes, and canonical
 values replaced by a later waterfall listener remain untouched. A missing,
 failing, or timed-out CLI also preserves the original content.
+
+DSH removes inherited `TOKENLESS_*` variables from model shell commands. The
+adapter publishes managed aliases for the selected data directory and optional
+statistics/Stash database overrides so Core and the shell recover from the same
+state. By default this state is stored in `.tokenless` under the session
+workspace. The adapter creates `.tokenless/.gitignore` with `*` so complete tool
+text and Stash payloads are not included by `git add -A`. Set
+`TOKENLESS_DATA_DIR`, `TOKENLESS_STATS_DB`, or `TOKENLESS_STASH_DB` before
+starting DSH to use another absolute path accessible to its shell sandbox;
+protect and exclude custom paths according to your repository policy.
 
 Add an override for the installed row to
 `$DSH_HOME/profiles/<profile>/cordis.patch.yml`, then restart that DSH profile:
@@ -125,7 +138,7 @@ that need to differ.
 | Option | Default | Behavior |
 |--------|---------|----------|
 | `responseCompressionEnabled` | `true` | Enables response compression. Setting it to `false` does not disable environment-error attribution. |
-| `tokenlessBin` | `$TOKENLESS_BIN`, then `tokenless` | Selects the Tokenless CLI executable. A non-empty plugin value takes precedence over the environment variable. |
+| `tokenlessBin` | `$TOKENLESS_BIN`, then `tokenless` | Selects the Tokenless CLI executable. A non-empty plugin value takes precedence over the environment variable. Marker recovery additionally requires bare `tokenless` on the shell `PATH` to resolve to this same executable. |
 | `timeoutMs` | `3000` | Bounds one Tokenless child process in milliseconds. Only a positive integer is accepted. |
 | `maxBuffer` | `2097152` | Bounds captured child-process output in bytes. Only a positive integer is accepted. |
 | `agentId` | `dsh` | Sets the Agent attribution recorded by Tokenless statistics. |
@@ -287,8 +300,9 @@ The install script uses OpenClaw's unsafe-install override as described above. R
 ### Hermes
 
 The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the
-block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. Hermes has no
-marker-authorized recovery path, so compression that requires recovery passes through unchanged.
+block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. When bare
+`tokenless` resolves on the shell `PATH`, a Marker can ask Hermes to run `tokenless retrieve`; the
+successful recovery result is returned without another compression pass.
 
 ### Qoder
 

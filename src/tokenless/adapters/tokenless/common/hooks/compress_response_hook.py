@@ -60,6 +60,7 @@ from hook_utils import (
     build_post_tool_request,
     consume_output_optimization,
     detect_cosh_ng_runtime,
+    is_tokenless_retrieve_command,
     is_skill_file,
     parse_version,
     resolve_agent_id,
@@ -68,6 +69,7 @@ from hook_utils import (
     run_compress,
     secure_write_text,
     skip,
+    tokenless_retrieve_command_available,
     try_parse_json,
     warn,
 )
@@ -365,6 +367,17 @@ def main() -> None:
         if error_parts:
             content = "\n".join(error_parts)
 
+    retrieve_result = status == "success" and is_tokenless_retrieve_command(
+        tool_name, input_data.get("tool_input")
+    )
+    retrieval_available = (
+        can_replace
+        and status == "success"
+        and output_optimization == "none"
+        and not retrieve_result
+        and tokenless_retrieve_command_available()
+    )
+
     # 10. The one Tokenless subprocess: Core owns all PostTool policy.
     request = build_post_tool_request(
         content,
@@ -373,6 +386,8 @@ def main() -> None:
         status,
         content_origin,
         output_optimization,
+        result_kind="retrieve" if retrieve_result else "tool",
+        retrieval_available=retrieval_available,
         session_id=session_id,
         tool_use_id=tool_use_id,
         replace_output=can_replace,

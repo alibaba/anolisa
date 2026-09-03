@@ -24,10 +24,20 @@ called **stash** to avoid the proprietary abbreviation.
    after expiry, deletion, or eviction.
 2. **Mark**: the output contains a marker such as
    `<... N of M records omitted, run: tokenless retrieve '<<tokenless:KEY>>'>`.
-3. **Retrieve**: a trusted local operator can call `tokenless retrieve <KEY>`.
-   An agent uses the Protocol v2 `retrieve` operation, which authorizes the
-   key against the Marker set currently visible to the model before reading
-   Stash.
+3. **Retrieve**: `tokenless retrieve <KEY>` reads the original payload through
+   the trusted same-user CLI boundary. Claude Code 2.1.121 or newer, Qoder CLI,
+   OpenCode, Cosh-NG, Hermes, and DSH let the Marker direct the model to this
+   existing shell command. Their adapters recognize only a successful,
+   standalone retrieve command with a valid Hash or Marker and classify its
+   output as an already recovered result, so it bypasses compression. AgentScope
+   instead keeps its static Retrieve Tool and authorizes the key against the
+   Marker set currently visible to the model before reading Stash.
+
+DSH removes inherited `TOKENLESS_*` variables from model shell commands. Its
+adapter therefore gives Core and the managed shell the same state directory,
+defaulting to `.tokenless` beneath the current session workspace. An absolute
+`TOKENLESS_DATA_DIR` set before DSH starts overrides that default when the DSH
+shell sandbox can access it.
 
 When no stash store is attached (`Option<Arc<dyn StashStore>>` = `None`),
 recognized record arrays are not reduced and do not fall back to positional
@@ -164,8 +174,12 @@ Existing database files must be regular files rather than symlinks. The CLI
 and bundled RTK writer use the same path policy.
 
 `retrieve` queries are parameterized SQL. Invalid input fails before a Stash
-read. Agent-facing Protocol v2 retrieval also rejects an unauthorized hash
-before the read and does not record that attempt as a Hit or Miss.
+read. AgentScope retrieval also rejects an unauthorized hash before the read
+and does not record that attempt as a Hit or Miss. Marker-command recovery does
+not add a second authorization layer: it deliberately uses the same trusted,
+same-user CLI boundary as a direct local invocation. The 96-bit content hash is
+the unguessable handle, and the adapter's strict command classification exists
+to prevent recovered output from being compressed again.
 
 ## Fail-open policy
 
@@ -189,8 +203,10 @@ as lossless and does not emit recovery markers.
 
 The former stateless MCP Retrieve server was removed. It accepted hashes
 without verified model-visibility context, so it cannot serve as an authorized
-agent recovery endpoint. Protocol v2 `retrieve` is the agent-facing path;
-`tokenless retrieve` remains the trusted local operations path.
+Retrieve Tool. AgentScope uses the Marker-authorized lifecycle path. Supported
+local CLI adapters expose the existing `tokenless retrieve` command indirectly
+through the Marker and their ordinary shell tool; this does not change the
+CLI's same-user trust boundary.
 
 Schema description truncation **is** stashed when a store is attached (CLI
 default): `SchemaCompressor::truncate_description` writes the verbatim
@@ -203,7 +219,7 @@ stash is off or the stash write fails.
 |---|---|---|
 | CCR Store | stash store (`StashStore` trait) | InMemory / SQLite(WAL) / Redis* |
 | `<<ccr:HASH>>` | `<<tokenless:HASH>>` | 24-hex BLAKE3, same key length |
-| `headroom_retrieve` (MCP) | Protocol v2 `retrieve` | Requires current visible Markers; trusted local CLI remains separate |
+| `headroom_retrieve` (MCP) | AgentScope static Retrieve Tool or Marker-directed `tokenless retrieve` | AgentScope requires visible Markers; supported CLI agents use the same-user local command |
 | DashMap `remove_if` TOCTOU fix | `BEGIN IMMEDIATE` ownership transaction | SQLite path |
 | default TTL 5 min / cap 1000 | InMemory 5 min / 1000; SQLite 1 h / 10 000 | tuned for hook process model |
 

@@ -369,6 +369,62 @@ class TestBinaryFallbackPaths(unittest.TestCase):
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestRetrieveCommandClassifier(unittest.TestCase):
+    @staticmethod
+    def _classify(tool_name: str, command: object) -> bool:
+        hook_utils = TestBinaryFallbackPaths._hook_utils()
+        return hook_utils.is_tokenless_retrieve_command(
+            tool_name, {"command": command}
+        )
+
+    def test_accepts_generated_and_direct_retrieve_commands(self):
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+        commands = (
+            f"tokenless retrieve '{marker}'",
+            f'tokenless retrieve "{marker}"',
+            "tokenless retrieve ABCDEF0123456789ABCDEF01",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(self._classify("Bash", command))
+
+    def test_rejects_non_retrieve_shell_syntax_and_invalid_boundaries(self):
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+        cases = (
+            ("Read", f"tokenless retrieve '{marker}'"),
+            ("Bash", f"relative/tokenless retrieve '{marker}'"),
+            ("Bash", f"/usr/bin/tokenless retrieve '{marker}'"),
+            ("Bash", f"'/usr/local/bin/tokenless' retrieve '{marker}'"),
+            ("Bash", f"'/tmp/tokenless test/tokenless' retrieve '{marker}'"),
+            ("Bash", f"tokenless retrieve {marker}"),
+            ("Bash", "tokenless retrieve 0123456789abcdef01234567 # comment"),
+            ("Bash", "tokenless retrieve 0123456789abcdef0123456\\7"),
+            ("Bash", "tokenless retrieve $'0123456789abcdef01234567'"),
+            ("Bash", "tokenless retrieve\n0123456789abcdef01234567"),
+            ("Bash", "tokenless retrieve 0123456789abcdef01234567\u00a0"),
+            ("Bash", f"tokenless retrieve '{marker}' | jq ."),
+            ("Bash", f"tokenless retrieve '{marker}' > recovered.json"),
+            ("Bash", f"tokenless retrieve '{marker}'; echo done"),
+            ("Bash", f"tokenless retrieve '{marker}' extra"),
+            ("Bash", "tokenless retrieve <<tokenless:not-a-hash>>"),
+            ("Bash", "tokenless retrieve 'unterminated"),
+            ("Bash", 42),
+        )
+        for tool_name, command in cases:
+            with self.subTest(tool_name=tool_name, command=command):
+                self.assertFalse(self._classify(tool_name, command))
+
+    def test_recovery_requires_bare_tokenless_on_path(self):
+        hook_utils = TestBinaryFallbackPaths._hook_utils()
+        with mock.patch.object(hook_utils.shutil, "which", return_value=None):
+            self.assertFalse(hook_utils.tokenless_retrieve_command_available())
+        with mock.patch.object(
+            hook_utils.shutil, "which", return_value="/usr/bin/tokenless"
+        ):
+            self.assertTrue(hook_utils.tokenless_retrieve_command_available())
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestReplacementProtocol(unittest.TestCase):
     """Verify updatedToolOutput replacement semantics."""
 

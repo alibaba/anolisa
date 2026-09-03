@@ -8,11 +8,26 @@
  */
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import {
+  accessSync,
+  appendFileSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { delimiter, isAbsolute, join, resolve } from 'node:path'
 
 const PLUGIN_NAME = 'anolisa-tokenless'
 const DEFAULT_AGENT_ID = 'dsh'
 const DEFAULT_TIMEOUT_MS = 3000
 const DEFAULT_MAX_BUFFER = 2 * 1024 * 1024
+const DSH_TOKENLESS_DATA_DIR = 'DSH_TOKENLESS_DATA_DIR'
+const DSH_TOKENLESS_STATS_DB = 'DSH_TOKENLESS_STATS_DB'
+const DSH_TOKENLESS_STASH_DB = 'DSH_TOKENLESS_STASH_DB'
+const TOKENLESS_RETRIEVE_COMMAND_RE = /^[ \t]*(?:"tokenless"|'tokenless'|tokenless)[ \t]+retrieve[ \t]+(?:"(?:[0-9a-f]{24}|<<tokenless:[0-9a-f]{24}>>)"|'(?:[0-9a-f]{24}|<<tokenless:[0-9a-f]{24}>>)'|[0-9a-f]{24})[ \t]*$/i
 
 // DSH does not expose content origin, so map its built-in tool names at the
 // host boundary. Core owns every compression decision after this translation.
@@ -60,6 +75,101 @@ function tokenlessBinary(config) {
   const configured = valueOr(config, 'tokenlessBin', undefined)
   if (typeof configured === 'string' && configured.length > 0) return configured
   return process.env.TOKENLESS_BIN || 'tokenless'
+}
+
+/** Keep Core and DSH's sandboxed shell on the same writable state directory. */
+function tokenlessDataDir(exec) {
+  const configured = process.env.TOKENLESS_DATA_DIR
+  if (typeof configured === 'string' && configured.length > 0) return configured
+  const sessionCwd = exec.agent?.session?.header?.cwd
+  const workspace = typeof sessionCwd === 'string' && isAbsolute(sessionCwd)
+    ? sessionCwd
+    : process.cwd()
+  return join(workspace, '.tokenless')
+}
+
+/** Prevent default workspace state from becoming a source-control candidate. */
+function prepareTokenlessDataDir(exec) {
+  const dataDir = tokenlessDataDir(exec)
+  if (typeof process.env.TOKENLESS_DATA_DIR === 'string'
+    && process.env.TOKENLESS_DATA_DIR.length > 0) return dataDir
+
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+  if (!lstatSync(dataDir).isDirectory()) {
+    throw new Error(`Tokenless state path is not a directory: ${dataDir}`)
+  }
+  const ignorePath = join(dataDir, '.gitignore')
+  try {
+    writeFileSync(ignorePath, '*\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error
+    const metadata = lstatSync(ignorePath)
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Tokenless state ignore file is unsafe: ${ignorePath}`)
+    }
+    const contents = readFileSync(ignorePath, 'utf8')
+    if (!contents.split(/\r?\n/).includes('*')) {
+      appendFileSync(
+        ignorePath,
+        `${contents.endsWith('\n') || contents.length === 0 ? '' : '\n'}*\n`,
+      )
+    }
+  }
+  return dataDir
+}
+
+/** Publish the state overrides that DSH strips from model shell commands. */
+function tokenlessShellEnvironment(exec) {
+  const environment = {
+    [DSH_TOKENLESS_DATA_DIR]: tokenlessDataDir(exec),
+  }
+  for (const [source, target] of [
+    ['TOKENLESS_STATS_DB', DSH_TOKENLESS_STATS_DB],
+    ['TOKENLESS_STASH_DB', DSH_TOKENLESS_STASH_DB],
+  ]) {
+    const value = process.env[source]
+    if (typeof value === 'string' && value.length > 0) environment[target] = value
+  }
+  return environment
+}
+
+/** Resolve one bare executable using the path inherited by DSH shell commands. */
+function executableOnPath(name) {
+  if (typeof process.env.PATH !== 'string') return undefined
+  for (const directory of process.env.PATH.split(delimiter)) {
+    // A future Marker call may use a different shell workdir, so a
+    // cwd-relative entry cannot establish a stable executable identity.
+    if (!isAbsolute(directory)) return undefined
+    const candidate = join(directory, name)
+    try {
+      accessSync(candidate, constants.X_OK)
+      if (statSync(candidate).isFile()) return candidate
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
+/** Require compression and Marker recovery to invoke the same CLI file. */
+function tokenlessRetrieveCommandAvailable(config) {
+  const markerBinary = executableOnPath('tokenless')
+  if (markerBinary === undefined) return false
+  const selected = tokenlessBinary(config)
+  const selectedBinary = isAbsolute(selected)
+    ? selected
+    : (selected.includes('/') ? resolve(selected) : executableOnPath(selected))
+  if (selectedBinary === undefined) return false
+  try {
+    accessSync(selectedBinary, constants.X_OK)
+    const markerStat = statSync(markerBinary)
+    const selectedStat = statSync(selectedBinary)
+    return selectedStat.isFile()
+      && markerStat.dev === selectedStat.dev
+      && markerStat.ino === selectedStat.ino
+  } catch {
+    return false
+  }
 }
 
 /** Convert one process limit to a positive finite integer. */
@@ -174,6 +284,14 @@ function contentOrigin(toolName) {
   return 'api_response'
 }
 
+/** Recognize the exact local recovery command emitted by Tokenless markers. */
+function isTokenlessRetrieveCommand(toolName, args) {
+  if (!COMMAND_TOOLS.has(toolName.toLowerCase())) return false
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return false
+  if (typeof args.command !== 'string') return false
+  return TOKENLESS_RETRIEVE_COMMAND_RE.test(args.command)
+}
+
 /** Execute a child process with bounded output and explicit stdin. */
 function runTokenless(binary, request, options) {
   return new Promise((resolve, reject) => {
@@ -204,6 +322,10 @@ async function runPostTool(request, exec, config) {
       encoding: 'utf8',
       windowsHide: true,
       signal: exec.signal,
+      env: {
+        ...process.env,
+        TOKENLESS_DATA_DIR: prepareTokenlessDataDir(exec),
+      },
     })
     const response = JSON.parse(stdout)
     if (!response || typeof response !== 'object' || Array.isArray(response)) return undefined
@@ -217,7 +339,16 @@ async function runPostTool(request, exec, config) {
 }
 
 /** Build one operation request from the DSH execution boundary. */
-function postToolRequest(exec, config, content, status, origin, replaceOutput) {
+function postToolRequest(
+  exec,
+  config,
+  content,
+  status,
+  origin,
+  replaceOutput,
+  resultKind,
+  retrievalAvailable,
+) {
   const attribution = {
     agent_id: String(valueOr(config, 'agentId', DEFAULT_AGENT_ID)),
   }
@@ -232,7 +363,7 @@ function postToolRequest(exec, config, content, status, origin, replaceOutput) {
     operation: 'post_tool',
     attribution,
     input: {
-      result_kind: 'tool',
+      result_kind: resultKind,
       tool_name: exec.name,
       content,
       status,
@@ -240,7 +371,7 @@ function postToolRequest(exec, config, content, status, origin, replaceOutput) {
       output_optimization: 'none',
       capabilities: {
         replace_output: replaceOutput,
-        retrieval_available: false,
+        retrieval_available: retrievalAvailable,
         replace_with_text: replaceOutput,
       },
     },
@@ -250,6 +381,22 @@ function postToolRequest(exec, config, content, status, origin, replaceOutput) {
 /** Register DSH's PostTool seam as a thin Tokenless lifecycle adapter. */
 export function apply(ctx, config = {}) {
   const compressionEnabled = valueOr(config, 'responseCompressionEnabled', true) !== false
+
+  ctx.shellEnv.register({
+    name: PLUGIN_NAME,
+    variables: {
+      [DSH_TOKENLESS_DATA_DIR]: {
+        description: 'Workspace-local Tokenless state used by Marker recovery.',
+      },
+      [DSH_TOKENLESS_STATS_DB]: {
+        description: 'Tokenless statistics database selected by the DSH host.',
+      },
+      [DSH_TOKENLESS_STASH_DB]: {
+        description: 'Tokenless Stash database selected by the DSH host.',
+      },
+    },
+    resolve: tokenlessShellEnvironment,
+  })
 
   ctx.on('tools/post-execute', async (exec, result, next) => {
     // DSH post-execute is a waterfall; later policies own the final projection.
@@ -272,6 +419,8 @@ export function apply(ctx, config = {}) {
         'error',
         'command_output',
         false,
+        'tool',
+        false,
       )
       const response = await runPostTool(request, exec, config)
       const diagnostic = response?.disposition === 'tool_error'
@@ -290,6 +439,7 @@ export function apply(ctx, config = {}) {
       const effectiveContent = decision.content ?? result.content
       const content = singleText(effectiveContent)
       if (content === undefined) return decision
+      const retrieveResult = isTokenlessRetrieveCommand(exec.name, exec.arguments)
       const request = postToolRequest(
         exec,
         config,
@@ -297,6 +447,8 @@ export function apply(ctx, config = {}) {
         status,
         contentOrigin(exec.name),
         true,
+        retrieveResult ? 'retrieve' : 'tool',
+        !retrieveResult && tokenlessRetrieveCommandAvailable(config),
       )
       const response = await runPostTool(request, exec, config)
       if (response?.disposition !== 'applied' || typeof response.output !== 'string') {
@@ -321,6 +473,8 @@ export function apply(ctx, config = {}) {
       status,
       contentOrigin(exec.name),
       false,
+      'tool',
+      false,
     )
     const response = await runPostTool(request, exec, config)
     const diagnostic = response?.disposition === 'tool_error'
@@ -331,4 +485,4 @@ export function apply(ctx, config = {}) {
 }
 
 export const name = PLUGIN_NAME
-export const inject = ['tools']
+export const inject = ['tools', 'shellEnv']

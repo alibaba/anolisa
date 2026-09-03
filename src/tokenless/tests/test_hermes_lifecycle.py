@@ -2,6 +2,7 @@
 """Lifecycle contract tests for the Hermes adapter."""
 
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -38,6 +39,9 @@ class HermesLifecycleTest(unittest.TestCase):
         self.response = None
         self.original_resolve = plugin._resolve_binary
         self.original_run = plugin.run_compress
+        self.original_retrieve_available = (
+            plugin.tokenless_retrieve_command_available
+        )
 
         def resolve(name, fallback):
             del fallback
@@ -49,10 +53,14 @@ class HermesLifecycleTest(unittest.TestCase):
 
         plugin._resolve_binary = resolve
         plugin.run_compress = run
+        plugin.tokenless_retrieve_command_available = lambda: True
 
     def tearDown(self):
         self.plugin._resolve_binary = self.original_resolve
         self.plugin.run_compress = self.original_run
+        self.plugin.tokenless_retrieve_command_available = (
+            self.original_retrieve_available
+        )
 
     def test_pre_tool_blocks_with_core_rewrite(self):
         rewritten = (
@@ -171,10 +179,119 @@ class HermesLifecycleTest(unittest.TestCase):
             request["input"]["capabilities"],
             {
                 "replace_output": True,
-                "retrieval_available": False,
+                "retrieval_available": True,
                 "replace_with_text": True,
             },
         )
+
+    def test_post_tool_disables_recovery_when_marker_command_is_unavailable(self):
+        self.plugin.tokenless_retrieve_command_available = lambda: False
+        self.response = {"output": "unchanged", "disposition": "passthrough"}
+
+        self.plugin.on_transform_tool_result(
+            tool_name="web_search",
+            args={"query": "tokenless"},
+            result='{"items":[]}',
+            status="ok",
+        )
+
+        request = self.requests[0][1]["input"]
+        self.assertFalse(request["capabilities"]["retrieval_available"])
+
+    def test_post_tool_compresses_terminal_output_field(self):
+        self.response = {
+            "output": "shortened <<tokenless:0123456789abcdef01234567>>",
+            "disposition": "applied",
+            "recoverability": "retrievable",
+        }
+        envelope = {
+            "output": '{"results":["entry-000","entry-150"]}',
+            "exit_code": 0,
+            "status": "completed",
+        }
+
+        result = self.plugin.on_transform_tool_result(
+            tool_name="terminal",
+            args={"command": "python3 emit.py"},
+            result=json.dumps(envelope),
+            status="ok",
+        )
+
+        self.assertEqual(
+            self.requests[0][1]["input"]["content"], envelope["output"]
+        )
+        self.assertEqual(
+            json.loads(result),
+            {
+                "output": "shortened <<tokenless:0123456789abcdef01234567>>",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        )
+
+    def test_post_tool_bypasses_successful_retrieve_command(self):
+        self.response = {"output": "full payload", "disposition": "passthrough"}
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+
+        result = self.plugin.on_transform_tool_result(
+            tool_name="terminal",
+            args={"command": f"tokenless retrieve '{marker}'"},
+            result="full payload",
+            status="ok",
+        )
+
+        self.assertIsNone(result)
+        request = self.requests[0][1]["input"]
+        self.assertEqual(request["result_kind"], "retrieve")
+        self.assertFalse(request["capabilities"]["retrieval_available"])
+
+    def test_post_tool_does_not_misclassify_retrieve_like_commands(self):
+        self.response = {"output": "unchanged", "disposition": "passthrough"}
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+
+        for command in (
+            f"tokenless retrieve '{marker}' | jq .",
+            f"tokenless retrieve '{marker}' extra",
+            "relative/tokenless retrieve 0123456789abcdef01234567",
+        ):
+            with self.subTest(command=command):
+                self.requests.clear()
+                self.plugin.on_transform_tool_result(
+                    tool_name="terminal",
+                    args={"command": command},
+                    result="unchanged",
+                    status="ok",
+                )
+                request = self.requests[0][1]["input"]
+                self.assertEqual(request["result_kind"], "tool")
+                self.assertTrue(request["capabilities"]["retrieval_available"])
+
+        self.requests.clear()
+        self.plugin.on_transform_tool_result(
+            tool_name="web_search",
+            args={"command": f"tokenless retrieve '{marker}'"},
+            result="unchanged",
+            status="ok",
+        )
+        request = self.requests[0][1]["input"]
+        self.assertEqual(request["result_kind"], "tool")
+        self.assertTrue(request["capabilities"]["retrieval_available"])
+
+    def test_failed_retrieve_command_remains_a_tool_error(self):
+        self.response = {"output": "missing", "disposition": "passthrough"}
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+
+        self.plugin.on_transform_tool_result(
+            tool_name="terminal",
+            args={"command": f"tokenless retrieve '{marker}'"},
+            result="stash entry not found",
+            status="error",
+        )
+
+        request = self.requests[0][1]["input"]
+        self.assertEqual(request["status"], "error")
+        self.assertEqual(request["result_kind"], "tool")
+        self.assertFalse(request["capabilities"]["retrieval_available"])
 
     def test_post_tool_maps_host_status_and_content_origin(self):
         self.response = {"output": "unchanged", "disposition": "passthrough"}
@@ -235,6 +352,9 @@ class HermesLifecycleTest(unittest.TestCase):
         )
         self.assertEqual(
             self.requests[-1][1]["input"]["output_optimization"], "rtk"
+        )
+        self.assertFalse(
+            self.requests[-1][1]["input"]["capabilities"]["retrieval_available"]
         )
 
         self.plugin.on_transform_tool_result(

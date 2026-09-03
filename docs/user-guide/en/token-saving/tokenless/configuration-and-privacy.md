@@ -98,6 +98,16 @@ Database path priority is:
 
 An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory that does not exist yet; Tokenless canonicalizes its nearest existing ancestor before creating it. File-level overrides are accepted only beneath the canonical real home or selected data directory, and existing database symlinks are rejected. `TOKENLESS_DATA_DIR` does not relocate `~/.tokenless/config.json` or the SLS JSONL output.
 
+DeepSeek Harness is an exception to the default database location because its
+sandbox removes inherited `TOKENLESS_*` variables and may not expose the home
+directory. Its adapter uses `.tokenless` in the session workspace unless
+`TOKENLESS_DATA_DIR` is set, and publishes managed shell aliases for that
+directory plus `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB`. The default
+workspace directory contains a `.gitignore` with `*`, so complete tool text,
+Stash payloads, and SQLite sidecars are not staged by `git add -A`. Custom paths
+are not modified; make them accessible to the DSH shell sandbox and exclude
+them from source control or backups as required by your data policy.
+
 ## Local and external data
 
 | Data | Default path | Default content | Retention | Stop new data |

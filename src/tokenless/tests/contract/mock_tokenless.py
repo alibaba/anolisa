@@ -120,7 +120,10 @@ def respond_post_tool(request: dict, behavior: str) -> int:
         not isinstance(input_data, dict)
         or not isinstance(input_data.get("content"), str)
         or not isinstance(input_data.get("capabilities"), dict)
-        or input_data["capabilities"].get("retrieval_available") is not False
+        or not isinstance(
+            input_data["capabilities"].get("retrieval_available"), bool
+        )
+        or input_data.get("result_kind") not in {"tool", "retrieve"}
         or "content_origin" not in input_data
         or "output_optimization" not in input_data
     ):
@@ -133,7 +136,9 @@ def respond_post_tool(request: dict, behavior: str) -> int:
     before_tokens = 100
     after_tokens = 100
     can_replace = input_data["capabilities"].get("replace_output") is True
-    if input_data["output_optimization"] == "rtk":
+    if input_data["result_kind"] == "retrieve":
+        disposition = "passthrough"
+    elif input_data["output_optimization"] == "rtk":
         disposition = "passthrough"
     elif behavior == "applied" and can_replace:
         output = json.dumps(

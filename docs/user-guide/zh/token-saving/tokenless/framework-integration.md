@@ -9,13 +9,13 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 
 | Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
-| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换无损 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
+| cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换受支持的 JSON 结果；旧版 Copilot Shell 透传 | 对可替换文本由 Pipeline 选择 | Common Hook 仅接受无损结果 |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
-| Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的无损结果或追加错误指引 | 对可替换文本由 Core 选择 | — |
+| Hermes | `hermes` | 已硬关闭 | 阻止第一次调用并建议使用 Core 返回的改写命令 | 替换已接受的结果或追加错误指引；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | — |
 | Qoder | `qoder` | 已硬关闭 | 输出改写后的 Shell 输入 | 通过 `updatedToolOutput` 替换输出 | 对可替换文本由 Pipeline 选择 | — |
 | Claude Code | `claude-code` | 已硬关闭 | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 对可替换文本由 Pipeline 选择 | — |
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文；仅对识别出的环境失败追加上下文 | — | — |
-| DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core | 对可替换文本由 Core 选择 | 未注册 |
+| DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
 
@@ -32,13 +32,14 @@ Schema 压缩到达模型路径的方式因宿主而异：cosh 与 Cosh-NG 触�
 ## Adapter 处理规则
 
 共享 Cosh-NG、Qoder、Claude Code 和 OpenCode PostTool Hook 会向 `tokenless compress`
-发送一个 Protocol v2 `post_tool` 请求。它不提供 Marker 授权恢复路径，因此 Core 只接受无损
-候选，并对所有非 `applied` Disposition 返回原文。当前路由如下：
+发送一个 `post_tool` 请求。当宿主可以替换结果，且裸 `tokenless` 能从 Shell 的 `PATH`
+解析时，Marker 可以提示模型通过已有 Shell Tool 恢复省略内容；否则 Core 只接受无损候选。
+所有非 `applied` Disposition 都保留原文。当前路由如下：
 
 | 内容 | 当前共享 Hook 行为 |
 |------|--------------------|
 | JSON | 无损结构清理；文本替换槽还会考虑 TOON |
-| 需要字符串、数组或深度截断的 JSON | Common Hook 没有 Marker 授权恢复路径，因此以 `recoverability_unavailable` 拒绝候选 |
+| 需要 Record Reduction 或字符串、数组、深度截断的 JSON | 仅在 Marker 命令恢复可用时应用；否则以 `recoverability_unavailable` 拒绝候选 |
 | 构建/测试/包管理日志、长纯文本、Diff、Stack Trace、HTML、搜索结果、表格、源码、Unknown | 对应领域 Compressor 接入前原样透传 |
 
 内容检测、PostTool 200 字符门禁、基于工具来源的阈值、诊断、TOON 选择和最终接受均属于
@@ -91,10 +92,19 @@ dsh --profile web
 
 Plugin 在 DSH 的 `tools/post-execute` Waterfall 上运行，并把包含一个文本块、可替换的
 根调用结果发送给 `tokenless compress`。内容检测、JSON 清理、TOON 选择、大小门禁、
-基于工具来源的阈值和最终接受均由 Core 负责。非 JSON 与文件内容结果会透传。DSH 没有
-Marker 授权恢复路径，因此 Core 会拒绝有损候选。多文本块、图片、Code Mode 子调用的
+基于工具来源的阈值和最终接受均由 Core 负责。非 JSON 与文件内容结果会透传。当裸
+`tokenless` 能从 DSH Shell 的 `PATH` 解析到 Core 调用选中的同一个可执行文件时，Marker
+可以提示模型执行一条独立的 `tokenless retrieve` 命令；成功的恢复输出会绕过压缩。多文本块、图片、Code Mode 子调用的
 成功结果，以及后续 Waterfall Listener 已替换的 Canonical Value 均保持不变。CLI 缺失、
 失败或超时也会保留原始内容。
+
+DSH 会从模型 Shell 命令中移除继承的 `TOKENLESS_*` 环境变量。Adapter 会发布选定数据目录
+以及可选统计库和 Stash 库路径的受控别名，让 Core 与 Shell 使用同一份恢复状态。默认状态
+位于会话工作区下的 `.tokenless`。Adapter 会创建内容为 `*` 的
+`.tokenless/.gitignore`，避免完整工具文本与 Stash Payload 被 `git add -A` 纳入提交。
+如需自定义，应在启动 DSH 前设置 `TOKENLESS_DATA_DIR`、`TOKENLESS_STATS_DB` 或
+`TOKENLESS_STASH_DB`，路径必须是其 Shell 沙箱可访问的绝对路径；自定义路径需要按仓库策略
+自行保护并排除。
 
 在 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 中覆盖安装后的 row，然后重启
 对应的 DSH profile。
@@ -113,7 +123,7 @@ Marker 授权恢复路径，因此 Core 会拒绝有损候选。多文本块、�
 | 配置项 | 默认值 | 行为 |
 |--------|--------|------|
 | `responseCompressionEnabled` | `true` | 控制响应压缩。设为 `false` 后，环境错误归因仍保持启用。 |
-| `tokenlessBin` | `$TOKENLESS_BIN`，随后使用 `tokenless` | 选择 Tokenless CLI 可执行文件。非空 Plugin 配置优先于环境变量。 |
+| `tokenlessBin` | `$TOKENLESS_BIN`，随后使用 `tokenless` | 选择 Tokenless CLI 可执行文件。非空 Plugin 配置优先于环境变量。Marker 恢复还要求 Shell `PATH` 中的裸 `tokenless` 解析到同一个文件。 |
 | `timeoutMs` | `3000` | 限制一次 Tokenless 子进程的运行时间，单位为毫秒。只接受正整数。 |
 | `maxBuffer` | `2097152` | 限制捕获的子进程输出，单位为 byte。只接受正整数。 |
 | `agentId` | `dsh` | 设置 Tokenless 统计记录中的 Agent Attribution。 |
@@ -269,8 +279,8 @@ Extension 在启动时发现。启用后重启 cosh，并运行一个 Shell 工�
 ### Hermes
 
 Plugin 在 Hermes 新会话中生效。重启 Hermes 后先执行 Shell 工具任务验证阻止后重试改写，
-再执行返回 JSON 的工具验证结果替换。Hermes 没有 Marker 授权恢复路径，因此需要恢复的压缩
-会原样透传。
+再执行返回 JSON 的工具验证结果替换。当裸 `tokenless` 能从 Shell 的 `PATH` 解析时，Marker
+可以提示 Hermes 执行 `tokenless retrieve`；成功的恢复结果不会再次进入压缩。
 
 ### Qoder
 

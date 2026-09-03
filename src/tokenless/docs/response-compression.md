@@ -102,8 +102,12 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
 `ContentType::Json -> JsonCompressor`；清理、Record Reduction、截断、Structured Slot 恢复、
 Compact JSON 与可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
-Common Hook、OpenClaw 与 Hermes Plugin 都不提供 Marker 授权恢复路径，因此只接受无损 JSON
-候选；需要截断的候选以 `recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK
+Claude Code 2.1.121 及以上版本、Qoder CLI、OpenCode 和 Cosh-NG 能替换实时结果；同时裸
+`tokenless` 可从 Shell `PATH` 解析时，其 PostTool 请求才声明恢复可用。缩减或截断结果中的
+Marker 会提示模型通过已有 Shell Tool 执行
+`tokenless retrieve`。Common Hook 只把成功执行、参数为有效 Hash 或规范 Marker 的单条命令
+识别为 Retrieve，其输出由 Core 原样旁路。旧 copilot-shell 及不能替换结果的宿主继续只接受
+无损候选。BeforeModel Schema 仍使用独立的 Marker 授权恢复能力。实际 Pipeline、Stash 或 RTK
 操作错误由 CLI 以退出码 1 返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过
 Protocol v2 调用 Core，由 Core
 执行 RTK；Adapter 按 Tool Call ID 暂存 `output_optimization: "rtk"`，并在对应 PostTool 调用中
@@ -131,20 +135,21 @@ Adapter 仅替换 Applied 输出或追加错误指引；其他结果原样透传
 ```
 
 Hermes Adapter 不再持有 200 字符门禁、JSON 检测、截断阈值、TOON 选择或最终大小仲裁。
-Hermes 不提供 Marker 授权恢复路径，因此 Core 只应用无损候选。为兼容只支持 Block 的 Hermes
-版本，Adapter 不要求 `pre_tool_call modify`。
+缩减结果中的 Marker 会提示 Hermes 通过已有 Shell Tool 执行 `tokenless retrieve`；Adapter
+根据 `transform_tool_result` 收到的实际 `args.command` 识别成功的单条恢复命令，并让结果绕过
+二次压缩。为兼容只支持 Block 的 Hermes 版本，Adapter 不要求 `pre_tool_call modify`。
 
 ### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
 
 Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。结构化响应沿用 Claude Code 的 schema 保留逻辑；字符串响应可使用更小的 TOON 文本。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。结构化响应沿用 Claude Code 的 schema 保留逻辑；字符串响应可使用更小的 TOON 文本。Marker 中的 `tokenless retrieve` 命令可以通过已有 Shell Tool 执行，成功结果原样旁路。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
 
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 
 通过 `run-hook.sh` 调度器定位共享 hook 脚本，调用 `compress_response_hook.py`。Claude Code 复制插件到版本化缓存目录，因此 `run-hook.sh` 通过 FHS 路径查找共享 hook。
 
-与其他 agent 不同，Claude Code 的 `additionalContext` 是**追加式**的（模型会同时看到原始工具结果和注入内容），因此压缩结果通过 `hookSpecificOutput.updatedToolOutput`（Claude Code >= 2.1.121）**替换**模型可见的工具结果，`additionalContext` 仅保留真正追加式的诊断信息（环境错误归因）。替换时会回填被压缩剥离的空 schema 字段（如 Bash 的 `stderr`/`interrupted`/`isImage`），保持内置工具输出结构不变；结构化响应不做 TOON 编码（TOON 为文本格式，会破坏 schema）。旧版本 Claude Code（< 2.1.121）或版本无法探测时 fail-open：直接透传原始结果，不注入重复内容。版本探测结果缓存于 `~/.tokenless/.claude-version`（0600 权限、拒绝符号链接，与其他 hook 状态文件一致），缓存键为 claude 二进制的路径+mtime+大小，升级 Claude Code 后自动失效重探，避免每次 PostToolUse 都启动 node CLI。
+与其他 agent 不同，Claude Code 的 `additionalContext` 是**追加式**的（模型会同时看到原始工具结果和注入内容），因此压缩结果通过 `hookSpecificOutput.updatedToolOutput`（Claude Code >= 2.1.121）**替换**模型可见的工具结果，`additionalContext` 仅保留真正追加式的诊断信息（环境错误归因）。替换时会回填被压缩剥离的空 schema 字段（如 Bash 的 `stderr`/`interrupted`/`isImage`），保持内置工具输出结构不变；结构化响应不做 TOON 编码（TOON 为文本格式，会破坏 schema）。Marker 中的 `tokenless retrieve` 命令可以通过 Bash 执行，成功结果原样旁路。旧版本 Claude Code（< 2.1.121）或版本无法探测时 fail-open：直接透传原始结果，不注入重复内容。版本探测结果缓存于 `~/.tokenless/.claude-version`（0600 权限、拒绝符号链接，与其他 hook 状态文件一致），缓存键为 claude 二进制的路径+mtime+大小，升级 Claude Code 后自动失效重探，避免每次 PostToolUse 都启动 node CLI。
 
 ### 路径 6：Codex 插件（`PostToolUse` hook）
 
@@ -153,7 +158,20 @@ Codex 的 PostToolUse 不能替换或抑制原始输出。通过 `additionalCont
 TOON。独立脚本 `response-diagnostics` 只在识别出环境失败时追加修复提示。支持的 Shell
 命令由 PreToolUse Hook 通过 RTK 在执行前重写，工具从源头产生更小的输出。
 
-### 路径 7：CLI 直接使用
+### 路径 7：DeepSeek Harness 插件（`tools/post-execute`）
+
+DSH 把可替换的单文本结果交给 PostTool Core。普通成功结果声明恢复可用；Marker 中的
+`tokenless retrieve` 由已有 Shell Tool 执行后，Adapter 从实际的
+`exec.arguments.command` 识别成功的单条恢复命令，并把输出标记为 Retrieve Result，确保
+恢复内容不会再次压缩。只有裸 `tokenless` 能从 Shell `PATH` 解析到 Adapter 为 Core 选中的
+同一个可执行文件时才声明恢复可用。DSH 会
+清除模型 Shell 继承的 `TOKENLESS_*` 环境变量，因此 Adapter 通过 `shellEnv` 发布受控的状态
+目录及文件级数据库覆盖，并让 Core 使用相同路径；默认位置为会话工作区下的 `.tokenless`，
+且用自忽略 `.gitignore` 防止数据库被暂存。启动 DSH 前设置、且 Shell 沙箱可以访问的绝对
+`TOKENLESS_DATA_DIR`、`TOKENLESS_STATS_DB` 或 `TOKENLESS_STASH_DB` 可以覆盖默认路径。
+错误、Interrupted、Denied 和不符合严格语法的命令不会伪装成 Retrieve。
+
+### 路径 8：CLI 直接使用
 
 ```bash
 # 从文件
