@@ -22,7 +22,7 @@ mod scripted;
 pub(crate) mod sigpipe;
 mod transcript;
 
-pub(crate) use bootstrap::assistance_state_file;
+pub(crate) use bootstrap::{assistance_state_file, spawn_profile_probe_on_pty};
 pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};
 pub(crate) use model::{HintCardRenderer, ShellEventView};
 pub use model::{ScriptedInput, ShellHostConfig, ShellHostOutput, ShellIntegration};

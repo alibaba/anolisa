@@ -128,7 +128,7 @@ pub(crate) fn run_raw(
     };
     let enhanced_integration = config.integration.uses_markers();
     if config.native_mode && enhanced_integration {
-        bootstrap_process_path_from_shell(&shell_kind, login);
+        bootstrap_process_path_from_shell(&shell_kind, login, &config.winsize);
     }
     let recommendations_environment_override = parse_recommendations_environment_override(
         std::env::var("COSH_RECOMMENDATIONS_ENABLED")

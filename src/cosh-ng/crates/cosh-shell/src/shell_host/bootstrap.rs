@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use nix::libc;
-use nix::pty::openpty;
+use nix::pty::{openpty, Winsize};
 
 use super::adapter::{BashAdapter, ShellAdapter, ZshAdapter};
 use super::auth::{generate_marker_token, marker_script_with_token};
@@ -91,12 +91,10 @@ fn start_shell_session(
         Some(path)
     };
 
-    let pty = openpty(Some(&config.winsize), None).map_err(nix_to_io)?;
-    let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
+    let (master, slave) = open_pty_pair(Some(&config.winsize))?;
     set_close_on_exec(master.as_raw_fd())?;
     set_nonblocking(master.as_raw_fd())?;
 
-    let slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
     set_interactive_terminal_baseline(slave.as_raw_fd())?;
     let terminal = slave.try_clone()?;
     let stdin = slave.try_clone()?;
@@ -189,6 +187,45 @@ fn start_shell_session(
         recovery_request_file,
         handoff_request_file,
     })
+}
+
+pub(crate) fn spawn_profile_probe_on_pty(
+    mut command: Command,
+    winsize: &Winsize,
+) -> io::Result<(Child, File)> {
+    let (master, slave) = open_pty_pair(Some(winsize))?;
+    set_close_on_exec(master.as_raw_fd())?;
+    set_interactive_terminal_baseline(slave.as_raw_fd())?;
+    command
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    unsafe {
+        command.pre_exec(|| {
+            super::sigpipe::restore_in_child()?;
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            set_interactive_terminal_baseline(0)?;
+            if libc::tcsetpgrp(0, libc::getpgrp()) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn()?;
+    drop(command);
+    Ok((child, master))
+}
+
+fn open_pty_pair(winsize: Option<&Winsize>) -> io::Result<(File, File)> {
+    let pty = openpty(winsize, None).map_err(nix_to_io)?;
+    let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
+    let slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
+    Ok((master, slave))
 }
 
 fn set_nonblocking(fd: i32) -> io::Result<()> {

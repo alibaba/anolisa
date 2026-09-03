@@ -85,6 +85,10 @@ fn cosh_entry_args() -> Option<Vec<std::ffi::OsString>> {
 }
 
 fn main() {
+    if let Some(status) = runtime::startup::run_profile_probe_helper_if_requested() {
+        std::process::exit(status);
+    }
+
     // `/usr/bin/cosh` entry (argv[0] basename `cosh`, login `-cosh` included):
     // the invocation-transparency contract dispatches before any runtime
     // initialization so passthrough leaves no logs or terminal side effects.

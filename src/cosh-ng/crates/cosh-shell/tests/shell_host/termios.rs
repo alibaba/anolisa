@@ -12,9 +12,16 @@ mod parent_lifecycle {
     use std::process::{Child, ExitStatus, Stdio};
 
     use nix::libc;
+    use nix::pty::Winsize;
     use wait_timeout::ChildExt;
 
     const TERMINAL_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+    const LOGIN_PROFILE_WINSIZE: Winsize = Winsize {
+        ws_row: 37,
+        ws_col: 113,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
 
     struct ParentPtySession {
         child: Option<Child>,
@@ -24,6 +31,18 @@ mod parent_lifecycle {
         original_flags: i32,
         output: Vec<u8>,
         root: PathBuf,
+    }
+
+    struct EscapedProcessCleanup(i32);
+
+    impl Drop for EscapedProcessCleanup {
+        fn drop(&mut self) {
+            if process_is_running(self.0) {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
     }
 
     impl ParentPtySession {
@@ -51,6 +70,28 @@ mod parent_lifecycle {
             ignore_sigint: bool,
             wait_for_raw_mode: bool,
         ) -> Self {
+            Self::spawn_with_options(label, args, ignore_sigint, wait_for_raw_mode, None, None)
+        }
+
+        fn spawn_with_login_profile(label: &str, profile: &str) -> Self {
+            Self::spawn_with_options(
+                label,
+                &["raw", "fake", "--shell", "bash"],
+                false,
+                true,
+                Some(profile),
+                Some(&LOGIN_PROFILE_WINSIZE),
+            )
+        }
+
+        fn spawn_with_options(
+            label: &str,
+            args: &[&str],
+            ignore_sigint: bool,
+            wait_for_raw_mode: bool,
+            login_profile: Option<&str>,
+            winsize: Option<&Winsize>,
+        ) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "cosh-shell-parent-termios-{label}-{}-{}",
                 std::process::id(),
@@ -60,8 +101,11 @@ mod parent_lifecycle {
             let work = root.join("work");
             std::fs::create_dir_all(&home).expect("create isolated HOME");
             std::fs::create_dir_all(&work).expect("create isolated work dir");
+            if let Some(profile) = login_profile {
+                std::fs::write(home.join(".bash_profile"), profile).expect("write login profile");
+            }
 
-            let pty = nix::pty::openpty(None, None).expect("open parent PTY");
+            let pty = nix::pty::openpty(winsize, None).expect("open parent PTY");
             let master = File::from(pty.master);
             let terminal = File::from(pty.slave);
             let original = read_termios(terminal.as_raw_fd());
@@ -85,17 +129,26 @@ mod parent_lifecycle {
                 .stderr(Stdio::from(stderr))
                 .current_dir(&work)
                 .env("HOME", &home)
-                .env("COSH_SHELL_ISOLATED", "1")
+                .env(
+                    "COSH_SHELL_ISOLATED",
+                    if login_profile.is_some() { "0" } else { "1" },
+                )
                 .env("COSH_SHELL_INTEGRATION", "enhanced")
                 .env("COSH_SHELL_RAW_SHELL", "bash")
                 .env("COSH_SHELL_DEFAULT_SHELL", "bash")
                 .env("COSH_SHELL_LANG", "en-US")
-                .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
+                .env(
+                    "COSH_SHELL_BOOTSTRAP_PATH",
+                    if login_profile.is_some() { "1" } else { "0" },
+                )
                 .env("COSH_SHELL_HEALTH_SCAN", "disabled")
                 .env("COSH_RECOMMENDATIONS_ENABLED", "0")
                 .env("TERM", "xterm-256color")
                 .env("LANG", "C.UTF-8")
                 .env("LC_ALL", "C.UTF-8");
+            if login_profile.is_some() {
+                command.env("PATH", "/usr/bin:/bin");
+            }
             unsafe {
                 command.pre_exec(move || {
                     if ignore_sigint {
@@ -303,6 +356,28 @@ mod parent_lifecycle {
         assert_eq!(actual.c_ospeed, expected.c_ospeed, "output speed changed");
     }
 
+    fn process_is_running(pid: i32) -> bool {
+        let is_zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, suffix)| suffix.starts_with('Z'))
+            })
+            == Some(true);
+        !is_zombie && unsafe { libc::kill(pid, 0) } == 0
+    }
+
+    fn assert_process_stopped(pid: i32) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if !process_is_running(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("profile-started daemon {pid} survived the PATH probe");
+    }
+
     fn direct_children(pid: i32) -> Vec<i32> {
         let mut children = BTreeSet::new();
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
@@ -342,6 +417,133 @@ mod parent_lifecycle {
             "modifyOtherKeys was not disabled: {}",
             String::from_utf8_lossy(&output)
         );
+    }
+
+    #[test]
+    fn startup_path_probe_preserves_login_profile_terminal_semantics() {
+        let _guard = shell_host_run_guard();
+        let mut session = ParentPtySession::spawn_with_login_profile(
+            "bootstrap-path-terminal",
+            "[ -t 0 ] && [ -t 1 ] && [ \"$(stty size)\" = \"37 113\" ] && \
+             export PATH=\"$HOME/terminal-login:$PATH\"\n",
+        );
+        let expected = format!("{}/home/terminal-login", session.root.display());
+        session.write(b"printf '__BOOTSTRAP_PATH__=%s\\n' \"$PATH\"; exit\n");
+        let (status, output) = session.wait_with_output();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(status.success(), "startup status: {status:?}; {output}");
+        assert!(
+            output.contains(&format!("__BOOTSTRAP_PATH__={expected}:")),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn startup_path_probe_preserves_precedence_before_fallback_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = shell_host_run_guard();
+        let mut session = ParentPtySession::spawn_with_login_profile(
+            "bootstrap-path-fallback-precedence",
+            "export PATH=\"$HOME/login-only:/usr/local/bin:/usr/bin:/bin\"\n",
+        );
+        let directory = session.root.join("home/login-only");
+        std::fs::create_dir(&directory).unwrap();
+        let command = directory.join("ls");
+        std::fs::write(
+            &command,
+            "#!/bin/sh\nprintf '__LOGIN_COMMAND_SELECTED__\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        session.write(b"command ls; exit\n");
+        let (status, output) = session.wait_with_output();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(status.success(), "startup status: {status:?}; {output}");
+        assert!(output.contains("__LOGIN_COMMAND_SELECTED__"), "{output}");
+    }
+
+    #[test]
+    fn startup_path_probe_reaps_detached_profile_daemon() {
+        if Command::new("setsid").arg("--help").output().is_err() {
+            return;
+        }
+        let _guard = shell_host_run_guard();
+        let mut session = ParentPtySession::spawn_with_login_profile(
+            "bootstrap-path-daemon",
+            "printf \"%s\\n\" \"$PPID\" > \"$HOME/profile-supervisor.pid\"\n\
+             setsid --fork sh -c 'printf \"%s\\n\" \"$$\" > \
+             \"$HOME/profile-daemon.pid\"; exec sleep 30' \
+             </dev/null >/dev/null 2>&1\n\
+             for ((attempt = 0; attempt < 1000; attempt++)); do \
+                 [ -s \"$HOME/profile-daemon.pid\" ] && break; sleep 0.001; \
+             done\n\
+             export PATH=\"$HOME/daemon-login:$PATH\"\n",
+        );
+        let supervisor_pid_file = session.root.join("home/profile-supervisor.pid");
+        let supervisor_pid = session.wait_for_pid_file(&supervisor_pid_file);
+        let _supervisor_cleanup = EscapedProcessCleanup(supervisor_pid);
+        let pid_file = session.root.join("home/profile-daemon.pid");
+        let daemon_pid = session.wait_for_pid_file(&pid_file);
+        let _daemon_cleanup = EscapedProcessCleanup(daemon_pid);
+        let expected = format!("{}/home/daemon-login", session.root.display());
+
+        assert_ne!(
+            supervisor_pid,
+            session.wrapper_pid(),
+            "profile Bash must be owned by a dedicated supervisor process"
+        );
+
+        session.write(b"printf '__BOOTSTRAP_PATH__=%s\\n' \"$PATH\"; exit\n");
+        let (status, output) = session.wait_with_output();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(status.success(), "startup status: {status:?}; {output}");
+        assert!(
+            output.contains(&format!("__BOOTSTRAP_PATH__={expected}:")),
+            "{output}"
+        );
+        assert_process_stopped(supervisor_pid);
+        assert_process_stopped(daemon_pid);
+    }
+
+    #[test]
+    fn startup_path_probe_timeout_reaps_supervisor_descendants() {
+        if Command::new("setsid").arg("--help").output().is_err() {
+            return;
+        }
+        let _guard = shell_host_run_guard();
+        let mut session = ParentPtySession::spawn_with_login_profile(
+            "bootstrap-path-timeout-daemon",
+            "printf \"%s\\n\" \"$PPID\" > \"$HOME/profile-supervisor.pid\"\n\
+             setsid --fork sh -c 'printf \"%s\\n\" \"$$\" > \
+             \"$HOME/profile-daemon.pid\"; exec sleep 30' \
+             </dev/null >/dev/null 2>&1\n\
+             for ((attempt = 0; attempt < 1000; attempt++)); do \
+                 [ -s \"$HOME/profile-daemon.pid\" ] && break; sleep 0.001; \
+             done\n\
+             sleep 30\n",
+        );
+        let supervisor_pid_file = session.root.join("home/profile-supervisor.pid");
+        let daemon_pid_file = session.root.join("home/profile-daemon.pid");
+        let supervisor_pid = session.wait_for_pid_file(&supervisor_pid_file);
+        let _supervisor_cleanup = EscapedProcessCleanup(supervisor_pid);
+        let daemon_pid = session.wait_for_pid_file(&daemon_pid_file);
+        let _daemon_cleanup = EscapedProcessCleanup(daemon_pid);
+
+        assert_ne!(
+            supervisor_pid,
+            session.wrapper_pid(),
+            "profile Bash must be owned by a dedicated supervisor process"
+        );
+        session.write(b"exit\n");
+        let status = session.wait();
+
+        assert!(status.success(), "startup status: {status:?}");
+        assert_process_stopped(supervisor_pid);
+        assert_process_stopped(daemon_pid);
     }
 
     #[test]
