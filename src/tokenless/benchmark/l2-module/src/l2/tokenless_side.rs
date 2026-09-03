@@ -62,6 +62,7 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
         allow_toon: false,
         preserve_top_level_shape: false,
         min_toon_chars: usize::MAX,
+        allow_unrecoverable: true,
     };
     // Time only the compress call: the wire-form serialization below is
     // measurement plumbing, not engine work.

@@ -405,6 +405,8 @@ pub enum AppliedOperation {
     SchemaCompression,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
+    /// A JSON record collection was reduced with retrievable omissions.
+    JsonRecordReduction,
     /// Oversized JSON values were truncated.
     JsonTruncation,
     /// JSON was encoded as TOON.
@@ -418,6 +420,7 @@ impl AppliedOperation {
         match self {
             Self::SchemaCompression => "schema_compression",
             Self::JsonCleanup => "json_cleanup",
+            Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",
             Self::Toon => "toon",
         }

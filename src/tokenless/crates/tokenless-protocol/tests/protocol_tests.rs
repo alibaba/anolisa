@@ -89,7 +89,12 @@ fn all_response_operations_round_trip_with_fixed_envelope() {
             output: "{}".into(),
             disposition: Disposition::Applied,
             content_type: Some(ContentType::Json),
-            applied_operations: vec![AppliedOperation::JsonCleanup],
+            applied_operations: vec![
+                AppliedOperation::JsonCleanup,
+                AppliedOperation::JsonRecordReduction,
+                AppliedOperation::JsonTruncation,
+                AppliedOperation::Toon,
+            ],
             recoverability: Recoverability::Lossless,
             before_tokens: 10,
             after_tokens: 4,
@@ -113,6 +118,18 @@ fn all_response_operations_round_trip_with_fixed_envelope() {
         assert!(value.get("input").is_none());
         assert_eq!(ResponseEnvelope::from_json(&json).unwrap(), envelope);
     }
+}
+
+#[test]
+fn record_reduction_has_a_stable_wire_name() {
+    assert_eq!(
+        serde_json::to_string(&AppliedOperation::JsonRecordReduction).unwrap(),
+        r#""json_record_reduction""#
+    );
+    assert_eq!(
+        AppliedOperation::JsonRecordReduction.wire_str(),
+        "json_record_reduction"
+    );
 }
 
 #[test]

@@ -32,8 +32,8 @@ retrieval, and attribution.
 | Capability | Savings indicator | Details |
 |---|---|---|
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
-| Content-aware response compression | 65.8% on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; non-JSON domains currently pass through |
-| Reversible compression (stash) | — | Dropped array items are stashed and retrievable via `<<tokenless:KEY>>` markers |
+| Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
+| Reversible compression (stash) | — | Omitted record collections and bounded values are stashed and retrievable via `<<tokenless:KEY>>` markers |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
@@ -49,8 +49,8 @@ retrieval, and attribution.
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
-The schema, response, and TOON figures above are isolated Tokenless 0.7.11
-results on the repository's committed reference fixtures; they are neither a
+The schema, response, and TOON figures above are isolated results on the
+repository's committed reference fixtures; they are neither a
 production range nor additive. Compression depends on payload size and shape,
 removable fields, configured thresholds, and the share of tool data in the
 session. Short or already compact payloads may save only a few percent or pass

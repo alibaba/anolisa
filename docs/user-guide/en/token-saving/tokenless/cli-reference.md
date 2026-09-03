@@ -211,8 +211,8 @@ By default it removes exact, case-sensitive blacklisted keys, `null`, and empty 
 |--------|---------|-------------|
 | `-f, --file <path>` | stdin | Input file |
 | `--truncate-strings-at <n>` | `4096` | String truncation threshold |
-| `--truncate-arrays-at <n>` | `32` | Array length that triggers truncation; the first `n` items are kept |
-| `--array-tail-preserve <n>` | `8` | Items preserved from the tail of truncated arrays; `0` disables tail preservation |
+| `--truncate-arrays-at <n>` | `32` | Array length that triggers truncation; the first `n` items are kept. Object record arrays use record reduction instead (see below) |
+| `--array-tail-preserve <n>` | `8` | Items preserved from the tail of truncated arrays; `0` disables tail preservation. Does not apply to object record arrays |
 | `--max-depth <n>` | `8` | Maximum nesting depth |
 | `--agent-id <id>` | `cli` | Agent identifier in statistics |
 | `--session-id <id>` | — | Session identifier in statistics |
@@ -221,6 +221,8 @@ By default it removes exact, case-sensitive blacklisted keys, `null`, and empty 
 | `--stash-db <path>` | `~/.tokenless/stash.db` | Override the Stash database; an invalid path is rejected as an override and the CLI falls back to the environment or default path |
 
 Array truncation keeps a head window of `--truncate-arrays-at` items and a tail window of `--array-tail-preserve` items, with a truncation marker in between. Middle items are dropped only when the array is longer than both windows combined, so under the defaults a command can retain `n + 8` items plus the marker; when the two windows cover the whole array, every item is retained without a marker. Set `--array-tail-preserve 0` for head-only truncation.
+
+Object record arrays are an exception. Any array of at least 33 JSON objects is reduced against a base budget of 32 records plus a retrieval marker, regardless of the `--truncate-arrays-at` and `--array-tail-preserve` values. The selection keeps the first 4 and last 4 records, records carrying error or anomaly signals, numeric outliers, and a stable sample of the remaining records; critical records can exceed the base budget. The complete original array is written to the Stash as one entry so `tokenless retrieve` can restore it. Record reduction requires the Stash, so with `--no-stash` every record of such an array is kept instead of reduced.
 
 Override thresholds:
 
@@ -239,7 +241,7 @@ debug, trace, traces, stack, stacktrace, logs, logging
 
 Field matching and truncation change the response representation seen by the model. Save representative samples and compare the result before processing critical payloads.
 
-Stash applies only to truncation of strings, the dropped middle segment of truncated arrays, and deep subtrees. Tail items are kept inline, not stashed. Blacklisted fields, `null`, and empty values are removed without a retrieval marker.
+Stash applies to complete original arrays used by record reduction, truncated strings, the dropped middle segment of other truncated arrays, and deep subtrees. Tail items are kept inline, not stashed. Blacklisted fields, `null`, and empty values are removed without a retrieval marker.
 
 Most adapters override these standalone defaults. Their shared shell profile uses `65536`, `128`, and `8`; the other-structured-tool profile uses `1048576`, `65536`, and `32`. Content-retrieval tools are skipped. See [Agent integration · Adapter processing rules](framework-integration.md#adapter-processing-rules).
 

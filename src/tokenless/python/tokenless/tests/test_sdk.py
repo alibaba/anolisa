@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from anolisa_tokenless import (
+    AppliedOperation,
     Attribution,
     BeforeModelCapabilities,
     BeforeModelRequest,
@@ -48,6 +49,12 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 data_dir=Path(self.temporary_directory.name),
                 **overrides,
             )
+        )
+
+    def test_record_reduction_operation_uses_the_core_wire_value(self) -> None:
+        self.assertEqual(
+            AppliedOperation("json_record_reduction"),
+            AppliedOperation.JSON_RECORD_REDUCTION,
         )
 
     async def test_before_model_compresses_schema_and_scopes_retrieve(self) -> None:
@@ -205,8 +212,13 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_post_tool_uses_core_json_pipeline(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
+        records = [
+            {"name": "same", "value": index, "message": "x" * 80}
+            for index in range(300)
+        ]
         original = json.dumps(
-            {"items": [{"name": "same", "value": index} for index in range(300)]}
+            {"items": records},
+            separators=(",", ":"),
         )
         result = await sdk.post_tool(
             PostToolRequest(
@@ -219,13 +231,27 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
                 capabilities=PostToolCapabilities(
                     replace_output=True,
                     retrieval_available=True,
-                    replace_with_text=True,
+                    replace_with_text=False,
                 ),
                 attribution=Attribution("sdk-agent", "sdk-session", "call-9"),
             )
         )
         self.assertLess(len(result.output.encode()), len(original.encode()))
-        self.assertTrue(result.applied_operations)
+        self.assertIn(
+            AppliedOperation.JSON_RECORD_REDUCTION,
+            result.applied_operations,
+        )
+        self.assertEqual(result.recoverability.value, "retrievable")
+        self.assertEqual(len(result.stash_keys), 1)
+
+        restored = await sdk.retrieve(
+            RetrieveRequest(
+                result.stash_keys[0],
+                frozenset(result.stash_keys),
+                Attribution("sdk-agent", "sdk-session", "call-9"),
+            )
+        )
+        self.assertEqual(json.loads(restored.payload), records)
 
     def test_stats_client_is_lazy_and_uses_runtime_data_dir(self) -> None:
         sdk = self.sdk(rtk_enabled=False)

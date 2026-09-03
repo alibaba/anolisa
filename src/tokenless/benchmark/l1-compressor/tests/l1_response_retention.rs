@@ -19,9 +19,23 @@
 
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokenless_bench::{compress_json, compress_json_with};
+use tokenless_bench::{compress_json, compress_json_with, response_record_reduction};
 use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
-use tokenless_compressors::JsonCompressionConfig;
+use tokenless_compressors::{JsonCompressionConfig, JsonOperation};
+
+#[test]
+fn record_reduction_fixture_preserves_the_middle_anomaly() {
+    let store = InMemoryStore::new();
+    let fixture = response_record_reduction();
+    let (out, outcome) =
+        compress_json_with(&fixture, JsonCompressionConfig::default(), Some(&store));
+
+    assert_eq!(outcome.operations, [JsonOperation::RecordReduction]);
+    assert_eq!(outcome.stash_writes.len(), 1);
+    assert!(out.as_array().unwrap().iter().any(|record| {
+        record.get("id") == Some(&json!(31)) && record.get("status") == Some(&json!("failed"))
+    }));
+}
 
 #[test]
 fn string_truncation_adds_marker() {
@@ -154,8 +168,16 @@ fn stash_round_trip_recovers_dropped_items_verbatim() {
 fn stashed_items_keep_fields_the_compressor_would_strip() {
     let store = Arc::new(InMemoryStore::new());
     let arr = json!([
-        { "id": 1, "debug": format!("stripped in kept item {}", "x".repeat(200)) },
-        { "id": 2, "debug": format!("survives in stash {}", "x".repeat(200)) }
+        {
+            "id": 1,
+            "payload": "x".repeat(200),
+            "debug": "stripped in kept item"
+        },
+        {
+            "id": 2,
+            "payload": "x".repeat(200),
+            "debug": "survives in stash"
+        }
     ]);
     let (out, _) = compress_json_with(
         &arr,

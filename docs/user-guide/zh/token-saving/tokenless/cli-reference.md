@@ -204,8 +204,8 @@ tokenless compress-response -f response.json
 |------|--------|------|
 | `-f, --file <path>` | stdin | 输入文件 |
 | `--truncate-strings-at <n>` | `4096` | 字符串截断阈值 |
-| `--truncate-arrays-at <n>` | `32` | 触发数组截断的长度阈值；保留前 `n` 个元素 |
-| `--array-tail-preserve <n>` | `8` | 截断数组时从尾部保留的元素数；`0` 禁用尾部保留 |
+| `--truncate-arrays-at <n>` | `32` | 触发数组截断的长度阈值；保留前 `n` 个元素。对象记录数组改用记录缩减（见下文） |
+| `--array-tail-preserve <n>` | `8` | 截断数组时从尾部保留的元素数；`0` 禁用尾部保留。不适用于对象记录数组 |
 | `--max-depth <n>` | `8` | 最大嵌套深度 |
 | `--agent-id <id>` | `cli` | 统计中的 Agent 标识 |
 | `--session-id <id>` | — | 统计中的 Session 标识 |
@@ -214,6 +214,8 @@ tokenless compress-response -f response.json
 | `--stash-db <path>` | `~/.tokenless/stash.db` | 覆盖 Stash 数据库；无效路径会被拒绝为覆盖值，CLI 随后回退到环境变量或默认路径 |
 
 数组截断会保留 `--truncate-arrays-at` 个头部元素和 `--array-tail-preserve` 个尾部元素，并在两者之间插入截断标记。只有当数组长度超过首尾窗口之和时才会丢弃中间元素：默认配置下单条命令可保留 `n + 8` 个元素（外加截断标记）；当两个窗口覆盖整个数组时，所有元素都会保留且不插入标记。设置 `--array-tail-preserve 0` 可恢复纯头部截断。
+
+对象记录数组是例外：任何包含至少 33 个 JSON Object 的数组都会按 32 条记录的基础预算进行缩减，并追加一个取回标记，与 `--truncate-arrays-at` 和 `--array-tail-preserve` 的取值无关。选取会保留前 4 条和后 4 条记录、携带错误或异常信号的记录、数值异常记录，以及其余记录的稳定采样；关键记录可以突破基础预算。完整原始数组作为一个条目写入 Stash，可通过 `tokenless retrieve` 恢复。记录缩减依赖 Stash，因此使用 `--no-stash` 时会保留此类数组的全部记录而不做缩减。
 
 覆盖阈值：
 
@@ -232,7 +234,7 @@ debug, trace, traces, stack, stacktrace, logs, logging
 
 字段匹配和截断会改变模型看到的响应表示。处理关键 Payload 前，应先保存样例并对比压缩结果。
 
-Stash 只作用于字符串、截断数组中被丢弃的中间段和深层子树截断。尾部元素直接保留在输出中，不进入 Stash。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
+Stash 会保存 Record Reduction 使用的完整原始数组、被截断的字符串、其他截断数组中被丢弃的中间段和深层子树。尾部元素直接保留在输出中，不进入 Stash。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
 
 大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[Agent 集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)。
 

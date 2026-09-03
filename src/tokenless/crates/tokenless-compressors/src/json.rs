@@ -1,17 +1,25 @@
 //! JSON-domain compression for PostTool results.
 //!
-//! One call owns the complete JSON decision: tree cleanup and truncation,
-//! structured-slot restoration, compact serialization, and optional TOON
-//! representation selection. The caller owns final acceptance and Stash
-//! commit or rollback.
+//! One call owns the complete JSON decision: tree cleanup, record reduction,
+//! truncation, structured-slot restoration, compact serialization, and
+//! optional TOON representation selection. The caller owns final acceptance
+//! and Stash commit or rollback.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde_json::{Map, Value};
 use tokenless_ccr::{
     StashStore, StashWrite, marker_for, truncation_suffix, truncation_suffix_char_len,
 };
 use tokenless_protocol::estimate_tokens;
+
+const LOSSLESS_MIN_SAVINGS_PERCENT: usize = 15;
+const RECORD_MIN_ITEMS: usize = 33;
+const RECORD_MAX_ITEMS: usize = 32;
+const RECORD_HEAD_ITEMS: usize = 4;
+const RECORD_TAIL_ITEMS: usize = 4;
+const NUMERIC_MIN_SAMPLES: usize = 5;
+const NUMERIC_OUTLIER_SIGMA: f64 = 2.0;
 
 /// Configuration for one JSON-domain compressor.
 #[derive(Debug, Clone)]
@@ -56,6 +64,8 @@ pub struct JsonCompressionContext<'a> {
     pub preserve_top_level_shape: bool,
     /// Minimum candidate size before TOON is considered.
     pub min_toon_chars: usize,
+    /// Whether an unrecoverable bounded candidate may displace a lossless one.
+    pub allow_unrecoverable: bool,
 }
 
 /// Stable operations performed inside the JSON domain.
@@ -63,6 +73,8 @@ pub struct JsonCompressionContext<'a> {
 pub enum JsonOperation {
     /// Structural cleanup or compact JSON serialization changed the value.
     Cleanup,
+    /// A record collection was reduced using deterministic importance signals.
+    RecordReduction,
     /// One or more values were bounded by string, array, or depth limits.
     Truncation,
     /// TOON was selected as the final representation.
@@ -75,6 +87,7 @@ impl JsonOperation {
     pub fn id(self) -> &'static str {
         match self {
             Self::Cleanup => "json-cleanup",
+            Self::RecordReduction => "json-record-reduction",
             Self::Truncation => "json-truncation",
             Self::Toon => "json-toon",
         }
@@ -97,6 +110,10 @@ pub enum Recoverability {
 pub struct JsonMetrics {
     /// Failed Stash writes while producing tentative candidates.
     pub stash_errors: usize,
+    /// Record collections reduced in the selected candidate.
+    pub record_reductions: usize,
+    /// Records omitted from the selected candidate.
+    pub records_omitted: usize,
     /// Truncations present in the selected candidate.
     pub truncations: usize,
     /// Selected truncations without a retrievable marker.
@@ -152,72 +169,142 @@ impl JsonCompressor {
         context: &JsonCompressionContext<'_>,
     ) -> Result<JsonOutcome, JsonError> {
         let (normalized, original) = parse_input(input)?;
-        let mut session = Session::new(&self.config, context.stash);
-        let transformed = session.compress_value(&original, 0);
-        let transformed = if context.preserve_top_level_shape {
-            restore_top_level_shape(&original, transformed)
-        } else {
-            transformed
-        };
-        let compact = serde_json::to_string(&transformed)?;
-        let cleanup_selected = strictly_smaller(&compact, &normalized);
-
-        let mut operations = Vec::new();
-        if cleanup_selected
-            && (session.cleanup_changes > 0 || (session.truncations == 0 && compact != normalized))
-        {
-            operations.push(JsonOperation::Cleanup);
-        }
-        if cleanup_selected && session.truncations > 0 {
-            operations.push(JsonOperation::Truncation);
+        let mut full_session = Session::new(&self.config, None, false);
+        let full = build_candidate(
+            &normalized,
+            &original,
+            full_session.compress_value(&original, 0),
+            &full_session,
+            context,
+        )?;
+        if saves_at_least_percent(&full.output, &normalized, LOSSLESS_MIN_SAVINGS_PERCENT) {
+            return Ok(full.into_outcome(Vec::new(), 0));
         }
 
-        let (base_text, base_value) = if cleanup_selected {
-            (compact.as_str(), &transformed)
+        let mut bounded_session = Session::new(&self.config, context.stash, true);
+        let bounded = build_candidate(
+            &normalized,
+            &original,
+            bounded_session.compress_value(&original, 0),
+            &bounded_session,
+            context,
+        )?;
+        let bounded_is_valid =
+            context.allow_unrecoverable || bounded.recoverability != Recoverability::Unrecoverable;
+        let bounded_is_smaller = strictly_smaller(&bounded.output, &full.output);
+        let selected = if bounded_is_smaller && (bounded_is_valid || full.operations.is_empty()) {
+            // When no lossless operation exists, return the bounded attempt so
+            // the outer arbiter can preserve its recoverability-unavailable
+            // disposition while still preventing it from reaching the model.
+            bounded
         } else {
-            (normalized.as_str(), &original)
+            full
         };
-        let toon = context
-            .allow_toon
-            .then(|| toon_candidate(base_value, base_text, context.min_toon_chars))
-            .flatten();
 
-        let (output, recoverability, truncations, unrecoverable_truncations) =
-            if let Some(toon) = toon {
-                operations.push(JsonOperation::Toon);
-                if cleanup_selected {
-                    (
-                        toon,
-                        session.recoverability(),
-                        session.truncations,
-                        session.unrecoverable_truncations,
-                    )
-                } else {
-                    (toon, Recoverability::Lossless, 0, 0)
-                }
-            } else if cleanup_selected {
-                (
-                    compact,
-                    session.recoverability(),
-                    session.truncations,
-                    session.unrecoverable_truncations,
-                )
-            } else {
-                (normalized, Recoverability::Lossless, 0, 0)
-            };
-
-        Ok(JsonOutcome {
-            output,
-            operations,
-            recoverability,
-            stash_writes: session.stash_writes,
-            metrics: JsonMetrics {
-                stash_errors: session.stash_errors,
-                truncations,
-                unrecoverable_truncations,
-            },
-        })
+        Ok(selected.into_outcome(bounded_session.stash_writes, bounded_session.stash_errors))
     }
+}
+
+struct Candidate {
+    output: String,
+    operations: Vec<JsonOperation>,
+    recoverability: Recoverability,
+    metrics: JsonMetrics,
+}
+
+impl Candidate {
+    fn into_outcome(self, stash_writes: Vec<StashWrite>, stash_errors: usize) -> JsonOutcome {
+        JsonOutcome {
+            output: self.output,
+            operations: self.operations,
+            recoverability: self.recoverability,
+            stash_writes,
+            metrics: JsonMetrics {
+                stash_errors,
+                ..self.metrics
+            },
+        }
+    }
+}
+
+fn build_candidate(
+    normalized: &str,
+    original: &Value,
+    transformed: Value,
+    session: &Session<'_>,
+    context: &JsonCompressionContext<'_>,
+) -> Result<Candidate, JsonError> {
+    let transformed = if context.preserve_top_level_shape {
+        restore_top_level_shape(original, transformed)
+    } else {
+        transformed
+    };
+    let compact = serde_json::to_string(&transformed)?;
+    let mut output = normalized.to_owned();
+    let mut transformed_selected = false;
+    let mut toon_selected = false;
+    if strictly_smaller(&compact, normalized) {
+        output.clone_from(&compact);
+        transformed_selected = true;
+    }
+    if let Some(toon) = context
+        .allow_toon
+        .then(|| toon_candidate(&transformed, context.min_toon_chars))
+        .flatten()
+        .filter(|toon| {
+            strictly_smaller(toon, normalized)
+                && (!transformed_selected || strictly_smaller(toon, &output))
+        })
+    {
+        output = toon;
+        transformed_selected = true;
+        toon_selected = true;
+    }
+
+    let mut operations = Vec::new();
+    if transformed_selected
+        && (session.cleanup_changes > 0
+            || (!toon_selected
+                && session.record_reductions == 0
+                && session.truncations == 0
+                && compact != normalized))
+    {
+        operations.push(JsonOperation::Cleanup);
+    }
+    if transformed_selected && session.record_reductions > 0 {
+        operations.push(JsonOperation::RecordReduction);
+    }
+    if transformed_selected && session.truncations > 0 {
+        operations.push(JsonOperation::Truncation);
+    }
+    if toon_selected {
+        operations.push(JsonOperation::Toon);
+    }
+
+    let transformation_selected = transformed_selected;
+    let metrics = if transformation_selected {
+        JsonMetrics {
+            stash_errors: 0,
+            record_reductions: session.record_reductions,
+            records_omitted: session.records_omitted,
+            truncations: session.truncations,
+            unrecoverable_truncations: session.unrecoverable_truncations,
+        }
+    } else {
+        JsonMetrics::default()
+    };
+    let recoverability = if transformation_selected {
+        session.recoverability()
+    } else {
+        Recoverability::Lossless
+    };
+
+    Ok(Candidate {
+        output,
+        operations,
+        recoverability,
+        metrics,
+    })
 }
 
 fn parse_input(input: &str) -> Result<(String, Value), JsonError> {
@@ -246,18 +333,28 @@ fn restore_top_level_shape(original: &Value, transformed: Value) -> Value {
     Value::Object(transformed)
 }
 
-fn toon_candidate(value: &Value, baseline: &str, min_chars: usize) -> Option<String> {
-    if baseline.chars().count() < min_chars {
+fn toon_candidate(value: &Value, min_chars: usize) -> Option<String> {
+    let compact = serde_json::to_string(value).ok()?;
+    if compact.chars().count() < min_chars {
         return None;
     }
     let encoded = toon_format::encode_default(value).ok()?;
     let candidate = encoded.trim_end().to_owned();
-    (!candidate.is_empty() && strictly_smaller(&candidate, baseline)).then_some(candidate)
+    (!candidate.is_empty()).then_some(candidate)
 }
 
 fn strictly_smaller(candidate: &str, baseline: &str) -> bool {
     candidate.chars().count() < baseline.chars().count()
         && estimate_tokens(candidate) < estimate_tokens(baseline)
+}
+
+fn saves_at_least_percent(candidate: &str, baseline: &str, percent: usize) -> bool {
+    if !strictly_smaller(candidate, baseline) {
+        return false;
+    }
+    let baseline_tokens = estimate_tokens(baseline);
+    let saved_tokens = baseline_tokens - estimate_tokens(candidate);
+    saved_tokens.saturating_mul(100) >= baseline_tokens.saturating_mul(percent)
 }
 
 fn is_empty(value: &Value) -> bool {
@@ -270,22 +367,154 @@ fn is_empty_or_null(value: &Value) -> bool {
     value.is_null() || is_empty(value)
 }
 
+fn is_record_array(values: &[Value]) -> bool {
+    values.len() >= RECORD_MIN_ITEMS && values.iter().all(Value::is_object)
+}
+
+fn select_record_indices(values: &[Value]) -> BTreeSet<usize> {
+    let mut selected = BTreeSet::new();
+    selected.extend(0..values.len().min(RECORD_HEAD_ITEMS));
+    selected.extend(values.len().saturating_sub(RECORD_TAIL_ITEMS)..values.len());
+
+    let modal_shape = modal_record_shape(values);
+    for (index, value) in values.iter().enumerate() {
+        let Some(record) = value.as_object() else {
+            continue;
+        };
+        if has_error_signal(record) || record_shape(record) != modal_shape {
+            selected.insert(index);
+        }
+    }
+    select_numeric_outliers(values, &mut selected);
+
+    let mut seen = selected
+        .iter()
+        .map(|index| values[*index].to_string())
+        .collect::<HashSet<_>>();
+    let ordinary = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            (!selected.contains(&index) && seen.insert(value.to_string())).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let sample_count = RECORD_MAX_ITEMS
+        .saturating_sub(selected.len())
+        .min(ordinary.len());
+    for slot in 0..sample_count {
+        let position = (2 * slot + 1) * ordinary.len() / (2 * sample_count);
+        selected.insert(ordinary[position]);
+    }
+    selected
+}
+
+fn modal_record_shape(values: &[Value]) -> Vec<String> {
+    let mut counts = BTreeMap::<Vec<String>, usize>::new();
+    for value in values {
+        if let Some(record) = value.as_object() {
+            *counts.entry(record_shape(record)).or_default() += 1;
+        }
+    }
+    let mut mode = Vec::new();
+    let mut mode_count = 0;
+    for (shape, count) in counts {
+        if count > mode_count {
+            mode = shape;
+            mode_count = count;
+        }
+    }
+    mode
+}
+
+fn record_shape(record: &Map<String, Value>) -> Vec<String> {
+    let mut shape = record.keys().cloned().collect::<Vec<_>>();
+    shape.sort_unstable();
+    shape
+}
+
+fn has_error_signal(record: &Map<String, Value>) -> bool {
+    const ERROR_FIELDS: [&str; 4] = ["error", "errors", "exception", "failure"];
+    const STATUS_FIELDS: [&str; 4] = ["status", "state", "level", "severity"];
+    const STATUS_SIGNALS: [&str; 7] = [
+        "error", "failed", "fatal", "critical", "panic", "timeout", "warn",
+    ];
+
+    record.iter().any(|(key, value)| {
+        let key = key.to_ascii_lowercase();
+        if ERROR_FIELDS.contains(&key.as_str()) {
+            return !is_empty_or_null(value);
+        }
+        STATUS_FIELDS.contains(&key.as_str())
+            && value.as_str().is_some_and(|status| {
+                let status = status.to_ascii_lowercase();
+                STATUS_SIGNALS.iter().any(|signal| status.contains(signal))
+            })
+    })
+}
+
+fn select_numeric_outliers(values: &[Value], selected: &mut BTreeSet<usize>) {
+    let mut samples = BTreeMap::<String, Vec<(usize, f64)>>::new();
+    for (index, value) in values.iter().enumerate() {
+        let Some(record) = value.as_object() else {
+            continue;
+        };
+        for (field, value) in record {
+            if let Some(number) = value.as_f64().filter(|number| number.is_finite()) {
+                samples
+                    .entry(field.clone())
+                    .or_default()
+                    .push((index, number));
+            }
+        }
+    }
+
+    for values in samples
+        .values()
+        .filter(|values| values.len() >= NUMERIC_MIN_SAMPLES)
+    {
+        let mean = values.iter().map(|(_, value)| value).sum::<f64>() / values.len() as f64;
+        let variance = values
+            .iter()
+            .map(|(_, value)| (value - mean).powi(2))
+            .sum::<f64>()
+            / values.len() as f64;
+        let threshold = NUMERIC_OUTLIER_SIGMA * variance.sqrt();
+        if threshold == 0.0 {
+            continue;
+        }
+        selected.extend(
+            values
+                .iter()
+                .filter(|(_, value)| (value - mean).abs() > threshold)
+                .map(|(index, _)| *index),
+        );
+    }
+}
+
 struct Session<'a> {
     config: &'a JsonCompressionConfig,
     stash: Option<&'a dyn StashStore>,
+    bounds_enabled: bool,
     drop_fields: HashSet<&'static str>,
     stash_writes: Vec<StashWrite>,
     stash_errors: usize,
     cleanup_changes: usize,
+    record_reductions: usize,
+    records_omitted: usize,
     truncations: usize,
     unrecoverable_truncations: usize,
 }
 
 impl<'a> Session<'a> {
-    fn new(config: &'a JsonCompressionConfig, stash: Option<&'a dyn StashStore>) -> Self {
+    fn new(
+        config: &'a JsonCompressionConfig,
+        stash: Option<&'a dyn StashStore>,
+        bounds_enabled: bool,
+    ) -> Self {
         Self {
             config,
             stash,
+            bounds_enabled,
             drop_fields: HashSet::from([
                 "debug",
                 "trace",
@@ -298,13 +527,15 @@ impl<'a> Session<'a> {
             stash_writes: Vec::new(),
             stash_errors: 0,
             cleanup_changes: 0,
+            record_reductions: 0,
+            records_omitted: 0,
             truncations: 0,
             unrecoverable_truncations: 0,
         }
     }
 
     fn recoverability(&self) -> Recoverability {
-        if self.truncations == 0 {
+        if self.record_reductions == 0 && self.truncations == 0 {
             Recoverability::Lossless
         } else if self.stash.is_some() && self.unrecoverable_truncations == 0 {
             Recoverability::Retrievable
@@ -314,7 +545,7 @@ impl<'a> Session<'a> {
     }
 
     fn compress_value(&mut self, value: &Value, depth: usize) -> Value {
-        if depth > self.config.max_depth {
+        if self.bounds_enabled && depth > self.config.max_depth {
             self.truncations += 1;
             let type_name = match value {
                 Value::Null => "null",
@@ -345,7 +576,7 @@ impl<'a> Session<'a> {
     }
 
     fn compress_string(&mut self, value: &str) -> Value {
-        if value.chars().count() <= self.config.truncate_strings_at {
+        if !self.bounds_enabled || value.chars().count() <= self.config.truncate_strings_at {
             return Value::String(value.to_owned());
         }
         self.truncations += 1;
@@ -379,6 +610,15 @@ impl<'a> Session<'a> {
     }
 
     fn compress_array(&mut self, values: &[Value], depth: usize) -> Value {
+        if self.bounds_enabled && is_record_array(values) {
+            return self
+                .reduce_records(values, depth)
+                .unwrap_or_else(|| self.compress_all_array_items(values, depth));
+        }
+        if !self.bounds_enabled {
+            return self.compress_all_array_items(values, depth);
+        }
+
         let head = self.config.truncate_arrays_at;
         let budget = head.saturating_add(self.config.array_tail_preserve);
         let truncate = values.len() > head && values.len() > budget;
@@ -420,6 +660,42 @@ impl<'a> Session<'a> {
             self.push_if_kept(&mut output, value, depth);
         }
         Value::Array(output)
+    }
+
+    fn compress_all_array_items(&mut self, values: &[Value], depth: usize) -> Value {
+        let mut output = Vec::with_capacity(values.len());
+        for value in values {
+            self.push_if_kept(&mut output, value, depth);
+        }
+        Value::Array(output)
+    }
+
+    fn reduce_records(&mut self, values: &[Value], depth: usize) -> Option<Value> {
+        let selected = select_record_indices(values);
+        let omitted = values.len() - selected.len();
+        if omitted == 0 {
+            return None;
+        }
+        let payload = serde_json::to_string(values).ok()?;
+        let key = self.stash_payload(&payload)?;
+
+        let mut output = Vec::with_capacity(selected.len() + 1);
+        for index in selected {
+            self.push_if_kept(&mut output, &values[index], depth);
+        }
+        // Cleanup can drop selected records that collapsed to null or empty
+        // values. Recount from the records actually emitted so the marker and
+        // `records_omitted` stay consistent with the output; the complete
+        // array is stashed either way.
+        let omitted = values.len() - output.len();
+        output.push(Value::String(format!(
+            "<... {omitted} of {} records omitted, run: tokenless retrieve '{}'>",
+            values.len(),
+            marker_for(&key)
+        )));
+        self.record_reductions += 1;
+        self.records_omitted += omitted;
+        Some(Value::Array(output))
     }
 
     fn push_if_kept(&mut self, output: &mut Vec<Value>, value: &Value, depth: usize) {

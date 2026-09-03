@@ -86,6 +86,7 @@ class AppliedOperation(StrEnum):
 
     SCHEMA_COMPRESSION = "schema_compression"
     JSON_CLEANUP = "json_cleanup"
+    JSON_RECORD_REDUCTION = "json_record_reduction"
     JSON_TRUNCATION = "json_truncation"
     TOON = "toon"
 

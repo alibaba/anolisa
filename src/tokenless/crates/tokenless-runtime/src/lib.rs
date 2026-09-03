@@ -797,9 +797,7 @@ pub fn compress_response_with_store(
         output_optimization: OutputOptimization::None,
         capabilities: PostToolCapabilities {
             replace_output: true,
-            retrieval_available: options.stash_enabled
-                && compression_enabled
-                && stash_store.is_some(),
+            retrieval_available: options.stash_enabled && stash_store.is_some(),
             replace_with_text: false,
         },
     };
@@ -1033,6 +1031,11 @@ fn record_entry_stats(
             .contains(&tokenless_protocol::AppliedOperation::SchemaCompression)
         {
             "schema_compression"
+        } else if stats
+            .applied_operations
+            .contains(&tokenless_protocol::AppliedOperation::JsonRecordReduction)
+        {
+            "json_record_reduction"
         } else {
             "json_truncation"
         };
@@ -1491,6 +1494,62 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].before_tokens, result.before_tokens);
         assert_eq!(records[0].after_tokens, result.after_tokens);
+    }
+
+    #[test]
+    fn runtime_records_json_record_reduction_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            stats_enabled: true,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let content = serde_json::to_string(
+            &(0..40)
+                .map(|index| {
+                    serde_json::json!({
+                        "id": index,
+                        "message": format!("record-{index}-{}", "x".repeat(80))
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let attribution = ProtocolAttribution {
+            agent_id: "agentscope".to_string(),
+            session_id: Some("record-session".to_string()),
+            tool_use_id: Some("record-call".to_string()),
+        };
+        let response = runtime
+            .post_tool(
+                &PostToolRequest {
+                    result_kind: ResultKind::Tool,
+                    tool_name: "api".to_string(),
+                    content,
+                    status: ToolResultStatus::Success,
+                    content_origin: ContentOrigin::ApiResponse,
+                    output_optimization: OutputOptimization::None,
+                    capabilities: PostToolCapabilities {
+                        replace_output: true,
+                        retrieval_available: true,
+                        replace_with_text: false,
+                    },
+                },
+                &attribution,
+            )
+            .unwrap();
+        assert_eq!(
+            response.applied_operations,
+            [tokenless_protocol::AppliedOperation::JsonRecordReduction]
+        );
+
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        let records = recorder.records_by_session("record-session", None).unwrap();
+        assert_eq!(
+            records[0].applied_operations,
+            Some(vec!["json_record_reduction".to_string()])
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use tokenless_ccr::StashStore;
+use tokenless_ccr::{SqliteStore, StashStore};
 use tokenless_runtime::{CompressOptions, MIN_TOON_CHARS, compress_response_with_store};
 use tokenless_stats::{
     CompressionMode, OperationType, StatsRecord, StatsRecorder, estimate_tokens,
@@ -668,8 +668,8 @@ fn no_stash_response_to_toon_roundtrip_is_decodable() {
     // success. The marker now carries the `, not stashed` clause, which
     // forces TOON quoting, so the whole pipeline must round-trip and the
     // paired decoder must accept the TOON output.
-    let bad: Vec<serde_json::Value> = (0..60)
-        .map(|i| serde_json::json!({ "id": i, "value": "x" }))
+    let bad: Vec<String> = (0..60)
+        .map(|i| format!("result-{i}-{}", "x".repeat(80)))
         .collect();
     let good: Vec<serde_json::Value> = (0..5)
         .map(|i| serde_json::json!({ "identifier": i, "repeated_field_alpha": "alpha-value" }))
@@ -1849,6 +1849,48 @@ fn compress_post_tool_uses_the_v2_result_envelope() {
     );
     assert_eq!(response["result"]["recoverability"], "lossless");
     assert_eq!(response["result"]["content_type"], "json");
+}
+
+#[test]
+fn compress_post_tool_dry_run_previews_record_reduction_without_stash_writes() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let records = (0..200)
+        .map(|index| {
+            serde_json::json!({
+                "id": index,
+                "message": format!("record-{index}-{}", "x".repeat(80))
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = serde_json::to_string(&records).unwrap();
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "0")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &post_tool_request_json(&content, true, "record-dry-run"),
+    );
+
+    assert!(
+        output.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["disposition"], "dry_run");
+    assert_eq!(response["result"]["output"], content);
+    assert!(
+        response["result"]["after_tokens"].as_u64().unwrap()
+            < response["result"]["before_tokens"].as_u64().unwrap()
+    );
+
+    let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
+    assert_eq!(store.len(), 0);
 }
 
 #[test]

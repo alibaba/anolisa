@@ -260,7 +260,7 @@ class TokenlessRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(TokenlessError, "invalid stash hash"):
             self.runtime.retrieve("not-a-hash")
 
-    def test_stash_initialization_failure_is_reversible_fail_open(self) -> None:
+    def test_stash_initialization_failure_can_still_apply_lossless_json(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="tokenless-python-broken-stash-"
         ) as directory:
@@ -275,8 +275,9 @@ class TokenlessRuntimeTests(unittest.TestCase):
                 truncate_arrays_at=2,
                 agent_id="python-test",
             )
-            self.assertEqual(result.disposition, "recoverability_unavailable")
-            self.assertEqual(result.output, original)
+            self.assertEqual(result.disposition, "applied")
+            self.assertEqual(json.loads(result.output), json.loads(original))
+            self.assertLess(len(result.output), len(original))
 
     def test_short_string_limit_is_reversible_fail_open(self) -> None:
         original = json.dumps({"tail": "x" * 400})

@@ -58,6 +58,7 @@ fn very_deep_nesting_returns_a_parser_error() {
             allow_toon: false,
             preserve_top_level_shape: false,
             min_toon_chars: usize::MAX,
+            allow_unrecoverable: true,
         },
     );
     assert!(result.is_err());

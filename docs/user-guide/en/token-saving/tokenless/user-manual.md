@@ -48,7 +48,7 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
-| Stash | Stores content removed by string, array, depth, or schema-description truncation | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
+| Stash | Stores content removed by string, array, depth, or schema-description truncation, plus the complete original arrays behind record reduction | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
 

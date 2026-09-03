@@ -92,18 +92,21 @@ enum Commands {
         #[arg(long)]
         truncate_strings_at: Option<usize>,
         /// Array length that triggers truncation; the first n items are
-        /// kept plus a tail window (see --array-tail-preserve)
+        /// kept plus a tail window (see --array-tail-preserve). Arrays of
+        /// at least 33 JSON objects use record reduction instead.
         #[arg(long)]
         truncate_arrays_at: Option<usize>,
-        /// Items preserved from the tail of truncated arrays (default: 8)
+        /// Items preserved from the tail of truncated arrays (default: 8).
+        /// Does not apply to record reduction.
         #[arg(long)]
         array_tail_preserve: Option<usize>,
         /// Max nesting depth before truncation
         #[arg(long)]
         max_depth: Option<usize>,
-        /// Disable reversible stash. By default, dropped array items are
-        /// stashed so they can be retrieved via `tokenless retrieve`; this
-        /// flag makes truncation lossy (the pre-stash behavior).
+        /// Disable reversible stash. By default, dropped array items and
+        /// the complete arrays behind record reduction are stashed so they
+        /// can be retrieved via `tokenless retrieve`; this flag makes
+        /// truncation lossy and skips record reduction.
         #[arg(long)]
         no_stash: bool,
         /// Override the stash database path. Defaults to
@@ -500,11 +503,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // echo, so no fail-open response can be built: exit 2.
             let request = RequestEnvelope::from_json(&input).map_err(|e| (e.to_string(), 2))?;
 
-            // Load config before deciding on the stash so we can skip it
-            // entirely when compression is disabled (dry-run). Attaching the
-            // stash in dry-run would write entries whose `<<tokenless:KEY>>`
-            // markers never reach the LLM (the original input is emitted),
-            // orphaning them.
+            // PostTool dry-runs still open the configured store to verify that
+            // recovery is available. The pipeline substitutes an in-memory
+            // store for candidate generation, so the persistent store receives
+            // no Stash entries while the original result is emitted.
             let config = TokenlessConfig::load();
             let database_paths = DatabasePathResolver::default();
             let compression_on = config.is_compression_enabled();
@@ -512,9 +514,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 Request::BeforeModel(value) => {
                     compression_on && value.capabilities.retrieval_available
                 }
-                Request::PostTool(value) => {
-                    compression_on && value.capabilities.retrieval_available
-                }
+                Request::PostTool(value) => value.capabilities.retrieval_available,
                 Request::Retrieve(_) => true,
                 Request::PreTool(_) => false,
             };

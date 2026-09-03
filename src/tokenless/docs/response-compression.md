@@ -2,39 +2,50 @@
 
 ## 一、功能概述
 
-第一阶段的 PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并把 JSON 内容静态派发给 `JsonCompressor`（`crates/tokenless-compressors/src/json.rs`）。压缩器解析 JSON、递归应用以下规则，并在宿主允许文本替换时选择更小的 Compact JSON 或 TOON 表示。非 JSON 内容当前统一透传；Terminal Cleanup 与 Build Log 引擎仍保留，但尚未接入 Pipeline。
+第一阶段的 PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并把 JSON 内容静态派发给 `JsonCompressor`（`crates/tokenless-compressors/src/json.rs`）。压缩器只解析一次 JSON，先生成不截断数据的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。非 JSON 内容当前统一透传；Terminal Cleanup 与 Build Log 引擎仍保留，但尚未接入 Pipeline。
 
-## 二、7 条压缩规则
+## 二、8 条压缩规则
 
 | # | 规则 | 判断条件 | 处理方式 | 默认阈值 |
 |---|------|---------|---------|---------|
 | R1 | **字符串截断** | Unicode 字符数 > 4096 | 在 Unicode 字符边界截断，追加截断标记 | 4096 字符 |
-| R2 | **数组截断** | 数组元素 > 32 | 保留前 32 个 + 末尾 8 个（`array_tail_preserve`），head 与 tail 之间插入 `<... N more items truncated, not stashed>`；head+tail 覆盖全部元素时不截断 | 32 + 8 个 |
-| R3 | **字段删除** | key 匹配黑名单 | 整个字段移除（不递归进入） | 7 个字段 |
-| R4 | **null 移除** | 值为 `null` | 从对象/数组中删除 | 启用 |
-| R5 | **空值移除** | 值为 `""` / `[]` / `{}` | 从对象/数组中删除 | 启用 |
-| R6 | **深度截断** | 嵌套深度 > 8 | 替换为 `<{type} truncated at depth {N}>` | 8 层 |
-| R7 | **原始类型保留** | bool / number | 直接保留，不做处理 | — |
+| R2 | **Record Reduction** | 数组至少有 33 项，且每项都是 JSON Object | 保留首尾、错误、结构异常和数值异常记录；普通记录去重后稳定等距采样；完整数组写入 Stash | 32 条普通预算；关键记录可突破预算 |
+| R3 | **普通数组截断** | 非 Record Array 的元素数超过配置预算 | 保留前 32 个 + 末尾 8 个（`array_tail_preserve`），head 与 tail 之间插入截断标记；head+tail 覆盖全部元素时不截断 | 32 + 8 个 |
+| R4 | **字段删除** | key 匹配黑名单 | 整个字段移除（不递归进入） | 7 个字段 |
+| R5 | **null 移除** | 值为 `null` | 从对象/数组中删除 | 启用 |
+| R6 | **空值移除** | 值为 `""` / `[]` / `{}` | 从对象/数组中删除 | 启用 |
+| R7 | **深度截断** | 嵌套深度 > 8 | 替换为 `<{type} truncated at depth {N}>` | 8 层 |
+| R8 | **原始类型保留** | bool / number | 直接保留，不做处理 | — |
 
-**R3 默认黑名单字段**：`debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
+**R4 默认黑名单字段**：`debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
+
+Record Reduction 固定保留前 4 条和后 4 条；保留非空 `error/errors/exception/failure`
+字段，以及 `status/state/level/severity` 中带错误信号的记录；还会保留字段集合不同于众数
+Shape 的记录，以及至少 5 个数值样本中偏离均值超过 `2σ` 的记录。其余记录按完整内容去重，
+再稳定等距采样补足到 32 条。输出维持原始顺序。
+
+每个被缩减的数组只为集合本身写入一个 Stash Entry，Payload 是变换前完整数组的 Compact
+JSON；输出末尾追加总数、遗漏数和 Retrieve Marker。没有可用 Stash 或写入失败时，不执行
+Record Reduction，也不会回退为普通数组的位置型截断。
 
 ## 三、递归处理顺序
 
 ```
 compress_value(value, depth)
- ├─ 1. 检查深度限制 → 超限则返回截断标记（R6）
+ ├─ 1. 检查深度限制 → 超限则返回截断标记（R7）
  ├─ 2. 按类型分支：
- │   ├─ null / bool / number → 直接返回（R7）
+ │   ├─ null / bool / number → 直接返回（R8）
  │   ├─ string → compress_string()（R1）
  │   ├─ array  → compress_array()
- │   │   ├─ 截取前 N 个元素（R2）
+ │   │   ├─ Record Array → 保留关键记录并稳定采样（R2）
+ │   │   ├─ 其他 Array → 截取 head/tail（R3）
  │   │   ├─ 逐项递归 compress_value(item, depth+1)
- │   │   ├─ 过滤 null（R4）和空值（R5）
+ │   │   ├─ 过滤 null（R5）和空值（R6）
  │   │   └─ 追加截断标记
  │   └─ object → compress_object()
- │       ├─ 跳过黑名单字段（R3）
+ │       ├─ 跳过黑名单字段（R4）
  │       ├─ 逐值递归 compress_value(val, depth+1)
- │       └─ 过滤 null（R4）和空值（R5）
+ │       └─ 过滤 null（R5）和空值（R6）
 ```
 
 ## 四、集成路径
@@ -89,8 +100,8 @@ Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
 **流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
-`ContentType::Json -> JsonCompressor`；清理、截断、Structured Slot 恢复、Compact JSON 与
-可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
+`ContentType::Json -> JsonCompressor`；清理、Record Reduction、截断、Structured Slot 恢复、
+Compact JSON 与可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
 Common Hook、OpenClaw 与 Hermes Plugin 都不提供 Marker 授权恢复路径，因此只接受无损 JSON
 候选；需要截断的候选以 `recoverability_unavailable` 透传。实际 Pipeline、Stash 或 RTK
 操作错误由 CLI 以退出码 1 返回，Hook 在进程边界上 fail-open。Common PreTool Hook 通过
@@ -157,7 +168,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 
 ## 五、压缩前后示例
 
-### 示例 1 — 字段删除 + null 移除 + 空值移除（R3 + R4 + R5）
+### 示例 1 — 字段删除 + null 移除 + 空值移除（R4 + R5 + R6）
 
 输入：
 ```json
@@ -180,7 +191,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 }
 ```
 
-被删除的内容：`debug`（R3 黑名单）、`trace`（R3 黑名单）、`metadata`（R4 null）、`tags`（R5 空数组）、`extra`（R5 空字符串）。
+被删除的内容：`debug`（R4 黑名单）、`trace`（R4 黑名单）、`metadata`（R5 null）、`tags`（R6 空数组）、`extra`（R6 空字符串）。
 
 ### 示例 2 — 字符串截断（R1）
 
@@ -194,9 +205,9 @@ curl -s https://api.example.com/data | tokenless compress-response
 "This is a very long … (truncated)"
 ```
 
-默认阈值 4096 字节。多字节 UTF-8 字符（如中文）会回退到安全边界，不会截断在字符中间。
+默认阈值 4096 个 Unicode 字符，不会截断在多字节 UTF-8 字符中间。
 
-### 示例 3 — 数组截断（R2）
+### 示例 3 — 普通数组截断（R3）
 
 输入（`truncate_arrays_at = 3`、`array_tail_preserve = 0` 为例）：
 ```json
@@ -213,7 +224,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 能覆盖整个数组，则不截断、不加标记。上例在默认配置下（3 + 8 ≥ 10）会
 原样保留全部 10 个元素。
 
-### 示例 4 — 深度截断（R6）
+### 示例 4 — 深度截断（R7）
 
 输入（`max_depth = 2` 为例）：
 ```json
@@ -241,7 +252,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 
 默认阈值 8 层。
 
-### 示例 5 — 递归组合压缩（R1 + R3 + R4 同时生效）
+### 示例 5 — 递归组合压缩（R1 + R4 + R5 同时生效）
 
 输入（`truncate_strings_at = 10` 为例）：
 ```json
@@ -268,7 +279,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 }
 ```
 
-### 示例 6 — 数组内对象的复合压缩（R2 + R3 + R4）
+### 示例 6 — 小型数组内对象的复合压缩（R3 + R4 + R5）
 
 输入（`truncate_arrays_at = 2`、`array_tail_preserve = 0` 为例）：
 ```json
@@ -289,7 +300,18 @@ curl -s https://api.example.com/data | tokenless compress-response
 ]
 ```
 
-第一个对象的 `debug`（R3）和 `value: null`（R4）被移除，数组在第 2 个元素后截断（R2）。
+第一个对象的 `debug`（R4）和 `value: null`（R5）被移除，数组在第 2 个元素后截断（R3）。少于 33 项，因此该数组不是 Record Array。
+
+### 示例 7 — Record Reduction（R2）
+
+一个包含 64 个同 Shape Object 的数组，在可恢复路径中最多保留 32 条普通记录；如果第 31 条
+含有 `status: "failed"` 或超过 `2σ` 的数值，它即使位于集合中间也会被保留。数组末尾会追加：
+
+```text
+<... 32 of 64 records omitted, run: tokenless retrieve '<<tokenless:HASH>>'>
+```
+
+对应 Stash Payload 是缩减前 64 条记录组成的完整 Compact JSON 数组。
 
 ## 六、默认配置汇总
 
@@ -382,10 +404,10 @@ tokenless stats summary
 
 | 数据类型 | 响应压缩 | 响应压缩+TOON | 说明 |
 |---------|---------|--------------|------|
-| 含 debug/trace 的 API 响应 | ~78% | ~82-85% | 响应压缩移除冗余字段后，TOON 消除剩余 JSON 语法 |
-| 表格数据 `[{...}]` | ~5-10% | ~40-60% | 响应压缩对表格效果有限，TOON 效果显著（实测 44%） |
-| 简单扁平对象 | ~0-10% | ~15-25% | JSON 语法开销占比有限 |
+| 仓库 JSON 参考 Fixture | 36.3%（无损） | 50.6% | 无损清理超过 15% 门槛，因此保留全部 Record |
+| 可恢复的 Record Array | 取决于记录数和重复度 | 取决于所选表示 | 未达到无损门槛时才缩减；关键记录可突破 32 条基础预算 |
+| 简单扁平对象 | 可能无收益 | 取决于字段和值长度 | 两种表示都没有同时减少字符和估算 Token 时透传 |
 
-Schema 压缩不经过本表的响应压缩或 TOON 流程。Tokenless 0.7.11 在仓库参考
-fixture 上的独立 Schema 压缩结果为 47.3%；该数字不是生产范围或任意 Schema
+Schema 压缩不经过本表的响应压缩或 TOON 流程。当前仓库参考 fixture 上的独立 Schema
+压缩结果为 47.3%；该数字不是生产范围或任意 Schema
 的保证值，实际结果取决于输入结构、description 长度和可移除字段。

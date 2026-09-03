@@ -12,23 +12,27 @@ called **stash** to avoid the proprietary abbreviation.
 
 ## How it works
 
-1. **Compress**: `JsonCompressor` truncates oversized arrays (default:
-   keep the first 32 and the last 8 items). The dropped middle items are
-   serialized to JSON and `stash.stash(payload)` stores them, returning a
+1. **Compress**: `JsonCompressor` first prefers a complete-data representation
+   when it saves at least 15% of estimated tokens. Otherwise, a record array
+   (at least 33 JSON objects) may be reduced to a 32-record base budget while
+   preserving boundary, error, structural-anomaly, and numeric-outlier
+   records. The complete pre-transform array is serialized once and
+   `stash.stash(payload)` stores it. Other oversized arrays retain the first
+   32 and last 8 items and stash the dropped middle window. A successful write returns a
    24-hex BLAKE3 key plus a store-wide, monotonically increasing ownership
    token used if the write must later be rolled back. Tokens are never reused
    after expiry, deletion, or eviction.
-2. **Mark**: the truncation marker becomes
-   `<... N items truncated, retrieve with <<tokenless:KEY>>`.
+2. **Mark**: the output contains a marker such as
+   `<... N of M records omitted, run: tokenless retrieve '<<tokenless:KEY>>'>`.
 3. **Retrieve**: a trusted local operator can call `tokenless retrieve <KEY>`.
    An agent uses the Protocol v2 `retrieve` operation, which authorizes the
    key against the Marker set currently visible to the model before reading
    Stash.
 
 When no stash store is attached (`Option<Arc<dyn StashStore>>` = `None`),
-truncation is lossy and non-retrievable — the original pre-stash behavior.
-This keeps the stash off the core compression path unless a caller explicitly
-enables it.
+recognized record arrays are not reduced and do not fall back to positional
+array truncation. Other bounded transformations retain their existing lossy,
+non-retrievable behavior where the caller permits it.
 
 ## No-savings rollback
 
@@ -177,8 +181,9 @@ before the read and does not record that attempt as a Hit or Miss.
 
 ## What is not stashed
 
-`JsonCompressor` stashes complete long strings, dropped array windows, and
-depth-truncated subtrees when a trusted recovery path is available. Structural
+`JsonCompressor` stashes complete record arrays, complete long strings, dropped
+non-record array windows, and depth-truncated subtrees when a trusted recovery
+path is available. Structural
 cleanup—blacklisted diagnostic fields, `null`, and empty values—is classified
 as lossless and does not emit recovery markers.
 

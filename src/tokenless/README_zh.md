@@ -9,12 +9,12 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 | 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
-| Content-aware 响应压缩 | JSON 参考 fixture 65.8% | 把成功 JSON 路由给 `JsonCompressor`；非 JSON 内容域当前透传 |
+| Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
 
-表中 Schema、响应和 TOON 数字是 Tokenless 0.7.11 对仓库内置参考 fixture 的独立测试
+表中 Schema、响应和 TOON 数字是当前仓库内置参考 fixture 的独立测试
 结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、可移除字段、
 配置阈值，以及工具数据在会话中的占比。短小或已经紧凑的 Payload 可能只节省几个百分
 点，也可能直接原样透传。精确输入、命令、完整结果和限制见
@@ -67,7 +67,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 例如：面板显示压缩率 60%，若工具响应占总消耗 20%，实际节省率为 60% × 20% = **12%**。这也是为何在总消耗 1500 万 Token 的实验中节省量观感偏小——tokenless 只作用于其中约 300 万 Token 的工具响应部分。
 
-> Stash 使压缩**端到端无损**：可适度收紧截断阈值换取更高 inline 节省，需要原文时经 `<<tokenless:KEY>>` 标记取回，不影响正确性。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。数组截断默认保留头部 32 项与尾部 8 项（`--array-tail-preserve`，默认 8，设为 0 关闭尾部保留），被丢弃的中间段进入 Stash；完整参数见用户手册 CLI 参考。
+> Stash 使压缩**端到端无损**：可适度收紧截断阈值换取更高 inline 节省，需要原文时经 `<<tokenless:KEY>>` 标记取回，不影响正确性。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。至少 33 项且全为 Object 的数组使用 Record Reduction：完整数组进入 Stash，默认保留首尾、错误、结构/数值异常并稳定采样至 32 条基础预算；其他数组截断默认保留头部 32 项与尾部 8 项。完整参数见用户手册 CLI 参考。
 > 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
 
 ## 集成路径

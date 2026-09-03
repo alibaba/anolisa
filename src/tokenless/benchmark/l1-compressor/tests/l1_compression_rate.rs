@@ -30,10 +30,10 @@ fn pct(report: &serde_json::Value, pointer: &str) -> f64 {
 }
 
 #[test]
-fn response_canonical_savings_at_least_55_pct() {
+fn response_canonical_lossless_savings_at_least_35_pct() {
     let report = compression_metrics();
     let saved = pct(&report, "/canonical/response/savings_pct");
-    assert!(saved >= 55.0, "response savings regressed: {saved}%");
+    assert!(saved >= 35.0, "response savings regressed: {saved}%");
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn schema_canonical_savings_at_least_40_pct() {
 }
 
 #[test]
-fn full_stack_savings_at_least_52_pct() {
+fn full_stack_savings_at_least_49_pct() {
     let report = compression_metrics();
     let configs = report["stacking"]["configs"].as_array().unwrap();
     let full = configs
@@ -52,7 +52,7 @@ fn full_stack_savings_at_least_52_pct() {
         .find(|c| c["config"] == "full_stack")
         .expect("full_stack config present");
     let saved = full["savings_pct"].as_f64().unwrap();
-    assert!(saved >= 52.0, "full_stack savings regressed: {saved}%");
+    assert!(saved >= 49.0, "full_stack savings regressed: {saved}%");
 }
 
 #[test]

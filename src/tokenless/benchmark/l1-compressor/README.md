@@ -37,6 +37,7 @@ It depends on the tokenless crates by path.
 l1-compressor/
 ├── fixtures/                     # canonical inputs (generated, committed)
 │   ├── records.json              #   1000 uniform records
+│   ├── record_reduction.json     #   middle critical-record fixture
 │   ├── tool_response.json        #   canonical response payload
 │   └── schema_search.json        #   canonical function schema
 ├── src/lib.rs                    # payload generators; loads fixtures for canonical inputs
@@ -145,9 +146,10 @@ stacking report) is computed in Rust in-process.
 5. **Default config only**: All measurements use default compressor settings.
    Production adapters may use different configurations with different results.
 
-## Version note
+## Behavior note
 
-Reconstructed against tokenless **0.7.3**. The 0.2.0-era reports used
-The old response compressor defaulted `truncate_arrays_at = 16`; `JsonCompressor` uses **32**, so
-the `items/*` and `medium/large/huge` response curves flatten after 32 items
-rather than 16. The curve shape matches the report; the truncation knee moved.
+`JsonCompressor` now selects a complete-data JSON/TOON candidate before trying
+bounded transformations. The canonical records contain enough removable
+diagnostic data to cross the 15% lossless threshold, so the `items/*` curves
+retain all records. `fixtures/record_reduction.json` separately covers the
+recoverable 32-record base budget and its middle critical record.
