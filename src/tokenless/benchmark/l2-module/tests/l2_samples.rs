@@ -211,3 +211,59 @@ fn json_ground_truth_never_references_droppable_noise() {
         }
     }
 }
+
+/// The path-like pattern also matches a pure slash run (`///`, a Rust doc
+/// comment), which is syntax, not content. Every extracted diff fact must
+/// carry at least one alphanumeric character.
+#[test]
+fn diff_ground_truth_never_yields_pure_punctuation_facts() {
+    use tokenless_l2_bench::l2::GroundTruth;
+    use tokenless_l2_bench::l2::samples::extract_dynamic_ground_truth;
+
+    let diff = concat!(
+        "--- a/src/lib.rs\n",
+        "+++ b/src/lib.rs\n",
+        "@@ -1,2 +1,2 @@\n",
+        "-/// Auto-fix missing dependencies via env-fix.sh.\n",
+        "+/// Ordered candidate list for the fix script lookup.\n",
+    );
+    let facts = extract_dynamic_ground_truth(Category::Diff, diff).expect("extract diff facts");
+    assert!(!facts.is_empty(), "doc-comment diff produced no facts");
+    for item in &facts {
+        let GroundTruth::Substring(fact) = item else {
+            continue;
+        };
+        assert!(
+            fact.chars().any(char::is_alphanumeric),
+            "fact {fact:?} is pure punctuation"
+        );
+    }
+}
+
+/// The committed `static_code_diff.diff` fixture backs the three
+/// `static_code_diff*` samples. If extraction ever regresses to an empty
+/// result on it, those samples would silently become invalid (empty ground
+/// truth, retention always 1.0) with no warning in the report.
+#[test]
+fn static_code_diff_fixture_yields_probeable_facts() {
+    use tokenless_l2_bench::l2::GroundTruth;
+    use tokenless_l2_bench::l2::samples::{diff_probe_questions, extract_dynamic_ground_truth};
+
+    let diff = std::fs::read_to_string(l2_dir().join("fixtures/static_code_diff.diff"))
+        .expect("read fixtures/static_code_diff.diff");
+    let facts = extract_dynamic_ground_truth(Category::Diff, &diff).expect("extract diff facts");
+    assert!(!facts.is_empty(), "fixture produced no ground truth");
+    assert!(
+        !diff_probe_questions(&facts).is_empty(),
+        "fixture facts produced no probe questions"
+    );
+    for item in &facts {
+        let GroundTruth::Substring(fact) = item else {
+            continue;
+        };
+        assert!(
+            fact.chars().any(char::is_alphanumeric),
+            "fact {fact:?} is pure punctuation"
+        );
+    }
+}

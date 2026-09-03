@@ -520,7 +520,9 @@ fn extract_diff_ground_truth(raw_output: &str) -> Result<Vec<GroundTruth>, L2Err
     // Quoted literals: error codes, messages and versions travel this way, and
     // they are the content a reader of the diff would quote back.
     let quoted_re = Regex::new(r#"["']([^"'\n]{3,})["']"#)?;
-    // Path-like tokens (at least one separator and an extension or directory).
+    // Path-like tokens. The regex alone also matches pure slash/punctuation
+    // runs (`///` from doc comments), so the use site below requires at least
+    // one alphanumeric character in the match.
     let path_re = Regex::new(r"[A-Za-z0-9_.-]*/[A-Za-z0-9_./-]{2,}")?;
     // Fallback: the longest identifier-like token on a changed line, so a line
     // that changes an expression rather than a definition still yields a fact.
@@ -548,7 +550,15 @@ fn extract_diff_ground_truth(raw_output: &str) -> Result<Vec<GroundTruth>, L2Err
                     .and_then(|c| c.get(1))
                     .map(|m| m.as_str().to_string())
             })
-            .or_else(|| path_re.find(body).map(|m| m.as_str().to_string()))
+            .or_else(|| {
+                path_re
+                    .find(body)
+                    // A match without any alphanumeric is a separator or
+                    // doc-comment run, not a path: it would occupy a fact
+                    // slot while passing retention almost anywhere.
+                    .filter(|m| m.as_str().chars().any(char::is_alphanumeric))
+                    .map(|m| m.as_str().to_string())
+            })
             .or_else(|| {
                 ident_re
                     .find_iter(body)
