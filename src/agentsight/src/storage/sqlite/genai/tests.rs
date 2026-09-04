@@ -442,6 +442,143 @@ fn test_get_agent_token_summary() {
     cleanup_db(&path);
 }
 
+/// Cache accounting differs by provider, and these aggregations recompute the
+/// totals in SQL instead of reading the stored `total_tokens` column. Figures
+/// come from captured traffic: an Anthropic call, which reports the cache
+/// counters outside `input_tokens`, and a Qoder CLI call, whose OpenAI-style
+/// gateway already counts them inside `prompt_tokens`.
+#[test]
+fn test_token_aggregations_apply_provider_cache_rule() {
+    let path =
+        std::env::temp_dir().join(format!("test_genai_cache_rule_{}.db", std::process::id()));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    let sql = "INSERT INTO genai_events (\
+               call_id, event_type, start_timestamp_ns, end_timestamp_ns, duration_ns,\
+               provider, model, input_tokens, output_tokens, total_tokens,\
+               cache_creation_tokens, cache_read_tokens,\
+               agent_name, pid, status, event_json, process_name,\
+               session_id, conversation_id\
+               ) VALUES (?1,'llm_call',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'complete','{}',?14,?15,?16)";
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            sql,
+            params![
+                "anthropic-call",
+                BASE_NS,
+                BASE_NS + STEP_NS,
+                STEP_NS,
+                "anthropic",
+                "claude-opus-5",
+                1111_i64,
+                803_i64,
+                26490_i64,
+                0_i64,
+                24576_i64,
+                "claude",
+                1_i32,
+                "proc-claude",
+                "sess-anthropic",
+                "conv-anthropic"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            sql,
+            params![
+                "openai-call",
+                BASE_NS + STEP_NS,
+                BASE_NS + 2 * STEP_NS,
+                STEP_NS,
+                "openai",
+                "gpt-4o",
+                74302_i64,
+                170_i64,
+                74472_i64,
+                0_i64,
+                71552_i64,
+                "qodercli",
+                2_i32,
+                "proc-node",
+                "sess-openai",
+                "conv-openai"
+            ],
+        )
+        .unwrap();
+    }
+
+    let ts = store
+        .get_token_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, None, 1)
+        .unwrap();
+    assert_eq!(ts.len(), 1);
+    // Anthropic contributes 1111 + 24576; OpenAI contributes 74302 as reported.
+    assert_eq!(ts[0].input_tokens, 99_989);
+    assert_eq!(ts[0].output_tokens, 973);
+    // Adding the OpenAI cache read a second time would report 172514 here.
+    assert_eq!(ts[0].total_tokens, 100_962);
+
+    let by_agent = store.get_agent_token_summary().unwrap();
+    assert_eq!(by_agent.len(), 2);
+    assert_eq!(by_agent[0].agent_name, "qodercli");
+    assert_eq!(by_agent[0].input_tokens, 74_302);
+    assert_eq!(by_agent[0].total_tokens, 74_472);
+    assert_eq!(by_agent[1].agent_name, "claude");
+    assert_eq!(by_agent[1].input_tokens, 25_687);
+    assert_eq!(by_agent[1].total_tokens, 26_490);
+
+    let by_model = store
+        .get_model_timeseries(BASE_NS, BASE_NS + 6 * STEP_NS, None, 1)
+        .unwrap();
+    let gpt = by_model.iter().find(|b| b.model == "gpt-4o").unwrap();
+    assert_eq!(gpt.total_tokens, 74_472);
+    let claude = by_model
+        .iter()
+        .find(|b| b.model == "claude-opus-5")
+        .unwrap();
+    assert_eq!(claude.total_tokens, 26_490);
+
+    // Session-scoped queries feed the sessions list and the Token Savings page,
+    // and aggregate the same way.
+    let savings = store
+        .list_sessions_for_savings(BASE_NS, BASE_NS + 6 * STEP_NS, None)
+        .unwrap();
+    let openai_session = savings
+        .iter()
+        .find(|s| s.session_id == "sess-openai")
+        .unwrap();
+    assert_eq!(openai_session.total_input_tokens, 74_302);
+    let anthropic_session = savings
+        .iter()
+        .find(|s| s.session_id == "sess-anthropic")
+        .unwrap();
+    assert_eq!(anthropic_session.total_input_tokens, 25_687);
+
+    let single = store
+        .get_session_for_savings("sess-openai")
+        .unwrap()
+        .expect("session should exist");
+    assert_eq!(single.total_input_tokens, 74_302);
+
+    let sessions = store
+        .list_sessions(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
+    let listed = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-openai")
+        .unwrap();
+    assert_eq!(listed.total_input_tokens, 74_302);
+
+    let traces = store
+        .list_traces_by_session("sess-openai", None, None, true)
+        .unwrap();
+    assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0].total_input_tokens, 74_302);
+
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_get_agent_token_summary_empty() {
     let path = std::env::temp_dir().join(format!("test_genai_ats_empty_{}.db", std::process::id()));
@@ -1559,19 +1696,22 @@ fn agent_activity_summaries_group_names_and_aggregate_calls() {
     let store = GenAISqliteStore::new_with_path(&path).unwrap();
     {
         let conn = store.conn.lock().unwrap();
+        // `provider` is set explicitly because the aggregated total depends on
+        // it: Anthropic reports the cache counters outside input_tokens, so
+        // they add to the total, while OpenAI-style gateways do not.
         conn.execute(
             "INSERT INTO genai_events
-             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name,
+             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name, provider,
               input_tokens, output_tokens, cache_read_tokens, event_json)
-             VALUES ('llm_call', 100, 150, 'Claude', 10, 5, 2, '{}')",
+             VALUES ('llm_call', 100, 150, 'Claude', 'anthropic', 10, 5, 2, '{}')",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO genai_events
-             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name,
+             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name, provider,
               input_tokens, output_tokens, cache_creation_tokens, event_json)
-             VALUES ('llm_call', 200, 0, 'claude', 20, 10, 3, '{}')",
+             VALUES ('llm_call', 200, 0, 'claude', 'anthropic', 20, 10, 3, '{}')",
             [],
         )
         .unwrap();
@@ -1585,9 +1725,9 @@ fn agent_activity_summaries_group_names_and_aggregate_calls() {
         .unwrap();
         conn.execute(
             "INSERT INTO genai_events
-             (event_type, start_timestamp_ns, process_name, input_tokens,
+             (event_type, start_timestamp_ns, process_name, provider, input_tokens,
               output_tokens, event_json)
-             VALUES ('llm_call', 250, 'Codex', 7, 3, '{}')",
+             VALUES ('llm_call', 250, 'Codex', 'openai', 7, 3, '{}')",
             [],
         )
         .unwrap();
@@ -1603,6 +1743,7 @@ fn agent_activity_summaries_group_names_and_aggregate_calls() {
     assert_eq!(summaries[1].agent_name, "Claude");
     assert_eq!(summaries[1].last_seen_ns, 200);
     assert_eq!(summaries[1].total_calls, 2);
+    // Anthropic: (10 + 5 + 2) + (20 + 10 + 3).
     assert_eq!(summaries[1].total_tokens, 50);
 
     drop(store);
