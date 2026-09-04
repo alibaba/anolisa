@@ -55,7 +55,8 @@
       "required": ["allow_text_reencoding"],
       "properties": {
         "allow_text_reencoding": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "When false, the candidate must preserve artifact.media_type; Core rejects a media-type change."
         }
       }
     }
