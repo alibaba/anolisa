@@ -251,7 +251,7 @@ pub struct McpConfig {
 }
 
 /// A trusted MCP server that cosh-core may start locally or contact over HTTP.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct McpServerConfig {
     /// Executable for a locally managed stdio server, launched without a shell.
     #[serde(default)]
@@ -268,6 +268,16 @@ pub struct McpServerConfig {
     /// Optional static bearer token for an HTTP server.
     #[serde(default)]
     pub bearer_token: Option<String>,
+    /// Extra HTTP headers appended to every request for an HTTP server.
+    ///
+    /// Values expand `${VAR}` references. Header names owned by the transport
+    /// or HTTP framework are silently ignored (`Authorization`, `Accept`,
+    /// `Content-Type`, `Last-Event-ID`, `MCP-Protocol-Version`,
+    /// `MCP-Session-Id`, `Connection`, `Content-Length`, `Host`,
+    /// `Transfer-Encoding`, `User-Agent`) so protocol behavior stays
+    /// deterministic.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
     /// OAuth settings for a Streamable HTTP server. Tokens are stored separately.
     #[serde(default)]
     pub oauth: McpOAuthConfig,
@@ -280,6 +290,30 @@ pub struct McpServerConfig {
     /// `None` exposes every server tool; an empty list exposes none.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+}
+
+impl fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // bearer_token and custom header values carry credentials, so both
+        // are redacted; header names stay visible to keep diagnostics useful.
+        let mut header_names: Vec<_> = self.headers.keys().collect();
+        header_names.sort();
+        f.debug_struct("McpServerConfig")
+            .field("command", &self.command)
+            .field("url", &self.url)
+            .field("args", &self.args)
+            .field("env", &self.env)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("headers", &header_names)
+            .field("oauth", &self.oauth)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("startup_timeout_ms", &self.startup_timeout_ms)
+            .field("allowed_tools", &self.allowed_tools)
+            .finish()
+    }
 }
 
 /// Non-secret OAuth settings for a Streamable HTTP MCP server.
@@ -1431,6 +1465,52 @@ allowed_tools = ["search"]
         assert_eq!(server.command, "");
         assert_eq!(server.url.as_deref(), Some("https://mcp.example.com/mcp"));
         assert_eq!(server.bearer_token.as_deref(), Some("${MCP_TOKEN}"));
+    }
+
+    #[test]
+    fn parse_custom_header_mcp_config() {
+        let toml_str = r#"
+[mcp.servers.remote]
+url = "https://mcp.example.com/mcp"
+bearer_token = "${MCP_TOKEN}"
+
+[mcp.servers.remote.headers]
+PRIVATE-TOKEN = "${AONE_TOKEN}"
+X-Custom-Header = "static-value"
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let server = config.mcp.servers.get("remote").unwrap();
+        assert_eq!(server.headers["PRIVATE-TOKEN"], "${AONE_TOKEN}");
+        assert_eq!(server.headers["X-Custom-Header"], "static-value");
+    }
+
+    #[test]
+    fn parse_mcp_config_without_headers_keeps_default() {
+        let toml_str = r#"
+[mcp.servers.remote]
+url = "https://mcp.example.com/mcp"
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let server = config.mcp.servers.get("remote").unwrap();
+        assert!(server.headers.is_empty());
+    }
+
+    #[test]
+    fn mcp_server_config_debug_redacts_credentials() {
+        let toml_str = r#"
+url = "https://mcp.example.com/mcp"
+bearer_token = "secret-bearer"
+
+[headers]
+PRIVATE-TOKEN = "secret-header"
+"#;
+        let server: McpServerConfig = toml::from_str(toml_str).unwrap();
+        let debug = format!("{server:?}");
+        assert!(debug.contains("PRIVATE-TOKEN"), "got: {debug}");
+        assert!(!debug.contains("secret-bearer"), "got: {debug}");
+        assert!(!debug.contains("secret-header"), "got: {debug}");
     }
 
     #[test]

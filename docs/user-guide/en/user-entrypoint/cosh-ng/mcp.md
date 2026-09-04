@@ -50,6 +50,24 @@ For a static token, remove the OAuth table and set:
 bearer_token = "${SEARCH_MCP_TOKEN}"
 ```
 
+Servers that authenticate with non-standard headers can add a `headers`
+table instead of, or in addition to, the token:
+
+```toml
+[mcp.servers.search.headers]
+PRIVATE-TOKEN = "${SEARCH_MCP_TOKEN}"
+X-Custom-Header = "static-value"
+```
+
+Every entry is appended to each HTTP request the client sends, including the
+initial handshake, tool calls, and session teardown. Header values expand
+`${VAR}` environment references the same way `bearer_token` does. The
+following header names are silently ignored when configured, because the
+transport or HTTP framework owns them: `Authorization`, `Accept`,
+`Content-Type`, `Last-Event-ID`, `MCP-Protocol-Version`, `MCP-Session-Id`,
+`Connection`, `Content-Length`, `Host`, `Transfer-Encoding`, and
+`User-Agent`. Protocol behavior cannot be overridden through configuration.
+
 Use HTTPS for remote endpoints. HTTP is accepted only for loopback hosts such
 as `localhost`, `127.0.0.1`, or `::1`. A server must define exactly one of
 `command` and `url`.

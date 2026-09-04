@@ -1,5 +1,6 @@
 //! Minimal stdio MCP client support for dynamically discovered agent tools.
 
+mod headers;
 mod http;
 mod oauth;
 
@@ -188,6 +189,15 @@ fn print_json(value: &impl Serialize) -> Result<(), String> {
     Ok(())
 }
 
+/// Reports whether any authentication material is configured: a bearer
+/// token, OAuth credentials on disk, or custom request headers, which are
+/// commonly the credential for token-based gateways.
+fn server_has_credentials(server: &str, server_config: &McpServerConfig) -> Result<bool, String> {
+    Ok(server_config.bearer_token.is_some()
+        || !server_config.headers.is_empty()
+        || oauth::has_credentials(server)?)
+}
+
 fn print_server_list(config: &CoreConfig) -> Result<(), String> {
     let disabled = state::load_disabled(MCP_SERVERS_STATE);
     let mut servers = Vec::new();
@@ -196,8 +206,7 @@ fn print_server_list(config: &CoreConfig) -> Result<(), String> {
             server: server.clone(),
             transport: transport(server_config),
             enabled: !disabled.contains(server),
-            has_credentials: server_config.bearer_token.is_some()
-                || oauth::has_credentials(server)?,
+            has_credentials: server_has_credentials(server, server_config)?,
         });
     }
     servers.sort_by(|left, right| left.server.cmp(&right.server));
@@ -402,6 +411,7 @@ impl McpClient {
                     server_name,
                     url,
                     config.bearer_token.as_deref(),
+                    &config.headers,
                     config.oauth.resource.as_deref(),
                     workspace_root.to_path_buf(),
                 )?),
@@ -436,6 +446,7 @@ impl McpClient {
                 server_name,
                 url,
                 config.bearer_token.as_deref(),
+                &config.headers,
                 config.oauth.resource.as_deref(),
                 workspace_root.to_path_buf(),
             )
@@ -1168,6 +1179,7 @@ mod tests {
             args: vec![script_path.to_string_lossy().to_string()],
             env: HashMap::new(),
             bearer_token: None,
+            headers: HashMap::new(),
             oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
@@ -1328,6 +1340,29 @@ mod tests {
         assert!(output.contains("has_credentials"));
         assert!(!output.contains("access_token"));
         assert!(!output.contains("refresh_token"));
+    }
+
+    #[test]
+    fn header_only_config_counts_as_credentials() {
+        let header_only: McpServerConfig = toml::from_str(
+            r#"
+url = "https://mcp.example.com/mcp"
+
+[headers]
+PRIVATE-TOKEN = "secret"
+"#,
+        )
+        .unwrap();
+        assert!(server_has_credentials("remote", &header_only).unwrap());
+
+        let bearer_only: McpServerConfig = toml::from_str(
+            r#"
+url = "https://mcp.example.com/mcp"
+bearer_token = "token"
+"#,
+        )
+        .unwrap();
+        assert!(server_has_credentials("remote", &bearer_only).unwrap());
     }
 
     #[tokio::test]

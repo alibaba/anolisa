@@ -45,6 +45,16 @@ scopes = ["search"]
 bearer_token = "${SEARCH_MCP_TOKEN}"
 ```
 
+需要非标准 Header 认证的 server，可以改用或搭配使用 `headers` 表：
+
+```toml
+[mcp.servers.search.headers]
+PRIVATE-TOKEN = "${SEARCH_MCP_TOKEN}"
+X-Custom-Header = "static-value"
+```
+
+每个条目都会附加到客户端发送的每一个 HTTP 请求上，包括初始握手、工具调用与会话关闭。Header 值与 `bearer_token` 一样支持 `${VAR}` 环境变量展开。以下 Header 名在配置后会被静默忽略，因为它们由传输层或 HTTP 框架接管：`Authorization`、`Accept`、`Content-Type`、`Last-Event-ID`、`MCP-Protocol-Version`、`MCP-Session-Id`、`Connection`、`Content-Length`、`Host`、`Transfer-Encoding` 和 `User-Agent`。协议行为无法通过配置覆盖。
+
 远程 endpoint 使用 HTTPS。只有 `localhost`、`127.0.0.1` 或 `::1` 等 loopback 主机允许 HTTP。每个 server 必须且只能设置 `command` 或 `url` 之一。
 
 ## 连接并检查
