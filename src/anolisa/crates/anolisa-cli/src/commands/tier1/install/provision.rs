@@ -6,8 +6,9 @@ use anolisa_core::{
     ComponentManifest, DependencyResolver, DependencyStatus, ProvisionPlan, ProvisionStrategy,
     ResolverEnv,
 };
+use anolisa_platform::command::CommandRunner;
 use anolisa_platform::fs_layout::FsLayout;
-use anolisa_platform::package_manager::{PackageManager, detect_package_manager};
+use anolisa_platform::package_manager::{PackageManager, PkgError, detect_package_manager};
 
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
@@ -40,10 +41,20 @@ pub(crate) fn run_runtime_preflight(
     env: &anolisa_env::EnvFacts,
     command: &str,
 ) -> Result<Vec<String>, CliError> {
+    let resolver = DependencyResolver::system();
+    run_runtime_preflight_with(manifest, env, command, &resolver)
+}
+
+fn run_runtime_preflight_with<R: CommandRunner>(
+    manifest: &ComponentManifest,
+    env: &anolisa_env::EnvFacts,
+    command: &str,
+    resolver: &DependencyResolver<R>,
+) -> Result<Vec<String>, CliError> {
     if manifest.runtime_deps.is_empty() {
         return Ok(Vec::new());
     }
-    let plan = DependencyResolver::system()
+    let plan = resolver
         .resolve(&manifest.runtime_deps, &resolver_env_from_facts(env))
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
@@ -89,12 +100,45 @@ pub(crate) fn run_provision(
     journals: &JournalInventory,
     layout: &FsLayout,
 ) -> Result<Vec<String>, CliError> {
+    let resolver = DependencyResolver::system();
+    run_provision_with(
+        manifest,
+        env,
+        ctx,
+        command,
+        warnings,
+        journals,
+        layout,
+        &resolver,
+        detect_package_manager,
+    )
+}
+
+// The business inputs stay explicit; only the two host collaborators are
+// injected, so introducing a second request object would obscure the existing
+// production signature without reducing call-site complexity.
+#[allow(clippy::too_many_arguments)]
+fn run_provision_with<R, F>(
+    manifest: &ComponentManifest,
+    env: &anolisa_env::EnvFacts,
+    ctx: &CliContext,
+    command: &str,
+    warnings: &mut Vec<String>,
+    journals: &JournalInventory,
+    layout: &FsLayout,
+    resolver: &DependencyResolver<R>,
+    detect_manager: F,
+) -> Result<Vec<String>, CliError>
+where
+    R: CommandRunner,
+    F: FnOnce(Option<&str>) -> Result<Box<dyn PackageManager>, PkgError>,
+{
     if manifest.runtime_deps.is_empty() {
         return Ok(Vec::new());
     }
 
     let resolver_env = resolver_env_from_facts(env);
-    let plan = DependencyResolver::system()
+    let plan = resolver
         .resolve(&manifest.runtime_deps, &resolver_env)
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
@@ -180,7 +224,7 @@ pub(crate) fn run_provision(
             let pkg_base = resolver_env.pkg_base.as_deref();
 
             // Detect the host package manager.
-            let mgr = detect_package_manager(pkg_base).map_err(|err| CliError::Runtime {
+            let mgr = detect_manager(pkg_base).map_err(|err| CliError::Runtime {
                 command: command.to_string(),
                 reason: format!(
                     "cannot auto-install dependencies: {err}; install manually:\n  {}",
@@ -198,7 +242,7 @@ pub(crate) fn run_provision(
             install_unreserved_packages(&pkg_names, journals, layout, &*mgr, command)?;
 
             // Re-verify only the provisioned deps (manual deps stay as warnings).
-            let recheck = DependencyResolver::system()
+            let recheck = resolver
                 .resolve(&manifest.runtime_deps, &resolver_env)
                 .map_err(|err| CliError::Runtime {
                     command: command.to_string(),
@@ -308,6 +352,7 @@ pub(crate) fn select_provision_strategy(ctx: &CliContext) -> ProvisionStrategy {
 mod tests {
     use super::*;
     use crate::commands::tier1::rpm_install;
+    use crate::test_support::TestSandbox;
     use anolisa_core::domain::NativePm;
     use anolisa_core::facts::JournalEvidence;
     use anolisa_core::manifest::{DependencyKind, PackageNames, RuntimeDependency};
@@ -317,16 +362,68 @@ mod tests {
         TransactionStep,
     };
     use anolisa_core::{DependencyResolution, ResolutionPlan};
+    use anolisa_platform::command::CommandOutput;
     use anolisa_platform::package_manager::PkgError;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    type CommandCall = (String, Vec<String>);
+
+    #[derive(Clone)]
+    struct ScriptedRunner {
+        calls: Rc<RefCell<Vec<CommandCall>>>,
+        codes: Rc<RefCell<VecDeque<Option<i32>>>>,
+    }
+
+    impl ScriptedRunner {
+        fn with_codes(codes: impl IntoIterator<Item = Option<i32>>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                codes: Rc::new(RefCell::new(codes.into_iter().collect())),
+            }
+        }
+
+        fn calls(&self) -> Vec<CommandCall> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            self.calls.borrow_mut().push((
+                program.to_string(),
+                args.iter().map(|arg| (*arg).to_string()).collect(),
+            ));
+            let code = self
+                .codes
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected dependency probe");
+            Ok(CommandOutput {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
 
     /// Records install calls instead of touching the host.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct FakePackageManager {
-        installs: RefCell<Vec<Vec<String>>>,
+        installs: Rc<RefCell<Vec<Vec<String>>>>,
+        install_error: Option<String>,
     }
 
     impl FakePackageManager {
+        fn failing(reason: &str) -> Self {
+            Self {
+                install_error: Some(reason.to_string()),
+                ..Default::default()
+            }
+        }
+
         fn install_calls(&self) -> Vec<Vec<String>> {
             self.installs.borrow().clone()
         }
@@ -337,7 +434,10 @@ mod tests {
             self.installs
                 .borrow_mut()
                 .push(packages.iter().map(|package| package.to_string()).collect());
-            Ok(())
+            match &self.install_error {
+                Some(reason) => Err(PkgError::CommandFailed(reason.clone())),
+                None => Ok(()),
+            }
         }
 
         fn remove(&self, _packages: &[&str]) -> Result<(), PkgError> {
@@ -363,6 +463,64 @@ mod tests {
         ResolverEnv {
             pkg_base: Some("rpm".to_string()),
             ..Default::default()
+        }
+    }
+
+    fn rpm_host_env() -> anolisa_env::EnvFacts {
+        anolisa_env::EnvFacts {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            libc: Some("glibc".to_string()),
+            kernel: Some("5.10.0".to_string()),
+            pkg_base: Some("alinux4".to_string()),
+            os_id: Some("alinux".to_string()),
+            os_id_like: None,
+            os_version: Some("4".to_string()),
+            btf: Some(true),
+            cap_bpf: Some(true),
+            container: None,
+            user: "root".to_string(),
+            uid: 0,
+            home: PathBuf::from("/root"),
+        }
+    }
+
+    fn manifest_with_deps(deps: Vec<RuntimeDependency>) -> ComponentManifest {
+        let mut manifest = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "component-a"
+            version = "1.0.0"
+            "#,
+        )
+        .expect("minimal manifest");
+        manifest.runtime_deps = deps;
+        manifest
+    }
+
+    fn language_dep(name: &str) -> RuntimeDependency {
+        RuntimeDependency {
+            name: name.to_string(),
+            kind: DependencyKind::LanguageRuntime,
+            version: None,
+            probe: Some(format!("{name} --version")),
+            source: Some("https://example.invalid/runtime".to_string()),
+            packages: PackageNames::default(),
+            check: None,
+            min_kernel: None,
+        }
+    }
+
+    fn platform_dep(name: &str, check: &str) -> RuntimeDependency {
+        RuntimeDependency {
+            name: name.to_string(),
+            kind: DependencyKind::PlatformCapability,
+            version: None,
+            probe: None,
+            source: None,
+            packages: PackageNames::default(),
+            check: Some(check.to_string()),
+            min_kernel: None,
         }
     }
 
@@ -400,6 +558,352 @@ mod tests {
             status: DependencyStatus::Resolved,
             detail: None,
         }
+    }
+
+    #[test]
+    fn injected_runtime_preflight_uses_scripted_resolver() {
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let env = rpm_host_env();
+        let runner = ScriptedRunner::with_codes([Some(0)]);
+        let resolver = DependencyResolver::with_runner(runner.clone());
+
+        assert_eq!(
+            run_runtime_preflight_with(&manifest, &env, "update", &resolver)
+                .expect("scripted dependency is present"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                "rpm".to_string(),
+                vec!["-q".to_string(), "libfoo".to_string()]
+            )]
+        );
+    }
+
+    #[test]
+    fn no_op_provisioning_never_detects_package_manager() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let env = rpm_host_env();
+
+        let empty = manifest_with_deps(Vec::new());
+        let empty_resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([]));
+        assert!(
+            run_provision_with(
+                &empty,
+                &env,
+                &ctx,
+                "install component-a",
+                &mut Vec::new(),
+                &inventory,
+                layout,
+                &empty_resolver,
+                |_| -> Result<Box<dyn PackageManager>, PkgError> {
+                    panic!("manager detection must not run for an empty dependency list")
+                },
+            )
+            .expect("empty dependency list is a no-op")
+            .is_empty()
+        );
+
+        let satisfied = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let runner = ScriptedRunner::with_codes([Some(0)]);
+        let resolver = DependencyResolver::with_runner(runner.clone());
+        assert!(
+            run_provision_with(
+                &satisfied,
+                &env,
+                &ctx,
+                "install component-a",
+                &mut Vec::new(),
+                &inventory,
+                layout,
+                &resolver,
+                |_| -> Result<Box<dyn PackageManager>, PkgError> {
+                    panic!("manager detection must not run for satisfied dependencies")
+                },
+            )
+            .expect("satisfied dependencies are a no-op")
+            .is_empty()
+        );
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn user_mode_reports_missing_dependency_without_detecting_manager() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::User);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let env = rpm_host_env();
+        let resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([Some(1)]));
+
+        let err = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| -> Result<Box<dyn PackageManager>, PkgError> {
+                panic!("user mode must not detect a package manager")
+            },
+        )
+        .expect_err("user mode must report the missing package");
+
+        assert!(
+            err.reason()
+                .contains("missing system dependencies in user mode")
+        );
+        assert!(err.reason().contains("sudo dnf install libfoo"));
+    }
+
+    #[test]
+    fn system_provisioning_detects_once_installs_and_rechecks() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let env = rpm_host_env();
+        let runner = ScriptedRunner::with_codes([Some(1), Some(0)]);
+        let resolver = DependencyResolver::with_runner(runner.clone());
+        let manager = FakePackageManager::default();
+        let manager_for_factory = manager.clone();
+        let detection_calls = Cell::new(0);
+
+        let installed = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |pkg_base| {
+                detection_calls.set(detection_calls.get() + 1);
+                assert_eq!(pkg_base, Some("rpm"));
+                Ok(Box::new(manager_for_factory))
+            },
+        )
+        .expect("provisioning succeeds after the scripted recheck");
+
+        assert_eq!(installed, vec!["libfoo".to_string()]);
+        assert_eq!(detection_calls.get(), 1);
+        assert_eq!(manager.install_calls(), vec![vec!["libfoo".to_string()]]);
+        assert_eq!(
+            runner.calls(),
+            vec![
+                (
+                    "rpm".to_string(),
+                    vec!["-q".to_string(), "libfoo".to_string()]
+                ),
+                (
+                    "rpm".to_string(),
+                    vec!["-q".to_string(), "libfoo".to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn manager_detection_failure_keeps_existing_error_projection() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let env = rpm_host_env();
+        let resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([Some(1)]));
+
+        let err = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| Err(PkgError::Unsupported("rpm".to_string())),
+        )
+        .expect_err("manager detection failure must abort provisioning");
+
+        assert!(err.reason().contains("cannot auto-install dependencies"));
+        assert!(err.reason().contains("unsupported package base: rpm"));
+        assert!(err.reason().contains("sudo dnf install libfoo"));
+    }
+
+    #[test]
+    fn manager_install_failure_keeps_existing_error_projection() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let env = rpm_host_env();
+        let resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([Some(1)]));
+        let manager = FakePackageManager::failing("scripted install failure");
+        let manager_for_factory = manager.clone();
+
+        let err = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| Ok(Box::new(manager_for_factory)),
+        )
+        .expect_err("manager install failure must abort provisioning");
+
+        assert!(
+            err.reason().contains(
+                "failed to install system dependencies: package manager command failed: scripted install failure"
+            )
+        );
+        assert_eq!(manager.install_calls(), vec![vec!["libfoo".to_string()]]);
+    }
+
+    #[test]
+    fn failed_recheck_reports_retained_package() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![system_dep("foo", "libfoo")]);
+        let env = rpm_host_env();
+        let resolver =
+            DependencyResolver::with_runner(ScriptedRunner::with_codes([Some(1), Some(1)]));
+        let manager = FakePackageManager::default();
+        let manager_for_factory = manager.clone();
+
+        let err = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| Ok(Box::new(manager_for_factory)),
+        )
+        .expect_err("an unsatisfied recheck must report retained packages");
+
+        assert!(
+            err.reason()
+                .contains("dependencies still unsatisfied after install")
+        );
+        assert!(err.reason().contains("foo [system-package]"));
+        assert!(
+            err.reason()
+                .contains("system packages were installed and retained: libfoo")
+        );
+        assert_eq!(manager.install_calls(), vec![vec!["libfoo".to_string()]]);
+    }
+
+    #[test]
+    fn manual_only_dependency_warns_without_detecting_manager() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![language_dep("node")]);
+        let env = rpm_host_env();
+        let resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([Some(1)]));
+        let mut warnings = vec!["existing warning".to_string()];
+
+        let installed = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut warnings,
+            &inventory,
+            layout,
+            &resolver,
+            |_| -> Result<Box<dyn PackageManager>, PkgError> {
+                panic!("manual-only dependencies must not detect a package manager")
+            },
+        )
+        .expect("manual-only dependency is non-fatal in system mode");
+
+        assert!(installed.is_empty());
+        assert_eq!(warnings[0], "existing warning");
+        assert!(warnings[1].contains("dependency 'node' requires manual installation"));
+    }
+
+    #[test]
+    fn resolver_declaration_failure_precedes_manager_detection() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![platform_dep("future-cap", "unknown-check")]);
+        let env = rpm_host_env();
+        let resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([]));
+
+        let err = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| -> Result<Box<dyn PackageManager>, PkgError> {
+                panic!("invalid declarations must fail before manager detection")
+            },
+        )
+        .expect_err("unknown platform check must fail");
+
+        assert!(
+            err.reason()
+                .contains("invalid runtime dependency declaration")
+        );
+        assert!(err.reason().contains("unknown-check"));
+    }
+
+    #[test]
+    fn platform_blocker_precedes_manager_detection() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let layout = ctx.layout();
+        let inventory = inventory_for(layout, &[]);
+        let manifest = manifest_with_deps(vec![platform_dep("kernel-btf", "btf")]);
+        let mut env = rpm_host_env();
+        env.btf = Some(false);
+        let resolver = DependencyResolver::with_runner(ScriptedRunner::with_codes([]));
+
+        let err = run_provision_with(
+            &manifest,
+            &env,
+            &ctx,
+            "install component-a",
+            &mut Vec::new(),
+            &inventory,
+            layout,
+            &resolver,
+            |_| -> Result<Box<dyn PackageManager>, PkgError> {
+                panic!("platform blockers must fail before manager detection")
+            },
+        )
+        .expect_err("missing platform capability must block provisioning");
+
+        assert!(err.reason().contains("unsatisfiable platform requirements"));
+        assert!(err.reason().contains("kernel-btf"));
+        assert!(err.reason().contains("kernel BTF"));
     }
 
     /// Leave an in-flight delegated fresh RPM install journal reserving
