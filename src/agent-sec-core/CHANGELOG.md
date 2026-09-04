@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.12.0
+
+**cosh & Cosh-NG Hook Integration**
+
+- Normalized legacy cosh and Cosh-NG Skill invocation payloads in the cosh Skill Ledger hook so Cosh-NG invocations follow the configured policy instead of bypassing the check. (#2871)
+
+**Skill Ledger Runtime**
+
+- Tightened six Skill scanner detector patterns to remove deterministic false positives and bumped the static scanner identifier to `cisco-static-only-0.1.1`. (#2928)
+- Completed the `skill-ledger` and `check` help output with all eight integrity statuses and their production conditions. (#2707)
+
+**Daemon Runtime**
+
+- Added a POSIX shell `daemon.health` probe that avoids Python cold start for container health checks. (#2879)
+
+**Rust v2 Framework**
+
+- Added the v2 foundation and policy type crates as the base for the Rust security core migration. (#3007)
+- Added the v2 daemon service framework with UDS server, request dispatch, and shutdown handling. (#3040)
+- Added the v2 PAP service with Policy, Scope, and Binding CRUD over a repository abstraction. (#3027)
+
+**Build & Packaging**
+
+- Raised the `cryptography` runtime floor to 50.0.1 and refreshed the lock and exported requirements. (#3015)
+
+**Documentation**
+
+- Added design docs for the current daemon protocols and the v2 framework requirements. (#2881)
+
 ## 0.11.1
 
 **Prompt Scanner**
