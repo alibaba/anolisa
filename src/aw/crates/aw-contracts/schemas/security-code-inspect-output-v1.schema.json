@@ -9,7 +9,13 @@
     "inspection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["verdict", "findings", "scanned_bytes", "truncated"],
+      "required": [
+        "verdict",
+        "findings",
+        "scanned_bytes",
+        "truncated",
+        "language_detected"
+      ],
       "properties": {
         "verdict": {
           "enum": ["clean", "suspicious", "sensitive"]
@@ -50,7 +56,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
+                "minimum": 1,
                 "maximum": 4294967295
               }
             }
@@ -64,9 +70,48 @@
           "type": "boolean"
         },
         "language_detected": {
-          "enum": ["bash", "python", "unknown"]
+          "enum": ["bash", "python", "mixed", "unknown"]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "clean"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["suspicious", "sensitive"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -58,7 +58,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
+                "minimum": 1,
                 "maximum": 4294967295
               }
             }
@@ -68,7 +68,49 @@
           "type": "integer",
           "minimum": 0
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "allow"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "reasons": {
+                "maxItems": 0
+              },
+              "findings": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["warn", "deny"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "reasons": {
+                "minItems": 1
+              },
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

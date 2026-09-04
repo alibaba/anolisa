@@ -50,7 +50,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
+                "minimum": 1,
                 "maximum": 4294967295
               }
             }
@@ -63,7 +63,46 @@
         "truncated": {
           "type": "boolean"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "clean"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["suspicious", "sensitive"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
