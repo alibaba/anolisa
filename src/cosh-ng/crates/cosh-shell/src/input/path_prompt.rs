@@ -1,6 +1,7 @@
 //! Conservative classification for natural-language submissions whose first
 //! shell token contains a path separator.
 
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -40,6 +41,63 @@ impl PartialEq for ShellPromptCwd {
 }
 
 impl Eq for ShellPromptCwd {}
+
+/// Slash-bearing command names and suffix aliases Zsh resolves without a
+/// filesystem path.
+///
+/// Prompt markers refresh this snapshot after the shell has completed its
+/// own parsing and startup hooks. An unavailable snapshot is intentionally
+/// not treated as proof that a name is missing.
+#[derive(Debug, Default)]
+struct ShellPathNamespace {
+    names: HashSet<String>,
+    suffixes: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ShellPathCommandNames(Arc<Mutex<Option<ShellPathNamespace>>>);
+
+impl ShellPathCommandNames {
+    pub(crate) fn set(&self, names: Option<Vec<String>>, suffixes: Option<Vec<String>>) {
+        if let Ok(mut current) = self.0.lock() {
+            *current = names
+                .zip(suffixes)
+                .map(|(names, suffixes)| ShellPathNamespace {
+                    names: HashSet::from_iter(names),
+                    suffixes: HashSet::from_iter(suffixes),
+                });
+        }
+    }
+
+    pub(crate) fn excludes_first_token(&self, input: &str) -> bool {
+        let first_token = input
+            .trim_matches([' ', '\t'])
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        self.0
+            .lock()
+            .ok()
+            .and_then(|namespace| {
+                namespace.as_ref().map(|namespace| {
+                    !namespace.names.contains(first_token)
+                        && Path::new(first_token)
+                            .extension()
+                            .and_then(|suffix| suffix.to_str())
+                            .is_none_or(|suffix| !namespace.suffixes.contains(suffix))
+                })
+            })
+            .unwrap_or(false)
+    }
+}
+
+impl PartialEq for ShellPathCommandNames {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ShellPathCommandNames {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathPromptIntercept {

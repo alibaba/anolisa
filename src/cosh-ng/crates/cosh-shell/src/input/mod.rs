@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub(crate) mod path_prompt;
-pub(crate) use path_prompt::{PathPromptIntercept, ShellPromptCwd};
+pub(crate) use path_prompt::{PathPromptIntercept, ShellPathCommandNames, ShellPromptCwd};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AssistanceControl {
@@ -81,6 +81,7 @@ pub struct InputClassifier {
     bash_slash_submission_guard: bool,
     assistance_control: Option<AssistanceControl>,
     shell_prompt_cwd: ShellPromptCwd,
+    shell_path_command_names: ShellPathCommandNames,
 }
 
 impl InputClassifier {
@@ -112,6 +113,9 @@ impl InputClassifier {
     pub(crate) fn prompt_cwd(&self) -> ShellPromptCwd {
         self.shell_prompt_cwd.clone()
     }
+    pub(crate) fn shell_path_command_names(&self) -> ShellPathCommandNames {
+        self.shell_path_command_names.clone()
+    }
 }
 
 impl Default for InputClassifier {
@@ -129,6 +133,7 @@ impl Default for InputClassifier {
             bash_slash_submission_guard: false,
             assistance_control: None,
             shell_prompt_cwd: ShellPromptCwd::default(),
+            shell_path_command_names: ShellPathCommandNames::default(),
         }
     }
 }

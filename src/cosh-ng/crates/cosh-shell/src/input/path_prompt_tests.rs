@@ -1,6 +1,8 @@
 use std::os::unix::fs::PermissionsExt;
 
-use crate::input::path_prompt::{is_slash_bearing_han_prompt, path_provably_missing};
+use crate::input::path_prompt::{
+    is_slash_bearing_han_prompt, path_provably_missing, ShellPathCommandNames,
+};
 use crate::input::{AssistanceControl, InputClassifier, InterceptReason, PathPromptIntercept};
 use crate::raw_input::MainPromptGate;
 
@@ -17,6 +19,19 @@ fn initial_prompt_seed_is_scoped_to_path_routing() {
     gate.set_at_prompt(true);
     assert!(gate.is_at_prompt());
     assert!(gate.is_path_prompt_ready());
+}
+
+#[test]
+fn shell_path_command_names_require_a_complete_snapshot() {
+    let names = ShellPathCommandNames::default();
+
+    assert!(!names.excludes_first_token("路径/run 帮我运行一下"));
+    names.set(Some(Vec::new()), Some(Vec::new()));
+    assert!(names.excludes_first_token("路径/run 帮我运行一下"));
+    names.set(Some(vec!["路径/run".to_string()]), Some(Vec::new()));
+    assert!(!names.excludes_first_token("路径/run 帮我运行一下"));
+    names.set(Some(Vec::new()), Some(vec!["txt".to_string()]));
+    assert!(!names.excludes_first_token("/missing/path.txt 帮我运行一下"));
 }
 
 #[test]

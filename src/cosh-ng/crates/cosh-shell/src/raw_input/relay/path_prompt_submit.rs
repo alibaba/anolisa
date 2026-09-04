@@ -98,6 +98,14 @@ pub(super) fn route_candidate_missing_path_submission(
     {
         return false;
     }
+    if relay.zsh_path_prompt_buffering.is_some()
+        && !relay
+            .input_classifier
+            .shell_path_command_names()
+            .excludes_first_token(input)
+    {
+        return false;
+    }
     let Some(PathPromptIntercept {
         input,
         reason: InterceptReason::NaturalLanguage,

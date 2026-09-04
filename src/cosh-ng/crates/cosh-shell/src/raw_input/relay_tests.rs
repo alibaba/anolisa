@@ -2214,6 +2214,9 @@ fn zsh_candidate_submit_precedes_later_tab_in_same_read() {
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
     let classifier = InputClassifier::default();
+    classifier
+        .shell_path_command_names()
+        .set(Some(Vec::new()), Some(Vec::new()));
     classifier.prompt_cwd().set(Some(
         cwd.path()
             .canonicalize()

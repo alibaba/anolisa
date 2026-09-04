@@ -68,6 +68,10 @@ pub(super) struct Marker {
     pub(super) cwd: Option<String>,
     #[serde(alias = "pc")]
     pub(super) physical_cwd: Option<String>,
+    #[serde(alias = "spn")]
+    pub(super) shell_path_names: Option<Vec<String>>,
+    #[serde(alias = "sps")]
+    pub(super) shell_path_suffixes: Option<Vec<String>>,
     pub(super) command: Option<String>,
     pub(super) reason: Option<String>,
     #[serde(alias = "s")]

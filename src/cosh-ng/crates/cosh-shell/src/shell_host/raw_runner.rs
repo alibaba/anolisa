@@ -370,6 +370,9 @@ where
     };
     let mut session = start_session(config)?;
     session.parser.set_prompt_cwd(input_classifier.prompt_cwd());
+    session
+        .parser
+        .set_shell_path_command_names(input_classifier.shell_path_command_names());
     let mut prompt_presentation = PromptPresentation::new(config.integration.uses_markers());
     // Attach the gate before startup output consumes the first prompt_ready marker.
     let main_prompt_gate = MainPromptGate::default();

@@ -132,6 +132,27 @@ _cosh_json_escape() {
 _cosh_now_ms() {
   date +%s000
 }
+_cosh_shell_path_names_fragment() { # Line-init can mutate the namespace after this snapshot.
+  local -a names suffixes quoted_names quoted_suffixes; local name total=0
+  if [[ -n "${widgets[zle-line-init]:-}" ]]; then REPLY=',"shell_path_names":null,"shell_path_suffixes":null'; return; fi
+  for name in ${(k)functions} ${(k)aliases} ${(k)galiases}; do
+    [[ "$name" == */* ]] && names+=("$name")
+  done
+  suffixes=("${(k)saliases}"); if (( ${#names} > 128 || ${#suffixes} > 128 )); then REPLY=',"shell_path_names":null,"shell_path_suffixes":null'; return; fi
+  for name in "${names[@]}"; do
+    if [[ "$name" == *[[:cntrl:]]* || "$name" == *'"'* || "$name" == *\\* ]] || (( (total += ${#name} + 3) > 8192 )); then
+      REPLY=',"shell_path_names":null,"shell_path_suffixes":null'; return
+    fi
+    quoted_names+=("\"$name\"")
+  done
+  for name in "${suffixes[@]}"; do
+    if [[ "$name" == *[[:cntrl:]]* || "$name" == *'"'* || "$name" == *\\* ]] || (( (total += ${#name} + 3) > 8192 )); then
+      REPLY=',"shell_path_names":null,"shell_path_suffixes":null'; return
+    fi
+    quoted_suffixes+=("\"$name\"")
+  done
+  REPLY=",\"shell_path_names\":[${(j:,:)quoted_names}],\"shell_path_suffixes\":[${(j:,:)quoted_suffixes}]"
+}
 _cosh_emit_marker() {
   local event="$1"
   local command="$2"
@@ -143,6 +164,8 @@ _cosh_emit_marker() {
   # lines carry a token, every other marker stays byte-identical.
   local handoff_fragment=""
   local physical_cwd_fragment=""
+  local shell_path_names_fragment=""
+  local REPLY=""
   if [[ -n "${_COSH_HANDOFF_TOKEN:-}" ]]; then
     handoff_fragment=",\"handoff\":\"$(_cosh_json_escape "$_COSH_HANDOFF_TOKEN")\""
   fi
@@ -158,8 +181,10 @@ _cosh_emit_marker() {
     if [[ "$physical_cwd" == /* ]]; then
       physical_cwd_fragment=",\"physical_cwd\":\"$(_cosh_json_escape "$physical_cwd")\""
     fi
+    _cosh_shell_path_names_fragment
+    shell_path_names_fragment="$REPLY"
   fi
-  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s%s}\a' \
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s%s%s}\a' \
     "$(_cosh_json_escape "$event")" \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
@@ -171,6 +196,7 @@ _cosh_emit_marker() {
     "$path_trusted" \
     "${_COSH_ATTEMPT_GENERATION:-0}" \
     "$physical_cwd_fragment" \
+    "$shell_path_names_fragment" \
     "$handoff_fragment"
 }
 _cosh_emit_intercept_marker() {
