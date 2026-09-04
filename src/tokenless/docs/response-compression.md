@@ -2,7 +2,7 @@
 
 ## 一、功能概述
 
-第一阶段的 PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并把 JSON 内容静态派发给 `JsonCompressor`（`crates/tokenless-compressors/src/json.rs`）。压缩器只解析一次 JSON，先生成不截断数据的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。非 JSON 内容当前统一透传；Terminal Cleanup 与 Build Log 引擎仍保留，但尚未接入 Pipeline。
+PostTool 压缩由 Runtime 内部的 `PostToolPipeline` 编排，并按内容类型静态派发给 `JsonCompressor` 或 `BuildLogCompressor`。JSON 压缩器只解析一次输入，先生成不截断数据的 Compact JSON/TOON 候选；该候选同时减少字符与估算 Token 且 Token 节省率达到 15% 时直接采用。否则再生成包含 Record Reduction 或既有截断规则的 Bounded 候选，并选择更小的合法表示。Build Log 压缩器只处理成功的 `command_output`，先清理终端控制输出，再对已识别构建与测试日志中的重复常规进度进行可恢复缩减。Tool Error 保留原始输出并只追加环境诊断；其他内容类型当前透传。
 
 ## 二、8 条压缩规则
 
@@ -48,6 +48,35 @@ compress_value(value, depth)
  │       └─ 过滤 null（R5）和空值（R6）
 ```
 
+### Build Log 领域
+
+`BuildLogCompressor` 识别 Cargo/rustc、pytest、npm/Jest、Go、Make/C，以及具有明确 Shell
+边界、带编号进度词和稳定重复模板的通用日志。检测只采样首尾各 100 行、总计最多 64 KiB；
+证据不足时直接透传，避免把普通 prose、源码或未知日志误判为 Build Log。
+
+处理先生成无损 Terminal Cleanup Candidate；有可用 Stash 且格式证据充分时，继续在清理后
+文本上生成 Progress Reduction Candidate，再选择更小的合法结果。压缩器按方言把每行分类为
+Diagnostic、Summary、Phase、Routine Progress 或 Unknown，并使用 Python、JavaScript、Java、
+Rust、Go 和 .NET Stack Trace 状态机保护完整异常区间。只有同一 Progress Family 连续至少 9
+行时才考虑缩减：保留前 2 行和后 2 行，中间每个连续遗漏区间写入一个 Stash Entry 并插入
+Retrieve Marker。Diagnostic、Summary、Phase、Unknown 和 Stack Trace 原样保留。
+
+方言规则只吸收可从原生输出可靠识别的语义，例如 Cargo 编译及成功测试进度、pytest verbose
+及 quiet 进度。npm Warning、Make 目录边界和非普通测试结果仍保持可见；压缩器不会为了获得
+结构化输出而修改命令参数，也不采用固定行数截断。
+
+单个日志出现超过 8 个遗漏区间时，压缩器在写 Stash 前放弃 Reduction Candidate，防止输出被
+过多 Marker 切碎。每个区间还必须同时减少字符和估算 Token；无可用 Stash 时只允许 Terminal
+Cleanup。Runtime 最后仍只执行一次全局字符/Token 仲裁和一次 Stash Commit/Rollback。Tool Error
+不进入内容压缩 Pipeline，Core 保留原始工具输出并追加环境诊断信息。
+
+为避免两个组件依次改写同一输出，PreTool 对明确的 Cargo、pytest、npm/Jest、Go 和 Make
+构建/测试命令直接返回 `passthrough` 与 `output_optimization: "none"`，不调用 RTK；其原生输出
+随后才可能进入 `BuildLogCompressor`。其他受支持命令仍由 RTK 处理，带
+`output_optimization: "rtk"` 的结果继续直接旁路 PostTool Pipeline。目前 PreTool 没有声明
+宿主 PostTool 替换与恢复能力，因此这项命令所有权选择对所有宿主一致；无法应用 Build Log
+缩减的宿主可能暂时原样接收这些命令的输出。
+
 ## 四、集成路径
 
 ### 路径 1：OpenClaw 插件（`tool_result_persist` hook）
@@ -63,7 +92,7 @@ Plugin 按 Tool Call ID 消费 PreTool 输出优化状态
    ↓
 execFileSync("tokenless", ["compress"], { input: Request, timeout: 8s })
    ↓
-Core 执行状态路由、JSON Pipeline、TOON 与最终仲裁
+Core 执行状态路由、内容域 Pipeline、TOON 与最终仲裁
    ↓
 Plugin 只重建宿主允许替换的 Tool Result Slot
 ```
@@ -92,16 +121,18 @@ Hook 转换为 `operation: "post_tool"` 的 v2 Request
    ↓
 Runtime 执行门禁、内容检测和静态派发
    ↓
-JSON → `JsonCompressor`；非 JSON → Passthrough
+JSON → `JsonCompressor`；Build Log → `BuildLogCompressor`；其他 → Passthrough
    ↓
 Runtime 执行一次字符/Token 仲裁和一次 Stash Commit/Rollback
    ↓
 Hook 校验版本与 Operation，并按宿主 Capability 应用 v2 Result
 ```
 
-**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。第一阶段只接入
-`ContentType::Json -> JsonCompressor`；清理、Record Reduction、截断、Structured Slot 恢复、
-Compact JSON 与可选 TOON 都在同一次 JSON 领域调用内完成。其他 ContentType 当前不调用保留的文本引擎。
+**流水线说明**：`PostToolPipeline` 位于 Runtime 内部。当前静态派发
+`ContentType::Json -> JsonCompressor` 与 `ContentType::BuildLog -> BuildLogCompressor`。
+JSON 清理、Record Reduction、截断、Structured Slot 恢复、Compact JSON 与可选 TOON 都在
+同一次 JSON 领域调用内完成；Build Log 的 Terminal Cleanup、方言分类、Stack Trace 保护和
+可恢复 Progress Reduction 都在同一次 Build Log 领域调用内完成。其他 ContentType 当前透传。
 Claude Code 2.1.121 及以上版本、Qoder CLI、OpenCode 和 Cosh-NG 能替换实时结果；同时裸
 `tokenless` 可从 Shell `PATH` 解析时，其 PostTool 请求才声明恢复可用。缩减或截断结果中的
 Marker 会提示模型通过已有 Shell Tool 执行
@@ -127,7 +158,7 @@ Hermes 执行重试命令并触发 transform_tool_result
    ↓
 Adapter 映射 Status、Content Origin 和 RTK Wrapper 事实
    ↓
-tokenless compress 执行 PostTool 路由与 JSON-only Pipeline
+tokenless compress 执行 PostTool 路由与内容域 Pipeline
    ↓
 Core 返回 Applied / Tool Error / Passthrough 等 Disposition
    ↓
@@ -156,7 +187,9 @@ Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，�
 Codex 的 PostToolUse 不能替换或抑制原始输出。通过 `additionalContext` 追加压缩内容
 会同时保留原文，增加模型首轮可见 Payload，因此 Codex Adapter 不运行响应压缩或
 TOON。独立脚本 `response-diagnostics` 只在识别出环境失败时追加修复提示。支持的 Shell
-命令由 PreToolUse Hook 通过 RTK 在执行前重写，工具从源头产生更小的输出。
+除已交给 Build Log 领域的构建/测试命令外，受支持 Shell 命令由 PreToolUse Hook 通过 RTK
+在执行前重写，工具从源头产生更小的输出。Codex 当前不能替换 PostTool 输出，因此其构建/测试
+命令在这一阶段保持原始输出。
 
 ### 路径 7：DeepSeek Harness 插件（`tools/post-execute`）
 
@@ -356,6 +389,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 | 用途 | 文件路径 |
 |------|--------|
 | JSON 领域压缩器（JsonCompressor） | `crates/tokenless-compressors/src/json.rs` |
+| Build Log 领域压缩器（BuildLogCompressor） | `crates/tokenless-compressors/src/build_log.rs` |
 | PostTool Pipeline 与最终仲裁 | `crates/tokenless-runtime/src/post_tool/` |
 | Schema 压缩器（SchemaCompressor） | `crates/tokenless-schema/src/schema_compressor.rs` |
 | 内容压缩公开 API | `crates/tokenless-compressors/src/lib.rs` |
@@ -372,6 +406,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 | Codex 响应诊断 Hook | `adapters/tokenless/codex/scripts/response-diagnostics` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
 | JSON 压缩测试 | `crates/tokenless-compressors/src/tests/json_tests.rs` |
+| Build Log 压缩测试与 Fixture | `crates/tokenless-compressors/src/tests/build_log_tests.rs`、`crates/tokenless-compressors/tests/fixtures/build_logs/` |
 | PostTool 集成测试 | `crates/tokenless-runtime/src/entry.rs` |
 | TOON E2E 测试 | `tests/test-toon-full.sh` |
 | 全量测试套件 | `tests/run-all-tests.sh` |

@@ -1,9 +1,7 @@
-//! Trace-region boundary detection.
+//! Trace-region boundary detection for build-log diagnostics.
 //!
-//! PR 8 scope: find where a stack trace begins and ends so the whole region
-//! is protected verbatim — omission gaps and context windows must never cut
-//! into a trace. Frame folding inside traces is a later capability on this
-//! same engine (roadmap §8 / PR 14).
+//! Whole trace regions are protected so progress reduction never cuts an
+//! exception chain or backtrace.
 
 use std::ops::Range;
 
@@ -155,9 +153,9 @@ fn is_goroutine_header(line: &str) -> bool {
     line.starts_with("goroutine ") && line.contains(" [") && line.ends_with("]:")
 }
 
-/// Java and JS/Node share one shape: an Error/Exception header followed by
-/// indented `at …` frames; Java chains with `Caused by:` and elides frames
-/// with `... N more`.
+/// Java, JS/Node, and .NET share an Error/Exception header followed by
+/// indented `at …` frames. Their cause and inner-exception separators remain
+/// part of the same diagnostic region.
 fn exception_trace(lines: &[String], start: usize) -> Option<usize> {
     let head = &lines[start];
     if is_indented(head) || !(head.contains("Error") || head.contains("Exception")) {
@@ -165,26 +163,26 @@ fn exception_trace(lines: &[String], start: usize) -> Option<usize> {
     }
     let mut i = start + 1;
     let mut frames = 0usize;
-    loop {
+    while i < lines.len() {
         while i < lines.len() && is_at_frame(&lines[i]) {
             frames += 1;
             i += 1;
         }
-        if frames == 0 {
-            return None;
+        if i == lines.len() {
+            break;
         }
-        if i < lines.len() {
-            let trimmed = lines[i].trim_start();
-            if trimmed.starts_with("Caused by:")
-                || (trimmed.starts_with("... ") && trimmed.ends_with(" more"))
-            {
-                i += 1;
-                continue;
-            }
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("Caused by:")
+            || trimmed.starts_with("---> ") && trimmed.contains("Exception")
+            || trimmed == "--- End of inner exception stack trace ---"
+            || (trimmed.starts_with("... ") && trimmed.ends_with(" more"))
+        {
+            i += 1;
+            continue;
         }
         break;
     }
-    Some(i)
+    (frames > 0).then_some(i)
 }
 
 fn is_at_frame(line: &str) -> bool {

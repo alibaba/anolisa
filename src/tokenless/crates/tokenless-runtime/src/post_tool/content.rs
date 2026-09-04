@@ -1,14 +1,14 @@
 //! Bounded content detection for PostTool domain dispatch.
 //!
-//! Detection is a pure function of the content with bounded work: only the
-//! first [`MAX_SCAN_BYTES`] bytes / [`MAX_SCAN_LINES`] lines are inspected
-//! (plus, for the JSON sniff alone, at most [`MAX_SCAN_BYTES`] trailing
-//! bytes), and no format is fully parsed — expensive parsing belongs inside the
-//! selected compressor, not in a detector that runs on every input. When no
-//! cheap signal is decisive the detector prefers the more general class, and
-//! ultimately [`ContentType::PlainText`] or [`ContentType::Unknown`]; the
-//! Runtime routes unsupported domains to passthrough until their compressor
-//! is deliberately connected.
+//! Detection is a pure function of the content with bounded work. Most
+//! detectors inspect only the first [`MAX_SCAN_BYTES`] bytes / [`MAX_SCAN_LINES`]
+//! lines; JSON and build-log detection also sample bounded trailing content.
+//! No format is fully parsed — expensive parsing belongs inside the selected
+//! compressor, not in a detector that runs on every input. When no cheap signal
+//! is decisive the detector prefers the more general class, and ultimately
+//! [`ContentType::PlainText`] or [`ContentType::Unknown`]; the Runtime routes
+//! unsupported domains to passthrough until their compressor is deliberately
+//! connected.
 
 mod build_log;
 mod diff;
@@ -59,11 +59,11 @@ pub fn detect(content: &str) -> ContentType {
     if search_results::is_search_results(scan) {
         return ContentType::SearchResults;
     }
+    if build_log::is_build_log(content) {
+        return ContentType::BuildLog;
+    }
     if tabular::is_tabular(scan) {
         return ContentType::Tabular;
-    }
-    if build_log::is_build_log(scan) {
-        return ContentType::BuildLog;
     }
     if source_code::is_source_code(scan) {
         return ContentType::SourceCode;

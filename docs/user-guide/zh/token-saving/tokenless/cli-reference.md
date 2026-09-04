@@ -110,7 +110,9 @@ jq -n \
 - Retrieve Result、Interrupted/Denied 调用和 RTK 已优化输出绕过压缩。
 - Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
-- 在对应领域 Compressor 接入前，所有非 JSON 内容类型都原样透传。
+- 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的
+  Routine Progress Reduction。
+- 在对应领域 Compressor 接入前，其他非 JSON 内容类型都原样透传。
 
 只有 `disposition: "applied"` 表示 `output` 与原文不同。`dry_run`、`passthrough`、
 `no_savings`、`recoverability_unavailable`、`timeout` 和 `tool_error` 都携带原始内容。
@@ -126,7 +128,9 @@ Compressor 列表。
 - `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
 
 `pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
-并继续尝试后续打包位置。Agent-facing `retrieve` 在读取 Stash 前根据 `visible_markers` 授权
+并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
+原生形式，使其输出只有一个 PostTool 所有者；其他受支持命令仍可由 RTK 改写。Agent-facing
+`retrieve` 在读取 Stash 前根据 `visible_markers` 授权
 请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
 
 ## `compress-schema`

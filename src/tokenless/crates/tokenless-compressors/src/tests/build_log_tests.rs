@@ -1,278 +1,356 @@
-use tokenless_ccr::InMemoryStore;
+use std::sync::Arc;
 
-struct FailingStore;
+use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite, extract_hash};
 
-impl StashStore for FailingStore {
-    fn stash(&self, _payload: &str) -> Result<StashWrite, tokenless_ccr::StashError> {
-        Err(tokenless_ccr::StashError::Backend("store down".into()))
+struct AlwaysFail;
+
+impl StashStore for AlwaysFail {
+    fn stash(&self, _payload: &str) -> Result<StashWrite, StashError> {
+        Err(StashError::Backend("simulated".to_owned()))
     }
-    fn retrieve(&self, _hash: &str) -> Result<Option<String>, tokenless_ccr::StashError> {
+
+    fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
         Ok(None)
     }
+
     fn len(&self) -> usize {
         0
     }
-    fn evict_expired(&self) -> Result<usize, tokenless_ccr::StashError> {
+
+    fn evict_expired(&self) -> Result<usize, StashError> {
         Ok(0)
     }
-    fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, tokenless_ccr::StashError> {
+
+    fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
         Ok(false)
     }
 }
 
-/// Replace the whole marker line carrying `key` with `payload` — the
-/// reassembly rule for a gap without template summary lines.
-fn replace_marker_line(output: &str, key: &str, payload: &str) -> String {
-    let marker = marker_for(key);
-    let start = output.find(&marker).expect("marker present");
-    let line_start = output[..start].rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let line_end = output[start..].find('\n').map(|p| start + p + 1).unwrap_or(output.len());
-    format!("{}{}{}", &output[..line_start], payload, &output[line_end..])
+fn cargo_log(lines: usize) -> String {
+    let mut output = "$ cargo build\n".to_owned();
+    for index in 0..lines {
+        output.push_str(&format!(
+            "   Compiling package-{index:03} v0.1.{index} with a deliberately long progress suffix\n"
+        ));
+    }
+    output.push_str("Finished `dev` profile [unoptimized] target(s) in 2.1s\n");
+    output
 }
 
-fn cargo_like_log() -> String {
-    let mut lines = Vec::new();
-    for i in 0..5 {
-        lines.push(format!("$ cargo build --release step {i}"));
+fn cargo_test_log(passing: usize) -> String {
+    let mut output = format!("$ cargo test\nrunning {passing} tests\n");
+    for index in 0..passing {
+        output.push_str(&format!(
+            "test parser::case_{index:03}_with_a_descriptive_name ... ok\n"
+        ));
     }
-    for i in 0..60 {
-        lines.push(format!("   Compiling pkg{i:03} v0.1.{i}"));
-    }
-    lines.push("error[E0308]: mismatched types in src/main.rs".to_string());
-    for i in 60..120 {
-        lines.push(format!("   Compiling pkg{i:03} v0.1.{i}"));
-    }
-    for i in 0..10 {
-        lines.push(format!("summary tail line {i} of the build output"));
-    }
-    lines.join("\n") + "\n"
+    output.push_str(&format!(
+        "test result: ok. {passing} passed; 0 failed; finished in 0.30s\n"
+    ));
+    output
 }
 
-#[test]
-fn build_log_mode_stashes_gaps_and_keeps_signal() {
-    let text = cargo_like_log();
-    let store = InMemoryStore::new();
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, Some(&store));
-
-    assert_eq!(outcome.omitted_blocks, 2);
-    assert_eq!(outcome.stash_writes.len(), 2);
-    assert_eq!(outcome.stash_errors, 0);
-    assert!(outcome.retrievable);
-    assert!(outcome.output.contains("error[E0308]: mismatched types in src/main.rs"));
-    assert!(outcome.output.starts_with("$ cargo build --release step 0"));
-    assert!(outcome.output.contains("summary tail line 9"));
-    assert!(outcome.output.chars().count() < text.chars().count());
-
-    // Byte-exact reassembly: each marker line swaps back to its payload.
-    let mut reassembled = outcome.output.clone();
-    for write in &outcome.stash_writes {
-        let payload = store.retrieve(&write.key).unwrap().expect("stashed payload");
-        reassembled = replace_marker_line(&reassembled, &write.key, &payload);
+fn pytest_quiet_log(files: usize) -> String {
+    let mut output = String::new();
+    for index in 0..files {
+        output.push_str(&format!(
+            "tests/test_module_{index:03}.py ........ [ {:>3}%]\n",
+            (index + 1) * 100 / files
+        ));
     }
-    assert_eq!(reassembled, text);
+    output.push_str(&format!("{} passed in 2.34s\n", files * 8));
+    output
 }
 
 #[test]
-fn dry_run_without_store_renders_identical_markers() {
-    let text = cargo_like_log();
-    let store = InMemoryStore::new();
-    let active = compress_log(&text, BuildLogMode::BuildLog, Some(&store));
-    let dry = compress_log(&text, BuildLogMode::BuildLog, None);
-
-    // Keys are content-derived, so measurement output equals active output.
-    assert_eq!(dry.output, active.output);
-    assert!(dry.stash_writes.is_empty());
-    assert_eq!(dry.omitted_blocks, 2);
-    assert!(!dry.retrievable);
-}
-
-#[test]
-fn short_input_is_unchanged() {
-    let text = "error: boom\nsecond line\nthird line\n".repeat(3);
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, None);
-    assert_eq!(outcome.output, text);
-    assert_eq!(outcome.omitted_blocks, 0);
-    assert!(outcome.retrievable);
-}
-
-/// A run whose only failure signal is a crash line buried in routine
-/// progress: the line names no error, so an error-keyword classifier stashes
-/// it and the log reads as a clean run.
-#[test]
-fn keywordless_crash_survives_a_bulky_log() {
-    for crash in [
-        "Segmentation fault (core dumped)",
-        "Killed",
-        "./stage2.sh: line 8: linker: command not found",
+fn detects_six_supported_dialects() {
+    for log in [
+        "   Compiling a v1\n   Compiling b v1\n   Compiling c v1\n",
+        "===== test session starts =====\ntest_a::case PASSED\n",
+        "npm ERR! code E404\n",
+        "PASS src/a.test.js\nPASS src/b.test.js\nPASS src/c.test.js\n",
+        "=== RUN   TestOne\n--- PASS: TestOne (0.00s)\n",
+        "make: Entering directory '/work'\ncc -c a.c -o a.o\n",
     ] {
-        let mut lines: Vec<String> =
-            (0..35).map(|i| format!("   Compiling widget{i:02} v0.{i}.2")).collect();
-        lines.push(crash.to_string());
-        lines.extend((0..35).map(|i| format!("   Compiling gadget{i:02} v0.{i}.9")));
-        let text = lines.join("\n") + "\n";
-
-        let outcome = compress_log(&text, BuildLogMode::BuildLog, Some(&InMemoryStore::new()));
-        assert!(outcome.output.chars().count() < text.chars().count(), "crash: {crash}");
-        assert!(outcome.output.contains(crash), "crash line was stashed: {crash}");
+        assert!(BuildLogCompressor::detect(log), "undetected log: {log}");
     }
 }
 
 #[test]
-fn all_signal_input_is_unchanged() {
-    let text: String =
-        (0..31).map(|i| format!("error: distinct failure number {i}\n")).collect();
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, None);
-    assert_eq!(outcome.output, text);
-    assert_eq!(outcome.omitted_blocks, 0);
-}
-
-fn dup_run_log() -> String {
-    let mut lines = Vec::new();
-    for i in 0..12 {
-        lines.push(format!("step {i} preparing sources and copying items over"));
-    }
-    for _ in 0..5 {
-        lines.push("error: flaky connection reset by peer".to_string());
-    }
-    for i in 0..20 {
-        lines.push(format!("cleanup item {i} removed from the workspace temp dir"));
-    }
-    lines.join("\n") + "\n"
+fn detects_strong_signal_in_the_tail_sample() {
+    let mut log = (0..140)
+        .map(|index| format!("ordinary preface {index}\n"))
+        .collect::<String>();
+    log.push_str("npm ERR! code E404\n");
+    assert!(BuildLogCompressor::detect(&log));
 }
 
 #[test]
-fn duplicate_signal_run_collapses_to_count() {
-    let text = dup_run_log();
+fn rejects_prose_and_source_that_merely_name_log_words() {
+    let prose = "This document discusses npm ERR! and test result: as examples.\n";
+    let source = r#"const example = \"npm ERR! code E404\";
+const summary = \"test result: ok\";
+"#;
+    assert!(!BuildLogCompressor::detect(prose));
+    assert!(!BuildLogCompressor::detect(source));
+}
+
+#[test]
+fn terminal_cleanup_is_lossless_when_no_progress_run_exists() {
+    let input = (0..20)
+        .map(|index| format!("\x1b[1m\x1b[31merror[E{index:04}]\x1b[0m: diagnostic {index}\n"))
+        .collect::<String>();
     let store = InMemoryStore::new();
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, Some(&store));
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
 
-    assert_eq!(outcome.output.matches("error: flaky connection reset by peer").count(), 1);
-    let note = "[tokenless: previous line repeated 4 more times]\n";
-    assert!(outcome.output.contains(note));
-
-    // Reassembly: expand the annotation by count, then swap markers back.
-    let out = &outcome.output;
-    let pos = out.find(note).unwrap();
-    let prev_start = out[..pos - 1].rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let prev_line = &out[prev_start..pos];
-    let mut reassembled =
-        format!("{}{}{}", &out[..pos], prev_line.repeat(4), &out[pos + note.len()..]);
-    for write in &outcome.stash_writes {
-        let payload = store.retrieve(&write.key).unwrap().unwrap();
-        reassembled = replace_marker_line(&reassembled, &write.key, &payload);
-    }
-    assert_eq!(reassembled, text);
-}
-
-#[test]
-fn short_and_near_duplicate_signal_runs_stay_verbatim() {
-    let mut lines: Vec<String> =
-        (0..15).map(|i| format!("step {i} preparing sources for the build")).collect();
-    lines.push("error: boom happened once".to_string());
-    lines.push("error: boom happened once".to_string());
-    for i in 0..8 {
-        lines.push(format!("error: distinct boom number {i}"));
-    }
-    for i in 0..15 {
-        lines.push(format!("cleanup item {i} removed from workspace"));
-    }
-    let text = lines.join("\n") + "\n";
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, None);
-
-    assert!(!outcome.output.contains("[tokenless: previous line repeated"));
-    assert_eq!(outcome.output.matches("error: boom happened once").count(), 2);
-    assert_eq!(outcome.output.matches("error: distinct boom number").count(), 8);
-}
-
-#[test]
-fn trace_region_spanning_a_gap_stays_verbatim() {
-    let mut lines: Vec<String> =
-        (0..40).map(|i| format!("   Compiling pkg{i:03} v0.2.{i}")).collect();
-    let trace = [
-        "Traceback (most recent call last):",
-        "  File \"/app/a.py\", line 9, in outer",
-        "    middle()",
-        "  File \"/app/b.py\", line 7, in middle",
-        "    inner()",
-        "  File \"/app/c.py\", line 5, in inner",
-        "    deepest()",
-        "  File \"/app/d.py\", line 3, in deepest",
-        "    boom()",
-        "KeyError: 'boom'",
-    ];
-    lines.extend(trace.iter().map(|s| s.to_string()));
-    lines.extend((0..40).map(|i| format!("   Compiling pkg{:03} v0.3.{i}", i + 40)));
-    let text = lines.join("\n") + "\n";
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, None);
-
-    // The middle frames sit outside every signal context window — only the
-    // atomic trace region keeps them out of the omission gaps.
-    for frame in trace {
-        assert!(outcome.output.contains(frame), "missing trace line: {frame}");
-    }
-    assert!(outcome.omitted_blocks >= 2);
-}
-
-#[test]
-fn failed_stash_keeps_gaps_verbatim() {
-    let text = cargo_like_log();
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, Some(&FailingStore));
-
-    assert_eq!(outcome.output, text);
-    assert_eq!(outcome.stash_errors, 2);
-    assert_eq!(outcome.omitted_blocks, 0);
+    assert_eq!(outcome.operations, [BuildLogOperation::TerminalCleanup]);
+    assert_eq!(outcome.recoverability, crate::Recoverability::Lossless);
+    assert!(!outcome.output.contains('\x1b'));
     assert!(outcome.stash_writes.is_empty());
 }
 
 #[test]
-fn generic_line_mode_keeps_head_and_tail() {
-    let text: String =
-        (0..120).map(|i| format!("record {i} holding some ordinary content\n")).collect();
+fn colored_progress_continues_to_recoverable_reduction() {
+    let input = cargo_log(30).replace("   Compiling", "   \x1b[1m\x1b[32mCompiling\x1b[0m");
     let store = InMemoryStore::new();
-    let outcome = compress_log(&text, BuildLogMode::GenericText, Some(&store));
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
 
-    assert_eq!(outcome.omitted_blocks, 1);
-    assert_eq!(outcome.stash_writes.len(), 1);
-    assert!(outcome.output.starts_with("record 0 "));
-    assert!(outcome.output.contains("record 119 "));
-    assert!(outcome.output.contains("… (omitted 40 lines, run: tokenless retrieve"));
-
-    let write = &outcome.stash_writes[0];
-    let payload = store.retrieve(&write.key).unwrap().unwrap();
-    assert_eq!(replace_marker_line(&outcome.output, &write.key, &payload), text);
-}
-
-#[test]
-fn generic_mode_below_thresholds_is_unchanged() {
-    let text: String =
-        (0..50).map(|i| format!("record {i} holding some ordinary content\n")).collect();
-    let outcome = compress_log(&text, BuildLogMode::GenericText, None);
-    assert_eq!(outcome.output, text);
-    assert_eq!(outcome.omitted_blocks, 0);
-}
-
-#[test]
-fn generic_char_mode_handles_a_giant_single_line() {
-    let text = "x".repeat(70_000);
-    let store = InMemoryStore::new();
-    let outcome = compress_log(&text, BuildLogMode::GenericText, Some(&store));
-
-    assert_eq!(outcome.omitted_blocks, 1);
-    let write = &outcome.stash_writes[0];
-    let payload = store.retrieve(&write.key).unwrap().unwrap();
-    assert_eq!(payload.chars().count(), 70_000 - 2 * 16_384);
-    let block = format!(
-        "\n… (omitted {} chars, run: tokenless retrieve '{}')\n",
-        70_000 - 2 * 16_384,
-        marker_for(&write.key)
+    assert_eq!(
+        outcome.operations,
+        [
+            BuildLogOperation::TerminalCleanup,
+            BuildLogOperation::ProgressReduction,
+        ]
     );
-    assert!(outcome.output.contains(&block));
-    assert_eq!(outcome.output.replace(&block, &payload), text);
+    assert_eq!(outcome.recoverability, crate::Recoverability::Retrievable);
+    assert!(!outcome.output.contains('\x1b'));
+    assert_eq!(outcome.metrics.omitted_blocks, 1);
+    assert_eq!(outcome.stash_writes.len(), 1);
 }
 
 #[test]
-fn build_log_mode_needs_line_volume_regardless_of_chars() {
-    let text = format!("{}\n{}\n", "a".repeat(40_000), "b".repeat(40_000));
-    let outcome = compress_log(&text, BuildLogMode::BuildLog, None);
-    assert_eq!(outcome.output, text);
+fn reduction_keeps_edges_diagnostics_summary_and_unknown_lines() {
+    let mut input = cargo_log(30);
+    input.insert_str(
+        input.find("Finished ").unwrap(),
+        "an unexplained but important line\nerror[E0308]: mismatched types\n  --> src/main.rs:3:4\n",
+    );
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.recoverability, crate::Recoverability::Retrievable);
+    assert_eq!(outcome.metrics.omitted_blocks, 1);
+    assert!(outcome.output.contains("package-000"));
+    assert!(outcome.output.contains("package-001"));
+    assert!(outcome.output.contains("package-028"));
+    assert!(outcome.output.contains("package-029"));
+    assert!(outcome.output.contains("error[E0308]"));
+    assert!(outcome.output.contains("src/main.rs:3:4"));
+    assert!(outcome.output.contains("an unexplained but important line"));
+    assert!(outcome.output.contains("Finished `dev` profile"));
+}
+
+#[test]
+fn cargo_test_reduction_keeps_failure_and_summary() {
+    let mut input = cargo_test_log(30);
+    let position = input.find("test parser::case_015").unwrap();
+    let end = input[position..].find('\n').unwrap() + position + 1;
+    input.replace_range(
+        position..end,
+        "test parser::case_015_with_a_descriptive_name ... FAILED\nthread 'parser::case_015_with_a_descriptive_name' panicked at src/parser.rs:15:5:\nassertion failed: parsed.is_valid()\n",
+    );
+    input = input.replace(
+        "test result: ok. 30 passed; 0 failed; finished in 0.30s",
+        "test result: FAILED. 29 passed; 1 failed; finished in 0.30s",
+    );
+
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.metrics.omitted_blocks, 2);
+    assert!(outcome.output.contains("case_015_with_a_descriptive_name ... FAILED"));
+    assert!(outcome.output.contains("assertion failed: parsed.is_valid()"));
+    assert!(outcome.output.contains("test result: FAILED"));
+    let mut restored = outcome.output.clone();
+    for write in &outcome.stash_writes {
+        let payload = store.retrieve(&write.key).unwrap().unwrap();
+        restored = replace_marker_line(&restored, &write.key, &payload);
+    }
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn pytest_quiet_progress_reduces_but_xpass_remains_visible() {
+    let mut input = pytest_quiet_log(30);
+    let position = input.find("tests/test_module_015.py").unwrap();
+    let end = input[position..].find('\n').unwrap() + position + 1;
+    input.replace_range(
+        position..end,
+        "tests/test_module_015.py ....X... [ 53%]\nXPASS tests/test_module_015.py::test_changed - behavior changed\n",
+    );
+    input = input.replace("240 passed in 2.34s", "239 passed, 1 xpassed in 2.34s");
+
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+
+    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert_eq!(outcome.metrics.omitted_blocks, 2);
+    assert!(outcome.output.contains("....X... [ 53%]"));
+    assert!(outcome.output.contains("XPASS tests/test_module_015.py::test_changed"));
+    assert!(outcome.output.contains("239 passed, 1 xpassed in 2.34s"));
+    let mut restored = outcome.output.clone();
+    for write in &outcome.stash_writes {
+        let payload = store.retrieve(&write.key).unwrap().unwrap();
+        restored = replace_marker_line(&restored, &write.key, &payload);
+    }
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn cargo_test_and_pytest_progress_need_recovery_and_a_long_run() {
+    for input in [cargo_test_log(30), pytest_quiet_log(30)] {
+        let outcome = BuildLogCompressor.compress(&input, None);
+        assert_eq!(outcome.output, input);
+        assert!(outcome.operations.is_empty());
+    }
+
+    for input in [cargo_test_log(8), pytest_quiet_log(8)] {
+        let store = InMemoryStore::new();
+        let outcome = BuildLogCompressor.compress(&input, Some(&store));
+        assert_eq!(outcome.output, input);
+        assert!(outcome.operations.is_empty());
+        assert_eq!(store.len(), 0);
+    }
+}
+
+#[test]
+fn every_marker_restores_its_cleaned_gap_exactly() {
+    let input = cargo_log(30);
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+    let mut restored = outcome.output.clone();
+    for write in &outcome.stash_writes {
+        let payload = store.retrieve(&write.key).unwrap().unwrap();
+        restored = replace_marker_line(&restored, &write.key, &payload);
+    }
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn no_store_allows_cleanup_but_not_progress_reduction() {
+    let input = cargo_log(30);
+    let outcome = BuildLogCompressor.compress(&input, None);
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(outcome.metrics.omitted_blocks, 0);
+}
+
+#[test]
+fn stash_failure_is_reported_without_emitting_a_marker() {
+    let input = cargo_log(30);
+    let outcome = BuildLogCompressor.compress(&input, Some(&AlwaysFail));
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(outcome.metrics.stash_errors, 1);
+    assert!(outcome.stash_writes.is_empty());
+}
+
+#[test]
+fn locally_unprofitable_gap_stays_verbatim() {
+    let input = "$ cargo build\nCompiling a\nCompiling b\nCompiling c\nCompiling d\nCompiling e\nCompiling f\nCompiling g\nCompiling h\nCompiling i\n";
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(input, Some(&store));
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
+fn ninth_profitable_gap_abandons_reduction_before_stashing() {
+    let mut input = "$ cargo build\n".to_owned();
+    for group in 0..9 {
+        for index in 0..12 {
+            input.push_str(&format!(
+                "Compiling group-{group}-package-{index} with a long repeated compilation description\n"
+            ));
+        }
+        input.push_str(&format!("phase boundary {group}\n"));
+    }
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
+fn anchored_generic_log_reduces_only_its_dominant_template() {
+    let mut input = "$ custom-builder\n".to_owned();
+    for index in 0..20 {
+        input.push_str(&format!(
+            "progress: item {index} completed with stable generic output\n"
+        ));
+    }
+    input.push_str("unique final observation\nExit code: 0\n");
+    assert!(BuildLogCompressor::detect(&input));
+
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+    assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
+    assert!(outcome.output.contains("unique final observation"));
+    assert!(outcome.output.contains("Exit code: 0"));
+}
+
+#[test]
+fn anchored_generic_output_does_not_reduce_repeated_data_rows() {
+    let mut input = "$ custom-export\n".to_owned();
+    for index in 0..20 {
+        input.push_str(&format!("customer record {index} has stable output\n"));
+    }
+    input.push_str("Exit code: 0\n");
+
+    assert!(!BuildLogCompressor::detect(&input));
+    let store = InMemoryStore::new();
+    let outcome = BuildLogCompressor.compress(&input, Some(&store));
+    assert_eq!(outcome.output, input);
+    assert!(outcome.operations.is_empty());
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
+fn trace_regions_are_never_cut_by_progress_reduction() {
+    let mut input = cargo_log(20);
+    input.push_str(
+        "Error: build script failed\n    at compile (/work/build.js:10:2)\n    at main (/work/index.js:3:1)\n",
+    );
+    input.push_str(&cargo_log(20));
+    let outcome = BuildLogCompressor.compress(&input, Some(&InMemoryStore::new()));
+    assert!(outcome.output.contains("at compile (/work/build.js:10:2)"));
+    assert!(outcome.output.contains("at main (/work/index.js:3:1)"));
+}
+
+fn replace_marker_line(output: &str, key: &str, payload: &str) -> String {
+    let marker = marker_for(key);
+    let marker_position = output.find(&marker).unwrap();
+    assert_eq!(extract_hash(&output[marker_position..]), Some(key));
+    let line_start = output[..marker_position]
+        .rfind('\n')
+        .map_or(0, |position| position + 1);
+    let line_end = output[marker_position..]
+        .find('\n')
+        .map_or(output.len(), |position| marker_position + position + 1);
+    format!("{}{}{}", &output[..line_start], payload, &output[line_end..])
+}
+
+#[test]
+fn duplicate_payload_writes_remain_visible_to_the_runtime_ledger() {
+    let store = Arc::new(InMemoryStore::new());
+    let input = cargo_log(30);
+    let first = BuildLogCompressor.compress(&input, Some(store.as_ref()));
+    let second = BuildLogCompressor.compress(&input, Some(store.as_ref()));
+    assert_eq!(first.stash_writes.len(), 1);
+    assert_eq!(second.stash_writes.len(), 1);
+    assert!(!second.stash_writes[0].created);
 }

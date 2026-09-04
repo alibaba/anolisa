@@ -6,7 +6,7 @@
 
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
-- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline currently compresses JSON only.
+- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline compresses JSON and recognized build/test command logs.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing syntax overhead for suitable structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
@@ -33,6 +33,7 @@ retrieval, and attribution.
 |---|---|---|
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
 | Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
+| Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents follow the Marker command `tokenless retrieve '<<tokenless:KEY>>'` when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
@@ -68,7 +69,7 @@ on the share and shape of that content in the session.
 
 | Workload | Primary strategy | Why |
 |----------|-----------------|-----|
-| Shell-heavy (build/test/triage) | Command rewriting (RTK) | `cargo`/`npm`/`go`/`pytest` output carries lots of progress/warning noise; RTK cuts 60–90% |
+| Shell-heavy (build/test/triage) | Build-log compression + RTK | Recognized build/test commands keep their native output for PostTool compression; other supported shell commands use RTK |
 | API/fetch-heavy (REST, web_fetch) | Response compression + TOON | JSON may carry removable debug/null/empty fields; sufficiently large, regular structures also have reducible syntax overhead |
 | Agents with many tools | Schema compression | Many Function Calling definitions carry verbose descriptions and removable metadata |
 | Long responses that must stay faithful | Reversible compression (Stash) | Truncated content is `retrieve`-able end-to-end lossless; thresholds can be tightened safely |
@@ -111,7 +112,7 @@ Token-Less/
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
 ├── crates/tokenless-runtime/  # Lifecycle API and Runtime-owned PostTool pipeline
 ├── crates/tokenless-protocol/ # Versioned adapter contract and token estimator
-├── crates/tokenless-compressors/ # JSON compressor plus standalone text engines
+├── crates/tokenless-compressors/ # JSON and build-log domain compressors
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
 ├── python/tokenless/          # PyO3 package: `anolisa_tokenless`
 ├── python/agentscope/         # Pure-Python AgentScope integration package
@@ -269,7 +270,15 @@ Agent adapters may apply separate pre-check thresholds; see the
 ### compress
 
 Shared Agent hooks send lifecycle requests to `tokenless compress`; only
-successful, non-bypassed PostTool JSON enters the Runtime-owned Pipeline.
+successful, non-bypassed PostTool JSON and eligible command-output build logs
+enter the Runtime-owned Pipeline. Tool errors bypass compression and keep their
+original output while Core attaches environment-diagnostic context.
+
+PreTool leaves recognized Cargo, pytest, npm/Jest, Go, and Make build/test
+commands unchanged so their native output has a single PostTool owner. Other
+supported commands may be rewritten by RTK, and their results continue to
+bypass PostTool compression.
+
 Claude Code 2.1.121 or newer, Qoder CLI, OpenCode, and Cosh-NG can replace the
 live result. Their PostTool requests enable recovery when bare `tokenless`
 also resolves on the shell `PATH`. A compression Marker then tells the model to
@@ -903,7 +912,7 @@ layout and single-target interface.
 |---|---|
 | `crates/tokenless-cli/` | CLI binary — `tokenless` command (compress, stats, env-check) |
 | `crates/tokenless-schema/` | BeforeModel tool-schema compression — `SchemaCompressor` |
-| `crates/tokenless-compressors/` | Content-domain engines — phase one wires only `JsonCompressor` into PostTool |
+| `crates/tokenless-compressors/` | Content-domain engines — `JsonCompressor` and `BuildLogCompressor` are connected to PostTool |
 | `crates/tokenless-runtime/` | Lifecycle API and Runtime-owned `PostToolPipeline`, shared by CLI and language bindings |
 | `crates/tokenless-protocol/` | Versioned adapter contract and shared `heuristic-v1` token estimator |
 | `python/tokenless/` | PyO3 package exposing `anolisa_tokenless` for CPython 3.11+ |

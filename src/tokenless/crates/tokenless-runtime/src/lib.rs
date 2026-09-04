@@ -440,7 +440,7 @@ impl TokenlessRuntime {
         pre_tool_with_rtk(request, attribution, rtk_path, &self.data_dir)
     }
 
-    /// Runs PostTool routing and the JSON-only content pipeline.
+    /// Runs PostTool routing and the content-domain pipeline.
     ///
     /// # Errors
     ///
@@ -769,9 +769,9 @@ const RESPONSE_PIPELINE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Compress a response using an optional caller-owned stash store.
 ///
-/// CLI and embedded frontends use the same Runtime-owned JSON PostTool
-/// pipeline. The explicit API validates JSON at its boundary; optional
-/// compression failures remain fail-open inside the pipeline.
+/// CLI and embedded frontends use the same Runtime-owned JSON domain path.
+/// The explicit API validates JSON at its boundary; optional compression
+/// failures remain fail-open inside the pipeline.
 ///
 /// # Errors
 ///
@@ -783,9 +783,8 @@ pub fn compress_response_with_store(
     stash_store: Option<&Arc<dyn StashStore>>,
 ) -> Result<CompressResult, RuntimeError> {
     validate_input_size(input)?;
-    // Boundary contract: response input must be JSON. The pipeline itself
-    // routes non-JSON content to passthrough, so this validation is what
-    // keeps invalid input a structured error for the CLI and bindings.
+    // This explicit API forces JSON domain dispatch, so validation here keeps
+    // invalid input a structured boundary error for the CLI and bindings.
     serde_json::from_str::<serde::de::IgnoredAny>(input)?;
 
     let request = PostToolRequest {
@@ -1549,6 +1548,60 @@ mod tests {
         assert_eq!(
             records[0].applied_operations,
             Some(vec!["json_record_reduction".to_string()])
+        );
+    }
+
+    #[test]
+    fn runtime_records_build_log_reduction_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            stats_enabled: true,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let mut content = "$ cargo build\n".to_owned();
+        for index in 0..30 {
+            content.push_str(&format!(
+                "Compiling package-{index:03} v0.1.{index} with extended progress output\n"
+            ));
+        }
+        content.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+        let response = runtime
+            .post_tool(
+                &PostToolRequest {
+                    result_kind: ResultKind::Tool,
+                    tool_name: "Bash".to_owned(),
+                    content,
+                    status: ToolResultStatus::Success,
+                    content_origin: ContentOrigin::CommandOutput,
+                    output_optimization: OutputOptimization::None,
+                    capabilities: PostToolCapabilities {
+                        replace_output: true,
+                        retrieval_available: true,
+                        replace_with_text: true,
+                    },
+                },
+                &ProtocolAttribution {
+                    agent_id: "agentscope".to_owned(),
+                    session_id: Some("build-log-session".to_owned()),
+                    tool_use_id: Some("build-log-call".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            response.applied_operations,
+            [tokenless_protocol::AppliedOperation::BuildLogReduction]
+        );
+
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        let records = recorder
+            .records_by_session("build-log-session", None)
+            .unwrap();
+        assert_eq!(records[0].content_type.as_deref(), Some("build_log"));
+        assert_eq!(
+            records[0].applied_operations,
+            Some(vec!["build_log_reduction".to_owned()])
         );
     }
 

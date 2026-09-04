@@ -1,10 +1,15 @@
 make: Entering directory '/work/project'
 cc -O2 -Wall -c src/main.c -o build/main.o
 cc -O2 -Wall -c src/util.c -o build/util.o
-cc -O2 -Wall -c src/parser.c -o build/parser.o
-cc -O2 -Wall -c src/lexer.c -o build/lexer.o
-… (omitted 27 lines: 6 info, 1 debug, 20 other; run: tokenless retrieve '<<tokenless:41ecde6305d26c246bcc7fac>>')
-  6× info: waiting for file lock on build/.lock (attempt 0)
+... (omitted 21 compiler invocation lines; run: tokenless retrieve '<<tokenless:1259598dfa53beec812b873f>>')
+cc -O2 -Wall -c src/ffi.c -o build/ffi.o
+cc -O2 -Wall -c src/platform.c -o build/platform.o
+info: waiting for file lock on build/.lock (attempt 1)
+info: waiting for file lock on build/.lock (attempt 2)
+info: waiting for file lock on build/.lock (attempt 3)
+info: waiting for file lock on build/.lock (attempt 4)
+info: waiting for file lock on build/.lock (attempt 5)
+info: waiting for file lock on build/.lock (attempt 6)
 info: waiting for file lock on build/.lock (attempt 7)
 info: waiting for file lock on build/.lock (attempt 8)
 info: waiting for file lock on build/.lock (attempt 9)

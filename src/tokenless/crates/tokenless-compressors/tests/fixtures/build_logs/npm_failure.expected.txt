@@ -1,15 +1,8 @@
 $ npm install
 npm http fetch GET 200 https://registry.npmjs.org/accepts 23ms
 npm http fetch GET 200 https://registry.npmjs.org/array-flatten 25ms
-npm http fetch GET 200 https://registry.npmjs.org/body-parser 27ms
-npm http fetch GET 200 https://registry.npmjs.org/bytes 29ms
-… (omitted 13 lines: 1 debug, 12 other; run: tokenless retrieve '<<tokenless:585becdcbfb5c006dd307d0d>>')
-npm http fetch GET 200 https://registry.npmjs.org/forwarded 57ms
-npm http fetch GET 200 https://registry.npmjs.org/fresh 59ms
-npm http fetch GET 200 https://registry.npmjs.org/http-errors 61ms
-npm http fetch GET 200 https://registry.npmjs.org/iconv-lite 63ms
-npm http fetch GET 200 https://registry.npmjs.org/inherits 65ms
-… (omitted 7 lines: 7 other; run: tokenless retrieve '<<tokenless:29070c6d24d3ec7e29e7e72e>>')
+... (omitted 26 package fetch lines; run: tokenless retrieve '<<tokenless:1c6416be6bbcd379cdd570aa>>')
+npm http fetch GET 200 https://registry.npmjs.org/mime-types 79ms
 npm http fetch GET 200 https://registry.npmjs.org/ms 81ms
 npm http fetch GET 404 https://registry.npmjs.org/left-padd 89ms
 npm ERR! code E404

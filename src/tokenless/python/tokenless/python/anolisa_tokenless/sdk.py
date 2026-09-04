@@ -85,6 +85,8 @@ class AppliedOperation(StrEnum):
     """Concrete transformations applied by Core."""
 
     SCHEMA_COMPRESSION = "schema_compression"
+    TERMINAL_CLEANUP = "terminal_cleanup"
+    BUILD_LOG_REDUCTION = "build_log_reduction"
     JSON_CLEANUP = "json_cleanup"
     JSON_RECORD_REDUCTION = "json_record_reduction"
     JSON_TRUNCATION = "json_truncation"
@@ -329,7 +331,7 @@ class TokenlessSdk:
         )
 
     async def post_tool(self, request: PostToolRequest) -> PostToolResponse:
-        """Runs Core PostTool routing and the JSON-only Pipeline."""
+        """Runs Core PostTool routing and the content-domain Pipeline."""
         response = await asyncio.to_thread(
             self.runtime._post_tool_json,
             _json_dumps(

@@ -97,3 +97,16 @@ fn error_line_without_frames_is_not_a_region() {
     let text = lines(&["Error: something went wrong", "plain line", "another"]);
     assert!(trace_regions(&text).is_empty());
 }
+
+#[test]
+fn dotnet_inner_exception_chain_stays_one_region() {
+    let text = vec![
+        "System.Exception: outer failure".to_owned(),
+        " ---> System.InvalidOperationException: inner failure".to_owned(),
+        "   at App.Inner.Run() in /work/Inner.cs:line 10".to_owned(),
+        "   --- End of inner exception stack trace ---".to_owned(),
+        "   at App.Outer.Run() in /work/Outer.cs:line 20".to_owned(),
+        "summary".to_owned(),
+    ];
+    assert_eq!(trace_regions(&text), vec![0..5]);
+}

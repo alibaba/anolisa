@@ -44,11 +44,11 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`, then only a smaller end-to-end result is accepted | Non-JSON domains currently pass through; recoverable truncation requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
-| Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
+| Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | Recognized build/test commands stay native for Build Log handling; other unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
-| Stash | Stores content removed by string, array, depth, or schema-description truncation, plus the complete original arrays behind record reduction | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
+| Stash | Stores content removed by string, array, depth, or schema-description truncation, complete arrays behind record reduction, and omitted Build Log progress intervals | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
 
@@ -58,8 +58,8 @@ After an adapter is enabled, a tool call may pass through these stages:
 
 ```text
 Before the tool: hard-disabled Tool Ready hook → command rewrite
-Before the tool: RTK rewrite → carry output-optimization state
-After the tool: status and optimization bypass → JSON-only PostTool Pipeline → optional Stash/TOON → statistics
+Before the tool: reserve recognized build/test commands; otherwise RTK rewrite → carry output-optimization state
+After the tool: status and optimization bypass → JSON/Build Log PostTool Pipeline → optional Stash/TOON → statistics
 Before the model: schema compression → visible Marker extraction → conditional Retrieve declaration
 Retrieve: visible-Marker authorization → byte-identical Stash read
 ```

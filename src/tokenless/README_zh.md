@@ -10,6 +10,7 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 |------|-----------|------|
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
+| Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
@@ -34,7 +35,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 | 工作负载 | 主要受益策略 | 原因 |
 |----------|-------------|------|
-| Shell 密集（编译/测试/排查） | 命令重写（RTK） | `cargo`/`npm`/`go`/`pytest` 等输出含大量进度/警告噪声，RTK 削减 60–90% |
+| Shell 密集（编译/测试/排查） | Build Log 压缩 + RTK | 已识别的构建/测试命令保留原生输出交给 PostTool 压缩，其他受支持 Shell 命令使用 RTK |
 | API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | JSON 可能含可移除的 debug/null/空值；足够大且结构规则的数据也有可削减的语法开销 |
 | 工具数量多的 Agent | Schema 压缩 | 大量 Function Calling 定义可能含冗长描述和可移除元数据 |
 | 长响应需保真 | 可逆压缩（Stash） | 截断后可 `retrieve` 原文，端到端无损，可放心收紧阈值 |
@@ -161,7 +162,13 @@ dsh --profile <profile>
 ### `compress` 压缩入口
 
 共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
-PostTool JSON 会进入 Runtime 内部 Pipeline。Claude Code 2.1.121 及以上版本、Qoder CLI、
+PostTool JSON 和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
+旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
+
+PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
+输出只由 PostTool 处理。其他受支持命令仍可由 RTK 改写，其结果继续旁路 PostTool 压缩。
+
+Claude Code 2.1.121 及以上版本、Qoder CLI、
 OpenCode 和 Cosh-NG 能替换实时结果；同时裸 `tokenless` 可从 Shell `PATH` 解析时，其
 PostTool 请求才启用恢复能力。压缩 Marker 会提示模型通过已有 Shell Tool 执行精确的
 `tokenless retrieve` 命令。Hook 只识别成功执行、参数为
@@ -515,7 +522,7 @@ tokenless env-check --tool Shell --fix
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-runtime/` — 生命周期 API 与 Runtime 内部的 `PostToolPipeline`
 - `crates/tokenless-protocol/` — 版本化 Adapter 契约与共享 `heuristic-v1` Token Estimator
-- `crates/tokenless-compressors/` — JSON 领域压缩器和暂未接入 PostTool 的文本引擎
+- `crates/tokenless-compressors/` — 已接入 PostTool 的 `JsonCompressor` 与 `BuildLogCompressor`
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据

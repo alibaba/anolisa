@@ -1,10 +1,10 @@
-//! §12 gate-9 measurement harness. Not part of the normal test run:
+//! Build-log measurement harness. Not part of the normal test run:
 //! `cargo test -p tokenless-compressors --release --test perf -- --ignored --nocapture`
 
 use std::time::Instant;
 
 use tokenless_ccr::InMemoryStore;
-use tokenless_compressors::{BuildLogMode, clean_terminal, compress_log};
+use tokenless_compressors::BuildLogCompressor;
 
 /// Synthetic ~5 MiB build log: dense noise with periodic errors, ANSI
 /// coloring, and CR progress redraws.
@@ -41,8 +41,7 @@ fn measure_percentiles_on_a_5mib_log() {
     for _ in 0..iterations {
         let store = InMemoryStore::new();
         let start = Instant::now();
-        let cleaned = clean_terminal(&log);
-        let outcome = compress_log(&cleaned, BuildLogMode::BuildLog, Some(&store));
+        let outcome = BuildLogCompressor.compress(&log, Some(&store));
         samples_ms.push(start.elapsed().as_secs_f64() * 1e3);
         last_len = outcome.output.len();
     }

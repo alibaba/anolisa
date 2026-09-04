@@ -56,6 +56,14 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             AppliedOperation("json_record_reduction"),
             AppliedOperation.JSON_RECORD_REDUCTION,
         )
+        self.assertEqual(
+            AppliedOperation("terminal_cleanup"),
+            AppliedOperation.TERMINAL_CLEANUP,
+        )
+        self.assertEqual(
+            AppliedOperation("build_log_reduction"),
+            AppliedOperation.BUILD_LOG_REDUCTION,
+        )
 
     async def test_before_model_compresses_schema_and_scopes_retrieve(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
@@ -142,6 +150,25 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             f"TOKENLESS_DATA_DIR={self.temporary_directory.name}",
             result.arguments["command"],
         )
+
+    async def test_pre_tool_leaves_build_log_commands_for_post_tool(self) -> None:
+        sdk = self.sdk()
+        original_arguments = {"command": "cargo test --workspace", "timeout": 120}
+        result = await sdk.pre_tool(
+            PreToolRequest(
+                tool_name="shell",
+                arguments=original_arguments,
+                command_field="command",
+                capabilities=PreToolCapabilities(
+                    replace_arguments=True,
+                    block_and_suggest=False,
+                ),
+                attribution=Attribution("sdk-agent", "sdk-session", "call-build"),
+            )
+        )
+        self.assertEqual(result.action, PreToolAction.PASSTHROUGH)
+        self.assertEqual(result.output_optimization, OutputOptimization.NONE)
+        self.assertEqual(result.arguments, original_arguments)
 
     def test_post_tool_tool_kind_requires_call_identity_for_wire_strings(self) -> None:
         with self.assertRaisesRegex(ValueError, "tool_use_id"):

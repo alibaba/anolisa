@@ -101,9 +101,9 @@ tree.
 
 The plugin runs on DSH's `tools/post-execute` waterfall and sends replaceable
 root results containing one text block to `tokenless compress`. Core owns
-content detection, JSON cleanup, TOON selection, size gates, tool-origin
-thresholds, and final acceptance. Non-JSON and file-content results pass
-through. When bare `tokenless` resolves on DSH's shell `PATH` to the same
+content detection, JSON and Build Log compression, TOON selection, size gates,
+tool-origin thresholds, and final acceptance. Unsupported content domains and
+file-content results pass through. When bare `tokenless` resolves on DSH's shell `PATH` to the same
 executable selected for the Core call, a Marker can ask the model to run a
 standalone `tokenless retrieve` command; its successful output bypasses
 compression. Multiple blocks, images, Code Mode child successes, and canonical

@@ -1,84 +1,188 @@
 #[test]
-fn error_warning_and_summary_lines_are_signal() {
-    for line in [
-        "error[E0308]: mismatched types",
-        "warning: unused variable: `x`",
-        "FAILED tests/test_x.py::test_y - AssertionError",
-        "thread 'main' panicked at src/main.rs:5:5:",
-        "npm ERR! code ELIFECYCLE",
-        "test result: FAILED. 3 passed; 1 failed; 0 ignored",
-        "Process exited with exit code 1",
-        "collect2: fatal error: ld returned 1 exit status",
-        "✗ lint",
-        "Traceback (most recent call last):",
+fn error_warning_and_failure_lines_are_diagnostic() {
+    let templates = HashSet::new();
+    for (format, line) in [
+        (BuildLogFormat::Cargo, "error[E0308]: mismatched types"),
+        (BuildLogFormat::Cargo, "warning: unused variable"),
+        (BuildLogFormat::Npm, "npm ERR! code E404"),
+        (BuildLogFormat::Go, "--- FAIL: TestThing (0.01s)"),
+        (BuildLogFormat::Make, "Segmentation fault (core dumped)"),
     ] {
-        assert_eq!(analyze(line).class, LineClass::Signal, "line: {line}");
+        assert_eq!(
+            classify(line, format, &templates),
+            LineRole::Diagnostic,
+            "line: {line}"
+        );
     }
 }
 
-/// Failures that name no error: the crash, the kernel, the shell, or the
-/// network reporting it. Each one is the whole story of a failed run.
 #[test]
-fn keywordless_failures_are_signal() {
-    for line in [
-        "Segmentation fault (core dumped)",
-        "Aborted (core dumped)",
-        "Killed",
-        "OOMKilled",
-        "signal: killed",
-        "out of memory: Kill process 8123 (rustc) score 901",
-        "./build.sh: line 42: gcc: command not found",
-        "bash: ./deploy.sh: Permission denied",
-        "cp: cannot stat 'build/app': No such file or directory",
-        "ld.so: libssl.so.1.1: cannot open shared object file",
-        "Connection refused",
-        "curl: (28) Operation timed out after 30001 milliseconds",
-        "TIMEOUT after 600s",
-        "yarn install exited with 1",
-        "413 Request Entity Too Large",
+fn dialects_assign_only_known_progress_to_routine_roles() {
+    let templates = HashSet::new();
+    for (format, line, family) in [
+        (
+            BuildLogFormat::Cargo,
+            "Compiling serde v1.0.0",
+            RoutineFamily::CargoCompile,
+        ),
+        (
+            BuildLogFormat::Cargo,
+            "test parser::accepts_valid_input ... ok",
+            RoutineFamily::CargoTestPass,
+        ),
+        (
+            BuildLogFormat::Pytest,
+            "tests/test_a.py::case PASSED [10%]",
+            RoutineFamily::PytestPass,
+        ),
+        (
+            BuildLogFormat::Pytest,
+            "tests/test_a.py ........ [ 40%]",
+            RoutineFamily::PytestProgress,
+        ),
+        (
+            BuildLogFormat::Npm,
+            "npm http fetch GET 200 https://registry/npm 20ms",
+            RoutineFamily::NpmFetch,
+        ),
+        (
+            BuildLogFormat::Jest,
+            "PASS src/a.test.js",
+            RoutineFamily::JestPass,
+        ),
+        (
+            BuildLogFormat::Go,
+            "go: downloading example.com/mod v1.0.0",
+            RoutineFamily::GoDownload,
+        ),
+        (
+            BuildLogFormat::Make,
+            "cc -O2 -c src/a.c -o build/a.o",
+            RoutineFamily::MakeCompile,
+        ),
     ] {
-        assert_eq!(analyze(line).class, LineClass::Signal, "line: {line}");
+        assert_eq!(
+            classify(line, format, &templates),
+            LineRole::Routine(family)
+        );
     }
+    assert_eq!(
+        classify(
+            "unrecognized but potentially important output",
+            BuildLogFormat::Cargo,
+            &templates,
+        ),
+        LineRole::Unknown
+    );
 }
 
 #[test]
-fn routine_progress_lines_are_neutral() {
+fn pytest_nonstandard_outcomes_remain_diagnostic() {
+    let templates = HashSet::new();
     for line in [
-        "   Compiling serde v1.0.190",
-        "Downloading 47 crates",
-        "npm http fetch GET 200 https://registry.npmjs.org/foo 12ms",
-        "get https://proxy.golang.org/golang.org/x/sys/@v/list",
-        "  Installing collected packages: pytest",
+        "tests/test_a.py::case XPASS [25%]",
+        "tests/test_a.py::case XFAIL [50%]",
+        "XPASS tests/test_a.py::case - behavior changed",
+        "XFAIL tests/test_a.py::case - expected failure",
     ] {
-        assert_eq!(analyze(line).class, LineClass::Neutral, "line: {line}");
+        assert_eq!(
+            classify(line, BuildLogFormat::Pytest, &templates),
+            LineRole::Diagnostic,
+            "line: {line}"
+        );
     }
 }
 
 #[test]
-fn go_diagnostics_are_signal_but_goroutine_frames_are_not() {
-    assert_eq!(analyze("./main.go:10:2: undefined: fooBar").class, LineClass::Signal);
-    assert_eq!(analyze("    main_test.go:10: unexpected value").class, LineClass::Signal);
-    // A goroutine dump frame's line number is followed by an offset.
-    assert_eq!(analyze("\t/work/main.go:10 +0x24").class, LineClass::Neutral);
+fn pytest_quiet_summary_is_strong_dialect_evidence() {
+    assert_eq!(
+        format_evidence(BuildLogFormat::Pytest, "38 passed in 1.23s"),
+        Evidence { strong: 1, weak: 0 }
+    );
+    assert_eq!(
+        format_evidence(BuildLogFormat::Pytest, "1 failed, 33 passed in 2.14s"),
+        Evidence { strong: 1, weak: 0 }
+    );
 }
 
 #[test]
-fn routine_looking_line_reporting_a_failure_is_signal() {
-    assert_eq!(analyze("Downloading foo v1.2 failed").class, LineClass::Signal);
-}
-
-#[test]
-fn other_lines_are_neutral() {
-    for line in ["running 5 tests", "   Doc-tests tokenless", "", "some plain output"] {
-        assert_eq!(analyze(line).class, LineClass::Neutral, "line: {line}");
+fn npm_warnings_and_make_directories_are_preserved() {
+    let templates = HashSet::new();
+    assert_eq!(
+        classify(
+            "npm WARN deprecated old-package@1.0.0",
+            BuildLogFormat::Npm,
+            &templates,
+        ),
+        LineRole::Diagnostic
+    );
+    for line in [
+        "make[1]: Entering directory '/work/lib'",
+        "make[1]: Leaving directory '/work/lib'",
+    ] {
+        assert_eq!(
+            classify(line, BuildLogFormat::Make, &templates),
+            LineRole::Phase
+        );
     }
 }
 
 #[test]
-fn level_buckets() {
-    assert_eq!(analyze("INFO: starting daemon").level, LogLevel::Info);
-    assert_eq!(analyze("[debug] cache miss").level, LogLevel::Debug);
-    assert_eq!(analyze("notice: config reloaded").level, LogLevel::Notice);
-    assert_eq!(analyze("TRACE spans flushed").level, LogLevel::Trace);
-    assert_eq!(analyze("plain output").level, LogLevel::Other);
+fn summaries_and_phase_boundaries_are_not_routine() {
+    let templates = HashSet::new();
+    assert_eq!(
+        classify(
+            "Finished `release` profile [optimized] target(s) in 1s",
+            BuildLogFormat::Cargo,
+            &templates,
+        ),
+        LineRole::Summary
+    );
+    assert_eq!(
+        classify(
+            "===== test session starts =====",
+            BuildLogFormat::Pytest,
+            &templates,
+        ),
+        LineRole::Phase
+    );
+}
+
+#[test]
+fn package_names_containing_error_are_not_diagnostics() {
+    let templates = HashSet::new();
+    assert_eq!(
+        classify(
+            "npm http fetch GET 200 https://registry/npm/http-errors 20ms",
+            BuildLogFormat::Npm,
+            &templates,
+        ),
+        LineRole::Routine(RoutineFamily::NpmFetch)
+    );
+    assert_eq!(
+        classify(
+            "Compiling error-chain v0.12.4",
+            BuildLogFormat::Cargo,
+            &templates,
+        ),
+        LineRole::Routine(RoutineFamily::CargoCompile)
+    );
+}
+
+#[test]
+fn generic_requires_a_preselected_dominant_template() {
+    let line = "progress: item 42 complete";
+    let template = generic_progress_template(line).unwrap();
+    assert_eq!(
+        classify(line, BuildLogFormat::Generic, &HashSet::new()),
+        LineRole::Unknown
+    );
+    assert_eq!(
+        classify(
+            line,
+            BuildLogFormat::Generic,
+            &HashSet::from([template]),
+        ),
+        LineRole::Routine(RoutineFamily::Generic)
+    );
 }

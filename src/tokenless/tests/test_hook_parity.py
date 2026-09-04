@@ -4,7 +4,7 @@
 Replays the tests/contract corpus through the current hooks against the
 real `tokenless` debug binary and compares every envelope with the Protocol
 v2 goldens. The baseline includes Marker-command recovery policy for Common
-Hooks and JSON-only PostTool dispatch.
+Hooks and JSON/Build Log PostTool dispatch.
 
 Requires target/debug/tokenless — run `cargo build -p tokenless-cli` first
 (the Makefile target does).

@@ -403,6 +403,10 @@ impl ContentType {
 pub enum AppliedOperation {
     /// Function schema descriptions were compacted.
     SchemaCompression,
+    /// ANSI SGR presentation sequences were removed from a build log.
+    TerminalCleanup,
+    /// Repeated build/test progress was reduced behind retrieval markers.
+    BuildLogReduction,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
@@ -419,6 +423,8 @@ impl AppliedOperation {
     pub fn wire_str(self) -> &'static str {
         match self {
             Self::SchemaCompression => "schema_compression",
+            Self::TerminalCleanup => "terminal_cleanup",
+            Self::BuildLogReduction => "build_log_reduction",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

@@ -1,4 +1,4 @@
-//! Fixture goldens for the two-stage terminal-cleanup → build-log chain.
+//! Fixture goldens for the build-log domain compressor.
 //!
 //! Each `<name>.txt` input has a committed `<name>.expected.txt` baseline.
 //! To re-baseline after an intentional engine change:
@@ -9,13 +9,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use tokenless_ccr::{InMemoryStore, StashStore, compute_key, is_valid_hash, marker_for};
-use tokenless_compressors::{BuildLogMode, BuildLogOutcome, clean_terminal, compress_log};
+use tokenless_compressors::{BuildLogCompressor, BuildLogOperation, BuildLogOutcome};
 
 const FIXTURES: &[&str] = &[
     "cargo_success",
     "cargo_failure",
     "npm_success",
     "npm_failure",
+    "jest_success",
+    "jest_failure",
     "pytest_success",
     "pytest_failure",
     "go_success",
@@ -51,6 +53,16 @@ const PROBES: &[(&str, &[&str])] = &[
         &[
             "npm ERR! code E404",
             "'left-padd@^1.0.0' is not in this registry.",
+        ],
+    ),
+    ("jest_success", &["Test Suites: 12 passed, 12 total"]),
+    (
+        "jest_failure",
+        &[
+            "FAIL src/critical.test.js",
+            "Error: expected true to be false",
+            "at verify (/work/src/critical.test.js:14:9)",
+            "Test Suites: 1 failed, 20 passed, 21 total",
         ],
     ),
     ("pytest_success", &["38 passed in 1.23s"]),
@@ -93,11 +105,9 @@ fn load(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// The production shape: the lossless stage runs first, the lossy stage
-/// compresses its output.
 fn run_chain(input: &str, store: &InMemoryStore) -> (String, BuildLogOutcome) {
-    let cleaned = clean_terminal(input);
-    let outcome = compress_log(&cleaned, BuildLogMode::BuildLog, Some(store));
+    let cleaned = strip_sgr_for_expected_reassembly(input);
+    let outcome = BuildLogCompressor.compress(input, Some(store));
     (cleaned, outcome)
 }
 
@@ -183,7 +193,10 @@ fn every_compressing_fixture_actually_saves() {
         let input = load(&format!("{name}.txt"));
         let store = InMemoryStore::new();
         let (cleaned, outcome) = run_chain(&input, &store);
-        if outcome.omitted_blocks > 0 {
+        if outcome
+            .operations
+            .contains(&BuildLogOperation::ProgressReduction)
+        {
             assert!(
                 outcome.output.chars().count() < cleaned.chars().count(),
                 "{name}: markers without net savings"
@@ -197,32 +210,12 @@ fn every_compressing_fixture_actually_saves() {
     }
 }
 
-/// Reassembly rule: a marker line (with its indented `N× …` template
-/// summaries) swaps back to its stashed payload; a repeat annotation expands
-/// to `N` more copies of the line above it.
 fn reassemble(output: &str, store: &InMemoryStore) -> String {
     let mut result = String::new();
-    let mut lines = output.split_inclusive('\n').peekable();
-    while let Some(line) = lines.next() {
+    for line in output.split_inclusive('\n') {
         if line.contains("run: tokenless retrieve '") {
             let hash = tokenless_ccr::extract_hash(line).expect("marker on omission line");
-            while let Some(next) = lines.peek() {
-                if is_template_summary(next) {
-                    lines.next();
-                } else {
-                    break;
-                }
-            }
             result.push_str(&store.retrieve(hash).unwrap().expect("stashed payload"));
-        } else if let Some(repeats) = repeat_annotation(line) {
-            let prev_start = result[..result.len() - 1]
-                .rfind('\n')
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            let prev = result[prev_start..].to_string();
-            for _ in 0..repeats {
-                result.push_str(&prev);
-            }
         } else {
             result.push_str(line);
         }
@@ -230,18 +223,26 @@ fn reassemble(output: &str, store: &InMemoryStore) -> String {
     result
 }
 
-fn is_template_summary(line: &str) -> bool {
-    let Some(rest) = line.strip_prefix("  ") else {
-        return false;
-    };
-    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-    digits > 0 && rest[digits..].starts_with('×')
-}
-
-fn repeat_annotation(line: &str) -> Option<usize> {
-    let rest = line.strip_prefix("[tokenless: previous line repeated ")?;
-    let rest = rest
-        .strip_suffix(" more times]\n")
-        .or_else(|| rest.strip_suffix(" more times]"))?;
-    rest.parse().ok()
+fn strip_sgr_for_expected_reassembly(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("\x1b[") {
+        output.push_str(&rest[..start]);
+        let sequence = &rest[start + 2..];
+        let Some(end) = sequence.find('m') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        if !sequence[..end]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b';')
+        {
+            output.push_str(&rest[start..start + 1]);
+            rest = &rest[start + 1..];
+            continue;
+        }
+        rest = &sequence[end + 1..];
+    }
+    output.push_str(rest);
+    output
 }

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use tokenless_ccr::{SqliteStore, StashStore};
+use tokenless_ccr::{SqliteStore, StashStore, extract_hash};
 use tokenless_runtime::{CompressOptions, MIN_TOON_CHARS, compress_response_with_store};
 use tokenless_stats::{
     CompressionMode, OperationType, StatsRecord, StatsRecorder, estimate_tokens,
@@ -1891,6 +1891,126 @@ fn compress_post_tool_dry_run_previews_record_reduction_without_stash_writes() {
 
     let store = SqliteStore::new(fixture.data_dir.join("stash.db")).unwrap();
     assert_eq!(store.len(), 0);
+}
+
+fn build_log_request(content: &str, status: &str, session_id: &str) -> String {
+    serde_json::json!({
+        "protocol_version": 2,
+        "operation": "post_tool",
+        "attribution": {
+            "agent_id": "integration-agent",
+            "session_id": session_id,
+            "tool_use_id": "call-1"
+        },
+        "input": {
+            "result_kind": "tool",
+            "tool_name": "Bash",
+            "content": content,
+            "status": status,
+            "content_origin": "command_output",
+            "output_optimization": "none",
+            "capabilities": {
+                "replace_output": true,
+                "retrieval_available": true,
+                "replace_with_text": true
+            }
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn compress_post_tool_reduces_and_restores_build_logs() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let mut content = "$ cargo build\n".to_owned();
+    for index in 0..30 {
+        content.push_str(&format!(
+            "Compiling package-{index:03} v0.1.{index} with extended progress output\n"
+        ));
+    }
+    content.push_str("Finished `dev` profile [unoptimized] target(s) in 1.2s\n");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &build_log_request(&content, "success", "build-log"),
+    );
+    assert!(
+        output.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["disposition"], "applied");
+    assert_eq!(response["result"]["content_type"], "build_log");
+    assert_eq!(
+        response["result"]["applied_operations"],
+        serde_json::json!(["build_log_reduction"])
+    );
+    assert_eq!(response["result"]["recoverability"], "retrievable");
+    let compressed = response["result"]["output"].as_str().unwrap();
+    let hash = extract_hash(compressed).unwrap();
+    let retrieve = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .args(["retrieve", hash])
+        .output()
+        .unwrap();
+    assert!(retrieve.status.success());
+    assert!(
+        String::from_utf8(retrieve.stdout)
+            .unwrap()
+            .contains("package-015")
+    );
+}
+
+#[test]
+fn compress_post_tool_error_build_log_stays_original_with_diagnosis() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let mut content = "$ cargo build\n".to_owned();
+    for index in 0..30 {
+        content.push_str(&format!(
+            "Compiling package-{index:03} v0.1.{index} with extended progress output\n"
+        ));
+    }
+    content.push_str("error: linker command not found\n");
+    let output = spawn_with_stdin(
+        fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .env("TOKENLESS_SLS_ENABLED", "0"),
+        &["compress"],
+        &build_log_request(&content, "error", "build-log-error"),
+    );
+    assert!(
+        output.status.success(),
+        "compress failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["disposition"], "tool_error");
+    assert_eq!(response["result"]["content_type"], "build_log");
+    assert_eq!(response["result"]["output"], content);
+    assert_eq!(
+        response["result"]["applied_operations"],
+        serde_json::json!([])
+    );
+    assert!(
+        response["result"]["additional_context"]
+            .as_str()
+            .unwrap()
+            .contains("ENV_DEPENDENCY_MISSING")
+    );
 }
 
 #[test]

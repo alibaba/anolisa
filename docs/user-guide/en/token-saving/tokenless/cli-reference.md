@@ -114,7 +114,9 @@ Operations:
 - Retrieve results, interrupted or denied calls, and RTK-optimized output bypass compression.
 - Tool errors pass through unchanged and may include bounded `additional_context` diagnostics.
 - Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
-- Every non-JSON content type passes through until its domain compressor is connected.
+- Recognized successful build/test command output uses `BuildLogCompressor`; terminal cleanup and
+  recoverable routine-progress reduction may be selected.
+- Every other non-JSON content type passes through until its domain compressor is connected.
 
 Only `disposition: "applied"` means `output` differs from the original. `dry_run`, `passthrough`,
 `no_savings`, `recoverability_unavailable`, `timeout`, and `tool_error` carry the original content.
@@ -131,6 +133,8 @@ Exit codes are part of the transport contract:
 
 The `pre_tool` operation resolves the separately packaged `rtk` executable from `PATH` and supported
 install layouts, skipping candidates older than 0.35.0 before trying the next packaged location.
+Recognized Cargo, pytest, npm/Jest, Go, and Make build/test commands stay native so their output has
+a single PostTool owner; other supported commands may be rewritten by RTK.
 Agent-facing `retrieve` authorizes the requested hash against `visible_markers` before reading Stash.
 The standalone `tokenless retrieve` command below is a separate trusted local operations path and
 does not require model-visibility context.

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokenless_ccr::{MARKER_PREFIX, MARKER_SUFFIX, StashStore, extract_hash, is_valid_hash};
-use tokenless_compressors::{JsonCompressionConfig, JsonOperation};
+use tokenless_compressors::JsonCompressionConfig;
 use tokenless_protocol::{
     AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, Disposition, Operation,
     OutputOptimization, PostToolRequest, PostToolResponse, PreToolAction, PreToolRequest,
@@ -318,6 +318,11 @@ fn pre_tool_with_optional_rtk(
     if !request.capabilities.replace_arguments && !request.capabilities.block_and_suggest {
         return Ok(pre_tool_passthrough(request));
     }
+    // RTK ownership would bypass the PostTool domain selected for native
+    // build/test output, so the two optimizers remain mutually exclusive.
+    if is_build_log_owned_command(command) {
+        return Ok(pre_tool_passthrough(request));
+    }
     let rtk_path = rtk_path.ok_or(RuntimeError::RtkUnavailable)?;
     let data_dir = data_dir.ok_or(RuntimeError::RtkDataDirectoryUnavailable)?;
 
@@ -398,6 +403,169 @@ fn pre_tool_passthrough(request: &PreToolRequest) -> PreToolResponse {
         action: PreToolAction::Passthrough,
         output_optimization: OutputOptimization::None,
     }
+}
+
+fn is_build_log_owned_command(command: &str) -> bool {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for character in command.chars() {
+        if escaped {
+            word.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                word.push(character);
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            if character == '\n' && segment_is_build_log_owned(&words) {
+                return true;
+            }
+            if character == '\n' {
+                words.clear();
+            }
+        } else if matches!(character, '&' | '|' | ';' | '(' | ')') {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            if segment_is_build_log_owned(&words) {
+                return true;
+            }
+            words.clear();
+        } else {
+            word.push(character);
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    segment_is_build_log_owned(&words)
+}
+
+fn segment_is_build_log_owned(words: &[String]) -> bool {
+    let mut index = words
+        .iter()
+        .position(|word| !is_environment_assignment(word))
+        .unwrap_or(words.len());
+    if words.get(index).is_some_and(|word| word == "env") {
+        index += 1;
+        while words
+            .get(index)
+            .is_some_and(|word| is_environment_assignment(word))
+        {
+            index += 1;
+        }
+    }
+    if matches!(
+        words.get(index).map(|word| command_basename(word)),
+        Some("command" | "exec")
+    ) {
+        index += 1;
+    }
+
+    let executable = words
+        .get(index)
+        .map(|word| command_basename(word))
+        .unwrap_or_default();
+    let arguments = &words[index.saturating_add(1).min(words.len())..];
+    match executable {
+        "cargo" => matches!(
+            arguments.first().map(String::as_str),
+            Some("build" | "check" | "clippy" | "install" | "test")
+        ),
+        "pytest" => true,
+        executable if is_python_executable(executable) => {
+            matches!(
+                arguments,
+                [module, runner, ..] if module == "-m" && runner == "pytest"
+            )
+        }
+        "uv" => matches!(
+            arguments,
+            [run, runner, ..] if run == "run" && (runner == "pytest" || is_python_pytest(arguments, 1))
+        ),
+        "npm" | "pnpm" => package_command_is_build_log_owned(arguments),
+        "npx" | "pnpx" => arguments.first().is_some_and(|runner| runner == "jest"),
+        "jest" => true,
+        "go" => matches!(
+            arguments.first().map(String::as_str),
+            Some("build" | "test" | "vet")
+        ),
+        "make" | "gmake" => true,
+        _ => false,
+    }
+}
+
+fn package_command_is_build_log_owned(arguments: &[String]) -> bool {
+    let Some(action) = arguments.first().map(String::as_str) else {
+        return false;
+    };
+    if action == "test" {
+        return true;
+    }
+    if matches!(action, "exec" | "x" | "dlx") {
+        return arguments.get(1).is_some_and(|runner| runner == "jest");
+    }
+    if !matches!(action, "run" | "run-script") {
+        return false;
+    }
+    arguments
+        .iter()
+        .skip(1)
+        .find(|word| !word.starts_with('-'))
+        .is_some_and(|script| {
+            matches!(script.as_str(), "build" | "jest" | "test")
+                || script.starts_with("build:")
+                || script.starts_with("test:")
+        })
+}
+
+fn is_environment_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+fn command_basename(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+fn is_python_executable(executable: &str) -> bool {
+    executable.strip_prefix("python").is_some_and(|suffix| {
+        suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    })
+}
+
+fn is_python_pytest(arguments: &[String], start: usize) -> bool {
+    matches!(
+        arguments.get(start..),
+        Some([python, module, runner, ..])
+            if is_python_executable(command_basename(python))
+                && module == "-m"
+                && runner == "pytest"
+    )
 }
 
 fn anchor_rtk_prefix(
@@ -569,11 +737,6 @@ pub(crate) fn post_tool_with_store(
         || request.output_optimization == OutputOptimization::Rtk
     {
         Some(PostToolResponse::passthrough(request, before_tokens))
-    } else if request.status == ToolResultStatus::Error {
-        let mut response = PostToolResponse::passthrough(request, before_tokens);
-        response.disposition = Disposition::ToolError;
-        response.additional_context = diagnose_tool_error(&request.tool_name, &request.content);
-        Some(response)
     } else {
         None
     };
@@ -583,47 +746,65 @@ pub(crate) fn post_tool_with_store(
         .then_some(stash_store)
         .flatten();
 
-    let (response, candidate, operations, stash_writes, stash_errors, stash_size, unrecoverable) =
-        if let Some(response) = routed {
-            (response, None, Vec::new(), None, None, None, None)
-        } else {
-            let thresholds = taxonomy::thresholds_for(request.content_origin);
-            let run = PostToolPipeline::run(
-                request,
-                &PostToolPipelineConfig {
-                    timeout: RESPONSE_PIPELINE_TIMEOUT,
-                    max_input_bytes: MAX_INPUT_BYTES,
-                    min_input_chars: MIN_RESPONSE_CHARS,
-                    compression_enabled: options.compression_enabled,
-                    stash_enabled: options.stash_enabled,
-                    require_reversibility: true,
-                    force_json: false,
-                    preserve_top_level_shape: !request.capabilities.replace_with_text,
-                    allow_toon: true,
-                    min_toon_chars: MIN_TOON_CHARS,
-                    json: JsonCompressionConfig {
-                        truncate_strings_at: thresholds.truncate_strings_at,
-                        truncate_arrays_at: thresholds.truncate_arrays_at,
-                        max_depth: thresholds.max_depth,
-                        ..JsonCompressionConfig::default()
-                    },
+    let (
+        mut response,
+        candidate,
+        operations,
+        stash_writes,
+        stash_errors,
+        stash_size,
+        unrecoverable,
+    ) = if let Some(response) = routed {
+        (response, None, Vec::new(), None, None, None, None)
+    } else {
+        let thresholds = taxonomy::thresholds_for(request.content_origin);
+        let run = PostToolPipeline::run(
+            request,
+            &PostToolPipelineConfig {
+                timeout: RESPONSE_PIPELINE_TIMEOUT,
+                max_input_bytes: MAX_INPUT_BYTES,
+                min_input_chars: MIN_RESPONSE_CHARS,
+                compression_enabled: options.compression_enabled,
+                stash_enabled: options.stash_enabled,
+                require_reversibility: true,
+                force_json: false,
+                preserve_top_level_shape: !request.capabilities.replace_with_text,
+                allow_toon: true,
+                min_toon_chars: MIN_TOON_CHARS,
+                json: JsonCompressionConfig {
+                    truncate_strings_at: thresholds.truncate_strings_at,
+                    truncate_arrays_at: thresholds.truncate_arrays_at,
+                    max_depth: thresholds.max_depth,
+                    ..JsonCompressionConfig::default()
                 },
-                attached_store,
-            )
-            .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
-            if let Some(count) = run.stash_errors.filter(|count| *count > 0) {
-                return Err(RuntimeError::StashWrite { count });
-            }
-            (
-                run.response,
-                run.candidate,
-                run.operations,
-                run.stash_writes,
-                run.stash_errors,
-                run.stash_size,
-                run.unrecoverable_truncations,
-            )
-        };
+            },
+            attached_store,
+        )
+        .map_err(|error| RuntimeError::Pipeline(error.to_string()))?;
+        if let Some(count) = run.stash_errors.filter(|count| *count > 0) {
+            return Err(RuntimeError::StashWrite { count });
+        }
+        (
+            run.response,
+            run.candidate,
+            run.operations,
+            run.stash_writes,
+            run.stash_errors,
+            run.stash_size,
+            run.unrecoverable_truncations,
+        )
+    };
+    if request.status == ToolResultStatus::Error {
+        response.additional_context = diagnose_tool_error(&request.tool_name, &request.content);
+        if matches!(
+            response.disposition,
+            Disposition::Passthrough
+                | Disposition::NoSavings
+                | Disposition::RecoverabilityUnavailable
+        ) {
+            response.disposition = Disposition::ToolError;
+        }
+    }
     let measured = matches!(
         response.disposition,
         Disposition::Applied | Disposition::DryRun
@@ -633,7 +814,7 @@ pub(crate) fn post_tool_with_store(
     } else {
         request.content.clone()
     };
-    let operation = if operations.contains(&JsonOperation::Toon) {
+    let operation = if operations.contains(&AppliedOperation::Toon) {
         OperationType::CompressToon
     } else {
         OperationType::CompressResponse
@@ -776,7 +957,8 @@ mod tests {
     use tempfile::tempdir;
     use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite};
     use tokenless_protocol::{
-        BeforeModelCapabilities, ContentOrigin, PostToolCapabilities, PreToolCapabilities,
+        BeforeModelCapabilities, ContentOrigin, ContentType, PostToolCapabilities,
+        PreToolCapabilities,
     };
 
     use super::*;
@@ -987,6 +1169,68 @@ mod tests {
                 .unwrap()
                 .contains("fake rtk")
         );
+    }
+
+    #[test]
+    fn pre_tool_reserves_supported_build_and_test_commands_for_post_tool() {
+        let commands = [
+            "cargo test --workspace",
+            "RUST_BACKTRACE=1 /usr/bin/cargo check",
+            "cd crate && cargo clippy",
+            "python3.12 -m pytest tests/",
+            "uv run python -m pytest -q",
+            "npm test",
+            "npm run --silent test:unit",
+            "pnpm exec jest --runInBand",
+            "npx jest",
+            "go test ./... 2>&1 | tail -40",
+            "make -j8",
+        ];
+        for command in commands {
+            assert!(
+                is_build_log_owned_command(command),
+                "expected BuildLog ownership for {command:?}"
+            );
+        }
+
+        for command in [
+            "cargo metadata",
+            "cargo fmt --all",
+            "go env",
+            "npm run lint",
+            "cat build.log",
+            "echo 'cargo test'",
+            "rg pytest README.md",
+        ] {
+            assert!(
+                !is_build_log_owned_command(command),
+                "unexpected BuildLog ownership for {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_tool_build_log_owner_does_not_require_rtk() {
+        let request = PreToolRequest {
+            tool_name: "Bash".into(),
+            arguments: json!({"command": "cargo test --workspace"}),
+            command_field: "command".into(),
+            capabilities: PreToolCapabilities {
+                replace_arguments: true,
+                block_and_suggest: false,
+            },
+        };
+        let response = pre_tool_with_optional_rtk(
+            &request,
+            &Attribution::new("test"),
+            None,
+            None,
+            RTK_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(response.action, PreToolAction::Passthrough);
+        assert_eq!(response.output_optimization, OutputOptimization::None);
+        assert_eq!(response.arguments, request.arguments);
     }
 
     #[test]
@@ -1454,6 +1698,61 @@ mod tests {
                 .unwrap()
                 .contains("ENV_DEPENDENCY_MISSING")
         );
+    }
+
+    fn failing_build_log() -> String {
+        let mut output = "$ cargo build\n".to_owned();
+        for index in 0..30 {
+            output.push_str(&format!(
+                "Compiling package-{index:03} v0.1.{index} with extended progress output\n"
+            ));
+        }
+        output.push_str("error: linker command not found\n");
+        output
+    }
+
+    #[test]
+    fn tool_error_build_log_stays_original_even_when_recovery_is_available() {
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let request = PostToolRequest {
+            status: ToolResultStatus::Error,
+            content: failing_build_log(),
+            capabilities: PostToolCapabilities {
+                replace_output: true,
+                retrieval_available: true,
+                replace_with_text: true,
+            },
+            ..post_tool_request("unused")
+        };
+
+        let outcome = post_tool_with_store(&request, &options(), Some(&store)).unwrap();
+
+        assert_eq!(outcome.response.disposition, Disposition::ToolError);
+        assert_eq!(outcome.response.content_type, Some(ContentType::BuildLog));
+        assert_eq!(outcome.response.output, request.content);
+        assert!(outcome.response.applied_operations.is_empty());
+        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+        assert!(
+            outcome
+                .response
+                .additional_context
+                .as_deref()
+                .unwrap()
+                .contains("ENV_DEPENDENCY_MISSING")
+        );
+    }
+
+    #[test]
+    fn tool_error_without_recovery_keeps_the_original_build_log() {
+        let request = PostToolRequest {
+            status: ToolResultStatus::Error,
+            content: failing_build_log(),
+            ..post_tool_request("unused")
+        };
+        let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::ToolError);
+        assert_eq!(outcome.response.output, request.content);
+        assert!(outcome.response.applied_operations.is_empty());
     }
 
     #[test]

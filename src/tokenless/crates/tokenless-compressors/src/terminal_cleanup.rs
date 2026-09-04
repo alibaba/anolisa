@@ -25,16 +25,15 @@
 //!   which is a judgement about usefulness rather than about information.
 //!
 //! Those are all judgements, and judgements belong in the retrievable-lossy
-//! stage, which stashes what it removes and emits a marker for it. Progress
-//! frames and spinner lines reaching the build/log compressor classify as
-//! Neutral and are omitted there, recoverably.
+//! stage, which stashes what it removes and emits a marker for it. Recognized
+//! repeated progress belongs to the build-log compressor's recoverable stage.
 
 /// Strip ANSI SGR (colour and style) sequences from a terminal capture.
 ///
 /// Matches `ESC [` followed by parameter bytes and a final `m`. An
 /// unterminated or non-SGR sequence is left in place — this function removes
 /// only what it positively recognizes.
-pub fn clean_terminal(text: &str) -> String {
+pub(crate) fn clean_terminal(text: &str) -> String {
     if !text.contains('\x1b') {
         return text.to_string();
     }

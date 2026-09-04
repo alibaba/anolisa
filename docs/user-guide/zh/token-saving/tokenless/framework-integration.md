@@ -91,8 +91,9 @@ dsh --profile web
 继续操作同一棵 profile 目录树。
 
 Plugin 在 DSH 的 `tools/post-execute` Waterfall 上运行，并把包含一个文本块、可替换的
-根调用结果发送给 `tokenless compress`。内容检测、JSON 清理、TOON 选择、大小门禁、
-基于工具来源的阈值和最终接受均由 Core 负责。非 JSON 与文件内容结果会透传。当裸
+根调用结果发送给 `tokenless compress`。内容检测、JSON 与 Build Log 压缩、TOON 选择、
+大小门禁、基于工具来源的阈值和最终接受均由 Core 负责。不受支持的内容域与文件内容结果会
+透传。当裸
 `tokenless` 能从 DSH Shell 的 `PATH` 解析到 Core 调用选中的同一个可执行文件时，Marker
 可以提示模型执行一条独立的 `tokenless retrieve` 命令；成功的恢复输出会绕过压缩。多文本块、图片、Code Mode 子调用的
 成功结果，以及后续 Waterfall Listener 已替换的 Canonical Value 均保持不变。CLI 缺失、

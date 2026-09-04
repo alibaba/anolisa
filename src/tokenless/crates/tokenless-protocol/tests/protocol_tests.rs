@@ -90,6 +90,8 @@ fn all_response_operations_round_trip_with_fixed_envelope() {
             disposition: Disposition::Applied,
             content_type: Some(ContentType::Json),
             applied_operations: vec![
+                AppliedOperation::TerminalCleanup,
+                AppliedOperation::BuildLogReduction,
                 AppliedOperation::JsonCleanup,
                 AppliedOperation::JsonRecordReduction,
                 AppliedOperation::JsonTruncation,
@@ -125,6 +127,14 @@ fn record_reduction_has_a_stable_wire_name() {
     assert_eq!(
         serde_json::to_string(&AppliedOperation::JsonRecordReduction).unwrap(),
         r#""json_record_reduction""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AppliedOperation::TerminalCleanup).unwrap(),
+        r#""terminal_cleanup""#
+    );
+    assert_eq!(
+        serde_json::to_string(&AppliedOperation::BuildLogReduction).unwrap(),
+        r#""build_log_reduction""#
     );
     assert_eq!(
         AppliedOperation::JsonRecordReduction.wire_str(),

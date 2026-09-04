@@ -42,11 +42,11 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 会路由给 `JsonCompressor`，只接受端到端更小的结果 | 非 JSON 内容域当前透传；可恢复截断需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
-| 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 真正提交给 Shell 的命令会变化；无规则或被拒绝时透传 |
+| 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 已识别的构建/测试命令保持原生输出交给 Build Log；其他无规则或被拒绝的改写透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
-| Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容，以及记录缩减背后的完整原始数组 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
+| Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容、Record Reduction 背后的完整原始数组，以及被省略的 Build Log 进度区间 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
 
 代码没有提供固定节省率保证。结果取决于 Payload、Adapter 交付语义，以及工具数据在模型上下文中的占比。请按[效果度量](measuring-savings.md)使用自己的工作负载测量。
 
@@ -55,8 +55,8 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 启用对应 Adapter 后，一次工具调用可能经过以下阶段：
 
 ```text
-工具调用前：RTK 改写 → 传递输出优化状态
-工具调用后：状态与优化旁路 → JSON-only PostTool Pipeline → 可选 Stash/TOON → 写入统计
+工具调用前：已识别的构建/测试命令预留给 Build Log；其他命令 RTK 改写 → 传递输出优化状态
+工具调用后：状态与优化旁路 → JSON/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
 模型调用前：Schema 压缩 → 提取可见 Marker → 条件式 Retrieve 声明
 Retrieve：可见 Marker 授权 → 字节级一致的 Stash Read
 ```
