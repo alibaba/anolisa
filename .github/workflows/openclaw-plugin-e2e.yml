@@ -64,13 +64,49 @@ jobs:
           path: src/agent-sec-core/target/wheels/*.whl
           if-no-files-found: error
 
+  build-openclaw-plugin:
+    name: Build one OpenClaw plugin package
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
+    defaults:
+      run:
+        working-directory: src/agent-sec-core/openclaw-plugin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/agent-sec-core/openclaw-plugin/package-lock.json
+
+      - name: Install plugin dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Build and pack plugin
+        run: |
+          mkdir -p ../target/openclaw-plugin
+          npm run build
+          npm pack --pack-destination ../target/openclaw-plugin
+
+      - name: Upload OpenClaw plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-sec-openclaw-plugin
+          path: src/agent-sec-core/target/openclaw-plugin/*.tgz
+          if-no-files-found: error
+
   openclaw-plugin-e2e:
     name: OpenClaw ${{ matrix.openclaw.label }} E2E
-    needs: build-agent-sec-cli
+    needs:
+      - build-agent-sec-cli
+      - build-openclaw-plugin
     runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         openclaw:
           - label: "2026.4.14"
@@ -127,16 +163,20 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install jq
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+      - name: Verify jq
+        run: jq --version
 
       - name: Download agent-sec-cli wheel
         uses: actions/download-artifact@v4
         with:
           name: agent-sec-cli-wheel
           path: src/agent-sec-core/target/wheels
+
+      - name: Download OpenClaw plugin package
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-sec-openclaw-plugin
+          path: src/agent-sec-core/target/openclaw-plugin
 
       # The `latest` entry tracks whatever OpenClaw release is current, so it
       # can break on upstream changes unrelated to this repository. Keep it
@@ -150,6 +190,7 @@ jobs:
           OPENCLAW_MATRIX_LABEL: ${{ matrix.openclaw.label }}
           EXPECT_UNSAFE_INSTALL_FLAG: ${{ matrix.openclaw.expect-unsafe-install }}
           AGENT_SEC_CLI_WHEEL: target/wheels/*.whl
+          OPENCLAW_E2E_PLUGIN_PACKAGE: target/openclaw-plugin/*.tgz
           OPENCLAW_E2E_RESULT_ROOT: target/openclaw-e2e/results
           # The native prompt scanner's standard mode requires an Ollama L2
           # model service that is not available in this CI environment. Use

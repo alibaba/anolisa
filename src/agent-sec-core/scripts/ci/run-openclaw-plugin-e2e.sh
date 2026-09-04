@@ -18,6 +18,7 @@ OPENCLAW_BIN="${OPENCLAW_BIN:-}"
 OPENCLAW_E2E_DRY_RUN="${OPENCLAW_E2E_DRY_RUN:-0}"
 OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE="${OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE:-minimal}"
 OPENCLAW_E2E_SKIP_NPM_CI="${OPENCLAW_E2E_SKIP_NPM_CI:-0}"
+OPENCLAW_E2E_PLUGIN_PACKAGE="${OPENCLAW_E2E_PLUGIN_PACKAGE:-}"
 EXPECT_UNSAFE_INSTALL_FLAG="${EXPECT_UNSAFE_INSTALL_FLAG:-}"
 AGENT_SEC_CLI_BIN="${AGENT_SEC_CLI_BIN:-}"
 AGENT_SEC_DAEMON_BIN="${AGENT_SEC_DAEMON_BIN:-}"
@@ -41,6 +42,7 @@ Environment:
   AGENT_SEC_CLI_BIN             Existing agent-sec-cli binary.
   AGENT_SEC_DAEMON_BIN          Existing agent-sec-daemon binary.
   AGENT_SEC_CLI_WHEEL           Wheel artifact to install into .venv.
+  OPENCLAW_E2E_PLUGIN_PACKAGE   Prebuilt plugin .tgz; skips npm ci/build/pack.
   OPENCLAW_E2E_AGENT_SEC_INSTALL_MODE
                                 minimal (default) installs wheel-declared
                                 runtime deps without ML packages; full installs
@@ -129,9 +131,8 @@ tmp_root="${OPENCLAW_E2E_TMP_ROOT:-${TMPDIR:-/tmp}}"
 pilot_workdir="${OPENCLAW_E2E_WORKDIR:-$tmp_root/agentsec-openclaw-e2e-$openclaw_label-$run_id}"
 artifact_workdir="$result_dir/workdir"
 tools_root="${OPENCLAW_E2E_TOOLS_ROOT:-$repo_root/target/openclaw-e2e/tools}"
-npm_cache="${NPM_CONFIG_CACHE:-$result_dir/npm-cache}"
-export NPM_CONFIG_CACHE="$npm_cache"
-export npm_config_cache="$npm_cache"
+npm_cache="${NPM_CONFIG_CACHE:-${npm_config_cache:-}}"
+plugin_package=""
 # Wheels no longer declare torch/transformers/modelscope, so there is nothing
 # to exclude from the resolved runtime-dep set. Kept as an empty array so the
 # resolve_wheel_runtime_deps call site keeps working if exclusions are needed again.
@@ -176,8 +177,9 @@ find_latest_wheel() {
     printf '%s\n' "$wheel"
 }
 
-resolve_wheel_spec() {
-    local spec="$1"
+resolve_artifact_spec() {
+    local label="$1"
+    local spec="$2"
     local absolute_spec="$spec"
     local matches=()
     local match
@@ -203,7 +205,41 @@ resolve_wheel_spec() {
         return
     fi
 
-    die "agent-sec-cli wheel not found from spec: $spec"
+    die "$label not found from spec: $spec"
+}
+
+configure_npm() {
+    export NPM_CONFIG_AUDIT="${NPM_CONFIG_AUDIT:-false}"
+    export NPM_CONFIG_FETCH_RETRIES="${NPM_CONFIG_FETCH_RETRIES:-2}"
+    export NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT="${NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT:-10000}"
+    export NPM_CONFIG_FETCH_RETRY_MINTIMEOUT="${NPM_CONFIG_FETCH_RETRY_MINTIMEOUT:-1000}"
+    export NPM_CONFIG_FETCH_TIMEOUT="${NPM_CONFIG_FETCH_TIMEOUT:-60000}"
+    export NPM_CONFIG_FUND="${NPM_CONFIG_FUND:-false}"
+    if [[ "$OPENCLAW_REQUESTED_VERSION" == "latest" ]]; then
+        export NPM_CONFIG_PREFER_OFFLINE=false
+        export NPM_CONFIG_PREFER_ONLINE=true
+    else
+        export NPM_CONFIG_PREFER_OFFLINE="${NPM_CONFIG_PREFER_OFFLINE:-true}"
+    fi
+
+    if [[ -z "$npm_cache" ]]; then
+        if [[ "$OPENCLAW_E2E_DRY_RUN" == "1" ]]; then
+            npm_cache="<npm default>"
+        else
+            npm_cache="$(npm config get cache)"
+        fi
+    fi
+}
+
+resolve_plugin_package() {
+    [[ -n "$OPENCLAW_E2E_PLUGIN_PACKAGE" ]] || return 0
+
+    if [[ "$OPENCLAW_E2E_DRY_RUN" == "1" ]]; then
+        plugin_package="$OPENCLAW_E2E_PLUGIN_PACKAGE"
+    else
+        plugin_package="$(resolve_artifact_spec "OpenClaw plugin package" "$OPENCLAW_E2E_PLUGIN_PACKAGE")"
+    fi
+    log "prebuilt plugin package: $plugin_package"
 }
 
 resolve_wheel_runtime_deps() {
@@ -318,7 +354,7 @@ ensure_agent_sec_cli() {
             run make build-cli
             AGENT_SEC_CLI_WHEEL="$(find_latest_wheel)"
         else
-            AGENT_SEC_CLI_WHEEL="$(resolve_wheel_spec "$AGENT_SEC_CLI_WHEEL")"
+            AGENT_SEC_CLI_WHEEL="$(resolve_artifact_spec "agent-sec-cli wheel" "$AGENT_SEC_CLI_WHEEL")"
         fi
         [[ -n "$AGENT_SEC_CLI_WHEEL" ]] || die "agent-sec-cli wheel not found"
         install_agent_sec_cli_wheel "$AGENT_SEC_CLI_WHEEL"
@@ -371,6 +407,10 @@ verify_openclaw() {
 }
 
 install_plugin_dependencies() {
+    if [[ -n "$plugin_package" ]]; then
+        log "skipping npm ci because a prebuilt plugin package was provided"
+        return
+    fi
     if [[ "$OPENCLAW_E2E_SKIP_NPM_CI" == "1" ]]; then
         log "skipping npm ci because OPENCLAW_E2E_SKIP_NPM_CI=1"
         return
@@ -379,14 +419,21 @@ install_plugin_dependencies() {
 }
 
 run_pilot() {
+    local pilot_args=(
+        --openclaw-bin "$OPENCLAW_BIN"
+        --agent-sec-cli "$AGENT_SEC_CLI_BIN"
+        --agent-sec-daemon "$AGENT_SEC_DAEMON_BIN"
+        --workdir "$pilot_workdir"
+    )
+    if [[ -n "$plugin_package" ]]; then
+        pilot_args+=(--plugin-package "$plugin_package")
+    fi
+
     run mkdir -p "$result_dir"
     run mkdir -p "$pilot_workdir"
     run chmod 700 "$pilot_workdir"
     run npm run e2e:openclaw --prefix "$plugin_root" -- \
-        --openclaw-bin "$OPENCLAW_BIN" \
-        --agent-sec-cli "$AGENT_SEC_CLI_BIN" \
-        --agent-sec-daemon "$AGENT_SEC_DAEMON_BIN" \
-        --workdir "$pilot_workdir"
+        "${pilot_args[@]}"
 }
 
 write_summary() {
@@ -468,7 +515,6 @@ log "matrix label: $OPENCLAW_MATRIX_LABEL"
 log "requested OpenClaw: $OPENCLAW_REQUESTED_VERSION"
 log "result dir: $result_dir"
 log "pilot workdir: $pilot_workdir"
-log "npm cache: $npm_cache"
 
 if [[ "$OPENCLAW_E2E_DRY_RUN" == "1" ]]; then
     log "dry-run enabled; no install or E2E command will be executed"
@@ -476,7 +522,11 @@ fi
 
 require_command node
 require_command jq
-run mkdir -p "$npm_cache"
+require_command npm
+configure_npm
+log "npm cache: $npm_cache"
+log "npm fetch preference: prefer-offline=$NPM_CONFIG_PREFER_OFFLINE prefer-online=${NPM_CONFIG_PREFER_ONLINE:-false}"
+resolve_plugin_package
 ensure_agent_sec_cli
 install_openclaw
 verify_openclaw

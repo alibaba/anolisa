@@ -268,18 +268,25 @@ async function runPilot() {
   );
   result.versions.agentSecCli = agentSecVersion.stdout.trim();
 
-  await runRequiredStep("agent-sec-plugin-build", "npm", ["run", "build"], {
-    cwd: PLUGIN_ROOT,
-    env: baseEnv,
-    timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
-  });
-  const packResult = await runRequiredStep(
-    "agent-sec-plugin-pack",
-    "npm",
-    ["pack", "--pack-destination", artifactsDir, "--json"],
-    { cwd: PLUGIN_ROOT, env: baseEnv, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
-  );
-  result.install.packageArtifact = await parseNpmPackArtifact(packResult.stdout, artifactsDir);
+  if (args.pluginPackage) {
+    result.install.packageArtifact = path.resolve(args.pluginPackage);
+    await fs.access(result.install.packageArtifact);
+    result.install.prebuiltPackage = true;
+  } else {
+    await runRequiredStep("agent-sec-plugin-build", "npm", ["run", "build"], {
+      cwd: PLUGIN_ROOT,
+      env: baseEnv,
+      timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
+    });
+    const packResult = await runRequiredStep(
+      "agent-sec-plugin-pack",
+      "npm",
+      ["pack", "--pack-destination", artifactsDir, "--json"],
+      { cwd: PLUGIN_ROOT, env: baseEnv, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
+    );
+    result.install.packageArtifact = await parseNpmPackArtifact(packResult.stdout, artifactsDir);
+    result.install.prebuiltPackage = false;
+  }
   result.install.packageRoot = await extractPackedPluginPackage({
     artifactsDir,
     env: baseEnv,

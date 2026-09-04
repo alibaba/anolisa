@@ -49,16 +49,23 @@ export function createPilotHarness({
       const child = spawn(command, commandArgs, {
         cwd: options.cwd ?? pluginRoot,
         env: options.env ?? process.env,
+        detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
       });
+      const processGroupId = process.platform !== "win32" ? child.pid : undefined;
       let timedOut = false;
       const stdoutStream = createWriteStream(stdoutLog);
       const stderrStream = createWriteStream(stderrLog);
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
+        signalChildProcess(child, processGroupId, "SIGTERM");
         setTimeout(() => {
-          if (child.exitCode === null) child.kill("SIGKILL");
+          if (
+            (processGroupId !== undefined && processGroupExists(processGroupId)) ||
+            (processGroupId === undefined && !hasChildExited(child))
+          ) {
+            signalChildProcess(child, processGroupId, "SIGKILL");
+          }
         }, 5_000).unref();
       }, timeoutMs);
       timer.unref();
@@ -667,20 +674,24 @@ async function waitForStartedProcessStop(proc) {
 }
 
 async function signalStartedProcess(proc, signal) {
+  signalChildProcess(proc.child, proc.processGroupId, signal);
+  if (proc.gatewayPort !== undefined) {
+    for (const pid of await listeningPidsOnPort(proc.gatewayPort)) {
+      signalPid(pid, signal);
+    }
+  }
+}
+
+function signalChildProcess(child, processGroupId, signal) {
   try {
-    if (proc.processGroupId !== undefined) {
-      process.kill(-proc.processGroupId, signal);
-    } else if (!hasChildExited(proc.child)) {
-      proc.child.kill(signal);
+    if (processGroupId !== undefined) {
+      process.kill(-processGroupId, signal);
+    } else if (!hasChildExited(child)) {
+      child.kill(signal);
     }
   } catch (error) {
     if (error?.code !== "ESRCH") {
       throw error;
-    }
-  }
-  if (proc.gatewayPort !== undefined) {
-    for (const pid of await listeningPidsOnPort(proc.gatewayPort)) {
-      signalPid(pid, signal);
     }
   }
 }

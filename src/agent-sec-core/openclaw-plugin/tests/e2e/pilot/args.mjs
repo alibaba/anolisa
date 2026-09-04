@@ -21,6 +21,8 @@ export function parseArgs(argv) {
       parsed.agentSecCli = argv[++index];
     } else if (arg === "--agent-sec-daemon") {
       parsed.agentSecDaemon = argv[++index];
+    } else if (arg === "--plugin-package") {
+      parsed.pluginPackage = argv[++index];
     } else if (arg === "--port") {
       parsed.port = argv[++index];
     } else if (arg === "--gateway-timeout-ms") {
@@ -42,6 +44,7 @@ Options:
   --openclaw-bin <path>        OpenClaw executable or openclaw.mjs path.
   --agent-sec-cli <path>       Installed agent-sec-cli binary.
   --agent-sec-daemon <path>    Installed agent-sec-daemon binary.
+  --plugin-package <path>      Prebuilt agent-sec OpenClaw plugin .tgz.
   --port <port>                Gateway port. Defaults to a free local port.
   --gateway-timeout-ms <ms>    Gateway health wait budget.
   --gateway-token <token>      Gateway token for local health checks.
