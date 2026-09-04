@@ -1,8 +1,6 @@
 name: AI / Qoder Review
 
 on:
-  pull_request_target:
-    types: [opened, ready_for_review]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -47,7 +45,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: qoder-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || github.run_id }}
+  group: qoder-review-${{ github.event.issue.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -55,11 +53,6 @@ jobs:
     name: Check review eligibility
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (
-        github.event_name == 'pull_request_target' &&
-        github.event.pull_request.draft == false &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
-      ) ||
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
@@ -88,9 +81,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-          EVENT_PR_AUTHOR: ${{ github.event.pull_request.user.login || '' }}
-          EVENT_PR_DRAFT: ${{ github.event.pull_request.draft || false }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number || '' }}
           INPUT_COMPONENT: ${{ inputs.component || 'auto' }}
           INPUT_REVIEW_SCOPE: ${{ inputs.review_scope || 'auto' }}
@@ -134,18 +124,7 @@ jobs:
             esac
           }
 
-          if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
-            pr_number="$EVENT_PR_NUMBER"
-            author="$EVENT_PR_AUTHOR"
-            actor="$TRIGGER_ACTOR"
-            component="auto"
-            review_scope="auto"
-
-            if [[ "$EVENT_PR_DRAFT" == "true" ]]; then
-              deny "draft-pr" "$pr_number" "$component" "$review_scope"
-              exit 0
-            fi
-          elif [[ "$EVENT_NAME" == "issue_comment" ]]; then
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
             pr_number="$(jq -r '.issue.number // ""' "$GITHUB_EVENT_PATH")"
             actor="$(jq -r '.comment.user.login // ""' "$GITHUB_EVENT_PATH")"
             component="auto"
@@ -171,10 +150,8 @@ jobs:
               deny "pr-not-found" "$pr_number" "$component" "$review_scope"
               exit 0
             fi
-            author=""
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             pr_number="$INPUT_PR_NUMBER"
-            author=""
             actor="$TRIGGER_ACTOR"
             component="$INPUT_COMPONENT"
             review_scope="${INPUT_REVIEW_SCOPE:-auto}"
@@ -192,14 +169,6 @@ jobs:
           if ! has_write_access "$actor_permission"; then
             deny "actor-${actor}-permission-${actor_permission}" "$pr_number" "$component" "$review_scope"
             exit 0
-          fi
-
-          if [[ -n "$author" ]]; then
-            author_permission="$(permission_for "$author")"
-            if ! has_write_access "$author_permission"; then
-              deny "author-${author}-permission-${author_permission}" "$pr_number" "$component" "$review_scope"
-              exit 0
-            fi
           fi
 
           pr_state="$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.state' 2>/dev/null || echo "unknown")"
@@ -228,7 +197,6 @@ jobs:
       PR_NUMBER: ${{ needs.review-gate.outputs.pr_number }}
       REQUESTED_COMPONENT: ${{ needs.review-gate.outputs.component }}
       REQUESTED_REVIEW_SCOPE: ${{ needs.review-gate.outputs.review_scope }}
-      TRIGGER_EVENT: ${{ github.event_name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -258,13 +226,11 @@ jobs:
         env:
           PR_NUMBER: ${{ env.PR_NUMBER }}
           REQUESTED_REVIEW_SCOPE: ${{ env.REQUESTED_REVIEW_SCOPE }}
-          TRIGGER_EVENT: ${{ env.TRIGGER_EVENT }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const prNumber = Number(process.env.PR_NUMBER);
             const requestedScope = process.env.REQUESTED_REVIEW_SCOPE || 'auto';
-            const automaticTrigger = process.env.TRIGGER_EVENT === 'pull_request_target';
             const qoderLogins = new Set(['qoderai', 'qoderai[bot]']);
 
             const compact = (value, limit) => String(value || '')
@@ -539,10 +505,7 @@ jobs:
             let files = [];
             let skip = false;
 
-            if (automaticTrigger && latestQoderReview) {
-              skip = true;
-              reviewMode = 'automatic-already-reviewed';
-            } else if (requestedScope !== 'full' && latestQoderReview) {
+            if (requestedScope !== 'full' && latestQoderReview) {
               try {
                 const { data: comparison } = await github.rest.repos.compareCommits({
                   owner,
