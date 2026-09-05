@@ -408,6 +408,8 @@ function copyAdapters(rootPkgDir) {
   console.log('  Bundling Agent adapters...');
   cpSync(adaptersSrc, adaptersDest, {
     recursive: true,
+    // npm pack omits symlinks; shared hook dispatchers must ship as regular files.
+    dereference: true,
     filter: (src) =>
       src !== legacyAgentscopeSrc &&
       !src.startsWith(`${legacyAgentscopeSrc}${sep}`) &&

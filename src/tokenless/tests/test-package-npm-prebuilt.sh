@@ -122,6 +122,19 @@ check_selector aarch64-apple-darwin 'darwin-arm64'
 node "$ROOT/npm/scripts/package-npm.js" --all
 test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
 
+# Inspect the published tarball: staging can contain working symlinks that
+# npm pack silently omits, leaving an installed Agent plugin without hooks.
+mkdir -p "$TMP/npm-root"
+tar -xzpf "$ROOT/npm/dist/tokenless/"*.tgz -C "$TMP/npm-root"
+for agent in claude-code qwencode; do
+    dispatcher="$TMP/npm-root/package/adapters/tokenless/$agent/hooks/run-hook.sh"
+    test -f "$dispatcher"
+    test ! -L "$dispatcher"
+    cmp "$ROOT/adapters/tokenless/common/hooks/run-hook.sh" "$dispatcher"
+    test "$(stat -c '%a' "$dispatcher")" = 755
+    bash -n "$dispatcher"
+done
+
 for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"
     test -f "$package/package.json"
