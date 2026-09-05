@@ -487,7 +487,7 @@ export default {
               capabilities: {
                 replace_output: true,
                 // The trusted operator CLI does not enforce Agent Marker visibility.
-                retrieval_available: false,
+                recovery: { kind: 'none' },
                 replace_with_text: slot.replaceWithText,
               },
             },

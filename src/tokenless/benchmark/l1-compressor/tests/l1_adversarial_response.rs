@@ -20,7 +20,7 @@
 
 use serde_json::{Value, json};
 use tokenless_bench::compress_json;
-use tokenless_compressors::{JsonCompressionContext, JsonCompressor};
+use tokenless_compressors::{JsonCompressionContext, JsonCompressor, RecoveryMethod};
 
 /// Compress and assert the result is still valid JSON (serializable).
 fn compress_ok(v: &Value) -> Value {
@@ -54,6 +54,8 @@ fn very_deep_nesting_returns_a_parser_error() {
     let result = JsonCompressor::default().compress(
         &input,
         &JsonCompressionContext {
+            // Matches the shared helper; recovery is inert without a Stash.
+            recovery: &RecoveryMethod::Shell,
             stash: None,
             allow_toon: false,
             preserve_top_level_shape: false,

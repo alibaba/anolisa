@@ -1,7 +1,7 @@
 $ npm test
 PASS src/component-00.test.js completed successfully
 PASS src/component-01.test.js completed successfully
-... (omitted 6 passing test suite lines; run: tokenless retrieve '<<tokenless:eda00052102640c88016b691>>')
+6 passing test suite lines omitted. If needed, run in shell: tokenless retrieve eda00052102640c88016b691
 PASS src/component-08.test.js completed successfully
 PASS src/component-09.test.js completed successfully
 FAIL src/critical.test.js
@@ -11,7 +11,7 @@ FAIL src/critical.test.js
         at runValidation (/work/src/runner.js:22:3)
 PASS src/component-10.test.js completed successfully
 PASS src/component-11.test.js completed successfully
-... (omitted 6 passing test suite lines; run: tokenless retrieve '<<tokenless:803de4b5926881cfbe4b6252>>')
+6 passing test suite lines omitted. If needed, run in shell: tokenless retrieve 803de4b5926881cfbe4b6252
 PASS src/component-18.test.js completed successfully
 PASS src/component-19.test.js completed successfully
 Test Suites: 1 failed, 20 passed, 21 total

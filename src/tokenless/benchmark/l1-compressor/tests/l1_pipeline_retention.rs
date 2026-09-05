@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tokenless_bench::{compress_json, compress_json_with, response_canonical, schema_canonical};
-use tokenless_ccr::{InMemoryStore, StashStore};
-use tokenless_compressors::JsonCompressionConfig;
+use tokenless_ccr::{InMemoryStore, StashStore, extract_hash, recovery_instruction};
+use tokenless_compressors::{JsonCompressionConfig, RecoveryMethod};
 use tokenless_schema::SchemaCompressor;
 
 /// Compress a response value (stage 1 of the pipeline).
@@ -201,9 +201,15 @@ fn response_pipeline_stash_marker_roundtrips_intact() {
     let marker = results[32]
         .as_str()
         .expect("marker sits between head and tail");
+    let hash = extract_hash(marker)
+        .unwrap_or_else(|| panic!("stash key survives the round-trip intact: {marker}"));
     assert!(
-        marker.contains("tokenless:"),
-        "stash key survives the round-trip intact: {marker}"
+        marker.ends_with(&recovery_instruction(hash, &RecoveryMethod::Shell)),
+        "new instruction form, not a legacy marker: {marker}"
+    );
+    assert!(
+        store.retrieve(hash).expect("stash readable").is_some(),
+        "recovered key resolves to the stashed payload"
     );
     assert_eq!(store.len(), 1, "one stash entry for the dropped middle");
     assert_eq!(decoded["tool"], "search_code", "root keys recovered");

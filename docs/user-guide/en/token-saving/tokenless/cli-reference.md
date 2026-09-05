@@ -91,7 +91,7 @@ jq -n \
       output_optimization: "none",
       capabilities: {
         replace_output: true,
-        retrieval_available: false,
+        recovery: {kind: "none"},
         replace_with_text: true
       }
     }
@@ -122,6 +122,13 @@ Only `disposition: "applied"` means `output` differs from the original. `dry_run
 `no_savings`, `recoverability_unavailable`, `timeout`, and `tool_error` carry the original content.
 `content_type: "json"` replaces the old JSON label, and `applied_operations` reports the actual
 transformations instead of a configured compressor list.
+
+`before_model` and `post_tool` require `capabilities.recovery`: `{"kind":"none"}`,
+`{"kind":"shell"}`, or `{"kind":"tool","name":"tokenless_retrieve"}`. Tool names contain
+1–64 ASCII letters, digits, underscores, or hyphens. Unknown fields, missing recovery, and the former
+`retrieval_available` boolean are rejected; update Core and callers together. The protocol version
+remains 2. Only a static Tool enables recoverable BeforeModel schema truncation; shell recovery
+applies to PostTool and does not add or change Agent tools.
 
 Exit codes are part of the transport contract:
 
@@ -277,10 +284,10 @@ echo '{"name":"test","value":42}' \
 
 ## `retrieve`
 
-This marker in compressed output means that removed content was written to Stash:
+This optional instruction in compressed output means that removed content was written to Stash:
 
 ```text
-<<tokenless:0123456789abcdef01234567>>
+12 passing-test lines omitted. If needed, run in shell: tokenless retrieve 0123456789abcdef01234567
 ```
 
 Retrieve by bare hash:
@@ -289,11 +296,16 @@ Retrieve by bare hash:
 tokenless retrieve 0123456789abcdef01234567
 ```
 
-You may also paste a complete line containing the marker:
+AgentScope uses its configured static Tool instead of a shell command:
+
+```text
+12 passing-test lines omitted. If needed, call tool tokenless_retrieve with hash_or_marker=0123456789abcdef01234567
+```
+
+Historical markers remain accepted but are no longer generated:
 
 ```bash
-tokenless retrieve \
-  '<... 12 items truncated, retrieve with <<tokenless:0123456789abcdef01234567>>'
+tokenless retrieve '<<tokenless:0123456789abcdef01234567>>'
 ```
 
 Override the database:

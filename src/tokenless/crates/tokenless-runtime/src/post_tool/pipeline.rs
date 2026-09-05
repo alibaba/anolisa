@@ -94,11 +94,11 @@ impl PostToolPipeline {
 
         let dry_run_store = (!config.compression_enabled
             && config.stash_enabled
-            && request.capabilities.retrieval_available
+            && request.capabilities.recovery.is_available()
             && stash_store.is_some())
         .then(InMemoryStore::new);
         let attached_store: Option<&dyn StashStore> =
-            if config.stash_enabled && request.capabilities.retrieval_available {
+            if config.stash_enabled && request.capabilities.recovery.is_available() {
                 if config.compression_enabled {
                     stash_store.map(AsRef::as_ref)
                 } else {
@@ -109,6 +109,7 @@ impl PostToolPipeline {
             };
         let candidate = if json_candidate {
             let context = JsonCompressionContext {
+                recovery: &request.capabilities.recovery,
                 stash: attached_store,
                 allow_toon: config.allow_toon && request.capabilities.replace_with_text,
                 preserve_top_level_shape: config.preserve_top_level_shape,
@@ -130,7 +131,11 @@ impl PostToolPipeline {
                     .then_some(outcome.metrics.unrecoverable_truncations),
             }
         } else {
-            let outcome = BuildLogCompressor.compress(&request.content, attached_store);
+            let outcome = BuildLogCompressor.compress_with_recovery(
+                &request.content,
+                attached_store,
+                &request.capabilities.recovery,
+            );
             DomainCandidate {
                 output: outcome.output,
                 operations: build_log_operations(&outcome.operations),
@@ -158,7 +163,7 @@ impl PostToolPipeline {
         let store = attached_store;
         let (output, disposition, stash_keys) = match verdict {
             Verdict::Apply => {
-                let keys = ledger.commit(&candidate.output, store);
+                let keys = ledger.commit(&candidate.output, store, &request.capabilities.recovery);
                 (candidate.output.clone(), Disposition::Applied, keys)
             }
             Verdict::DryRun => {
@@ -347,7 +352,7 @@ mod tests {
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,
-                retrieval_available: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
                 replace_with_text: true,
             },
         }

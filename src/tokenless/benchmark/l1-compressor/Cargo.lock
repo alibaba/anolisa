@@ -691,6 +691,7 @@ dependencies = [
  "blake3",
  "rusqlite",
  "thiserror",
+ "tokenless-protocol",
 ]
 
 [[package]]

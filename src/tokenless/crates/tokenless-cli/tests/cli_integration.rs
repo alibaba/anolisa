@@ -524,7 +524,7 @@ fn compress_response_stats_use_unicode_aware_estimates() {
         .args([
             "compress-response",
             "--truncate-strings-at",
-            "80",
+            "120",
             "--no-stash",
             "--agent-id",
             "integration-agent",
@@ -780,7 +780,7 @@ fn retrieve_stdout_is_byte_exact_without_extra_trailing_newline() {
         .args([
             "compress-response",
             "--truncate-strings-at",
-            "80",
+            "120",
             "--stash-db",
         ])
         .arg(&stash_db)
@@ -800,14 +800,8 @@ fn retrieve_stdout_is_byte_exact_without_extra_trailing_newline() {
         String::from_utf8_lossy(&compressed.stderr)
     );
     let compressed_text = String::from_utf8_lossy(&compressed.stdout);
-    let marker_start = compressed_text
-        .find("<<tokenless:")
-        .expect("compressed output should contain a stash marker");
-    let marker_end = compressed_text[marker_start..]
-        .find(">>")
-        .map(|i| marker_start + i + 2)
-        .expect("stash marker should be closed");
-    let marker = &compressed_text[marker_start..marker_end];
+    let marker = tokenless_ccr::extract_hash(&compressed_text)
+        .expect("compressed output should contain a recovery instruction");
 
     let retrieved = fixture
         .command()
@@ -862,14 +856,8 @@ fn retrieve_records_events_and_summary_reports_attribution() {
     let response: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
     let marker_text = response["result"]["output"].as_str().unwrap();
-    let marker_start = marker_text
-        .find("<<tokenless:")
-        .expect("array truncation should emit a stash marker");
-    let marker_end = marker_text[marker_start..]
-        .find(">>")
-        .map(|i| marker_start + i + 2)
-        .expect("stash marker should be closed");
-    let marker = &marker_text[marker_start..marker_end];
+    let marker = tokenless_ccr::extract_hash(marker_text)
+        .expect("array truncation should emit a recovery instruction");
 
     let hit = fixture
         .command()
@@ -1776,7 +1764,7 @@ fn spawn_with_stdin(
         .unwrap()
 }
 
-fn post_tool_request_json(content: &str, retrieval_available: bool, session_id: &str) -> String {
+fn post_tool_request_json(content: &str, recovery_available: bool, session_id: &str) -> String {
     serde_json::json!({
         "protocol_version": 2,
         "operation": "post_tool",
@@ -1794,7 +1782,7 @@ fn post_tool_request_json(content: &str, retrieval_available: bool, session_id: 
             "output_optimization": "none",
             "capabilities": {
                 "replace_output": true,
-                "retrieval_available": retrieval_available,
+                "recovery": {"kind": if recovery_available { "shell" } else { "none" }},
                 "replace_with_text": false
             }
         }
@@ -1911,7 +1899,7 @@ fn build_log_request(content: &str, status: &str, session_id: &str) -> String {
             "output_optimization": "none",
             "capabilities": {
                 "replace_output": true,
-                "retrieval_available": true,
+                "recovery": {"kind": "shell"},
                 "replace_with_text": true
             }
         }
@@ -2035,7 +2023,7 @@ fn compress_before_model_and_retrieve_operations_are_dispatched() {
             "visible_context": {"messages": []},
             "capabilities": {
                 "replace_tools": true,
-                "retrieval_available": true
+                "recovery": {"kind": "tool", "name": "tokenless_retrieve"}
             }
         }
     });

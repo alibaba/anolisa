@@ -19,9 +19,7 @@ from agentscope.tool import ToolBase, ToolChunk, Toolkit
 from anolisa_tokenless import ContentOrigin
 from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig, ToolContract
 
-_RECOVERY_PAYLOAD = (
-    "RECOVERY_SENTINEL=世界\n" + ("内容" * 525_000) + "TRAILING_NEWLINE\n"
-)
+_RECOVERY_PAYLOAD = "RECOVERY_SENTINEL=世界\n" + ("内容" * 525_000) + "TRAILING_NEWLINE\n"
 _SCHEMA_DESCRIPTION = "SCHEMA_SENTINEL " + ("details " * 200)
 _SHELL_COMMANDS: list[str] = []
 
@@ -76,9 +74,7 @@ class LargeResultTool(ToolBase):
             "answer": "ORCHID-7291",
             "payload": _RECOVERY_PAYLOAD,
         }
-        return ToolChunk(
-            content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))]
-        )
+        return ToolChunk(content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))])
 
     async def call(self) -> ToolChunk:
         return await self._execute()
@@ -176,9 +172,7 @@ async def main() -> None:
         middleware_tool = integration.tools[0]
         app_toolkit = Toolkit(tools=[existing_retrieve, *integration.tools])
         assert await app_toolkit.get_tool("tokenless_retrieve") is existing_retrieve
-        assert (
-            await app_toolkit.get_tool("tenant_tokenless_retrieve") is middleware_tool
-        )
+        assert await app_toolkit.get_tool("tenant_tokenless_retrieve") is middleware_tool
 
         toolkit = Toolkit(
             tools=[
@@ -204,11 +198,11 @@ async def main() -> None:
         await agent._call_model(**model_input)
         serialized_tools = json.dumps(model.tools, ensure_ascii=False)
         assert _SCHEMA_DESCRIPTION not in serialized_tools, serialized_tools
-        assert re.search(r"<<tokenless:[0-9a-f]{24}>>", serialized_tools)
-        assert any(
-            tool["function"]["name"] == "tenant_tokenless_retrieve"
-            for tool in model.tools
+        assert re.search(
+            r"If needed, call tool tenant_tokenless_retrieve with hash_or_marker=[0-9a-f]{24}",
+            serialized_tools,
         )
+        assert any(tool["function"]["name"] == "tenant_tokenless_retrieve" for tool in model.tools)
 
         _SHELL_COMMANDS.clear()
         shell_call = ToolCallBlock(
@@ -231,7 +225,10 @@ async def main() -> None:
         streamed, response = events
         assert "TRAILING_NEWLINE" in streamed.content[0].text
         assert "TRAILING_NEWLINE" not in response.content[0].text
-        marker = re.search(r"<<tokenless:([0-9a-f]{24})>>", response.content[0].text)
+        marker = re.search(
+            r"If needed, call tool [A-Za-z0-9_-]+ with hash_or_marker=([0-9a-f]{24})",
+            response.content[0].text,
+        )
         assert marker is not None
         assert response.id == "call-large"
 
@@ -255,9 +252,7 @@ async def main() -> None:
             name="tenant_tokenless_retrieve",
             input=json.dumps({"hash_or_marker": marker.group(1).upper()}),
         )
-        retrieved = [
-            event async for event in toolkit.call_tool(retrieve_call, agent.state)
-        ]
+        retrieved = [event async for event in toolkit.call_tool(retrieve_call, agent.state)]
         assert len(retrieved) == 2
         assert retrieved[0].content[0].text == _RECOVERY_PAYLOAD
 
@@ -267,9 +262,7 @@ async def main() -> None:
             except RuntimeError:
                 pass
             else:
-                raise AssertionError(
-                    "AgentScope before 2.0.3 App options must be rejected"
-                )
+                raise AssertionError("AgentScope before 2.0.3 App options must be rejected")
         else:
             options = integration.app_options()
             assert set(options) == {"extra_agent_middlewares"}
@@ -295,7 +288,7 @@ async def main() -> None:
             app_events = [event async for event in app_agent._acting(app_call)]
             app_response = app_events[-1]
             app_marker = re.search(
-                r"<<tokenless:([0-9a-f]{24})>>",
+                r"If needed, call tool [A-Za-z0-9_-]+ with hash_or_marker=([0-9a-f]{24})",
                 app_response.content[0].text,
             )
             assert app_marker is not None

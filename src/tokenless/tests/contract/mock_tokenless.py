@@ -51,7 +51,7 @@ def respond_before_model(request: dict, behavior: str) -> int:
         or not isinstance(input_data.get("tools"), list)
         or "visible_context" not in input_data
         or not isinstance(input_data.get("capabilities"), dict)
-        or input_data["capabilities"].get("retrieval_available") is not False
+        or input_data["capabilities"].get("recovery") != {"kind": "none"}
     ):
         return 3
 
@@ -120,9 +120,7 @@ def respond_post_tool(request: dict, behavior: str) -> int:
         not isinstance(input_data, dict)
         or not isinstance(input_data.get("content"), str)
         or not isinstance(input_data.get("capabilities"), dict)
-        or not isinstance(
-            input_data["capabilities"].get("retrieval_available"), bool
-        )
+        or input_data["capabilities"].get("recovery") not in ({"kind": "none"}, {"kind": "shell"})
         or input_data.get("result_kind") not in {"tool", "retrieve"}
         or "content_origin" not in input_data
         or "output_optimization" not in input_data

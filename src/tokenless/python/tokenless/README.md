@@ -24,6 +24,7 @@ from anolisa_tokenless import (
     OutputOptimization,
     PostToolCapabilities,
     PostToolRequest,
+    RecoveryMethod,
     ResultKind,
     TokenlessConfig,
     TokenlessSdk,
@@ -47,7 +48,7 @@ async def main() -> None:
             status=ToolResultStatus.SUCCESS,
             content_origin=ContentOrigin.API_RESPONSE,
             output_optimization=OutputOptimization.NONE,
-            capabilities=PostToolCapabilities(True, True, True),
+            capabilities=PostToolCapabilities(True, RecoveryMethod(), True),
             attribution=Attribution("my-agent", "session-42", "tool-7"),
         )
     )
@@ -56,6 +57,13 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+Declare `RecoveryMethod.shell()` only when the Agent can run `tokenless retrieve HASH` through
+its existing shell tool. For a registered static Tool, use `RecoveryMethod.tool(actual_name)`;
+the output then instructs the model to call that Tool with `hash_or_marker=HASH`. The default
+`RecoveryMethod()` permits only candidates that need no retrieval. Schema recovery requires
+the static Tool method. Historical angle-bracket markers remain readable, but new output uses
+optional `If needed` instructions.
 
 The public `TokenlessStats` client provides typed, read-only status, summary, recent-record,
 record-detail, structured-diff, and session-comparison queries over the Runtime's `stats.db`.

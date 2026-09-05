@@ -8,7 +8,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use tokenless_ccr::{InMemoryStore, StashStore, compute_key, is_valid_hash, marker_for};
+use tokenless_ccr::{
+    InMemoryStore, RecoveryMethod, StashStore, compute_key, is_valid_hash, recovery_instruction,
+};
 use tokenless_compressors::{BuildLogCompressor, BuildLogOperation, BuildLogOutcome};
 
 const FIXTURES: &[&str] = &[
@@ -146,7 +148,9 @@ fn markers_are_valid_and_keys_match_payloads() {
         for write in &outcome.stash_writes {
             assert!(is_valid_hash(&write.key), "{name}: bad key {}", write.key);
             assert!(
-                outcome.output.contains(&marker_for(&write.key)),
+                outcome
+                    .output
+                    .contains(&recovery_instruction(&write.key, &RecoveryMethod::Shell)),
                 "{name}: marker for {} missing from output",
                 write.key
             );
@@ -213,7 +217,7 @@ fn every_compressing_fixture_actually_saves() {
 fn reassemble(output: &str, store: &InMemoryStore) -> String {
     let mut result = String::new();
     for line in output.split_inclusive('\n') {
-        if line.contains("run: tokenless retrieve '") {
+        if line.contains("If needed, run in shell: tokenless retrieve ") {
             let hash = tokenless_ccr::extract_hash(line).expect("marker on omission line");
             result.push_str(&store.retrieve(hash).unwrap().expect("stashed payload"));
         } else {

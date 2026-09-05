@@ -1,8 +1,8 @@
 //! Reversible compression stash for tokenless (Compress-Cache-Retrieve).
 //!
 //! When a compressor truncates content, the original payload is stashed under
-//! a BLAKE3-derived key and a `<<tokenless:KEY>>` marker is inserted in the
-//! compressed output. The LLM can quote the marker back to retrieve the
+//! a BLAKE3-derived key and an entry-point-specific recovery instruction is
+//! inserted in the compressed output. The LLM can use the hash to retrieve the
 //! original, so compression stays reversible end-to-end even though the inline
 //! representation is lossy.
 //!
@@ -22,6 +22,7 @@
 pub mod backends;
 pub mod key;
 pub mod marker;
+pub mod recovery;
 pub mod store;
 
 pub use backends::in_memory::InMemoryStore;
@@ -32,4 +33,6 @@ pub use marker::{
     MARKER_PREFIX, MARKER_SUFFIX, extract_hash, is_valid_hash, marker_for, parse_marker,
     truncation_suffix, truncation_suffix_char_len,
 };
+pub use recovery::{recovery_hashes, recovery_instruction, truncation_suffix_for};
 pub use store::{StashError, StashStore, StashWrite};
+pub use tokenless_protocol::RecoveryMethod;

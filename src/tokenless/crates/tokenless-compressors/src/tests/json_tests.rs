@@ -5,6 +5,7 @@ use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite, extract_h
 
 fn context<'a>(stash: Option<&'a dyn StashStore>) -> JsonCompressionContext<'a> {
     JsonCompressionContext {
+        recovery: &tokenless_protocol::RecoveryMethod::Shell,
         stash,
         allow_toon: false,
         preserve_top_level_shape: false,
@@ -15,6 +16,117 @@ fn context<'a>(stash: Option<&'a dyn StashStore>) -> JsonCompressionContext<'a> 
 
 fn output_value(outcome: &JsonOutcome) -> Value {
     serde_json::from_str(&outcome.output).expect("JSON representation")
+}
+
+#[test]
+fn recovery_instruction_is_budgeted_for_each_method() {
+    use tokenless_ccr::{RecoveryMethod, recovery_hashes, truncation_suffix_for};
+    for method in [
+        RecoveryMethod::Shell,
+        RecoveryMethod::tool("t".repeat(64)).unwrap(),
+    ] {
+        let store = InMemoryStore::new();
+        let suffix = truncation_suffix_for("0123456789abcdef01234567", &method)
+            .chars()
+            .count();
+        for budget in [suffix - 1, suffix, suffix + 1] {
+            let input = serde_json::to_string(&"世界".repeat(500)).unwrap();
+            let outcome = JsonCompressor::new(JsonCompressionConfig {
+                truncate_strings_at: budget,
+                ..JsonCompressionConfig::default()
+            })
+            .compress(
+                &input,
+                &JsonCompressionContext {
+                    recovery: &method,
+                    ..context(Some(&store))
+                },
+            )
+            .unwrap();
+            let value = output_value(&outcome);
+            let text = value.as_str().unwrap();
+            assert!(text.chars().count() <= budget);
+            let hashes = recovery_hashes(&outcome.output, &method);
+            assert_eq!(hashes.len(), usize::from(budget > suffix));
+            for hash in hashes {
+                assert_eq!(store.retrieve(hash).unwrap().unwrap(), "世界".repeat(500));
+            }
+            assert!(!outcome.output.contains("<<tokenless:"));
+        }
+    }
+}
+
+#[test]
+fn every_json_omission_uses_the_declared_static_tool() {
+    use tokenless_ccr::{RecoveryMethod, recovery_hashes};
+    let method = RecoveryMethod::tool("tenant_retrieve").unwrap();
+    let cases = [
+        (
+            serde_json::json!({"value": "word ".repeat(1000)}),
+            JsonCompressionConfig {
+                truncate_strings_at: 180,
+                ..JsonCompressionConfig::default()
+            },
+        ),
+        (
+            serde_json::json!({"value": {"nested": "word ".repeat(1000)}}),
+            JsonCompressionConfig {
+                max_depth: 0,
+                ..JsonCompressionConfig::default()
+            },
+        ),
+        (
+            serde_json::json!(
+                (0..100)
+                    .map(|n| format!("{n}{}", "x".repeat(100)))
+                    .collect::<Vec<_>>()
+            ),
+            JsonCompressionConfig {
+                truncate_arrays_at: 4,
+                ..JsonCompressionConfig::default()
+            },
+        ),
+        (
+            serde_json::json!(
+                records(100)
+                    .into_iter()
+                    .map(|mut record| {
+                        record["message"] = serde_json::json!("ordinary content ".repeat(60));
+                        record
+                    })
+                    .collect::<Vec<_>>()
+            ),
+            JsonCompressionConfig::default(),
+        ),
+    ];
+    for (index, (value, config)) in cases.into_iter().enumerate() {
+        for allow_toon in [false, true] {
+            let store = InMemoryStore::new();
+            let outcome = JsonCompressor::new(config.clone())
+                .compress(
+                    &value.to_string(),
+                    &JsonCompressionContext {
+                        recovery: &method,
+                        allow_toon,
+                        min_toon_chars: 0,
+                        ..context(Some(&store))
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                outcome.recoverability,
+                Recoverability::Retrievable,
+                "case={index} toon={allow_toon}"
+            );
+            assert!(!outcome.output.contains("<<tokenless:"));
+            assert!(!outcome.output.contains("run in shell"));
+            let hashes = recovery_hashes(&outcome.output, &method);
+            assert!(!hashes.is_empty(), "{}", outcome.output);
+            for hash in hashes {
+                assert!(store.retrieve(hash).unwrap().is_some());
+            }
+        }
+    }
 }
 
 fn records(count: usize) -> Vec<Value> {
@@ -59,7 +171,10 @@ fn string_truncation_is_unicode_safe_and_bounded() {
         ..JsonCompressionConfig::default()
     });
     let outcome = compressor
-        .compress(r#"{"value":"你好世界，这是一个很长的测试"}"#, &context(None))
+        .compress(
+            r#"{"value":"你好世界，这是一个很长的测试"}"#,
+            &context(None),
+        )
         .unwrap();
     let value = output_value(&outcome);
     assert!(value["value"].as_str().unwrap().chars().count() <= 10);
@@ -91,8 +206,18 @@ fn array_truncation_preserves_head_and_tail() {
     let array = output.as_array().unwrap();
     assert!(array[0].as_str().unwrap().starts_with("item-1-"));
     assert!(array[2].as_str().unwrap().starts_with("item-3-"));
-    assert!(array[array.len() - 2].as_str().unwrap().starts_with("item-9-"));
-    assert!(array[array.len() - 1].as_str().unwrap().starts_with("item-10-"));
+    assert!(
+        array[array.len() - 2]
+            .as_str()
+            .unwrap()
+            .starts_with("item-9-")
+    );
+    assert!(
+        array[array.len() - 1]
+            .as_str()
+            .unwrap()
+            .starts_with("item-10-")
+    );
     assert!(array[3].as_str().unwrap().contains("5 more items"));
     assert_eq!(outcome.recoverability, Recoverability::Unrecoverable);
     assert_eq!(outcome.metrics.unrecoverable_truncations, 1);
@@ -127,9 +252,7 @@ fn depth_truncation_stashes_the_exact_subtree() {
     });
     let subtree = serde_json::json!({"value": "exact payload".repeat(40)});
     let input = serde_json::to_string(&serde_json::json!({"nested": subtree})).unwrap();
-    let outcome = compressor
-        .compress(&input, &context(Some(&store)))
-        .unwrap();
+    let outcome = compressor.compress(&input, &context(Some(&store))).unwrap();
     assert_eq!(outcome.operations, [JsonOperation::Truncation]);
     assert_eq!(outcome.recoverability, Recoverability::Retrievable);
     let hash = extract_hash(&outcome.output).unwrap();
@@ -164,6 +287,7 @@ fn stashed_array_tail_round_trips_exactly() {
 #[test]
 fn structured_slots_restore_empty_top_level_fields() {
     let context = JsonCompressionContext {
+        recovery: &tokenless_protocol::RecoveryMethod::Shell,
         preserve_top_level_shape: true,
         ..context(None)
     };
@@ -187,9 +311,11 @@ fn json_string_envelope_is_normalized_once() {
 
 #[test]
 fn invalid_json_is_an_error() {
-    assert!(JsonCompressor::default()
-        .compress("not json", &context(None))
-        .is_err());
+    assert!(
+        JsonCompressor::default()
+            .compress("not json", &context(None))
+            .is_err()
+    );
 }
 
 #[test]
@@ -211,6 +337,7 @@ fn toon_is_an_internal_json_operation() {
             .join(",")
     );
     let context = JsonCompressionContext {
+        recovery: &tokenless_protocol::RecoveryMethod::Shell,
         allow_toon: true,
         min_toon_chars: 0,
         ..context(None)
@@ -251,7 +378,7 @@ impl StashStore for AlwaysFail {
 #[test]
 fn stash_failure_is_visible_and_degrades_recovery() {
     let compressor = JsonCompressor::new(JsonCompressionConfig {
-        truncate_strings_at: 80,
+        truncate_strings_at: tokenless_ccr::truncation_suffix_char_len() + 16,
         ..JsonCompressionConfig::default()
     });
     let outcome = compressor
@@ -285,11 +412,7 @@ fn duplicate_stash_payloads_return_every_write_for_the_runtime_ledger() {
 
 #[test]
 fn lossless_threshold_is_inclusive_at_fifteen_percent() {
-    assert!(saves_at_least_percent(
-        &"x".repeat(68),
-        &"x".repeat(80),
-        15
-    ));
+    assert!(saves_at_least_percent(&"x".repeat(68), &"x".repeat(80), 15));
     assert!(!saves_at_least_percent(
         &"x".repeat(69),
         &"x".repeat(80),
@@ -314,9 +437,7 @@ fn error_signals_require_nonempty_fields_or_matching_status_text() {
             .unwrap()
     ));
     assert!(has_error_signal(
-        serde_json::json!({"errors": ["boom"]})
-            .as_object()
-            .unwrap()
+        serde_json::json!({"errors": ["boom"]}).as_object().unwrap()
     ));
     assert!(has_error_signal(
         serde_json::json!({"severity": "Critical warning"})
@@ -343,8 +464,8 @@ fn record_reduction_stashes_the_complete_array_with_a_fixed_budget() {
     assert_eq!(
         ids,
         vec![
-            0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26,
-            27, 28, 30, 31, 32, 34, 35, 36, 37, 38, 39,
+            0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 27, 28, 30,
+            31, 32, 34, 35, 36, 37, 38, 39,
         ]
     );
     assert_eq!(outcome.operations, [JsonOperation::RecordReduction]);
@@ -355,7 +476,10 @@ fn record_reduction_stashes_the_complete_array_with_a_fixed_budget() {
     assert_eq!(outcome.stash_writes.len(), 1);
 
     let hash = extract_hash(&outcome.output).unwrap();
-    assert_eq!(store.retrieve(hash).unwrap().as_deref(), Some(input.as_str()));
+    assert_eq!(
+        store.retrieve(hash).unwrap().as_deref(),
+        Some(input.as_str())
+    );
 }
 
 #[test]
@@ -402,23 +526,29 @@ fn record_reduction_counts_selected_records_removed_by_cleanup() {
     let array = array.as_array().unwrap();
     let kept = array.iter().filter(|value| value.is_object()).count();
     assert_eq!(kept, RECORD_MAX_ITEMS - 1);
-    assert_eq!(outcome.operations, [JsonOperation::Cleanup, JsonOperation::RecordReduction]);
+    assert_eq!(
+        outcome.operations,
+        [JsonOperation::Cleanup, JsonOperation::RecordReduction]
+    );
     assert_eq!(outcome.metrics.record_reductions, 1);
     assert_eq!(outcome.metrics.records_omitted, values.len() - kept);
     assert_eq!(outcome.recoverability, Recoverability::Retrievable);
 
     let hash = extract_hash(&outcome.output).unwrap();
     let expected_marker = format!(
-        "<... {} of {} records omitted, run: tokenless retrieve '{}'>",
+        "{} of {} records omitted. {}",
         values.len() - kept,
         values.len(),
-        marker_for(hash)
+        recovery_instruction(hash, &RecoveryMethod::Shell)
     );
     assert_eq!(
         array.last().and_then(Value::as_str),
         Some(expected_marker.as_str())
     );
-    assert_eq!(store.retrieve(hash).unwrap().as_deref(), Some(input.as_str()));
+    assert_eq!(
+        store.retrieve(hash).unwrap().as_deref(),
+        Some(input.as_str())
+    );
 }
 
 #[test]
@@ -486,9 +616,16 @@ fn nested_record_array_is_reduced_in_place() {
         .unwrap();
     let output = output_value(&outcome);
 
-    assert_eq!(output["batch"].as_array().unwrap().len(), RECORD_MAX_ITEMS + 1);
+    assert_eq!(
+        output["batch"].as_array().unwrap().len(),
+        RECORD_MAX_ITEMS + 1
+    );
     assert_eq!(outcome.metrics.record_reductions, 1);
     assert_eq!(outcome.stash_writes.len(), 1);
+    assert_eq!(
+        tokenless_ccr::recovery_hashes(&outcome.output, &RecoveryMethod::Shell),
+        [outcome.stash_writes[0].key.as_str()]
+    );
 }
 
 #[test]
@@ -496,6 +633,7 @@ fn lossless_toon_skips_record_reduction() {
     let store = InMemoryStore::new();
     let input = serde_json::to_string(&records(100)).unwrap();
     let toon_context = JsonCompressionContext {
+        recovery: &tokenless_protocol::RecoveryMethod::Shell,
         allow_toon: true,
         min_toon_chars: 0,
         ..context(Some(&store))
@@ -530,6 +668,7 @@ fn reduced_toon_can_win_after_lossless_toon_misses_the_gate() {
     }))
     .unwrap();
     let toon_context = JsonCompressionContext {
+        recovery: &tokenless_protocol::RecoveryMethod::Shell,
         allow_toon: true,
         min_toon_chars: 0,
         ..context(Some(&store))
@@ -544,6 +683,10 @@ fn reduced_toon_can_win_after_lossless_toon_misses_the_gate() {
     );
     assert_eq!(outcome.metrics.record_reductions, 1);
     assert_eq!(outcome.stash_writes.len(), 1);
+    assert_eq!(
+        tokenless_ccr::recovery_hashes(&outcome.output, &RecoveryMethod::Shell),
+        [outcome.stash_writes[0].key.as_str()]
+    );
 }
 
 #[test]
@@ -582,6 +725,7 @@ fn unrecoverable_bounded_candidate_can_be_disallowed() {
     }))
     .unwrap();
     let restricted = JsonCompressionContext {
+        recovery: &tokenless_protocol::RecoveryMethod::Shell,
         allow_unrecoverable: false,
         ..context(None)
     };

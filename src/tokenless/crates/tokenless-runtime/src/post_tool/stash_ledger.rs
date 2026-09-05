@@ -1,6 +1,6 @@
 //! Transaction ledger for tentative PostTool Stash writes.
 
-use tokenless_ccr::{StashStore, StashWrite, marker_for};
+use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, recovery_hashes};
 
 /// Tracks the generations one PostTool run may safely roll back.
 #[derive(Default)]
@@ -39,10 +39,19 @@ impl StashLedger {
         }
     }
 
-    pub(super) fn commit(&mut self, output: &str, stash: Option<&dyn StashStore>) -> Vec<String> {
+    pub(super) fn commit(
+        &mut self,
+        output: &str,
+        stash: Option<&dyn StashStore>,
+        recovery: &RecoveryMethod,
+    ) -> Vec<String> {
+        let visible = recovery_hashes(output, recovery)
+            .into_iter()
+            .map(str::to_ascii_lowercase)
+            .collect::<std::collections::HashSet<_>>();
         let (kept, orphaned): (Vec<_>, Vec<_>) = std::mem::take(&mut self.keys)
             .into_iter()
-            .partition(|key| output.contains(&marker_for(key)));
+            .partition(|key| visible.contains(key));
         for key in orphaned {
             if let Some(index) = self.owned.iter().position(|(owned, _)| *owned == key) {
                 let (_, generation) = self.owned.swap_remove(index);
@@ -111,8 +120,64 @@ mod tests {
         let write = store.stash("payload").unwrap();
         let mut ledger = StashLedger::default();
         ledger.record(write);
-        assert!(ledger.commit("no marker", Some(&store)).is_empty());
+        assert!(
+            ledger
+                .commit("no marker", Some(&store), &RecoveryMethod::Shell)
+                .is_empty()
+        );
         assert_eq!(store.len(), 0);
         assert_eq!(ledger.live_writes(), 0);
+    }
+
+    #[test]
+    fn commit_keeps_only_complete_visible_references_for_the_actual_method() {
+        for method in [
+            RecoveryMethod::Shell,
+            RecoveryMethod::tool("tenant_retrieve").unwrap(),
+        ] {
+            let store = InMemoryStore::new();
+            let kept = store.stash("原文\n").unwrap();
+            let orphan = store.stash("discarded candidate").unwrap();
+            let key = kept.key.clone();
+            let orphan_key = orphan.key.clone();
+            let mut ledger = StashLedger::default();
+            ledger.record(kept);
+            ledger.record(orphan);
+            let output = serde_json::json!({
+                "text": tokenless_ccr::recovery_instruction(&key, &method),
+                "unrelated_hash": orphan_key,
+            })
+            .to_string();
+            assert_eq!(
+                ledger.commit(&output, Some(&store), &method),
+                std::slice::from_ref(&key)
+            );
+            assert_eq!(ledger.live_writes(), 1);
+            assert_eq!(store.len(), 1);
+            assert_eq!(store.retrieve(&key).unwrap().as_deref(), Some("原文\n"));
+            assert!(store.retrieve(&orphan_key).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn another_tools_reference_does_not_keep_a_tentative_write() {
+        let store = InMemoryStore::new();
+        let write = store.stash("payload").unwrap();
+        let output = tokenless_ccr::recovery_instruction(
+            &write.key,
+            &RecoveryMethod::tool("other").unwrap(),
+        );
+        let mut ledger = StashLedger::default();
+        ledger.record(write);
+        assert!(
+            ledger
+                .commit(
+                    &output,
+                    Some(&store),
+                    &RecoveryMethod::tool("current").unwrap()
+                )
+                .is_empty()
+        );
+        assert_eq!(store.len(), 0);
     }
 }

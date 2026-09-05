@@ -50,6 +50,33 @@ fn cargo_test_log(passing: usize) -> String {
     output
 }
 
+#[test]
+fn static_tool_instructions_restore_exact_log_intervals() {
+    use tokenless_ccr::{RecoveryMethod, recovery_hashes, recovery_instruction};
+    let method = RecoveryMethod::tool("t".repeat(64)).unwrap();
+    let store = InMemoryStore::new();
+    let input = cargo_test_log(40);
+    let outcome = BuildLogCompressor.compress_with_recovery(&input, Some(&store), &method);
+    assert_eq!(outcome.metrics.omitted_blocks, 1);
+    let hashes = recovery_hashes(&outcome.output, &method);
+    assert_eq!(hashes.len(), 1);
+    assert!(!outcome.output.contains("<<tokenless:"));
+    let line = outcome
+        .output
+        .lines()
+        .find(|line| line.contains(&recovery_instruction(hashes[0], &method)))
+        .unwrap();
+    let restored = outcome.output.replace(
+        &format!("{line}\n"),
+        &store.retrieve(hashes[0]).unwrap().unwrap(),
+    );
+    assert_eq!(restored, input);
+    let none =
+        BuildLogCompressor.compress_with_recovery(&input, Some(&store), &RecoveryMethod::None);
+    assert_eq!(none.output, input);
+    assert!(none.stash_writes.is_empty());
+}
+
 fn pytest_quiet_log(files: usize) -> String {
     let mut output = String::new();
     for index in 0..files {
@@ -170,8 +197,16 @@ fn cargo_test_reduction_keeps_failure_and_summary() {
 
     assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
     assert_eq!(outcome.metrics.omitted_blocks, 2);
-    assert!(outcome.output.contains("case_015_with_a_descriptive_name ... FAILED"));
-    assert!(outcome.output.contains("assertion failed: parsed.is_valid()"));
+    assert!(
+        outcome
+            .output
+            .contains("case_015_with_a_descriptive_name ... FAILED")
+    );
+    assert!(
+        outcome
+            .output
+            .contains("assertion failed: parsed.is_valid()")
+    );
     assert!(outcome.output.contains("test result: FAILED"));
     let mut restored = outcome.output.clone();
     for write in &outcome.stash_writes {
@@ -198,7 +233,11 @@ fn pytest_quiet_progress_reduces_but_xpass_remains_visible() {
     assert_eq!(outcome.operations, [BuildLogOperation::ProgressReduction]);
     assert_eq!(outcome.metrics.omitted_blocks, 2);
     assert!(outcome.output.contains("....X... [ 53%]"));
-    assert!(outcome.output.contains("XPASS tests/test_module_015.py::test_changed"));
+    assert!(
+        outcome
+            .output
+            .contains("XPASS tests/test_module_015.py::test_changed")
+    );
     assert!(outcome.output.contains("239 passed, 1 xpassed in 2.34s"));
     let mut restored = outcome.output.clone();
     for write in &outcome.stash_writes {
@@ -332,7 +371,7 @@ fn trace_regions_are_never_cut_by_progress_reduction() {
 }
 
 fn replace_marker_line(output: &str, key: &str, payload: &str) -> String {
-    let marker = marker_for(key);
+    let marker = recovery_instruction(key, &RecoveryMethod::Shell);
     let marker_position = output.find(&marker).unwrap();
     assert_eq!(extract_hash(&output[marker_position..]), Some(key));
     let line_start = output[..marker_position]
@@ -341,7 +380,12 @@ fn replace_marker_line(output: &str, key: &str, payload: &str) -> String {
     let line_end = output[marker_position..]
         .find('\n')
         .map_or(output.len(), |position| marker_position + position + 1);
-    format!("{}{}{}", &output[..line_start], payload, &output[line_end..])
+    format!(
+        "{}{}{}",
+        &output[..line_start],
+        payload,
+        &output[line_end..]
+    )
 }
 
 #[test]

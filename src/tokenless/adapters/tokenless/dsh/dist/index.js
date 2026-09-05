@@ -371,7 +371,7 @@ function postToolRequest(
       output_optimization: 'none',
       capabilities: {
         replace_output: replaceOutput,
-        retrieval_available: retrievalAvailable,
+        recovery: { kind: retrievalAvailable ? "shell" : "none" },
         replace_with_text: replaceOutput,
       },
     },

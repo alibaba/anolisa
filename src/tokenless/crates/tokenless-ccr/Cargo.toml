@@ -16,6 +16,7 @@ sqlite = ["dep:rusqlite"]
 [dependencies]
 blake3.workspace = true
 thiserror.workspace = true
+tokenless-protocol = { path = "../tokenless-protocol" }
 
 [dependencies.rusqlite]
 workspace = true

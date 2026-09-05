@@ -99,6 +99,7 @@ from anolisa_tokenless import (
     OutputOptimization,
     PostToolCapabilities,
     PostToolRequest,
+    RecoveryMethod,
     ResultKind,
     RetrieveRequest,
     TokenlessConfig,
@@ -131,7 +132,7 @@ async def main() -> None:
                 visible_context="",
                 capabilities=BeforeModelCapabilities(
                     replace_tools=True,
-                    retrieval_available=True,
+                    recovery=RecoveryMethod.tool("tokenless_retrieve"),
                 ),
                 attribution=model_attribution,
             )
@@ -151,7 +152,7 @@ async def main() -> None:
                 output_optimization=OutputOptimization.NONE,
                 capabilities=PostToolCapabilities(
                     replace_output=True,
-                    retrieval_available=True,
+                    recovery=RecoveryMethod.tool("tokenless_retrieve"),
                     replace_with_text=True,
                 ),
                 attribution=Attribution("my-agent", "session-42", "tool-7"),
@@ -163,7 +164,7 @@ async def main() -> None:
             BeforeModelRequest(
                 tools=(),
                 visible_context=result.output,
-                capabilities=BeforeModelCapabilities(True, True),
+                capabilities=BeforeModelCapabilities(True, RecoveryMethod.tool("tokenless_retrieve")),
                 attribution=model_attribution,
             )
         )
@@ -194,16 +195,18 @@ request = await sdk.before_model(
     BeforeModelRequest(
         tools=tuple(model_tools),
         visible_context=visible_context,
-        capabilities=BeforeModelCapabilities(True, True),
+        capabilities=BeforeModelCapabilities(True, RecoveryMethod.tool("tokenless_retrieve")),
         attribution=attribution,
     )
 )
 ```
 
-`before_model()` 只在 `retrieval_available` 确认 Integration 具有验证当前 Marker 集合的
-Agent-facing 恢复路径时压缩 OpenAI Function Calling 工具；受信本地运维命令并不足够。Core
-从转换后的工具和可见 Context 扫描 `<<tokenless:HASH>>` Marker，返回精确授权集合，但不命名
-也不发布 Agent Tool。
+`before_model()` 仅在 `RecoveryMethod.tool(name)` 下允许 Schema 的可恢复截断，Integration
+必须已经注册该静态 Tool。`RecoveryMethod.shell()` 允许 PostTool 命令恢复，但不启用 Schema
+截断；`RecoveryMethod()` 表示不可恢复。Core 从转换后的工具和可见 Context 收集完整的 Shell
+指令、名称匹配所声明 Tool 的指令，以及历史 `<<tokenless:HASH>>` Marker，返回排序去重的小写
+Hash；孤立 Hash 不构成授权依据。Core 不发布 Agent Tool。Tool 名称限 1–64 个 ASCII 字母、
+数字、下划线或连字符。
 
 #### 工具调用前
 
@@ -238,7 +241,7 @@ result = await sdk.post_tool(
         status=ToolResultStatus.SUCCESS,
         content_origin=ContentOrigin.API_RESPONSE,
         output_optimization=call.output_optimization,
-        capabilities=PostToolCapabilities(True, True, True),
+        capabilities=PostToolCapabilities(True, RecoveryMethod.tool("tokenless_retrieve"), True),
         attribution=attribution,
     )
 )
@@ -274,7 +277,10 @@ config = TokenlessConfig(
 
 `data_dir` 必须是可写的绝对路径。每个租户或安全边界应使用不同目录；
 `TOKENLESS_DATA_DIR` 只是进程级回退。`retrieve_tool_name` 为 AgentScope 等 Framework Layer
-选择 Integration 自有的 Tool 名称，Core 不接收该值；`rtk_enabled` 控制 SDK 是否为 PreTool
+选择 Integration 自有的 Tool 名称，Integration 通过恢复能力将该名称声明给 Core。
+名称必须由 1–64 个 ASCII 字母、数字、下划线或连字符组成。这也收紧了已有
+`retrieve_tool_name` 配置的校验：含点号、冒号或空格的名称必须在升级前重命名。
+`rtk_enabled` 控制 SDK 是否为 PreTool
 解析 Wheel 内置 RTK。压缩阈值、内容检测、TOON 选择、诊断、授权和 Stash 策略都属于 Core
 行为，不是 Python 配置。
 
@@ -350,16 +356,16 @@ model_visible_text = toon_result.output
 
 #### 恢复 Stash 内容
 
-响应或 Schema 压缩可能会把省略内容写入 Stash，并在输出中留下 Marker：
+低层响应或 Schema 压缩默认使用 Shell 恢复指令：
 
 ```python
-marker = re.search(r"<<tokenless:([0-9a-f]{24})>>", response_result.output)
-if marker is not None:
-    recovered_content = runtime.retrieve(marker.group(0))
+hash_match = re.search(r"If needed, run in shell: tokenless retrieve ([0-9A-Fa-f]{24})(?![\w-])", response_result.output)
+if hash_match is not None:
+    recovered_content = runtime.retrieve(hash_match.group(1))
     print(recovered_content)
 ```
 
-`retrieve()` 既可以接收完整 Marker，也可以接收其中 24 个字符的 Hash。直接调用 Runtime
+`retrieve()` 可以接收 24 个字符的 Hash 或历史 Marker。直接调用 Runtime
 时，需要由调用方决定允许恢复哪些 Marker；`TokenlessSdk.retrieve()` 会把当前 BeforeModel
 Marker 集合交给 Core 授权。
 

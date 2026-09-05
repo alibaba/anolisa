@@ -8,9 +8,7 @@ import sys
 import unittest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PLUGIN_SRC = os.path.join(
-    _REPO_ROOT, "adapters", "tokenless", "hermes", "__init__.py"
-)
+_PLUGIN_SRC = os.path.join(_REPO_ROOT, "adapters", "tokenless", "hermes", "__init__.py")
 
 
 def _load_plugin(path: str, name: str):
@@ -39,9 +37,7 @@ class HermesLifecycleTest(unittest.TestCase):
         self.response = None
         self.original_resolve = plugin._resolve_binary
         self.original_run = plugin.run_compress
-        self.original_retrieve_available = (
-            plugin.tokenless_retrieve_command_available
-        )
+        self.original_retrieve_available = plugin.tokenless_retrieve_command_available
 
         def resolve(name, fallback):
             del fallback
@@ -58,9 +54,7 @@ class HermesLifecycleTest(unittest.TestCase):
     def tearDown(self):
         self.plugin._resolve_binary = self.original_resolve
         self.plugin.run_compress = self.original_run
-        self.plugin.tokenless_retrieve_command_available = (
-            self.original_retrieve_available
-        )
+        self.plugin.tokenless_retrieve_command_available = self.original_retrieve_available
 
     def test_pre_tool_blocks_with_core_rewrite(self):
         rewritten = (
@@ -145,9 +139,7 @@ class HermesLifecycleTest(unittest.TestCase):
 
         self.requests.clear()
         self.assertIsNone(
-            self.plugin.on_pre_tool_call(
-                tool_name="web_search", args={"query": "tokenless"}
-            )
+            self.plugin.on_pre_tool_call(tool_name="web_search", args={"query": "tokenless"})
         )
         self.assertEqual(self.requests, [])
 
@@ -179,7 +171,7 @@ class HermesLifecycleTest(unittest.TestCase):
             request["input"]["capabilities"],
             {
                 "replace_output": True,
-                "retrieval_available": True,
+                "recovery": {"kind": "shell"},
                 "replace_with_text": True,
             },
         )
@@ -196,7 +188,7 @@ class HermesLifecycleTest(unittest.TestCase):
         )
 
         request = self.requests[0][1]["input"]
-        self.assertFalse(request["capabilities"]["retrieval_available"])
+        self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
     def test_post_tool_compresses_terminal_output_field(self):
         self.response = {
@@ -217,9 +209,7 @@ class HermesLifecycleTest(unittest.TestCase):
             status="ok",
         )
 
-        self.assertEqual(
-            self.requests[0][1]["input"]["content"], envelope["output"]
-        )
+        self.assertEqual(self.requests[0][1]["input"]["content"], envelope["output"])
         self.assertEqual(
             json.loads(result),
             {
@@ -243,7 +233,7 @@ class HermesLifecycleTest(unittest.TestCase):
         self.assertIsNone(result)
         request = self.requests[0][1]["input"]
         self.assertEqual(request["result_kind"], "retrieve")
-        self.assertFalse(request["capabilities"]["retrieval_available"])
+        self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
     def test_post_tool_does_not_misclassify_retrieve_like_commands(self):
         self.response = {"output": "unchanged", "disposition": "passthrough"}
@@ -264,7 +254,7 @@ class HermesLifecycleTest(unittest.TestCase):
                 )
                 request = self.requests[0][1]["input"]
                 self.assertEqual(request["result_kind"], "tool")
-                self.assertTrue(request["capabilities"]["retrieval_available"])
+                self.assertEqual(request["capabilities"]["recovery"]["kind"], "shell")
 
         self.requests.clear()
         self.plugin.on_transform_tool_result(
@@ -275,7 +265,7 @@ class HermesLifecycleTest(unittest.TestCase):
         )
         request = self.requests[0][1]["input"]
         self.assertEqual(request["result_kind"], "tool")
-        self.assertTrue(request["capabilities"]["retrieval_available"])
+        self.assertEqual(request["capabilities"]["recovery"]["kind"], "shell")
 
     def test_failed_retrieve_command_remains_a_tool_error(self):
         self.response = {"output": "missing", "disposition": "passthrough"}
@@ -291,7 +281,7 @@ class HermesLifecycleTest(unittest.TestCase):
         request = self.requests[0][1]["input"]
         self.assertEqual(request["status"], "error")
         self.assertEqual(request["result_kind"], "tool")
-        self.assertFalse(request["capabilities"]["retrieval_available"])
+        self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
     def test_post_tool_maps_host_status_and_content_origin(self):
         self.response = {"output": "unchanged", "disposition": "passthrough"}
@@ -350,12 +340,8 @@ class HermesLifecycleTest(unittest.TestCase):
             result="rtk output",
             status="ok",
         )
-        self.assertEqual(
-            self.requests[-1][1]["input"]["output_optimization"], "rtk"
-        )
-        self.assertFalse(
-            self.requests[-1][1]["input"]["capabilities"]["retrieval_available"]
-        )
+        self.assertEqual(self.requests[-1][1]["input"]["output_optimization"], "rtk")
+        self.assertEqual(self.requests[-1][1]["input"]["capabilities"]["recovery"]["kind"], "none")
 
         self.plugin.on_transform_tool_result(
             tool_name="terminal",
@@ -363,9 +349,7 @@ class HermesLifecycleTest(unittest.TestCase):
             result="nested rtk output",
             status="ok",
         )
-        self.assertEqual(
-            self.requests[-1][1]["input"]["output_optimization"], "rtk"
-        )
+        self.assertEqual(self.requests[-1][1]["input"]["output_optimization"], "rtk")
 
         self.plugin.on_transform_tool_result(
             tool_name="terminal",
@@ -373,9 +357,7 @@ class HermesLifecycleTest(unittest.TestCase):
             result="manual rtk output",
             status="ok",
         )
-        self.assertEqual(
-            self.requests[-1][1]["input"]["output_optimization"], "none"
-        )
+        self.assertEqual(self.requests[-1][1]["input"]["output_optimization"], "none")
 
         self.plugin.on_transform_tool_result(
             tool_name="terminal",
@@ -388,9 +370,7 @@ class HermesLifecycleTest(unittest.TestCase):
             result="partial wrapper output",
             status="ok",
         )
-        self.assertEqual(
-            self.requests[-1][1]["input"]["output_optimization"], "none"
-        )
+        self.assertEqual(self.requests[-1][1]["input"]["output_optimization"], "none")
 
     def test_post_tool_appends_core_error_context(self):
         self.response = {

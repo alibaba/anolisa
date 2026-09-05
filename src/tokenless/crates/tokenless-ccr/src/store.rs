@@ -32,7 +32,7 @@ pub(crate) const MAX_GENERATION: u64 = i64::MAX as u64;
 /// A reversible stash of compressed-out payloads.
 ///
 /// `stash` stores a payload and returns its BLAKE3-derived key; the caller
-/// injects a `<<tokenless:KEY>>` marker into the compressed output so the LLM
+/// injects a recovery instruction into the compressed output so the LLM
 /// can request the original back via `retrieve`. Keeping `stash` responsible
 /// for key derivation (rather than accepting a caller-supplied hash) removes a
 /// injection footgun: callers cannot mismatch a marker from its payload.

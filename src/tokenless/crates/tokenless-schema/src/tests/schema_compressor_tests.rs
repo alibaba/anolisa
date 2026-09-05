@@ -1,6 +1,25 @@
 use serde_json::json;
 
 #[test]
+fn static_tool_hint_respects_description_budget_and_restores_unicode() {
+    use tokenless_ccr::{InMemoryStore, RecoveryMethod, StashStore, recovery_hashes};
+    let store = std::sync::Arc::new(InMemoryStore::new());
+    let method = RecoveryMethod::tool("t".repeat(64)).unwrap();
+    let description = "详细说明。".repeat(300);
+    let schema = json!({"function": {"name": "lookup", "description": description}});
+    let output = SchemaCompressor::new()
+        .with_stash_store(store.clone())
+        .with_recovery(method.clone())
+        .compress(&schema);
+    let text = output["function"]["description"].as_str().unwrap();
+    assert!(text.chars().count() <= 256);
+    assert!(!text.contains("<<tokenless:"));
+    let hashes = recovery_hashes(text, &method);
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(store.retrieve(hashes[0]).unwrap().unwrap(), description);
+}
+
+#[test]
 fn test_compress_long_description() {
     let compressor = SchemaCompressor::new();
     let schema = json!({
@@ -68,14 +87,7 @@ fn compress_openai_tools_request_container() {
     let result = compressor.compress(&schema);
     let function = &result["tools"][0]["function"];
 
-    assert!(
-        function["description"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count()
-            <= 256
-    );
+    assert!(function["description"].as_str().unwrap().chars().count() <= 256);
     assert!(
         function["parameters"]["properties"]["query"]["description"]
             .as_str()
@@ -114,14 +126,7 @@ fn compress_gemini_tools_request_container() {
     let result = compressor.compress(&schema);
     let function = &result["tools"][0]["functionDeclarations"][0];
 
-    assert!(
-        function["description"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count()
-            <= 256
-    );
+    assert!(function["description"].as_str().unwrap().chars().count() <= 256);
     assert!(
         function["parametersJsonSchema"]["properties"]["query"]["description"]
             .as_str()
@@ -156,14 +161,7 @@ fn compress_bare_declaration_in_tools_request_container() {
     let result = compressor.compress(&schema);
     let function = &result["tools"][0];
 
-    assert!(
-        function["description"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count()
-            <= 256
-    );
+    assert!(function["description"].as_str().unwrap().chars().count() <= 256);
     assert!(
         function["parameters"]["properties"]["query"]["description"]
             .as_str()
@@ -358,7 +356,9 @@ fn test_compress_gemini_parameters_json_schema() {
     assert!(func_desc.chars().count() <= 256);
 
     // Parameter description truncated to <= 160.
-    let param_desc = params["properties"]["path"]["description"].as_str().unwrap();
+    let param_desc = params["properties"]["path"]["description"]
+        .as_str()
+        .unwrap();
     assert!(param_desc.chars().count() <= 160);
 
     // Title and examples dropped (drop_titles / drop_examples default true).
@@ -407,23 +407,29 @@ fn test_parameters_json_schema_stash_roundtrip() {
 
     // Function-level description: marker present, fits limit, retrieves verbatim.
     let func_desc = decl["description"].as_str().unwrap();
-    assert!(func_desc.contains("tokenless:"), "function desc must carry marker");
+    assert!(
+        func_desc.contains("If needed, run in shell: tokenless retrieve "),
+        "function desc must carry marker"
+    );
     assert!(func_desc.chars().count() <= 100);
     let func_key = extract_hash(func_desc).expect("function desc marker has hash");
     let func_retrieved = store.retrieve(func_key).unwrap().unwrap();
     assert_eq!(func_retrieved, func_desc_orig);
-    assert!(!func_retrieved.contains("tokenless:"));
+    assert!(!func_retrieved.contains("If needed, run in shell: tokenless retrieve "));
 
     // Parameter-level description: marker present, fits limit, retrieves verbatim.
     let param_desc = decl["parametersJsonSchema"]["properties"]["path"]["description"]
         .as_str()
         .unwrap();
-    assert!(param_desc.contains("tokenless:"), "param desc must carry marker");
+    assert!(
+        param_desc.contains("If needed, run in shell: tokenless retrieve "),
+        "param desc must carry marker"
+    );
     assert!(param_desc.chars().count() <= 120);
     let param_key = extract_hash(param_desc).expect("param desc marker has hash");
     let param_retrieved = store.retrieve(param_key).unwrap().unwrap();
     assert_eq!(param_retrieved, param_desc_orig);
-    assert!(!param_retrieved.contains("tokenless:"));
+    assert!(!param_retrieved.contains("If needed, run in shell: tokenless retrieve "));
 }
 
 #[test]
@@ -820,7 +826,7 @@ fn test_description_truncation_with_stash() {
     let result = compressor.compress(&schema);
     let desc = result["function"]["description"].as_str().unwrap();
     assert!(desc.chars().count() <= 100);
-    assert!(desc.contains("tokenless:"));
+    assert!(desc.contains("If needed, run in shell: tokenless retrieve "));
     let hash = extract_hash(desc).unwrap();
     let retrieved = store.retrieve(hash).unwrap().unwrap();
     assert_eq!(retrieved, long_desc);
@@ -852,19 +858,25 @@ fn direct_schema_stash_single_retrieve() {
     let desc = result["description"].as_str().unwrap();
 
     // Output marker must be present and fit within the limit.
-    assert!(desc.contains("tokenless:"), "expected a stash marker in output");
+    assert!(
+        desc.contains("If needed, run in shell: tokenless retrieve "),
+        "expected a stash marker in output"
+    );
     assert!(desc.chars().count() <= 100);
 
     // Retrieve the single stash key — must yield the verbatim original with
     // no nested markers.
     let key = extract_hash(desc).expect("marker must carry a valid hash");
-    let retrieved = store.retrieve(key).unwrap().expect("stash entry must exist");
+    let retrieved = store
+        .retrieve(key)
+        .unwrap()
+        .expect("stash entry must exist");
     assert_eq!(
         retrieved, original_desc,
         "retrieved value must equal the original description verbatim"
     );
     assert!(
-        !retrieved.contains("tokenless:"),
+        !retrieved.contains("If needed, run in shell: tokenless retrieve "),
         "retrieved value must not contain nested stash markers"
     );
 }
@@ -898,7 +910,11 @@ fn test_compress_parameters_with_nested_schema() {
     let props = &result["function"]["parameters"]["properties"];
     assert!(props["config"].get("title").is_none());
     assert!(props["config"].get("examples").is_none());
-    assert!(props["config"]["properties"]["nested"].get("title").is_none());
+    assert!(
+        props["config"]["properties"]["nested"]
+            .get("title")
+            .is_none()
+    );
     let nested_desc = props["config"]["properties"]["nested"]["description"]
         .as_str()
         .unwrap();
@@ -1221,8 +1237,7 @@ fn test_gemini_wrapper_multi_declaration_order_and_titles() {
     assert_eq!(decls[0]["parameters"]["required"][0], "command");
     // The rewrite actually shrank the declaration set.
     assert!(
-        serde_json::to_string(&result).unwrap().len()
-            < serde_json::to_string(&tool).unwrap().len()
+        serde_json::to_string(&result).unwrap().len() < serde_json::to_string(&tool).unwrap().len()
     );
 }
 

@@ -6,7 +6,7 @@ collected 38 items
 
 tests/test_core.py::test_case_00 PASSED [  2%]
 tests/test_core.py::test_case_01 PASSED [  5%]
-... (omitted 34 passing test lines; run: tokenless retrieve '<<tokenless:41224042da659ef8033ac770>>')
+34 passing test lines omitted. If needed, run in shell: tokenless retrieve 41224042da659ef8033ac770
 tests/test_core.py::test_case_36 PASSED [ 97%]
 tests/test_core.py::test_case_37 PASSED [100%]
 

@@ -88,6 +88,7 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
     # (NOT $HOME — env-controllable).
     try:
         import pwd as _pwd
+
         real_home = _pwd.getpwuid(os.getuid()).pw_dir
     except (ImportError, KeyError):
         real_home = ""
@@ -106,11 +107,14 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
     xdg_data = os.environ.get("XDG_DATA_HOME", "")
     if xdg_data and os.path.isabs(xdg_data):
         candidates.append(
-            os.path.join(xdg_data, "anolisa", "adapters", "tokenless", "common", "hooks"))
+            os.path.join(xdg_data, "anolisa", "adapters", "tokenless", "common", "hooks")
+        )
     if real_home:
         candidates.append(
-            os.path.join(real_home, ".local", "share",
-                         "anolisa", "adapters", "tokenless", "common", "hooks"))
+            os.path.join(
+                real_home, ".local", "share", "anolisa", "adapters", "tokenless", "common", "hooks"
+            )
+        )
 
     rejections: list[str] = []
     for candidate in candidates:
@@ -135,18 +139,20 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
 _HOOK_UTILS_RESOLVED, _HOOK_UTILS_CANDIDATES = _resolve_hook_utils()
 
 from hook_utils import (
-    _TOKENLESS_FALLBACK,
-    _TOKENLESS_LOCAL_SHARE,
-    _TOKENLESS_LOCAL_LIB,
     _RTK_FALLBACK,
-    _RTK_LOCAL_SHARE,
     _RTK_LOCAL_LIB,
-    resolve_binary,
-    SKIP_TOOLS as _SKIP_TOOLS_SHARED,
-    SHELL_TOOLS as _SHELL_TOOLS_SHARED,
+    _RTK_LOCAL_SHARE,
+    _TOKENLESS_FALLBACK,
+    _TOKENLESS_LOCAL_LIB,
+    _TOKENLESS_LOCAL_SHARE,
+)
+from hook_utils import SHELL_TOOLS as _SHELL_TOOLS_SHARED
+from hook_utils import SKIP_TOOLS as _SKIP_TOOLS_SHARED
+from hook_utils import (
     build_post_tool_request,
     build_pre_tool_request,
     is_tokenless_retrieve_command,
+    resolve_binary,
     run_compress,
     tokenless_retrieve_command_available,
 )
@@ -161,7 +167,8 @@ AGENT_ID = "hermes-agent"
 _COMPRESS_TIMEOUT_SECONDS = 8
 
 _SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
-    "session_search", "list_sessions",
+    "session_search",
+    "list_sessions",
 }
 
 # Use shared SHELL_TOOLS directly - all tools (including "terminal") are now
@@ -288,9 +295,7 @@ def on_pre_tool_call(
         replace_arguments=False,
         block_and_suggest=True,
     )
-    result = run_compress(
-        tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "pre_tool"
-    )
+    result = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "pre_tool")
     if not isinstance(result, dict):
         return None
     rewritten_args = result.get("arguments")
@@ -346,9 +351,7 @@ def on_transform_tool_result(
             parsed_result = json.loads(result)
         except json.JSONDecodeError:
             parsed_result = None
-        if isinstance(parsed_result, dict) and isinstance(
-            parsed_result.get("output"), str
-        ):
+        if isinstance(parsed_result, dict) and isinstance(parsed_result.get("output"), str):
             shell_envelope = parsed_result
             content = parsed_result["output"]
 
@@ -360,20 +363,24 @@ def on_transform_tool_result(
         _content_origin(tool_name),
         output_optimization,
         result_kind="retrieve" if retrieve_result else "tool",
-        retrieval_available=(
-            protocol_status == "success"
-            and output_optimization == "none"
-            and not retrieve_result
-            and tokenless_retrieve_command_available()
-        ),
+        recovery={
+            "kind": (
+                "shell"
+                if (
+                    protocol_status == "success"
+                    and output_optimization == "none"
+                    and not retrieve_result
+                    and tokenless_retrieve_command_available()
+                )
+                else "none"
+            )
+        },
         session_id=str(session_id),
         tool_use_id=str(tool_call_id),
         replace_output=True,
         replace_with_text=True,
     )
-    response = run_compress(
-        tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "post_tool"
-    )
+    response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT_SECONDS, "post_tool")
     if not isinstance(response, dict):
         return None
     if response.get("disposition") == "applied":

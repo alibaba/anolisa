@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
@@ -21,6 +22,44 @@ class PreToolAction(StrEnum):
     PASSTHROUGH = "passthrough"
     REPLACE_ARGUMENTS = "replace_arguments"
     BLOCK_AND_SUGGEST = "block_and_suggest"
+
+
+@dataclass(frozen=True)
+class RecoveryMethod:
+    """Declared model recovery entry point, not a compression policy switch."""
+
+    kind: str = "none"
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"none", "shell", "tool"}:
+            raise ValueError(f"unknown recovery kind: {self.kind!r}")
+        if self.kind == "tool":
+            if not isinstance(self.name, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{1,64}", self.name
+            ):
+                raise ValueError(
+                    "recovery tool name must contain 1–64 ASCII letters, digits, '_' or '-'"
+                )
+        elif self.name is not None:
+            raise ValueError("only tool recovery accepts a name")
+
+    @classmethod
+    def shell(cls) -> RecoveryMethod:
+        """Uses the host's existing shell tool and trusted local CLI."""
+        return cls("shell")
+
+    @classmethod
+    def tool(cls, name: str) -> RecoveryMethod:
+        """Uses an already registered, reference-authorized tool."""
+        return cls("tool", name)
+
+    def as_dict(self) -> dict[str, str]:
+        """Serializes the strict operation capability."""
+        result = {"kind": self.kind}
+        if self.name is not None:
+            result["name"] = self.name
+        return result
 
 
 class OutputOptimization(StrEnum):
@@ -125,8 +164,10 @@ class TokenlessConfig:
     rtk_enabled: bool = True
 
     def __post_init__(self) -> None:
-        if not self.retrieve_tool_name:
-            raise ValueError("retrieve_tool_name must not be empty")
+        try:
+            RecoveryMethod.tool(self.retrieve_tool_name)
+        except ValueError as error:
+            raise ValueError(f"retrieve_tool_name: {error}") from error
         if self.data_dir is not None:
             data_dir = Path(self.data_dir).expanduser()
             if not data_dir.is_absolute():
@@ -138,12 +179,11 @@ class TokenlessConfig:
 class BeforeModelCapabilities:
     """Host capabilities relevant to BeforeModel.
 
-    ``retrieval_available`` requires Agent-facing recovery that verifies the
-    current Marker set; a trusted local operator command is not sufficient.
+    Only static-tool recovery permits recoverable schema truncation.
     """
 
     replace_tools: bool
-    retrieval_available: bool
+    recovery: RecoveryMethod
 
 
 @dataclass(frozen=True)
@@ -204,12 +244,11 @@ class PreToolResponse:
 class PostToolCapabilities:
     """Host capabilities relevant to PostTool.
 
-    ``retrieval_available`` requires Agent-facing recovery that verifies the
-    current Marker set; a trusted local operator command is not sufficient.
+    Recovery uses either the existing shell tool or a static authorized tool.
     """
 
     replace_output: bool
-    retrieval_available: bool
+    recovery: RecoveryMethod
     replace_with_text: bool
 
 
@@ -292,7 +331,7 @@ class TokenlessSdk:
                     "visible_context": request.visible_context,
                     "capabilities": {
                         "replace_tools": request.capabilities.replace_tools,
-                        "retrieval_available": request.capabilities.retrieval_available,
+                        "recovery": request.capabilities.recovery.as_dict(),
                     },
                 }
             ),
@@ -344,7 +383,7 @@ class TokenlessSdk:
                     "output_optimization": request.output_optimization,
                     "capabilities": {
                         "replace_output": request.capabilities.replace_output,
-                        "retrieval_available": request.capabilities.retrieval_available,
+                        "recovery": request.capabilities.recovery.as_dict(),
                         "replace_with_text": request.capabilities.replace_with_text,
                     },
                 }
@@ -356,9 +395,7 @@ class TokenlessSdk:
         return PostToolResponse(
             output=value["output"],
             disposition=Disposition(value["disposition"]),
-            content_type=(
-                ContentType(content_type) if content_type is not None else None
-            ),
+            content_type=(ContentType(content_type) if content_type is not None else None),
             applied_operations=tuple(
                 AppliedOperation(item) for item in value["applied_operations"]
             ),

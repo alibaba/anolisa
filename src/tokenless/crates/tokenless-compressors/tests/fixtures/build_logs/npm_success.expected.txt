@@ -5,7 +5,7 @@ npm http fetch GET 200 https://registry.npmjs.org/express 231ms
 ⠹
 npm http fetch GET 200 https://registry.npmjs.org/accepts 17ms
 npm http fetch GET 200 https://registry.npmjs.org/array-flatten 20ms
-... (omitted 36 package fetch lines; run: tokenless retrieve '<<tokenless:e039532f7ff8cdafb558e373>>')
+36 package fetch lines omitted. If needed, run in shell: tokenless retrieve e039532f7ff8cdafb558e373
 npm http fetch GET 200 https://registry.npmjs.org/safe-buffer 131ms
 npm http fetch GET 200 https://registry.npmjs.org/send 134ms
 

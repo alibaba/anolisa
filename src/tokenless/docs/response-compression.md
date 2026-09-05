@@ -359,10 +359,16 @@ curl -s https://api.example.com/data | tokenless compress-response
 含有 `status: "failed"` 或超过 `2σ` 的数值，它即使位于集合中间也会被保留。数组末尾会追加：
 
 ```text
-<... 32 of 64 records omitted, run: tokenless retrieve '<<tokenless:HASH>>'>
+32 of 64 records omitted. If needed, run in shell: tokenless retrieve HASH
 ```
 
 对应 Stash Payload 是缩减前 64 条记录组成的完整 Compact JSON 数组。
+
+`HASH` 代表输出中的完整 24 位 Hash。AgentScope 使用实际静态 Tool 名称，例如
+`If needed, call tool tokenless_retrieve with hash_or_marker=HASH`，不要求 Shell。
+Schema、字符串、深度、普通数组和 BuildLog 的省略提示使用同一恢复指令格式；只有省略说明
+不同。历史 `<<tokenless:HASH>>` 仍可读取，但不再生成。只有完整恢复指令或历史 Marker 能进入
+可见性授权集合，孤立 Hash 不能授权。恢复仅在需要时执行，额外开销应独立计入。
 
 ## 六、默认配置汇总
 

@@ -174,7 +174,9 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
                 "tokenless_retrieve",
                 [tool.get("function", {}).get("name") for tool in request.tools],
             )
-            self.assertTrue(request.capabilities.retrieval_available)
+            self.assertEqual(
+                request.capabilities.recovery, core.RecoveryMethod.tool("tokenless_retrieve")
+            )
             return core.BeforeModelResponse(
                 tools=request.tools,
                 visible_markers=next(marker_sets),
@@ -183,9 +185,7 @@ class AgentScopeV1Test(unittest.IsolatedAsyncioTestCase):
         self.integration.sdk.before_model = before_model
         _, first = await self.agent.model(
             [],
-            tools=[
-                registered.json_schema for registered in self.toolkit.tools.values()
-            ],
+            tools=[registered.json_schema for registered in self.toolkit.tools.values()],
         )
         self.assertEqual(self.toolkit.visible_markers, frozenset())
         _, second = await self.agent.model([], tools=first["tools"])

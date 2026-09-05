@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use tokenless_ccr::{StashStore, StashWrite, truncation_suffix, truncation_suffix_char_len};
+use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, truncation_suffix_for};
 
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
@@ -19,6 +19,7 @@ fn char_index(s: &str, n: usize) -> usize {
 /// by truncating descriptions, removing titles/examples, and applying
 /// smart compression to reduce token usage.
 pub struct SchemaCompressor {
+    recovery: RecoveryMethod,
     func_desc_max_len: usize,
     param_desc_max_len: usize,
     drop_examples: bool,
@@ -27,7 +28,7 @@ pub struct SchemaCompressor {
     max_depth: usize,
     /// Optional reversible stash. When present, truncated descriptions are
     /// stashed (verbatim original, including markdown) and a
-    /// `<<tokenless:KEY>>` marker is appended so the LLM can retrieve the
+    /// recovery instruction is appended so the LLM can retrieve the
     /// full original. When `None`, truncation is lossy — the pre-stash
     /// behavior.
     stash_store: Option<Arc<dyn StashStore>>,
@@ -50,6 +51,7 @@ pub struct SchemaCompressor {
 impl Default for SchemaCompressor {
     fn default() -> Self {
         Self {
+            recovery: RecoveryMethod::Shell,
             func_desc_max_len: 256,
             param_desc_max_len: 160,
             drop_examples: true,
@@ -79,11 +81,17 @@ impl SchemaCompressor {
     }
 
     /// Attach a reversible stash store. When set, truncated descriptions
-    /// carry a `<<tokenless:KEY>>` marker and the verbatim original is
+    /// carry an entry-point-specific recovery instruction and the verbatim original is
     /// stashed for retrieval; when unset (the default), truncation stays
     /// lossy.
     pub fn with_stash_store(mut self, store: Arc<dyn StashStore>) -> Self {
         self.stash_store = Some(store);
+        self
+    }
+
+    /// Selects the already-registered recovery entry point before building candidates.
+    pub fn with_recovery(mut self, recovery: RecoveryMethod) -> Self {
+        self.recovery = recovery;
         self
     }
 
@@ -426,7 +434,7 @@ impl SchemaCompressor {
 
     /// Intelligently truncate a description string. When a stash store is
     /// attached, the verbatim original `desc` (including markdown, before
-    /// stripping) is stashed and a `<<tokenless:KEY>>` marker is appended so
+    /// stripping) is stashed and a recovery instruction is appended so
     /// the LLM can retrieve the full original; the stash suffix length is
     /// reserved from `max_len` so the result still honors the limit. On stash
     /// failure the suffix is dropped (lossy truncation, the pre-stash
@@ -447,9 +455,13 @@ impl SchemaCompressor {
         // the final string still fits `max_len`. Fit is checked before any
         // stash call so a too-small `max_len` cannot orphan a stash entry
         // whose marker never reaches the LLM.
-        let stash_active = self.stash_store.is_some() && max_len > truncation_suffix_char_len();
+        let suffix_len = truncation_suffix_for("000000000000000000000000", &self.recovery)
+            .chars()
+            .count();
+        let stash_active =
+            self.stash_store.is_some() && self.recovery.is_available() && max_len > suffix_len;
         let effective_max = if stash_active {
-            max_len - truncation_suffix_char_len()
+            max_len - suffix_len
         } else {
             max_len
         };
@@ -510,7 +522,11 @@ impl SchemaCompressor {
         };
 
         match stash_key {
-            Some(key) => format!("{}{}", truncated, truncation_suffix(&key)),
+            Some(key) => format!(
+                "{}{}",
+                truncated,
+                truncation_suffix_for(&key, &self.recovery)
+            ),
             None => truncated,
         }
     }

@@ -1,7 +1,7 @@
 $ npm install
 npm http fetch GET 200 https://registry.npmjs.org/accepts 23ms
 npm http fetch GET 200 https://registry.npmjs.org/array-flatten 25ms
-... (omitted 26 package fetch lines; run: tokenless retrieve '<<tokenless:1c6416be6bbcd379cdd570aa>>')
+26 package fetch lines omitted. If needed, run in shell: tokenless retrieve 1c6416be6bbcd379cdd570aa
 npm http fetch GET 200 https://registry.npmjs.org/mime-types 79ms
 npm http fetch GET 200 https://registry.npmjs.org/ms 81ms
 npm http fetch GET 404 https://registry.npmjs.org/left-padd 89ms

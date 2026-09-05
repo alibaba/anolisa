@@ -21,7 +21,7 @@
 use crate::l2::{Category, L2Error};
 use serde_json::{Value, json};
 use std::time::Instant;
-use tokenless_compressors::{JsonCompressionContext, JsonCompressor};
+use tokenless_compressors::{JsonCompressionContext, JsonCompressor, RecoveryMethod};
 
 /// Latency-basis label stamped on every tokenless-side result row.
 pub const LATENCY_BASIS: &str = "in-process";
@@ -57,7 +57,11 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
 
     let input = serde_json::to_string(&value)?;
     let compressor = JsonCompressor::default();
+    // Matches L1's default CLI entry point; with no Stash, this does not
+    // affect output or compression metrics.
+    let recovery = RecoveryMethod::Shell;
     let context = JsonCompressionContext {
+        recovery: &recovery,
         stash: None,
         allow_toon: false,
         preserve_top_level_shape: false,

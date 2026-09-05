@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde_json::{Map, Value};
 use tokenless_ccr::{
-    StashStore, StashWrite, marker_for, truncation_suffix, truncation_suffix_char_len,
+    RecoveryMethod, StashStore, StashWrite, recovery_instruction, truncation_suffix_for,
 };
 use tokenless_protocol::estimate_tokens;
 
@@ -56,6 +56,8 @@ impl Default for JsonCompressionConfig {
 
 /// Per-call facts that affect valid JSON representations.
 pub struct JsonCompressionContext<'a> {
+    /// Recovery instruction included before measuring any candidate.
+    pub recovery: &'a RecoveryMethod,
     /// Store used to back truncation markers, when retrieval is reachable.
     pub stash: Option<&'a dyn StashStore>,
     /// Whether the host accepts a non-JSON text representation such as TOON.
@@ -169,7 +171,7 @@ impl JsonCompressor {
         context: &JsonCompressionContext<'_>,
     ) -> Result<JsonOutcome, JsonError> {
         let (normalized, original) = parse_input(input)?;
-        let mut full_session = Session::new(&self.config, None, false);
+        let mut full_session = Session::new(&self.config, None, false, context.recovery);
         let full = build_candidate(
             &normalized,
             &original,
@@ -181,7 +183,7 @@ impl JsonCompressor {
             return Ok(full.into_outcome(Vec::new(), 0));
         }
 
-        let mut bounded_session = Session::new(&self.config, context.stash, true);
+        let mut bounded_session = Session::new(&self.config, context.stash, true, context.recovery);
         let bounded = build_candidate(
             &normalized,
             &original,
@@ -492,6 +494,7 @@ fn select_numeric_outliers(values: &[Value], selected: &mut BTreeSet<usize>) {
 }
 
 struct Session<'a> {
+    recovery: &'a RecoveryMethod,
     config: &'a JsonCompressionConfig,
     stash: Option<&'a dyn StashStore>,
     bounds_enabled: bool,
@@ -510,10 +513,12 @@ impl<'a> Session<'a> {
         config: &'a JsonCompressionConfig,
         stash: Option<&'a dyn StashStore>,
         bounds_enabled: bool,
+        recovery: &'a RecoveryMethod,
     ) -> Self {
         Self {
+            recovery,
             config,
-            stash,
+            stash: stash.filter(|_| recovery.is_available()),
             bounds_enabled,
             drop_fields: HashSet::from([
                 "debug",
@@ -559,8 +564,8 @@ impl<'a> Session<'a> {
                 && let Some(key) = self.stash_payload(&serialized)
             {
                 return Value::String(format!(
-                    "<{type_name} truncated at depth {depth}, run: tokenless retrieve '{}'>",
-                    marker_for(&key)
+                    "{type_name} truncated at depth {depth}. {}",
+                    recovery_instruction(&key, self.recovery)
                 ));
             }
             self.mark_unrecoverable();
@@ -581,14 +586,17 @@ impl<'a> Session<'a> {
         }
         self.truncations += 1;
 
-        let reversible_fits = self.config.add_truncation_marker
-            && self.config.truncate_strings_at > truncation_suffix_char_len();
+        let suffix_len = truncation_suffix_for("000000000000000000000000", self.recovery)
+            .chars()
+            .count();
+        let reversible_fits =
+            self.config.add_truncation_marker && self.config.truncate_strings_at > suffix_len;
         if reversible_fits && let Some(key) = self.stash_payload(value) {
-            let keep = self.config.truncate_strings_at - truncation_suffix_char_len();
+            let keep = self.config.truncate_strings_at - suffix_len;
             return Value::String(format!(
                 "{}{}",
                 prefix_chars(value, keep),
-                truncation_suffix(&key)
+                truncation_suffix_for(&key, self.recovery)
             ));
         }
         self.mark_unrecoverable();
@@ -643,9 +651,9 @@ impl<'a> Session<'a> {
             let dropped = &values[head_end..tail_start];
             let marker = if let Some(key) = self.stash_dropped(dropped) {
                 format!(
-                    "<... {} items truncated, run: tokenless retrieve '{}'>",
+                    "{} items omitted. {}",
                     dropped.len(),
-                    marker_for(&key)
+                    recovery_instruction(&key, self.recovery)
                 )
             } else {
                 self.mark_unrecoverable();
@@ -689,9 +697,9 @@ impl<'a> Session<'a> {
         // array is stashed either way.
         let omitted = values.len() - output.len();
         output.push(Value::String(format!(
-            "<... {omitted} of {} records omitted, run: tokenless retrieve '{}'>",
+            "{omitted} of {} records omitted. {}",
             values.len(),
-            marker_for(&key)
+            recovery_instruction(&key, self.recovery)
         )));
         self.record_reductions += 1;
         self.records_omitted += omitted;

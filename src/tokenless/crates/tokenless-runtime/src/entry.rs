@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokenless_ccr::{MARKER_PREFIX, MARKER_SUFFIX, StashStore, extract_hash, is_valid_hash};
+use tokenless_ccr::{RecoveryMethod, StashStore, extract_hash, is_valid_hash, recovery_hashes};
 use tokenless_compressors::JsonCompressionConfig;
 use tokenless_protocol::{
     AppliedOperation, Attribution, BeforeModelRequest, BeforeModelResponse, Disposition, Operation,
@@ -172,13 +172,14 @@ pub(crate) fn before_model_with_store(
     let attached_store = if request.capabilities.replace_tools
         && options.compression_enabled
         && options.stash_enabled
-        && request.capabilities.retrieval_available
+        && matches!(request.capabilities.recovery, RecoveryMethod::Tool { .. })
     {
         stash_store
     } else {
         None
     };
-    let mut compressor = SchemaCompressor::new();
+    let mut compressor =
+        SchemaCompressor::new().with_recovery(request.capabilities.recovery.clone());
     if let Some(store) = attached_store {
         compressor = compressor.with_stash_store(Arc::clone(store));
     }
@@ -219,8 +220,16 @@ pub(crate) fn before_model_with_store(
     let tools = serde_json::from_str::<Vec<Value>>(&compression.output)?;
 
     let mut markers = BTreeSet::new();
-    collect_markers(&request.visible_context, &mut markers);
-    collect_markers(&Value::Array(tools.clone()), &mut markers);
+    collect_markers(
+        &request.visible_context,
+        &request.capabilities.recovery,
+        &mut markers,
+    );
+    collect_markers(
+        &Value::Array(tools.clone()),
+        &request.capabilities.recovery,
+        &mut markers,
+    );
     let visible_markers = markers.into_iter().collect::<Vec<_>>();
     let measured = matches!(
         compression.disposition,
@@ -265,22 +274,29 @@ pub(crate) fn before_model_with_store(
     })
 }
 
-fn collect_markers(value: &Value, markers: &mut BTreeSet<String>) {
-    let Ok(text) = serde_json::to_string(value) else {
-        return;
-    };
-    let mut rest = text.as_str();
-    while let Some(start) = rest.find(MARKER_PREFIX) {
-        let after_prefix = &rest[start + MARKER_PREFIX.len()..];
-        if let Some(hash) = after_prefix.get(..24)
-            && is_valid_hash(hash)
-            && after_prefix[24..].starts_with(MARKER_SUFFIX)
-        {
-            markers.insert(hash.to_ascii_lowercase());
-            rest = &after_prefix[24 + MARKER_SUFFIX.len()..];
-        } else {
-            rest = after_prefix;
+fn collect_markers(value: &Value, recovery: &RecoveryMethod, markers: &mut BTreeSet<String>) {
+    match value {
+        Value::String(text) => markers.extend(
+            recovery_hashes(text, recovery)
+                .into_iter()
+                .map(str::to_ascii_lowercase),
+        ),
+        Value::Array(items) => {
+            for item in items {
+                collect_markers(item, recovery, markers);
+            }
         }
+        Value::Object(fields) => {
+            for (name, item) in fields {
+                markers.extend(
+                    recovery_hashes(name, recovery)
+                        .into_iter()
+                        .map(str::to_ascii_lowercase),
+                );
+                collect_markers(item, recovery, markers);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -742,7 +758,8 @@ pub(crate) fn post_tool_with_store(
     };
     let attached_store = request
         .capabilities
-        .retrieval_available
+        .recovery
+        .is_available()
         .then_some(stash_store)
         .flatten();
 
@@ -1067,6 +1084,85 @@ mod tests {
         .unwrap();
         assert_eq!(restored.payload.as_bytes(), b"byte-exact\n");
         assert_eq!(concrete.reads.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn new_visible_references_authorize_only_the_current_static_tool() {
+        let concrete = Arc::new(ReadCountingStore::default());
+        let write = concrete.stash("恢复\n").unwrap();
+        let store: Arc<dyn StashStore> = concrete.clone();
+        let recovery = RecoveryMethod::tool("tenant_retrieve").unwrap();
+        for (context, authorized) in [
+            (write.key.clone(), false),
+            (
+                tokenless_ccr::recovery_instruction(
+                    &write.key,
+                    &RecoveryMethod::tool("other").unwrap(),
+                ),
+                false,
+            ),
+            (
+                tokenless_ccr::recovery_instruction(&write.key, &recovery),
+                true,
+            ),
+            (
+                tokenless_ccr::recovery_instruction(&write.key, &RecoveryMethod::Shell),
+                true,
+            ),
+            (tokenless_ccr::marker_for(&write.key), true),
+        ] {
+            let before = before_model_with_store(
+                &BeforeModelRequest {
+                    tools: vec![],
+                    visible_context: json!({"messages": [context]}),
+                    capabilities: BeforeModelCapabilities {
+                        replace_tools: false,
+                        recovery: recovery.clone(),
+                    },
+                },
+                &options(),
+                Some(&store),
+            )
+            .unwrap();
+            let reads = concrete.reads.load(Ordering::Relaxed);
+            let restored = retrieve_authorized_with_store(
+                &RetrieveRequest {
+                    hash_or_marker: write.key.clone(),
+                    visible_markers: before.response.visible_markers,
+                },
+                Some(&store),
+                None,
+                &Attribution::new("test"),
+                "test",
+            );
+            if authorized {
+                assert_eq!(restored.unwrap().payload, "恢复\n");
+                assert_eq!(concrete.reads.load(Ordering::Relaxed), reads + 1);
+            } else {
+                assert!(matches!(
+                    restored,
+                    Err(RuntimeError::RetrieveUnauthorized { .. })
+                ));
+                assert_eq!(concrete.reads.load(Ordering::Relaxed), reads);
+            }
+        }
+    }
+
+    #[test]
+    fn shell_recovery_does_not_enable_schema_stash() {
+        let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
+        let request = BeforeModelRequest {
+            tools: vec![json!({"name":"read", "description":"long description ".repeat(200)})],
+            visible_context: json!([]),
+            capabilities: BeforeModelCapabilities {
+                replace_tools: true,
+                recovery: RecoveryMethod::Shell,
+            },
+        };
+        let result = before_model_with_store(&request, &options(), Some(&store)).unwrap();
+        assert_eq!(result.response.tools, request.tools);
+        assert!(result.response.visible_markers.is_empty());
+        assert_eq!(store.len(), 0);
     }
 
     #[test]
@@ -1565,7 +1661,7 @@ mod tests {
             visible_context: json!({"messages": []}),
             capabilities: BeforeModelCapabilities {
                 replace_tools: true,
-                retrieval_available: false,
+                recovery: tokenless_protocol::RecoveryMethod::None,
             },
         };
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
@@ -1598,7 +1694,7 @@ mod tests {
             }),
             capabilities: BeforeModelCapabilities {
                 replace_tools: true,
-                retrieval_available: true,
+                recovery: RecoveryMethod::tool("tokenless_retrieve").unwrap(),
             },
         };
         let outcome = before_model_with_store(&request, &options(), Some(&store)).unwrap();
@@ -1636,14 +1732,14 @@ mod tests {
             visible_context: json!({}),
             capabilities: BeforeModelCapabilities {
                 replace_tools: false,
-                retrieval_available: false,
+                recovery: tokenless_protocol::RecoveryMethod::None,
             },
         };
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.tools, vec![tool]);
         assert_eq!(outcome.stats.disposition, Disposition::Passthrough);
 
-        request.capabilities.retrieval_available = true;
+        request.capabilities.recovery = RecoveryMethod::tool("tokenless_retrieve").unwrap();
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.tools, request.tools);
     }
@@ -1663,7 +1759,7 @@ mod tests {
                 output_optimization: optimization,
                 capabilities: PostToolCapabilities {
                     replace_output: true,
-                    retrieval_available: false,
+                    recovery: tokenless_protocol::RecoveryMethod::None,
                     replace_with_text: true,
                 },
             };
@@ -1719,7 +1815,7 @@ mod tests {
             content: failing_build_log(),
             capabilities: PostToolCapabilities {
                 replace_output: true,
-                retrieval_available: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
                 replace_with_text: true,
             },
             ..post_tool_request("unused")
@@ -1783,7 +1879,7 @@ mod tests {
         let failing: Arc<dyn StashStore> = Arc::new(FailingStore);
         let failing_request = PostToolRequest {
             capabilities: PostToolCapabilities {
-                retrieval_available: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
                 ..lossy.capabilities
             },
             ..lossy.clone()
@@ -1796,7 +1892,7 @@ mod tests {
         let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
         let recoverable = PostToolRequest {
             capabilities: PostToolCapabilities {
-                retrieval_available: true,
+                recovery: tokenless_protocol::RecoveryMethod::Shell,
                 ..lossy.capabilities
             },
             ..lossy
@@ -1817,7 +1913,7 @@ mod tests {
             output_optimization: OutputOptimization::None,
             capabilities: PostToolCapabilities {
                 replace_output: true,
-                retrieval_available: false,
+                recovery: tokenless_protocol::RecoveryMethod::None,
                 replace_with_text: true,
             },
         }

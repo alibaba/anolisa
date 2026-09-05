@@ -10,7 +10,7 @@ mod trace;
 
 use std::collections::{HashMap, HashSet};
 
-use tokenless_ccr::{StashStore, StashWrite, compute_key, marker_for};
+use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, compute_key, recovery_instruction};
 use tokenless_protocol::estimate_tokens;
 
 use crate::terminal_cleanup::clean_terminal;
@@ -85,6 +85,17 @@ impl BuildLogCompressor {
     /// Builds the smallest valid build-log candidate under the recovery policy.
     #[must_use]
     pub fn compress(&self, input: &str, stash: Option<&dyn StashStore>) -> BuildLogOutcome {
+        self.compress_with_recovery(input, stash, &RecoveryMethod::Shell)
+    }
+
+    /// Measures and renders omissions using the caller's actual recovery entry point.
+    #[must_use]
+    pub fn compress_with_recovery(
+        &self,
+        input: &str,
+        stash: Option<&dyn StashStore>,
+        recovery: &RecoveryMethod,
+    ) -> BuildLogOutcome {
         let cleaned = clean_terminal(input);
         let cleanup_changed = cleaned != input;
         let cleanup_operations = cleanup_changed
@@ -92,7 +103,7 @@ impl BuildLogCompressor {
             .into_iter()
             .collect::<Vec<_>>();
 
-        let Some(store) = stash else {
+        let Some(store) = stash.filter(|_| recovery.is_available()) else {
             return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
         };
         let Some(format) = detect_format(&cleaned) else {
@@ -115,7 +126,7 @@ impl BuildLogCompressor {
             }
         }
 
-        let Some(plans) = omission_plans(&lines, &roles) else {
+        let Some(plans) = omission_plans(&lines, &roles, recovery) else {
             return lossless_outcome(cleaned, cleanup_operations, Vec::new(), 0);
         };
         if plans.is_empty() {
@@ -141,7 +152,7 @@ impl BuildLogCompressor {
             return lossless_outcome(cleaned, cleanup_operations, writes, stash_errors);
         }
 
-        let reduced = render_reduced(&lines, &plans, &keys);
+        let reduced = render_reduced(&lines, &plans, &keys, recovery);
         if !saves_both(&cleaned, &reduced) {
             return lossless_outcome(cleaned, cleanup_operations, writes, 0);
         }
@@ -193,7 +204,11 @@ fn saves_both(original: &str, candidate: &str) -> bool {
         && estimate_tokens(candidate) < estimate_tokens(original)
 }
 
-fn omission_plans(lines: &[&str], roles: &[LineRole]) -> Option<Vec<OmissionPlan>> {
+fn omission_plans(
+    lines: &[&str],
+    roles: &[LineRole],
+    recovery: &RecoveryMethod,
+) -> Option<Vec<OmissionPlan>> {
     let mut plans = Vec::new();
     let mut index = 0;
     while index < roles.len() {
@@ -213,6 +228,7 @@ fn omission_plans(lines: &[&str], roles: &[LineRole]) -> Option<Vec<OmissionPlan
                 family,
                 omitted_end - start,
                 &compute_key(payload.as_bytes()),
+                recovery,
             );
             if saves_both(&payload, &marker) {
                 plans.push(OmissionPlan {
@@ -231,23 +247,38 @@ fn omission_plans(lines: &[&str], roles: &[LineRole]) -> Option<Vec<OmissionPlan
     Some(plans)
 }
 
-fn render_reduced(lines: &[&str], plans: &[OmissionPlan], keys: &[String]) -> String {
+fn render_reduced(
+    lines: &[&str],
+    plans: &[OmissionPlan],
+    keys: &[String],
+    recovery: &RecoveryMethod,
+) -> String {
     let mut output = String::new();
     let mut cursor = 0;
     for (plan, key) in plans.iter().zip(keys) {
         output.push_str(&lines[cursor..plan.start].concat());
-        output.push_str(&render_marker(plan.family, plan.end - plan.start, key));
+        output.push_str(&render_marker(
+            plan.family,
+            plan.end - plan.start,
+            key,
+            recovery,
+        ));
         cursor = plan.end;
     }
     output.push_str(&lines[cursor..].concat());
     output
 }
 
-fn render_marker(family: RoutineFamily, omitted_lines: usize, key: &str) -> String {
+fn render_marker(
+    family: RoutineFamily,
+    omitted_lines: usize,
+    key: &str,
+    recovery: &RecoveryMethod,
+) -> String {
     format!(
-        "... (omitted {omitted_lines} {} lines; run: tokenless retrieve '{}')\n",
+        "{omitted_lines} {} lines omitted. {}\n",
         family.label(),
-        marker_for(key),
+        recovery_instruction(key, recovery),
     )
 }
 

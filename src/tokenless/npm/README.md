@@ -79,7 +79,7 @@ jq -n --rawfile content build.log \
     input: {result_kind: "tool", tool_name: "Bash", content: $content,
       status: "success", content_origin: "command_output",
       output_optimization: "none",
-      capabilities: {replace_output: true, retrieval_available: false,
+      capabilities: {replace_output: true, recovery: {kind: "none"},
                      replace_with_text: true}}}' \
   | tokenless compress
 

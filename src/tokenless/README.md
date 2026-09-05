@@ -34,7 +34,7 @@ retrieval, and attribution.
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
 | Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
-| Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents follow the Marker command `tokenless retrieve '<<tokenless:KEY>>'` when full data is needed |
+| Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
@@ -101,7 +101,7 @@ on the share and shape of that content in the session.
 
 Example: dashboard shows 60% compression rate, but if tool responses account for 20% of total consumption, the actual savings rate is 60% × 20% = **12%**. This is why savings feel "lighter than a feather" in experiments consuming 15 million tokens — tokenless only optimizes the ~3 million tokens of tool responses.
 
-> Stash makes compression **end-to-end lossless**: you can tighten truncation thresholds for higher inline savings and recover the original via the `<<tokenless:KEY>>` marker when needed, with no correctness impact. Use `TOKENLESS_COMPRESSION_ENABLED=0/1` dual runs to compare real savings.
+> Recoverable omissions include an optional action: `If needed, run in shell: tokenless retrieve HASH`. AgentScope instead sees `If needed, call tool tokenless_retrieve with hash_or_marker=HASH` (using its configured static Tool name). Recovery returns the saved payload while it remains in Stash; it costs additional tokens and is not required for every omission. Historical `<<tokenless:HASH>>` markers remain readable but are no longer generated. Use `TOKENLESS_COMPRESSION_ENABLED=0/1` dual runs to compare real savings.
 > See [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md) for per-strategy trigger conditions.
 
 ## Architecture
@@ -348,9 +348,8 @@ hash or any text containing a `<<tokenless:HASH>>` marker:
 # Bare hash
 tokenless retrieve c30ccf5ed1125e0ed871ba8e
 
-# Or paste the whole truncation line — the hash is extracted automatically.
-# (Use the FULL 24-hex hash from your output; the value below is shorthand.)
-tokenless retrieve "<... 160 items truncated, run: tokenless retrieve '<<tokenless:c30ccf5ed1125e0ed871ba8e>>'>"
+# Historical markers remain accepted
+tokenless retrieve '<<tokenless:c30ccf5ed1125e0ed871ba8e>>'
 ```
 
 ### compress-toon / decompress-toon

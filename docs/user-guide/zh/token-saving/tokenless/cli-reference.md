@@ -87,7 +87,7 @@ jq -n \
       output_optimization: "none",
       capabilities: {
         replace_output: true,
-        retrieval_available: false,
+        recovery: {kind: "none"},
         replace_with_text: true
       }
     }
@@ -118,6 +118,12 @@ jq -n \
 `no_savings`、`recoverability_unavailable`、`timeout` 和 `tool_error` 都携带原始内容。
 JSON 的 `content_type` 现在是 `json`；`applied_operations` 报告实际发生的变换，而不是配置的
 Compressor 列表。
+
+`before_model` 和 `post_tool` 必须提供 `capabilities.recovery`：`{"kind":"none"}`、
+`{"kind":"shell"}` 或 `{"kind":"tool","name":"tokenless_retrieve"}`。Tool 名称限 1–64 个
+ASCII 字母、数字、下划线或连字符。未知字段、缺失 recovery 和旧的 `retrieval_available`
+布尔字段均会被拒绝，Core 与调用方必须一起更新；协议版本保持 2。只有静态 Tool 能启用
+BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增或改变 Agent 工具。
 
 退出码属于 Transport 契约：
 
@@ -270,10 +276,10 @@ echo '{"name":"test","value":42}' \
 
 ## `retrieve`
 
-压缩输出中出现以下标记时，说明被截断的内容已写入 Stash：
+压缩输出中出现以下按需操作提示时，说明被省略的内容已写入 Stash：
 
 ```text
-<<tokenless:0123456789abcdef01234567>>
+12 passing-test lines omitted. If needed, run in shell: tokenless retrieve 0123456789abcdef01234567
 ```
 
 使用裸 Hash 取回：
@@ -282,11 +288,16 @@ echo '{"name":"test","value":42}' \
 tokenless retrieve 0123456789abcdef01234567
 ```
 
-也可以粘贴包含标记的整行文本：
+AgentScope 使用实际配置的静态 Tool，而不是 Shell 命令：
+
+```text
+12 passing-test lines omitted. If needed, call tool tokenless_retrieve with hash_or_marker=0123456789abcdef01234567
+```
+
+历史 Marker 仍可读取，但不再生成：
 
 ```bash
-tokenless retrieve \
-  '<... 12 items truncated, retrieve with <<tokenless:0123456789abcdef01234567>>'
+tokenless retrieve '<<tokenless:0123456789abcdef01234567>>'
 ```
 
 覆盖数据库：

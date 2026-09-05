@@ -39,7 +39,7 @@ use serde_json::{Map, Value, json};
 use std::sync::OnceLock;
 use tokenless_ccr::StashStore;
 use tokenless_compressors::{
-    JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonOutcome,
+    JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonOutcome, RecoveryMethod,
 };
 
 /// Runs the default JSON compressor and parses its JSON representation.
@@ -48,6 +48,11 @@ pub fn compress_json(value: &Value) -> Value {
 }
 
 /// Runs the JSON compressor with explicit limits and an optional Stash store.
+///
+/// [`RecoveryMethod::Shell`] matches the default CLI recovery entry point so
+/// Stash-backed tests exercise its instruction format and truncation budget.
+/// Without a Stash (including the current latency benches), the recovery method
+/// does not affect output or compression metrics.
 pub fn compress_json_with(
     value: &Value,
     config: JsonCompressionConfig,
@@ -58,6 +63,7 @@ pub fn compress_json_with(
         .compress(
             &input,
             &JsonCompressionContext {
+                recovery: &RecoveryMethod::Shell,
                 stash,
                 allow_toon: false,
                 preserve_top_level_shape: false,

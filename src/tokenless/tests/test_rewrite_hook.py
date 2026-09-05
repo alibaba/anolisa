@@ -21,9 +21,7 @@ import corpus
 
 RESPONSE_HOOK = REPO_ROOT / "adapters/tokenless/common/hooks/compress_response_hook.py"
 MOCK_TOKENLESS = CONTRACT_DIR / "mock_tokenless.py"
-QWEN_MANIFEST = (
-    REPO_ROOT / "adapters/tokenless/qwencode/qwen-extension.json.in"
-)
+QWEN_MANIFEST = REPO_ROOT / "adapters/tokenless/qwencode/qwen-extension.json.in"
 
 
 def pre_tool_payload(call_id: str = "call-1") -> dict:
@@ -143,9 +141,7 @@ class HookLifecycleStateTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def run_hook(
-        self, hook: Path, payload: dict, *hook_args: str, env: dict | None = None
-    ) -> dict:
+    def run_hook(self, hook: Path, payload: dict, *hook_args: str, env: dict | None = None) -> dict:
         proc = subprocess.run(
             [sys.executable, str(hook), *hook_args],
             input=json.dumps(payload),
@@ -167,33 +163,23 @@ class HookLifecycleStateTest(unittest.TestCase):
 
         first = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
         self.assertEqual(first, {})
-        self.assertEqual(
-            self.requests()[-1]["input"]["output_optimization"], "rtk"
-        )
-        self.assertFalse(
-            self.requests()[-1]["input"]["capabilities"]["retrieval_available"]
-        )
+        self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "rtk")
+        self.assertEqual(self.requests()[-1]["input"]["capabilities"]["recovery"]["kind"], "none")
 
         second = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-1"))
         self.assertIn("hookSpecificOutput", second)
-        self.assertEqual(
-            self.requests()[-1]["input"]["output_optimization"], "none"
-        )
+        self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "none")
 
     def test_state_is_isolated_by_tool_call(self) -> None:
         self.run_hook(corpus.PRE_TOOL_HOOK, pre_tool_payload("call-a"))
 
         other = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-b"))
         self.assertIn("hookSpecificOutput", other)
-        self.assertEqual(
-            self.requests()[-1]["input"]["output_optimization"], "none"
-        )
+        self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "none")
 
         matching = self.run_hook(RESPONSE_HOOK, post_tool_payload("call-a"))
         self.assertEqual(matching, {})
-        self.assertEqual(
-            self.requests()[-1]["input"]["output_optimization"], "rtk"
-        )
+        self.assertEqual(self.requests()[-1]["input"]["output_optimization"], "rtk")
 
     def test_rewrite_is_not_applied_when_state_cannot_be_written(self) -> None:
         tokenless_dir = self.home / ".tokenless"
@@ -203,11 +189,7 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertEqual(output, {})
 
     def test_command_agent_id_keeps_lifecycle_state_stable(self) -> None:
-        env = {
-            key: value
-            for key, value in self.env.items()
-            if key != "TOKENLESS_AGENT_ID"
-        }
+        env = {key: value for key, value in self.env.items() if key != "TOKENLESS_AGENT_ID"}
         self.run_hook(
             corpus.PRE_TOOL_HOOK,
             pre_tool_payload(),
@@ -247,9 +229,7 @@ class HookLifecycleStateTest(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(claimed.exists())
         self.assertFalse(crashed.exists())
-        unclaimed = [
-            path for path in state_dir.iterdir() if ".consuming." not in path.name
-        ]
+        unclaimed = [path for path in state_dir.iterdir() if ".consuming." not in path.name]
         self.assertLessEqual(len(unclaimed), 1024)
 
     def test_qwen_lifecycle_commands_pin_agent_id(self) -> None:
@@ -276,8 +256,8 @@ class RealCorePreToolTest(unittest.TestCase):
             rtk = bin_dir / "rtk"
             rtk.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = \"--version\" ]; then echo 'rtk 0.43.0'; exit 0; fi\n"
-                "if [ \"$1\" = \"rewrite\" ]; then echo 'rtk grep --count error log'; exit 0; fi\n"
+                'if [ "$1" = "--version" ]; then echo \'rtk 0.43.0\'; exit 0; fi\n'
+                'if [ "$1" = "rewrite" ]; then echo \'rtk grep --count error log\'; exit 0; fi\n'
                 "exit 1\n"
             )
             rtk.chmod(rtk.stat().st_mode | stat.S_IXUSR)

@@ -1,8 +1,4 @@
-//! Marker generation and parsing.
-//!
-//! A marker is `<<tokenless:HASH>>` where HASH is a 24-hex-char stash key.
-//! Compressors embed markers in truncated output so the LLM can quote the
-//! marker back to retrieve the original payload.
+//! Historical marker parsing and default Shell recovery suffixes.
 
 /// Marker prefix. The `tokenless:` namespace distinguishes these markers from
 /// Headroom's `<<ccr:HASH>>` and from any user content.
@@ -12,9 +8,9 @@ pub const MARKER_PREFIX: &str = "<<tokenless:";
 pub const MARKER_SUFFIX: &str = ">>";
 
 /// Length of a stash hash in hex characters (see `key.rs`).
-const HASH_LEN: usize = 24;
+pub(crate) const HASH_LEN: usize = 24;
 
-/// Build a marker string for `hash`.
+/// Builds a historical marker for persisted-context interoperability, not new output.
 pub fn marker_for(hash: &str) -> String {
     format!("{MARKER_PREFIX}{hash}{MARKER_SUFFIX}")
 }
@@ -22,10 +18,7 @@ pub fn marker_for(hash: &str) -> String {
 /// Builds the human-readable suffix used by bounded string compression.
 #[must_use]
 pub fn truncation_suffix(hash: &str) -> String {
-    format!(
-        "… (truncated, run: tokenless retrieve '{}')",
-        marker_for(hash)
-    )
+    crate::truncation_suffix_for(hash, &tokenless_protocol::RecoveryMethod::Shell)
 }
 
 /// Character length of [`truncation_suffix`].
@@ -46,36 +39,12 @@ pub fn parse_marker(s: &str) -> Option<&str> {
     Some(inner)
 }
 
-/// Extract the first **valid** marker's hash from arbitrary text. Useful
-/// when the LLM quotes a whole truncation line such as
-/// `<... 12 items truncated, run: tokenless retrieve '<<tokenless:abcd…>>'>`.
-///
-/// Scans past malformed markers (wrong-length or non-hex content between a
-/// prefix/suffix pair) so a hallucinated or partial marker earlier in the
-/// text does not prevent retrieval of a valid marker that follows it.
-///
-/// The scan stays linear on untrusted input: at each prefix the fixed
-/// `24-hex + suffix` window directly after it is validated in place instead
-/// of searching the rest of the text for the next suffix, so a rejected
-/// prefix costs O(1) and no tail is ever rescanned.
+/// Extracts the first valid Shell recovery reference or historical marker.
+/// Static-tool references require [`crate::recovery_hashes`] with the declared tool.
 pub fn extract_hash(text: &str) -> Option<&str> {
-    let mut search_from = 0;
-    while let Some(start) = text[search_from..].find(MARKER_PREFIX) {
-        let hash_start = search_from + start + MARKER_PREFIX.len();
-        // A valid marker is exactly prefix + 24 hex chars + suffix, so only
-        // the fixed window right after the prefix can complete it. When too
-        // few bytes remain, `get` yields None and this prefix is rejected.
-        if let Some(hash) = text.get(hash_start..hash_start + HASH_LEN)
-            && validate_hash(hash).is_some()
-            && text[hash_start + HASH_LEN..].starts_with(MARKER_SUFFIX)
-        {
-            return Some(hash);
-        }
-        // MARKER_PREFIX cannot overlap itself, so no marker can start inside
-        // the prefix just rejected; resume right after it.
-        search_from = hash_start;
-    }
-    None
+    crate::recovery_hashes(text, &tokenless_protocol::RecoveryMethod::Shell)
+        .into_iter()
+        .next()
 }
 
 /// Whether `hash` is a valid stash key: exactly 24 ASCII hex characters

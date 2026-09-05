@@ -18,7 +18,7 @@ fn requests() -> Vec<RequestEnvelope> {
                 visible_context: json!({"messages": []}),
                 capabilities: BeforeModelCapabilities {
                     replace_tools: true,
-                    retrieval_available: true,
+                    recovery: tokenless_protocol::RecoveryMethod::Shell,
                 },
             }),
         },
@@ -45,7 +45,7 @@ fn requests() -> Vec<RequestEnvelope> {
                 output_optimization: OutputOptimization::None,
                 capabilities: PostToolCapabilities {
                     replace_output: true,
-                    retrieval_available: false,
+                    recovery: tokenless_protocol::RecoveryMethod::None,
                     replace_with_text: true,
                 },
             }),

@@ -796,7 +796,11 @@ pub fn compress_response_with_store(
         output_optimization: OutputOptimization::None,
         capabilities: PostToolCapabilities {
             replace_output: true,
-            retrieval_available: options.stash_enabled && stash_store.is_some(),
+            recovery: if options.stash_enabled && stash_store.is_some() {
+                tokenless_protocol::RecoveryMethod::Shell
+            } else {
+                tokenless_protocol::RecoveryMethod::None
+            },
             replace_with_text: false,
         },
     };
@@ -1107,7 +1111,7 @@ mod tests {
             .compress_response(
                 &input,
                 &CompressOptions {
-                    truncate_strings_at: Some(80),
+                    truncate_strings_at: Some(tokenless_ccr::truncation_suffix_char_len() + 16),
                     require_reversible: true,
                     ..CompressOptions::default()
                 },
@@ -1145,7 +1149,7 @@ mod tests {
         let result = compress_response_with_store(
             &input,
             &CompressOptions {
-                truncate_strings_at: Some(80),
+                truncate_strings_at: Some(tokenless_ccr::truncation_suffix_char_len() + 16),
                 require_reversible: true,
                 ..CompressOptions::default()
             },
@@ -1365,7 +1369,7 @@ mod tests {
         let result = compress_response_with_store(
             &input,
             &CompressOptions {
-                truncate_strings_at: Some(80),
+                truncate_strings_at: Some(tokenless_ccr::truncation_suffix_char_len() + 16),
                 ..CompressOptions::default()
             },
             true,
@@ -1473,7 +1477,7 @@ mod tests {
             .compress_response(
                 &input,
                 &CompressOptions {
-                    truncate_strings_at: Some(80),
+                    truncate_strings_at: Some(tokenless_ccr::truncation_suffix_char_len() + 16),
                     require_reversible: true,
                     ..CompressOptions::default()
                 },
@@ -1531,7 +1535,7 @@ mod tests {
                     output_optimization: OutputOptimization::None,
                     capabilities: PostToolCapabilities {
                         replace_output: true,
-                        retrieval_available: true,
+                        recovery: tokenless_protocol::RecoveryMethod::Shell,
                         replace_with_text: false,
                     },
                 },
@@ -1578,7 +1582,7 @@ mod tests {
                     output_optimization: OutputOptimization::None,
                     capabilities: PostToolCapabilities {
                         replace_output: true,
-                        retrieval_available: true,
+                        recovery: tokenless_protocol::RecoveryMethod::Shell,
                         replace_with_text: true,
                     },
                 },

@@ -51,13 +51,16 @@ def retrieve_tool_declaration(name: str) -> RetrieveToolDeclaration:
     """Builds the static AgentScope retrieval tool declaration."""
     return RetrieveToolDeclaration(
         name=name,
-        description="Restore content referenced by a visible Tokenless marker.",
+        description=(
+            "Restore omitted content when needed. Pass only the 24-character hash from a "
+            "visible Tokenless recovery instruction, not the whole instruction."
+        ),
         input_schema={
             "type": "object",
             "properties": {
                 "hash_or_marker": {
                     "type": "string",
-                    "description": "A visible <<tokenless:HASH>> marker or its hash",
+                    "description": "The 24-character hash from a visible recovery instruction; historical Tokenless markers are also accepted",
                 }
             },
             "required": ["hash_or_marker"],
@@ -115,10 +118,7 @@ def build_tool_contracts(
 ) -> dict[str, ToolContract]:
     """Returns built-in contracts merged with explicit application contracts."""
     contracts = {
-        **{
-            name: ToolContract(ContentOrigin.COMMAND_OUTPUT, "command")
-            for name in _COMMAND_TOOLS
-        },
+        **{name: ToolContract(ContentOrigin.COMMAND_OUTPUT, "command") for name in _COMMAND_TOOLS},
         **{name: ToolContract(ContentOrigin.FILE_CONTENT) for name in _FILE_TOOLS},
         **{name: ToolContract(ContentOrigin.API_RESPONSE) for name in _API_TOOLS},
     }

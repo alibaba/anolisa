@@ -167,7 +167,7 @@ assert.deepEqual(requests(), [{
       output_optimization: 'none',
       capabilities: {
         replace_output: true,
-        retrieval_available: true,
+        recovery: { kind: "shell" },
         replace_with_text: true,
       },
     },
@@ -183,8 +183,7 @@ process.env.PATH = isolatedPath
 clearRequests()
 await listener(exec, success('ordinary output'), async () => ({ kind: 'accept' }))
 assert.equal(
-  requests()[0].request.input.capabilities.retrieval_available,
-  false,
+  requests()[0].request.input.capabilities.recovery.kind, "none",
 )
 process.env.PATH = `${tmp}:${originalPath}`
 
@@ -198,8 +197,7 @@ process.env.PATH = mismatchedPath
 clearRequests()
 await listener(exec, success('ordinary output'), async () => ({ kind: 'accept' }))
 assert.equal(
-  requests()[0].request.input.capabilities.retrieval_available,
-  false,
+  requests()[0].request.input.capabilities.recovery.kind, "none",
 )
 process.env.PATH = `${tmp}:${originalPath}`
 
@@ -222,8 +220,7 @@ await listener({
   },
 }, success('ordinary output'), async () => ({ kind: 'accept' }))
 assert.equal(
-  requests()[0].request.input.capabilities.retrieval_available,
-  false,
+  requests()[0].request.input.capabilities.recovery.kind, "none",
 )
 process.chdir(originalCwd)
 process.env.PATH = `${tmp}:${originalPath}`
@@ -296,7 +293,7 @@ for (const command of [
   assert.strictEqual(retrieve, decision)
   const sentRequest = requests()[0].request
   assert.equal(sentRequest.input.result_kind, 'retrieve', command)
-  assert.equal(sentRequest.input.capabilities.retrieval_available, false, command)
+  assert.equal(sentRequest.input.capabilities.recovery.kind, "none", command)
 }
 
 // Similar shell syntax remains an ordinary recoverable tool result.
@@ -325,7 +322,7 @@ for (const command of [
   )
   const sentRequest = requests()[0].request
   assert.equal(sentRequest.input.result_kind, 'tool', command)
-  assert.equal(sentRequest.input.capabilities.retrieval_available, true, command)
+  assert.equal(sentRequest.input.capabilities.recovery.kind, "shell", command)
 }
 
 clearRequests()
@@ -335,7 +332,7 @@ await listener(
   async () => ({ kind: 'accept' }),
 )
 assert.equal(requests()[0].request.input.result_kind, 'tool')
-assert.equal(requests()[0].request.input.capabilities.retrieval_available, true)
+assert.equal(requests()[0].request.input.capabilities.recovery.kind, "shell")
 
 // A downstream content projection is the model-visible input sent to Core.
 clearRequests()
@@ -440,7 +437,7 @@ assert.equal(commandFailure.additionalContexts.length, 1)
 request = requests()[0].request
 assert.equal(request.input.status, 'error')
 assert.equal(request.input.result_kind, 'tool')
-assert.equal(request.input.capabilities.retrieval_available, false)
+assert.equal(request.input.capabilities.recovery.kind, "none")
 assert.equal(request.input.content_origin, 'command_output')
 assert.equal(request.input.content, 'permission denied')
 

@@ -68,8 +68,8 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 
 例如：面板显示压缩率 60%，若工具响应占总消耗 20%，实际节省率为 60% × 20% = **12%**。这也是为何在总消耗 1500 万 Token 的实验中节省量观感偏小——tokenless 只作用于其中约 300 万 Token 的工具响应部分。
 
-> Stash 使压缩**端到端无损**：可适度收紧截断阈值换取更高 inline 节省，需要原文时经 `<<tokenless:KEY>>` 标记取回，不影响正确性。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。至少 33 项且全为 Object 的数组使用 Record Reduction：完整数组进入 Stash，默认保留首尾、错误、结构/数值异常并稳定采样至 32 条基础预算；其他数组截断默认保留头部 32 项与尾部 8 项。完整参数见用户手册 CLI 参考。
-> 对支持实时结果替换的 Agent，Marker 会直接提示模型通过已有 Shell Tool 执行 `tokenless retrieve '<<tokenless:KEY>>'`；成功的恢复结果原样返回，不会再次压缩。
+> 可恢复省略会附带按需操作：`If needed, run in shell: tokenless retrieve HASH`。AgentScope 则看到 `If needed, call tool tokenless_retrieve with hash_or_marker=HASH`，其中 Tool 名称采用实际静态配置。数据仍在 Stash 时可以取回；恢复会增加 Token 开销，并非每次省略都要恢复。历史 `<<tokenless:HASH>>` Marker 仍可读取，但不再生成。建议用 `TOKENLESS_COMPRESSION_ENABLED=0/1` 双跑对照真实节省。至少 33 项且全为 Object 的数组使用 Record Reduction：完整数组进入 Stash，默认保留首尾、错误、结构/数值异常并稳定采样至 32 条基础预算；其他数组截断默认保留头部 32 项与尾部 8 项。完整参数见用户手册 CLI 参考。
+> 对支持实时结果替换的 Agent，恢复提示通过已有 Shell Tool 执行裸 Hash 命令；成功的恢复结果原样返回，不会再次压缩。
 > 各策略触发条件与阈值见 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md)。
 
 ## 集成路径

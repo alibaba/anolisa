@@ -24,6 +24,7 @@ from anolisa_tokenless import (
     PreToolAction,
     PreToolCapabilities,
     PreToolRequest,
+    RecoveryMethod,
     ResultKind,
     RetrieveRequest,
     TokenlessConfig,
@@ -42,9 +43,7 @@ from tokenless_agentscope._contracts import (
 _STATE_KEY = "anolisa_tokenless"
 
 
-def _marker_state(
-    state: Any, session_markers: dict[str, frozenset[str]]
-) -> frozenset[str]:
+def _marker_state(state: Any, session_markers: dict[str, frozenset[str]]) -> frozenset[str]:
     middle_context = getattr(state, "middle_context", None)
     if middle_context is not None:
         values = middle_context.get(_STATE_KEY, {}).get("visible_markers", [])
@@ -115,9 +114,7 @@ class _RetrieveToolMixin:
         )
 
     async def _retrieve(self, hash_or_marker: str, state: Any) -> ToolChunk:
-        attribution = Attribution(
-            _agent_state(state, self._session_agents), state.session_id
-        )
+        attribution = Attribution(_agent_state(state, self._session_agents), state.session_id)
         try:
             response = await self._sdk.retrieve(
                 RetrieveRequest(
@@ -154,9 +151,7 @@ def _new_retrieve_tool(
     session_markers: dict[str, frozenset[str]],
     session_agents: dict[str, str],
 ) -> ToolBase:
-    tool_type = (
-        _ModernRetrieveTool if hasattr(ToolBase, "call") else _LegacyRetrieveTool
-    )
+    tool_type = _ModernRetrieveTool if hasattr(ToolBase, "call") else _LegacyRetrieveTool
     return tool_type(sdk, declaration, session_markers, session_agents)
 
 
@@ -242,7 +237,7 @@ class TokenlessMiddleware(MiddlewareBase):
                 ),
                 capabilities=BeforeModelCapabilities(
                     replace_tools=True,
-                    retrieval_available=True,
+                    recovery=RecoveryMethod.tool(self.retrieve_tool_name),
                 ),
                 attribution=Attribution(agent_id, agent.state.session_id),
             )
@@ -292,9 +287,7 @@ class TokenlessMiddleware(MiddlewareBase):
                 )
             )
             if transformed.action is PreToolAction.BLOCK_AND_SUGGEST:
-                raise RuntimeError(
-                    "Core returned block_and_suggest without host capability"
-                )
+                raise RuntimeError("Core returned block_and_suggest without host capability")
             optimization = transformed.output_optimization
             forwarded = source.model_copy(
                 update={
@@ -340,7 +333,12 @@ class TokenlessMiddleware(MiddlewareBase):
                     output_optimization=optimization,
                     capabilities=PostToolCapabilities(
                         replace_output=True,
-                        retrieval_available=True,
+                        recovery=(
+                            RecoveryMethod.tool(self.retrieve_tool_name)
+                            if self._status(response.state) == ToolResultStatus.SUCCESS
+                            and optimization == OutputOptimization.NONE
+                            else RecoveryMethod()
+                        ),
                         replace_with_text=True,
                     ),
                     attribution=attribution,
@@ -348,13 +346,8 @@ class TokenlessMiddleware(MiddlewareBase):
             )
             extra_context = extra_context or transformed.additional_context
             if transformed.output != block.text:
-                replacements[index] = block.model_copy(
-                    update={"text": transformed.output}
-                )
-        content = [
-            replacements.get(index, block)
-            for index, block in enumerate(response.content)
-        ]
+                replacements[index] = block.model_copy(update={"text": transformed.output})
+        content = [replacements.get(index, block) for index, block in enumerate(response.content)]
         if extra_context is not None:
             content.append(TextBlock(text=extra_context))
         if content == response.content:
@@ -418,9 +411,7 @@ class TokenlessAgentScope:
         if self.config.data_dir is None:
             raise ValueError("TokenlessConfig.data_dir is required for AgentScope App")
 
-        def new_middleware(
-            user_id: str, agent_id: str, session_id: str
-        ) -> TokenlessMiddleware:
+        def new_middleware(user_id: str, agent_id: str, session_id: str) -> TokenlessMiddleware:
             config = replace(
                 self.config,
                 data_dir=self._app_data_dir(user_id, agent_id, session_id),

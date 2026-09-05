@@ -28,9 +28,7 @@ class TokenlessRuntimeTests(unittest.TestCase):
     """Exercise public Python API behavior against real SQLite state."""
 
     def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory(
-            prefix="tokenless-python-test-"
-        )
+        self.temporary_directory = tempfile.TemporaryDirectory(prefix="tokenless-python-test-")
         self.runtime = TokenlessRuntime(
             self.temporary_directory.name,
             stats_enabled=True,
@@ -87,7 +85,9 @@ class TokenlessRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(result.applied)
         self.assertLess(len(result.output.encode()), len(original.encode()))
-        marker = re.search(r"<<tokenless:([0-9a-f]{24})>>", result.output)
+        marker = re.search(
+            r"If needed, run in shell: tokenless retrieve ([0-9a-f]{24})", result.output
+        )
         self.assertIsNotNone(marker)
         assert marker is not None
         recovered = self.runtime.retrieve(marker.group(1).upper())
@@ -150,14 +150,10 @@ class TokenlessRuntimeTests(unittest.TestCase):
         # Summaries report active rows only; the dry-run baseline is excluded.
         self.assertEqual(summary.total.records, 1)
         self.assertEqual(summary.dry_run_records_excluded, 1)
-        self.assertEqual(
-            summary.attribution.gross_savings_tokens, summary.total.tokens_saved
-        )
+        self.assertEqual(summary.attribution.gross_savings_tokens, summary.total.tokens_saved)
         self.assertEqual(summary.attribution.retrieve_hits, 0)
         self.assertEqual(summary.attribution.retrieved_tokens, 0)
-        self.assertEqual(
-            summary.attribution.net_savings_tokens, summary.total.tokens_saved
-        )
+        self.assertEqual(summary.attribution.net_savings_tokens, summary.total.tokens_saved)
         self.assertGreater(summary.total.tokens_saved, 0)
         self.assertIn(StatsOperation.COMPRESS_RESPONSE, summary.by_operation)
         self.assertEqual(stats.summary(limit=1).total.records, 1)
@@ -261,9 +257,7 @@ class TokenlessRuntimeTests(unittest.TestCase):
             self.runtime.retrieve("not-a-hash")
 
     def test_stash_initialization_failure_can_still_apply_lossless_json(self) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix="tokenless-python-broken-stash-"
-        ) as directory:
+        with tempfile.TemporaryDirectory(prefix="tokenless-python-broken-stash-") as directory:
             Path(directory, "stash.db").write_bytes(b"not a sqlite database")
             runtime = TokenlessRuntime(directory, stats_enabled=False)
             self.assertFalse(runtime.stash_available)
@@ -289,24 +283,20 @@ class TokenlessRuntimeTests(unittest.TestCase):
         self.assertEqual(result.unrecoverable_truncations, 1)
 
     def test_string_stash_write_failure_is_reversible_fail_open(self) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix="tokenless-python-string-failure-"
-        ) as directory:
+        with tempfile.TemporaryDirectory(prefix="tokenless-python-string-failure-") as directory:
             runtime = TokenlessRuntime(directory, stats_enabled=False)
             with sqlite3.connect(Path(directory, "stash.db")) as connection:
                 connection.execute("DROP TABLE stash")
 
             original = json.dumps({"tail": "x" * 400})
-            result = runtime.compress_response(original, truncate_strings_at=80)
+            result = runtime.compress_response(original, truncate_strings_at=120)
             self.assertEqual(result.disposition, "recoverability_unavailable")
             self.assertEqual(result.output, original)
             self.assertEqual(result.stash_errors, 1)
             self.assertEqual(result.unrecoverable_truncations, 1)
 
     def test_depth_stash_write_failure_is_reversible_fail_open(self) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix="tokenless-python-depth-failure-"
-        ) as directory:
+        with tempfile.TemporaryDirectory(prefix="tokenless-python-depth-failure-") as directory:
             runtime = TokenlessRuntime(directory, stats_enabled=False)
             with sqlite3.connect(Path(directory, "stash.db")) as connection:
                 connection.execute("DROP TABLE stash")
@@ -332,8 +322,10 @@ class TokenlessRuntimeTests(unittest.TestCase):
             # in between, so cross-call contamination surfaces at both ends.
             self.assertIn(f"SENTINEL-{index}-record-0000", result.output)
             self.assertIn(f"SENTINEL-{index}-record-0199", result.output)
-            self.assertIn("190 items truncated", result.output)
-            match = re.search(r"<<tokenless:([0-9a-f]{24})>>", result.output)
+            self.assertIn("190 items omitted", result.output)
+            match = re.search(
+                r"If needed, run in shell: tokenless retrieve ([0-9a-f]{24})", result.output
+            )
             self.assertIsNotNone(match)
             assert match is not None
             return self.runtime.retrieve(match.group(1))
@@ -345,10 +337,7 @@ class TokenlessRuntimeTests(unittest.TestCase):
             # (records 0002..0191); head and tail items stay inline.
             self.assertEqual(
                 json.loads(payload),
-                [
-                    f"SENTINEL-{index}-record-{record:04d}"
-                    for record in range(2, 192)
-                ],
+                [f"SENTINEL-{index}-record-{record:04d}" for record in range(2, 192)],
             )
 
         with sqlite3.connect(f"{self.temporary_directory.name}/stats.db") as connection:

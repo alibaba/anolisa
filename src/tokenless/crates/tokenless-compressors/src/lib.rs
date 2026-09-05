@@ -12,3 +12,4 @@ pub use json::{
     JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonMetrics,
     JsonOperation, JsonOutcome, Recoverability,
 };
+pub use tokenless_protocol::RecoveryMethod;

@@ -210,7 +210,9 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         async def before_model(request):
             self.assertEqual(request.tools[0]["function"]["name"], "api")
             self.assertEqual(request.tools[1], {"type": "web_search"})
-            self.assertTrue(request.capabilities.retrieval_available)
+            self.assertEqual(
+                request.capabilities.recovery, core.RecoveryMethod.tool("tokenless_retrieve")
+            )
             return core.BeforeModelResponse(
                 tools=request.tools,
                 visible_markers=next(marker_sets),
@@ -350,9 +352,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.middleware.sdk.post_tool = post_tool
-        response = _ToolResponse(
-            [_TextBlock("command not found")], state=_ResultState.ERROR
-        )
+        response = _ToolResponse([_TextBlock("command not found")], state=_ResultState.ERROR)
 
         async def next_handler(**_kwargs):
             yield response
@@ -378,9 +378,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
             return core.RetrieveResponse(hash=marker, payload="payload")
 
         self.middleware.sdk.retrieve = retrieve
-        result = await self.middleware.retrieve_tool.call(
-            marker.upper(), self.agent.state
-        )
+        result = await self.middleware.retrieve_tool.call(marker.upper(), self.agent.state)
         self.assertEqual(result.content[0].text, "payload")
 
     async def test_retrieve_response_bypasses_post_tool(self) -> None:
@@ -409,6 +407,8 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(output[0], response)
 
     async def test_register_tools_rejects_collision(self) -> None:
+        self.assertIn("Pass only the 24-character hash", self.middleware.retrieve_tool.description)
+        self.assertIn("not the whole instruction", self.middleware.retrieve_tool.description)
         self.assertEqual(
             self.middleware.retrieve_tool.description,
             self.middleware._retrieve_declaration.description,
@@ -419,9 +419,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         )
         toolkit = _Toolkit()
         await self.middleware.register_tools(toolkit)
-        self.assertIs(
-            await toolkit.get_tool("tokenless_retrieve"), self.middleware.retrieve_tool
-        )
+        self.assertIs(await toolkit.get_tool("tokenless_retrieve"), self.middleware.retrieve_tool)
         other = api.TokenlessMiddleware(_config=api.TokenlessConfig(rtk_enabled=False))
         with self.assertRaisesRegex(ValueError, "already contains"):
             await other.register_tools(toolkit)
@@ -436,9 +434,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         )
         options = integration.app_options()
         self.assertEqual(set(options), {"extra_agent_middlewares"})
-        middleware = (
-            await options["extra_agent_middlewares"]("user", "agent", "session")
-        )[0]
+        middleware = (await options["extra_agent_middlewares"]("user", "agent", "session"))[0]
         retrieve_tool = (await middleware.list_tools())[0]
         self.assertIs(retrieve_tool, middleware.retrieve_tool)
 
@@ -468,9 +464,7 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
         result = await retrieve_tool.call(marker, state)
         self.assertEqual(result.content[0].text, "payload")
 
-        other = (
-            await options["extra_agent_middlewares"]("user", "agent", "other-session")
-        )[0]
+        other = (await options["extra_agent_middlewares"]("user", "agent", "other-session"))[0]
         self.assertNotEqual(other.data_dir, middleware.data_dir)
 
     def test_app_factory_requires_modern_tool_abi(self) -> None:

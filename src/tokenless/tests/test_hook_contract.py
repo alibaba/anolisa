@@ -155,8 +155,8 @@ class ResponseHookContract(unittest.TestCase):
                 result = self.run_case(agent, "applied")
                 self.assertEqual(result.envelope, self.expected_replacement(agent))
                 self.assertEqual(result.spawns, ["compress"])
-                self.assertTrue(
-                    result.requests[0]["input"]["capabilities"]["retrieval_available"]
+                self.assertEqual(
+                    result.requests[0]["input"]["capabilities"]["recovery"]["kind"], "shell"
                 )
 
     def test_retrieve_command_is_bypassed(self):
@@ -180,7 +180,7 @@ class ResponseHookContract(unittest.TestCase):
                 self.assertEqual(result.spawns, ["compress"])
                 request = result.requests[0]["input"]
                 self.assertEqual(request["result_kind"], "retrieve")
-                self.assertFalse(request["capabilities"]["retrieval_available"])
+                self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
     def test_fallback_binary_does_not_advertise_marker_recovery(self):
         result = contract_runner.run_case(
@@ -192,9 +192,7 @@ class ResponseHookContract(unittest.TestCase):
         )
 
         self.assertEqual(result.spawns, ["compress"])
-        self.assertFalse(
-            result.requests[0]["input"]["capabilities"]["retrieval_available"]
-        )
+        self.assertEqual(result.requests[0]["input"]["capabilities"]["recovery"]["kind"], "none")
 
     def test_failed_retrieve_command_remains_a_tool_error(self):
         marker = "<<tokenless:0123456789abcdef01234567>>"
@@ -215,7 +213,7 @@ class ResponseHookContract(unittest.TestCase):
         request = result.requests[0]["input"]
         self.assertEqual(request["status"], "error")
         self.assertEqual(request["result_kind"], "tool")
-        self.assertFalse(request["capabilities"]["retrieval_available"])
+        self.assertEqual(request["capabilities"]["recovery"]["kind"], "none")
 
     def test_fail_open_classes_pass_through(self):
         for agent in self.REPLACEMENT_AGENTS:
@@ -232,10 +230,8 @@ class ResponseHookContract(unittest.TestCase):
                 self.assertEqual(result.envelope, {})
                 self.assertEqual(result.spawns, ["compress"])
                 if result.requests:
-                    self.assertFalse(
-                        result.requests[0]["input"]["capabilities"][
-                            "retrieval_available"
-                        ]
+                    self.assertEqual(
+                        result.requests[0]["input"]["capabilities"]["recovery"], {"kind": "none"}
                     )
 
     def test_missing_binary_passes_through(self):
@@ -299,8 +295,8 @@ class SchemaHookContract(unittest.TestCase):
                 result = self.run_case(agent, "applied")
                 self.assertEqual(result.envelope, expected)
                 self.assertEqual(result.spawns, ["compress"])
-                self.assertFalse(
-                    result.requests[0]["input"]["capabilities"]["retrieval_available"]
+                self.assertEqual(
+                    result.requests[0]["input"]["capabilities"]["recovery"]["kind"], "none"
                 )
 
     def test_no_savings_wraps_the_original(self):
