@@ -518,6 +518,9 @@ tokenless env-check --tool Shell --fix
 
 ## 架构
 
+安装产物检查与可选的真实 Agent 任务见
+[发布前回归测试](tests/release_regression/README_zh.md)，分别报告工具输出节省和恢复开销。
+
 - `crates/tokenless-schema/` — BeforeModel 工具 Schema 压缩：`SchemaCompressor`
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-runtime/` — 生命周期 API 与 Runtime 内部的 `PostToolPipeline`

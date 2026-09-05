@@ -833,6 +833,10 @@ transformed. Tool Ready remains hard-disabled.
 
 ## Build
 
+For installed-package checks and optional real Agent tasks, see the
+[release regression suite](tests/release_regression/README.md). It reports
+tool-output savings and retrieval overhead separately.
+
 | Target | Description |
 |---|---|
 | `make build` | Build `tokenless` + `rtk` (release mode) |
