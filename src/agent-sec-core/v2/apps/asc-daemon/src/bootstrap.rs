@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asc_daemon_service::{
-    BindError, BoundUnixSocket, ConfigError, DispatchError, DispatchRequest, RejectedRequest,
-    RejectionEncoder, RequestDispatcher, ResponseDisposition, ServeError, ServeReport,
-    ServiceConfig, ShutdownToken, UnixService,
+    BindError, BoundUnixSocket, ConfigError, RejectionEncoder, RequestDispatcher, ServeError,
+    ServeReport, ServiceConfig, ShutdownToken, UnixService,
 };
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -75,44 +74,6 @@ pub async fn serve(
     let socket = BoundUnixSocket::bind(&config.socket_path, config.socket_mode)?;
     let service = UnixService::new(socket, config.service, dispatcher, rejection_encoder)?;
     Ok(service.serve(shutdown).await?)
-}
-
-/// Runs the transport before any daemon protocol methods have been registered.
-///
-/// Connections are admitted and bounded normally, but complete request frames
-/// are closed without a response. This is transport bring-up, not daemon
-/// readiness; no temporary wire response is invented before protocol merge.
-///
-/// # Errors
-/// Returns the same bootstrap failures as [`serve`].
-pub async fn serve_without_handlers(
-    config: BootstrapConfig,
-    shutdown: ShutdownToken,
-) -> Result<ServeReport, BootstrapError> {
-    let handlers = Arc::new(NoRegisteredMethods);
-    serve(config, handlers.clone(), handlers, shutdown).await
-}
-
-struct NoRegisteredMethods;
-
-impl RequestDispatcher for NoRegisteredMethods {
-    fn dispatch(
-        &self,
-        _request: DispatchRequest,
-        _response: &mut dyn std::io::Write,
-    ) -> Result<ResponseDisposition, DispatchError> {
-        Ok(ResponseDisposition::Close)
-    }
-}
-
-impl RejectionEncoder for NoRegisteredMethods {
-    fn encode_rejection(
-        &self,
-        _request: RejectedRequest,
-        _response: &mut dyn std::io::Write,
-    ) -> Result<ResponseDisposition, DispatchError> {
-        Ok(ResponseDisposition::Close)
-    }
 }
 
 /// Failure to start or run the daemon transport.

@@ -709,7 +709,7 @@ fn binding_requires_exact_policy_and_scope_revisions() {
             &scope.scope_id,
             scope.revision,
         ),
-        Err(PapError::NotFound)
+        Err(PapError::ReferencedPolicyRevisionNotFound)
     );
     assert_eq!(
         pap.create_binding(
@@ -718,7 +718,7 @@ fn binding_requires_exact_policy_and_scope_revisions() {
             &missing,
             Revision::new(1).unwrap(),
         ),
-        Err(PapError::NotFound)
+        Err(PapError::ReferencedScopeRevisionNotFound)
     );
     assert_eq!(
         pap.update_binding(
@@ -783,7 +783,7 @@ fn existing_binding_can_reuse_embedded_sources_after_current_records_advance() {
             &reapplied.spec.scope.scope_id,
             reapplied.spec.scope.revision,
         ),
-        Err(PapError::NotFound),
+        Err(PapError::ReferencedPolicyRevisionNotFound),
         "a new Binding cannot select source revisions no longer current"
     );
 }

@@ -101,6 +101,10 @@ revision、搜索路径、已有测试和未自动验证项；不使用构建产
 
 - asc-daemon 是进程入口和 composition root，只负责 bootstrap、配置、runtime、RPC、
   signals、具体 adapter 装配和进程级 observability。
+- asc-daemon-service 负责协议无关的 UDS admission、framing、peer credentials、timeout、
+  drain 和 socket 生命周期，并通过 `RequestDispatcher` port 调用上层。
+- asc-daemon-handler 负责 daemon wire 解码、method allowlist、server-owned authorization、
+  application use case 路由以及 response/error projection；不拥有进程或 transport runtime。
 - asc-daemon-core 负责编排 identity、authorization、action、policy、observability、
   management、jobs 和 lifecycle 用例，不复制领域业务语义。
 - asc-action-runtime 负责 action validation、admission、execution supervision、timeout、
@@ -230,7 +234,7 @@ asc-state-migrator 必须定义并验证：
 工作包采用本文定义的目标 workspace，至少包括：
 
 - 产品入口：asc-daemon、asc-cli、asc-state-migrator；
-- daemon：asc-daemon-protocol、asc-daemon-core；
+- daemon：asc-daemon-protocol、asc-daemon-service、asc-daemon-handler、asc-daemon-core；
 - action：asc-action-types、asc-evidence-types、asc-action-runtime 和各 asc-capability-*；
 - policy：asc-policy-types、asc-policy-engine、asc-policy-runtime、asc-pap、asc-pcp；
 - data：asc-security-events、asc-observability、asc-session、asc-state、

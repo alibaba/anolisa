@@ -421,7 +421,7 @@ where
                         && binding.spec.policy.revision == policy_revision
                 })
                 .map(|binding| binding.spec.policy.clone())
-                .ok_or(PapError::NotFound),
+                .ok_or(PapError::ReferencedPolicyRevisionNotFound),
             Err(error) => Err(error),
         }
     }
@@ -440,7 +440,7 @@ where
                         && binding.spec.scope.revision == scope_revision
                 })
                 .map(|binding| binding.spec.scope.clone())
-                .ok_or(PapError::NotFound),
+                .ok_or(PapError::ReferencedScopeRevisionNotFound),
             Err(error) => Err(error),
         }
     }

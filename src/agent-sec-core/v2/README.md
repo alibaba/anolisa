@@ -1,25 +1,38 @@
 # AgentSecCore V2 Policy and daemon foundations
 
 This workspace slice contains the dependency-light contracts, Policy
-Administration Point, protocol-independent Unix-domain-socket service framework,
-and runnable foreground process bootstrap used by later AgentSecCore V2 work
-packages. It deliberately contains no daemon wire protocol, concrete persistence
-or Policy compiler, Policy runtime, reconciliation worker, outbox, or target
-Adapter.
+Administration Point, first-version PAP daemon protocol, product Policy-template
+compiler, protocol-independent Unix-domain-socket service framework, and runnable
+foreground process bootstrap used by later AgentSecCore V2 work packages. It
+deliberately contains no concrete persistence, Policy runtime, reconciliation
+worker, outbox, or target Adapter.
 
 The current crates are:
 
 - `asc-foundation-types`: bounded transport-independent identifiers and revisions.
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, backend-independent IR, and target Adapter contracts.
+- `asc-policy-engine`: deterministic `prevent_file_deletion` authoring-template
+  compiler with a frozen Canonical Policy IR golden. Other template kinds remain
+  explicitly unsupported until their lowering and Adapter evidence are defined.
 - `asc-pap`: transport-independent current-record Policy/Scope/Binding CRUD with
   monotonic revisions over explicit compiler and repository ports.
+- `asc-pap-repository-memory`: explicitly temporary process-local Repository
+  adapter used only to keep daemon/PAP integration runnable before durable
+  persistence lands; its implementation is outside the current review scope.
+- `asc-daemon-protocol`: strict request/response contracts and an explicit
+  allowlist for 15 Policy, Scope, and Binding administration methods.
+- `asc-daemon-handler`: inbound protocol adapter that decodes daemon requests,
+  applies server-owned authorization, routes PAP methods, and projects protocol
+  responses without depending on a concrete Repository or compiler.
+- `asc-daemon-core`: trusted Principal construction boundary and the
+  `PolicyAdministration` application port. `PapService<R, C>` implements this
+  port directly, so repository/compiler generics do not leak into dispatch.
 - `asc-daemon-service`: bounded UDS admission, one-request framing, kernel peer
   credentials, dispatcher/rejection-encoder injection, connection isolation,
   dispatch cancellation, and controlled drain.
-- `asc-daemon`: foreground process/bootstrap that installs Unix signal handling,
-  selects explicit transport limits, binds an explicitly supplied socket, and
-  runs `asc-daemon-service`.
+- `asc-daemon`: foreground process and composition root that configures and
+  injects concrete adapters into the daemon service.
 
 ## Daemon service boundary
 
@@ -33,10 +46,25 @@ evidence only and is not linked or executed by the Rust runtime.
 
 The service framework does not deserialize a daemon request, generate protocol
 request IDs, choose authorization roles, or render protocol errors. The concrete
-dispatcher receives a bounded raw request frame and owns method routing. Method
+`asc-daemon-handler::DaemonDispatcher` receives a bounded raw request frame and
+owns method routing. Method
 allowlist routing is internal to that one dispatcher implementation; it is not a
 second service dispatch layer. A separate `RejectionEncoder` receives typed
 transport failures and must remain independent of PAP/Repository state.
+
+The PAP request path is:
+
+```text
+UDS frame -> DaemonDispatcher -> method metadata authorization
+          -> PapHandler -> PolicyAdministration -> PapService<R, C>
+```
+
+RPC reuses the domain `PolicyTemplate`, `ScopeSelector`, `PreparedPolicy`,
+`PreparedScope`, and `BindingView` types. It does not define result wrappers for
+each CRUD operation. `PolicyAdministration` intentionally mirrors the use cases
+once: it erases `R`/`C` before dispatch and repeats authorization at the
+application boundary; there is no additional `PapServiceAdapter` forwarding
+object.
 
 The current bootstrap bounds frame read, application dispatch, rejection
 encoding, response write, connection drain, and final Tokio runtime shutdown.
@@ -45,12 +73,21 @@ it cannot forcibly stop an application blocking call that ignores that signal.
 The framework also cannot prove that a concrete PAP/Repository avoids global
 locks; that remains a required direct-consumer concurrency test at integration.
 
-The current `asc-daemon` executable deliberately registers no wire methods. It
-can start and exercise the real UDS lifecycle, but it closes complete requests
-without a response until the daemon protocol is merged. Socket presence therefore
-does not mean application readiness. It also requires an explicit absolute socket
-path because packaging-owned system paths, singleton/stale-socket policy, runtime
-directory hardening, and readiness remain later process-integration work.
+The current `asc-daemon` executable composes and registers the PAP dispatcher and
+protocol rejection encoder from `asc-daemon-handler`. It composes `PapService`
+with `PolicyTemplateCompiler`, a
+root-managed Principal policy, and an explicitly transitional process-local
+Repository. Policy CRUD therefore works during one daemon lifetime, but all
+state disappears on restart; this is integration evidence, not durable
+persistence or distribution readiness. The process prints that limitation at
+startup. It also requires an explicit absolute socket path because
+packaging-owned system paths, singleton/stale-socket policy, runtime directory
+hardening, and readiness remain later process-integration work.
+
+UID 0 is always a Policy administrator. Other UIDs are denied until root adds
+them to the process-local allowlist. Delegated administrators cannot delegate
+other UIDs. Loading, persisting, and exposing management RPCs for that allowlist
+remain later daemon state/configuration work.
 
 Run the independent transport process in the foreground:
 
@@ -58,11 +95,44 @@ Run the independent transport process in the foreground:
 cargo run -p asc-daemon -- serve --socket /absolute/existing-directory/daemon.sock
 ```
 
-After protocol integration, the existing daemon handler should implement
-`RequestDispatcher` directly and be injected by this bootstrap. A small
-protocol-only error encoder implements `RejectionEncoder`. PAP becomes one
+`asc-daemon-handler::DaemonDispatcher` implements `RequestDispatcher` directly
+and is injected by the executable composition root together with
+`JsonRejectionEncoder`. PAP is one
 registered method family inside the dispatcher; the service framework and
 rejection path remain independent of PAP, its compiler, and its repository.
+
+## PAP RPC contract
+
+The closed method inventory contains create, update, exact get, bounded list,
+and delete for each of Policy, Scope, and Binding. Successful responses are
+`{requestId,result}` and failures are `{requestId,error}`. The result is the
+domain record itself; list is the sole shared `{items,total}` shape. Exact inputs
+and output type names are frozen by
+`asc-daemon-protocol/tests/fixtures/pap-methods.json`.
+
+The stateful `asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` scenario
+freezes complete request and response values for all 15 methods, including
+Canonical Policy IR, Scope templates, embedded Binding snapshots, revisions,
+statuses, and deterministic digests. Server-generated request and resource UUIDs
+use named placeholders so the same fixture can assert their format and identity
+flow across later requests. A UDS integration E2E always executes the complete
+scenario with a server-authorized test principal. The `asc-daemon` bootstrap E2E
+also starts the real binary and repeats that scenario when the process is root;
+a non-root binary run instead verifies the product's default
+`permission_denied` policy.
+
+Binding create/update accepts desired state and returns `PENDING_APPLY`; delete
+returns `PENDING_DELETE`. These responses prove PAP acceptance only. They do not
+mean target enforcement or deletion completed. LIST is integration-ready but is
+not distribution-ready until a server-owned aggregate encoded-byte budget is
+passed through Repository, PAP, and transport.
+
+TODO(policy-response-bounds): direct `PreparedPolicy` and `BindingView` mutation
+results can exceed the response-frame limit after process-local state has already
+changed, while embedded snapshots can also make Binding GET/LIST oversized.
+Before a durable Repository or distribution gate, converge the public result and
+storage shapes and enforce server-owned encoded-size budgets for mutations,
+single-record GET, and LIST; increasing the transport limit alone is not the fix.
 
 ## Current-record revision boundary
 
@@ -162,16 +232,17 @@ must repeat the `APPLYING`/`DELETING` admission gate inside the atomic update so
 a worker claim cannot race a PAP pre-check.
 
 The shared state machine is defined and tested now, but the PAP-only phase
-implements no outbox, dispatcher, or reconciler. Therefore
+implements no outbox, delivery dispatcher, or reconciler. Therefore
 PAP writes only `PENDING_APPLY` and `PENDING_DELETE`; nothing in this phase
 advances them. TODO(policy-reconciliation): persist each accepted current
 Binding replacement and its reconcile intent atomically, then let the future
 Reconciler consume one complete `BindingView` whose embedded revision fences
 claim, retry, completion, failure, restart recovery, and cancellation.
 
-Daemon protocol, client, concrete persistence/compiler, Policy runtime,
-reconciliation worker, outbox, and target Adapter belong to later work packages
-and are intentionally absent from this slice.
+CLI client, concrete persistence, Policy runtime, reconciliation worker, outbox,
+and target Adapter belong to later work packages and are intentionally absent
+from this slice. The compiler included here is limited to the one golden-backed
+`prevent_file_deletion` lowering described above.
 
 Run the branch-owned validation from this directory:
 

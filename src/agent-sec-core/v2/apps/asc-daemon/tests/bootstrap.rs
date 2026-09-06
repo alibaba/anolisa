@@ -1,12 +1,14 @@
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use asc_daemon::{BootstrapConfig, serve_without_handlers};
-use asc_daemon_service::ShutdownToken;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
+
+mod support;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -60,38 +62,20 @@ async fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
     .expect("SIGTERM should stop the foreground daemon")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrap_serves_transport_without_methods_and_cleans_up() {
-    let directory = unique_directory();
-    std::fs::create_dir(&directory).unwrap();
-    let socket_path = directory.join("daemon.sock");
-    let shutdown = ShutdownToken::new();
-    let service_shutdown = shutdown.clone();
-    let config = BootstrapConfig::new(&socket_path);
-    let service =
-        tokio::spawn(async move { serve_without_handlers(config, service_shutdown).await });
-
-    wait_for_socket(&socket_path).await;
-    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
-    stream.write_all(b"unregistered request\n").await.unwrap();
+async fn request(path: &Path, payload: &[u8]) -> Value {
+    let mut stream = UnixStream::connect(path).await.unwrap();
+    stream.write_all(payload).await.unwrap();
     let mut response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+    BufReader::new(stream)
+        .read_until(b'\n', &mut response)
         .await
-        .unwrap()
         .unwrap();
-    assert!(response.is_empty());
-
-    shutdown.request();
-    let report = service.await.unwrap().unwrap();
-    assert_eq!(report.accepted_connections, 1);
-    assert_eq!(report.dispatched_requests, 1);
-    assert_eq!(report.silently_closed_connections, 1);
-    assert!(!socket_path.exists());
-    std::fs::remove_dir(directory).unwrap();
+    assert_eq!(response.pop(), Some(b'\n'));
+    serde_json::from_slice(&response).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn binary_starts_in_foreground_and_sigterm_cleans_its_socket() {
+async fn dproc_002_003_and_partial_013_binary_registers_pap_and_cleans_socket() {
     let directory = unique_directory();
     std::fs::create_dir(&directory).unwrap();
     let socket_path = directory.join("daemon.sock");
@@ -110,6 +94,20 @@ async fn binary_starts_in_foreground_and_sigterm_cleans_its_socket() {
     };
 
     wait_for_socket(&running.socket_path).await;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json"
+    ))
+    .unwrap();
+    if std::fs::metadata(&running.socket_path).unwrap().uid() == 0 {
+        support::run_frozen_pap_crud_scenario(&running.socket_path, &fixture).await;
+    } else {
+        let first_request = fixture["steps"][0]["request"].clone();
+        let mut payload = serde_json::to_vec(&first_request).unwrap();
+        payload.push(b'\n');
+        let response = request(&running.socket_path, &payload).await;
+        assert_eq!(response["error"]["code"], "permission_denied");
+    }
+
     let signal = Command::new("/bin/kill")
         .arg("-TERM")
         .arg(running.child.id().to_string())

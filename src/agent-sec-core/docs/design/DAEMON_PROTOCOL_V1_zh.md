@@ -29,7 +29,7 @@ V2 设计，不能在 V1 兼容迁移中单方面加入必填字段。
 [`DAEMON_CURRENT_BEHAVIOR_zh.md`](DAEMON_CURRENT_BEHAVIOR_zh.md)；Job 生命周期、调度、
 日志、trace 和恢复语义见 [`DAEMON_JOB_CONTRACT_zh.md`](DAEMON_JOB_CONTRACT_zh.md)。
 security action 不通过
-当前默认 method catalogue 执行；迁移目标通过本文 6.11 的显式 handler 扩展接入。
+当前默认 method catalogue 执行；迁移目标通过本文 6.12 的显式 handler 扩展接入。
 其逻辑契约见
 [`SECURITY_MIDDLEWARE_CONTRACT_zh.md`](SECURITY_MIDDLEWARE_CONTRACT_zh.md)。
 
@@ -423,11 +423,103 @@ next offset。items 按 `(timestamp_epoch, kind)` 升序排列：
 - `kind=security`：包含完整 security event、被关联的 observability context，以及
   `match.reason/rank/time_delta_seconds`。
 
+### 6.11 **[TARGET V2]** PAP administration
+
+PAP administration 是新增的 V2 method family，不是九个 V1 method 之一。第一版接口采用
+互斥的 `{requestId,result}` 或 `{requestId,error}` 响应，不保留 POC 的 `poc.*` method、
+`ok/data/stdout/stderr/exit_code` envelope 或兼容分支。输入和输出以
+`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-methods.json` 为可执行清单。
+`requestId` 是 daemon 为每次 dispatch 生成的 UUID；`error` 固定为 `{code,message}`，
+success 不得再包一层 `{policy}`、`{scope}` 或 `{binding}`。
+
+`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json` 进一步冻结覆盖
+15 个 method 的有状态 CRUD 场景及完整 response value，包括 Canonical Policy IR、Scope
+template、Binding 内嵌快照、revision、status 和确定性 digest。daemon 生成的 request/resource
+UUID 使用具名占位符：fixture 不冻结随机值本身，但必须验证 UUID 格式、CREATE 捕获值在后续
+请求/响应中的一致性，以及不同资源 identity 不混用。该 fixture 同时由 protocol 类型测试、
+使用服务端授权测试 Principal 的必跑 UDS integration E2E，以及真实 `asc-daemon` 子进程
+bootstrap E2E 消费。binary 测试在 root 身份下重复完整成功场景，非 root 身份验证默认
+`permission_denied`；不得为测试加入产品授权旁路。
+`v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-invalid-requests.json` 冻结 method
+params 构造失败时的 `invalid_request` code 和有界、安全 message，并由真实 UDS integration
+fixture 消费。
+
+所有方法都要求 daemon 根据 kernel peer credentials 和服务端策略构造
+Policy Administrator Principal；request 中不得携带可信 UID、role 或 scope。RPC 直接复用
+`asc-policy-types` 的 `PolicyTemplate`、`ScopeSelector`、`PreparedPolicy`、
+`PreparedScope`、`BindingView` 以及 foundation 的 `ResourceId`、`Revision`，不得复制
+Policy domain DTO。
+
+当前 bootstrap 的首版策略固定允许 UID 0 管理 Policy；其它 UID 默认拒绝。root 可以向
+process-local allowlist 添加额外管理员 UID，但被授权 UID 不获得继续委派权限。allowlist 的
+持久化、加载和管理 RPC 尚未进入本 slice，在这些能力完成前 daemon 重启后只保留 root 权限。
+
+| method | params | result |
+| --- | --- | --- |
+| `policy.templates.create` | `{policyName, template}` | `PreparedPolicy` |
+| `policy.templates.update` | `{policyId, policyName, template}` | `PreparedPolicy` |
+| `policy.templates.get` | `{id, revision}` | `PreparedPolicy` |
+| `policy.templates.list` | `{limit=100, offset=0}` | `{items: PreparedPolicy[], total}` |
+| `policy.templates.delete` | `{id, revision}` | `PreparedPolicy` |
+| `policy.scopes.create` | `{selector}` | `PreparedScope` |
+| `policy.scopes.update` | `{scopeId, selector}` | `PreparedScope` |
+| `policy.scopes.get` | `{id, revision}` | `PreparedScope` |
+| `policy.scopes.list` | `{limit=100, offset=0}` | `{items: PreparedScope[], total}` |
+| `policy.scopes.delete` | `{id, revision}` | `PreparedScope` |
+| `policy.bindings.create` | `{policyId, policyRevision, scopeId, scopeRevision}` | `BindingView` |
+| `policy.bindings.update` | `{bindingId, policyId, policyRevision, scopeId, scopeRevision}` | `BindingView` |
+| `policy.bindings.get` | `{id}` | `BindingView` |
+| `policy.bindings.list` | `{limit=100, offset=0}` | `{items: BindingView[], total}` |
+| `policy.bindings.delete` | `{id}` | `BindingView` |
+
+CREATE 的 stable identity 由 PAP 生成；UPDATE 不兼作 upsert。Policy/Scope GET 和 DELETE
+要求精确 current revision；Binding GET 读取唯一 current record。Binding CREATE/UPDATE
+返回 `PENDING_APPLY` intent，DELETE 返回 `PENDING_DELETE` intent；daemon handler 不等待
+Reconciler，也不把 PAP acceptance 表述为 target 已生效或删除完成。
+
+Policy CREATE/UPDATE 在 PAP 内同步调用 `PolicyCompiler::lower(TemplateEnvelope) ->
+PolicyEnvelope`。当前产品 compiler 只实现 `prevent_file_deletion`，其输入与完整 Canonical
+Policy IR 输出由
+`v2/crates/policy/asc-policy-engine/tests/fixtures/compiler-contract.json` 冻结；输出语义是
+`ResourceOperation::Delete + FileResolution::PathEntry`。其它 `PolicyTemplate` kind 在各自
+lowering 与直接 Adapter conformance 完成前返回 `invalid_argument`，不得生成占位 IR。
+
+参数 object 拒绝未知字段。新 authored Scope 只接受正数 PID 或 cgroup ID，不接受仅用于读取
+旧数据的 `LegacyExecutionDomain`。LIST 的 `limit` 为 `1..=1000`，`offset` 为 `u32`；total 是
+分页前总数。当前 aggregate byte budget 仍是 Repository/PAP/transport 联合 gate，在该 gate
+完成前 LIST 只达到 integration contract，不构成 distribution-ready 大数据量查询能力。
+
+TODO(policy-response-bounds)：当前 direct `PreparedPolicy`/`BindingView` mutation result 可能在
+Repository commit 后才因 response frame 超限而失败；Binding GET/LIST 也会因内嵌完整 Policy
+和 Scope 快照放大响应。在 durable Repository 或 distribution gate 前，必须完成 public result
+shape/存储模型收敛，并对 mutation、单记录 GET 和 LIST aggregate response 建立 server-owned
+encoded-size gate；本 slice 不以提高 transport limit 代替该修复。
+
+PAP error 稳定投影如下：无法构造成 method params 的字段、类型或 bounded value（包括非法
+identifier、revision、pagination 和 authored selector）→ `invalid_request`，同时返回最多 256
+字节的参数解码原因；任意层级 JSON object 的 duplicate key 在进入 `serde_json::Value` 前拒绝，
+按 malformed envelope 返回 `invalid_request / request envelope is invalid`。成功构造 params 后
+发生的 authoring/compiler validation → `invalid_argument`，message 为最多 256 字节的稳定
+`invalid policy name: <reason>`、`invalid policy: <authored-path>: <reason>` 或
+`invalid scope: <authored-path>: <reason>`，不得暴露 canonical IR path、输入内容或内部 error
+code。
+
+not found → `not_found`，并按操作对象稳定区分 `policy was not found`、
+`policy revision was not found`、`scope was not found`、`scope revision was not found`、
+`binding was not found`、`referenced policy revision was not found` 和
+`referenced scope revision was not found`。revision conflict 使用
+`conflict / policy request conflicts with current state`，operation in progress 使用
+`conflict / binding reconciliation operation is in progress`；revision exhaustion →
+`resource_exhausted`；serialization/persistence、内部 identifier/Binding 构造失败 → `internal`。
+Malformed envelope 使用 `invalid_request`，未注册 method 使用 `unknown_method`，授权失败使用
+`permission_denied`。repository error、secret、内部 validation path 和内部 error code 不进入
+wire message；所有 PAP 公开 error message 均不得超过 256 字节。
+
 <a id="daemon-security-action-handler-contract"></a>
 
-### 6.11 **[TARGET V2][PENDING DEFINITION]** Security action handler 扩展
+### 6.12 **[TARGET V2][PENDING DEFINITION]** Security action handler 扩展
 
-#### 6.11.1 历史依据与注册模型
+#### 6.12.1 历史依据与注册模型
 
 commit `ef0d75f27c389434cf6f4361f5dbcdeaff42ab72` 曾实现完整的 `scan-prompt`
 daemon action 路径：`register_prompt_scan_methods()` 在默认 `MethodRegistry` 中注册
@@ -462,7 +554,7 @@ asc-daemon-protocol 的 Definition Review 冻结 method 名、schema、authoriza
 该 alias 不计入 17 个 canonical method；是否启用必须在发布前形成明确决定，不能由实现
 自行推断。
 
-#### 6.11.2 Request 映射
+#### 6.12.2 Request 映射
 
 action request 继续使用 V1 顶层 envelope：
 
@@ -476,7 +568,7 @@ action request 继续使用 V1 顶层 envelope：
 - 同步文件、SQLite、模型、CPU 或 subprocess 操作不得阻塞 socket runtime 的 accept/
   timeout loop；Python 参考实现使用 thread offload，Rust 使用等价 blocking boundary。
 
-##### 6.11.2.1 参数错误边界
+##### 6.12.2.1 参数错误边界
 
 handler 与 core 的校验职责必须保持以下三层边界：
 
@@ -495,7 +587,7 @@ handler 与 core 的校验职责必须保持以下三层边界：
 必须报告稳定的 version/capability mismatch，不转入 PyO3 或本地业务路径。request 已发送
 后的 timeout、EOF 或协议错误仍然状态不明，不能由 client 重放。
 
-#### 6.11.3 三层结果
+#### 6.12.3 三层结果
 
 沿用历史 `scan-prompt` 协议的三层解释，并推广到全部 action：
 
@@ -532,7 +624,7 @@ failure 使用 `ok=true`、非零 `exit_code` 和 `stderr`。如果未来需要�
 type 暴露给 wire client，必须作为单独的版本化协议扩展，而不是向本兼容 projection 临时
 增加顶层字段。
 
-#### 6.11.4 **[TARGET V2]** system daemon 安全边界与 method metadata gate
+#### 6.12.4 **[TARGET V2]** system daemon 安全边界与 method metadata gate
 
 V2 是 one daemon per host 的 system-level service，并服务多个本地 UID/Agent。daemon 从
 内核 peer UID/GID/PID、token binding 和服务端配置构造 trusted Principal；客户端提供的
@@ -692,6 +784,7 @@ asc-cli 触发 PyO3、Python backend 或第二套本地业务执行。
 | DPV1-017 | 八个 action method 的 timeout、queue/resource、access-log、blocking 和 cancellation metadata 已冻结并逐项验证 |
 | DPV1-018 | 多 UID 共用 system socket；trusted Principal/QueryScope 隔离 owner，`caller/trace_context` 不参与授权 |
 | DPV1-019 | CLI/TUI 不能用 RPC filter 绕过服务端 QueryScope，也不能直读 SQLite 替代授权查询 |
+| DPV1-020 | 15 个 PAP method 的 strict params、完整请求/响应 CRUD fixture、直接领域 result、错误投影、server-owned Principal；必跑 UDS integration 经 Dispatcher/PapHandler → PapService → Policy Compiler/Repository 执行完整 fixture，真实 `asc-daemon` 子进程 bootstrap 在 root 下重复成功场景、非 root 下验证默认拒绝 |
 
 协议测试必须使用 socket bytes 和解析后 JSON 比较；只测试某个 Python dataclass 或 Rust
 struct 的构造函数不足以证明 wire compatibility。

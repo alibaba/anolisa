@@ -30,6 +30,12 @@ pub enum PapError {
     /// The requested exact record does not exist.
     #[error("record not found")]
     NotFound,
+    /// A Binding references a Policy revision that is neither current nor in its snapshot.
+    #[error("referenced policy revision not found")]
+    ReferencedPolicyRevisionNotFound,
+    /// A Binding references a Scope revision that is neither current nor in its snapshot.
+    #[error("referenced scope revision not found")]
+    ReferencedScopeRevisionNotFound,
     /// No further positive `u32` revision can be allocated.
     #[error("revision space exhausted")]
     RevisionExhausted,

@@ -574,7 +574,7 @@ asc-cli 是 Rust daemon client，只负责：
 asc-cli 不构造 Principal、不直读 SQLite、不启动 daemon、不安装 event writer，也不通过
 PyO3、Python backend 或另一套 local executor 执行业务 action。
 
-### 10.2 asc-daemon adapter
+### 10.2 asc-daemon-handler inbound adapter
 
 daemon handler：
 
@@ -599,6 +599,9 @@ module/crate 边界必须落在仓库迁移总计划定义的目标 workspace �
 ```text
 apps/asc-daemon/                         # process/composition root
 apps/asc-cli/                            # daemon client
+crates/daemon/asc-daemon-protocol/       # versioned wire contracts
+crates/daemon/asc-daemon-service/        # protocol-independent UDS transport
+crates/daemon/asc-daemon-handler/        # inbound protocol/application adapter
 crates/daemon/asc-daemon-core/           # application use cases
 crates/action/asc-action-types/          # ActionId/request/result
 crates/action/asc-evidence-types/        # Evidence/Attribute contracts

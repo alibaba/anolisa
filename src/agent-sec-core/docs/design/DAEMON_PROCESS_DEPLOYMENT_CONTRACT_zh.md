@@ -3,7 +3,7 @@
 | 属性 | 值 |
 | --- | --- |
 | 状态 | V1 Python 交付基线、兼容语料及仓库内 V2 部署目标 |
-| 实现核对日期 | 2026-08-21 |
+| 实现核对日期 | 2026-09-04 |
 | 当前行为基线 | fe58ed4b23b8；与 main 中已有 systemd/RPM 行为交叉核对 |
 | 适用实现 | V1 Python daemon oracle；V2 Rust asc-daemon；安装器、migrator 和进程管理器 |
 
@@ -229,20 +229,27 @@ write 和 drain 分别设置显式 deadline。dispatch deadline 到期会释放 
 blocking call。`asc-daemon` 因此显式拥有 Tokio runtime，并在 service drain 后使用额外的
 runtime shutdown timeout，避免残留 `spawn_blocking` 让前台进程永久不能退出。
 
-该 slice 尚未注册 daemon protocol 或 `daemon.health`，因此完整 request 在经过唯一的
-`RequestDispatcher` 注入点后静默关闭。此行为只用于证明 process/transport 能启动，不是
-稳定 wire contract，也不表示 application READY。后续 protocol 合并时，由同一个 concrete
-dispatcher 完成 envelope decode、request ID、trusted Principal 绑定、method allowlist 和
-response encode；PAP 只是其中一组显式注册的方法，不增加第二个 service dispatch 层。
+该 slice 已由唯一的 concrete `DaemonDispatcher` 注册 first-version PAP daemon protocol，
+但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer
+credentials 到 trusted Principal 的绑定、method allowlist、authorization 和 response
+encode；PAP 是其中一组显式注册的方法，不增加第二个 service dispatch 层。当前 composition
+root 使用 `RootManagedPrincipalPolicy`：UID 0 默认具有 PAP 管理权限，其它 UID 在未加载
+root-owned delegation 前返回 `permission_denied`，caller-supplied identity 不能覆盖该判断。
+
+当前 PAP 由 `PolicyTemplateCompiler` 和过渡性的 process-local Repository 组成。Policy、Scope
+和 Binding CRUD 可在同一 daemon 生命周期内经真实 UDS 执行，但所有状态在进程重启后丢失，
+进程启动时会显式输出该限制。这些结果只证明 protocol、identity、authorization 和应用装配的
+integration slice，不表示 durable persistence、target enforcement 或 application READY。
 Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
 `RejectionEncoder` 投影，正常依赖图不包含 PAP、Repository 或 Compiler。
 framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 transaction 或其它共享阻塞
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
 当前还未实现 packaging-owned system socket 默认值、runtime directory hardening、Host
-singleton/stale-socket 判定、日志/OTel 和 health readiness。因此这一 slice 只提供
-DPROC-002/DPROC-003 的 focused source-level evidence，不能宣称 DPROC-012 至 DPROC-014 或
-production process gate 已完成。
+singleton/stale-socket 判定、日志/OTel 和 health readiness。因此这一 slice 提供
+DPROC-002/DPROC-003 的 focused process evidence，以及 DPROC-013 中 binary + UDS protocol
+注册、server-side permission 和 signal cleanup 的部分证据；它不能宣称 DPROC-012、完整
+DPROC-013、DPROC-014 或 production process gate 已完成。
 
 ## 9. 验收矩阵
 
@@ -291,4 +298,8 @@ service/package、server-side admission 或真实 Kubernetes rollout 验证。
 - data/log path：security_events/config.py、daemon/logging.py；
 - service tests：tests/e2e/daemon/test_daemon_systemd_e2e.py；
 - process/signal tests：tests/e2e/daemon/test_daemon_e2e.py；
-- package layout tests：tests/packaging/test-package-raw.sh。
+- package layout tests：tests/packaging/test-package-raw.sh；
+- Rust DPROC-002/DPROC-003 与部分 DPROC-013 process fixture：
+  v2/apps/asc-daemon/tests/bootstrap.rs；
+- Rust PAP 完整 serialized UDS scenario：
+  v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json。

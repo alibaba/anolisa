@@ -6,8 +6,9 @@ use crate::BootstrapConfig;
 
 const HELP: &str = "Usage: asc-daemon [serve] --socket <ABSOLUTE_PATH>\n\
 \n\
-Runs the protocol-independent AgentSecCore V2 UDS service.\n\
-This bring-up binary has no registered daemon methods yet.\n";
+Runs the AgentSecCore V2 UDS service with PAP administration methods.\n\
+Only root may modify Policy state unless root delegates an additional UID.\n\
+PAP state is process-local until durable Repository integration lands.\n";
 
 /// Parsed command-line configuration for the daemon process.
 #[derive(Debug, Clone, PartialEq, Eq)]

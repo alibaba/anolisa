@@ -6,9 +6,51 @@ version = 4
 name = "asc-daemon"
 version = "0.1.0"
 dependencies = [
+ "asc-daemon-core",
+ "asc-daemon-handler",
+ "asc-daemon-protocol",
  "asc-daemon-service",
+ "asc-foundation-types",
+ "asc-pap",
+ "asc-pap-repository-memory",
+ "asc-policy-engine",
+ "asc-policy-types",
+ "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "asc-daemon-core"
+version = "0.1.0"
+dependencies = [
+ "asc-foundation-types",
+ "asc-pap",
+ "asc-policy-types",
+ "thiserror",
+]
+
+[[package]]
+name = "asc-daemon-handler"
+version = "0.1.0"
+dependencies = [
+ "asc-daemon-core",
+ "asc-daemon-protocol",
+ "asc-daemon-service",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "asc-daemon-protocol"
+version = "0.1.0"
+dependencies = [
+ "asc-foundation-types",
+ "asc-policy-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -39,6 +81,26 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "asc-pap-repository-memory"
+version = "0.1.0"
+dependencies = [
+ "asc-foundation-types",
+ "asc-pap",
+ "asc-policy-engine",
+ "asc-policy-types",
+]
+
+[[package]]
+name = "asc-policy-engine"
+version = "0.1.0"
+dependencies = [
+ "asc-foundation-types",
+ "asc-pap",
+ "asc-policy-types",
+ "serde_json",
 ]
 
 [[package]]
