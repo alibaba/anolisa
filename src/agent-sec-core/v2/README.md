@@ -2,16 +2,21 @@
 
 This workspace slice contains the dependency-light contracts, Policy
 Administration Point, protocol-independent Unix-domain-socket service framework,
-and runnable foreground process bootstrap used by later AgentSecCore V2 work
-packages. It deliberately contains no daemon wire protocol, concrete persistence
-or Policy compiler, Policy runtime, reconciliation worker, outbox, or target
-Adapter.
+runnable foreground process bootstrap, the first AgentSight file-deletion
+target Adapter, and its independent deployment Client used by later AgentSecCore
+V2 work packages. It deliberately contains no daemon wire protocol, concrete
+persistence or Policy compiler, Policy runtime, reconciliation worker, or outbox.
 
 The current crates are:
 
 - `asc-foundation-types`: bounded transport-independent identifiers and revisions.
 - `asc-policy-types`: authored Policy and immutable prepared Policy/Scope/Binding
   snapshots, backend-independent IR, and target Adapter contracts.
+- `asc-policy-adapter-agentsight`: deterministic file-deletion and PID-Scope
+  translation into a compiler-checked AgentSight/ActPlane plan.
+- `asc-agentsight-client`: health-gated AgentSight apply/delete transport for
+  one configured endpoint, with process identity resolution and complete HTTP
+  fixtures. It does not depend on a reconciliation framework.
 - `asc-pap`: transport-independent current-record Policy/Scope/Binding CRUD with
   monotonic revisions over explicit compiler and repository ports.
 - `asc-daemon-service`: bounded UDS admission, one-request framing, kernel peer
@@ -169,9 +174,9 @@ Binding replacement and its reconcile intent atomically, then let the future
 Reconciler consume one complete `BindingView` whose embedded revision fences
 claim, retry, completion, failure, restart recovery, and cancellation.
 
-Daemon protocol, client, concrete persistence/compiler, Policy runtime,
-reconciliation worker, outbox, and target Adapter belong to later work packages
-and are intentionally absent from this slice.
+Daemon protocol, daemon client, concrete persistence/compiler, Policy runtime,
+reconciliation worker, and outbox belong to later work packages and are
+intentionally absent from this slice.
 
 Run the branch-owned validation from this directory:
 
