@@ -51,7 +51,15 @@ fi
 LOCK_SHA=$(sha256_of "$SCRIPT_DIR/Cargo.lock" || echo "unknown")
 FIXTURES_SHA=$(cat "$SCRIPT_DIR"/fixtures/*.json 2>/dev/null | sha256_of /dev/stdin || echo "unknown")
 RTK_BIN_PATH="${RTK_BIN:-$SCRIPT_DIR/../../third_party/rtk/target/release/rtk}"
-RTK_VERSION=$("$RTK_BIN_PATH" --version 2>/dev/null | head -1 || echo "unavailable")
+# Best-effort RTK version: only invoke the binary when it exists and is
+# executable, mirroring the Rust `find_rtk_binary` convention. This keeps the
+# script runnable when rtk is not built and avoids blocking on a slow-start
+# binary just to collect traceability metadata.
+if [[ -x "$RTK_BIN_PATH" ]]; then
+    RTK_VERSION=$("$RTK_BIN_PATH" --version 2>/dev/null | head -1 || echo "unavailable")
+else
+    RTK_VERSION="unavailable"
+fi
 TOKENLESS_VERSION=$(grep -m1 '^version' "$SCRIPT_DIR/../../Cargo.toml" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || echo "unknown")
 cat > "$IDENTITY_FILE" <<EOF
 {
