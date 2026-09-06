@@ -93,6 +93,18 @@ detect = { binary = "hermes" }
 entry = "plugin.yaml"
 
 [[adapters]]
+framework = "qwenpaw"
+kind = "third-party"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qwenpaw"
+dest = "{datadir}/adapters/{component}/qwenpaw/"
+detect = { binary = "qwenpaw" }
+
+[adapters.bundle]
+entry = "plugin.json"
+
+[[adapters]]
 framework = "qoder"
 adapter_type = "plugin"
 plugin_id = "tokenless"

@@ -57,6 +57,12 @@ const MANAGED_ENV: &[&str] = &[
     "FAKE_QODER_LARGE_INVENTORY",
     "FAKE_QODER_PLUGIN_ID",
     "FAKE_QODER_PROJECT_PLUGIN",
+    "QWENPAW_BIN",
+    "QWENPAW_WORKING_DIR",
+    "COPAW_WORKING_DIR",
+    "QWENPAW_HOME",
+    "FAKE_QWENPAW_LOG",
+    "FAKE_QWENPAW_FAIL",
 ];
 
 struct EnvGuard {
@@ -3824,4 +3830,424 @@ fn claude_code_external_rpm_root_needs_no_anchor_stays_v5() {
         "anchor-free state must stay at v5, got:\n{}",
         state_text.lines().take(3).collect::<Vec<_>>().join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// QwenPaw
+// ---------------------------------------------------------------------------
+
+fn stage_qwenpaw_bundle(root: &Path) {
+    std::fs::write(
+        root.join("plugin.json"),
+        br#"{"id":"tokenless","name":"Tokenless","version":"0.6.0","entry":{"backend":"plugin.py"}}"#,
+    )
+    .expect("plugin.json");
+    std::fs::write(root.join("plugin.py"), b"plugin = None\n").expect("plugin.py");
+    std::fs::write(root.join("requirements.txt"), b"anolisa-tokenless\n").expect("requirements");
+}
+
+/// Fake `qwenpaw` CLI. Like the real one it copies the bundle into
+/// `$QWENPAW_WORKING_DIR/plugins/<id>`, asks for confirmation on uninstall,
+/// and exits 0 even when an install or uninstall fails
+/// (`FAKE_QWENPAW_FAIL=install|uninstall`), leaving the installed tree in
+/// place.
+fn write_fake_qwenpaw(dir: &Path) -> PathBuf {
+    let path = dir.join("qwenpaw");
+    write_exec(
+        &path,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_QWENPAW_LOG"
+printf 'WORKING_DIR=%s\n' "${QWENPAW_WORKING_DIR:-unset}" >> "$FAKE_QWENPAW_LOG"
+plugins="$QWENPAW_WORKING_DIR/plugins"
+if [ "$1" = plugin ] && [ "$2" = install ]; then
+  if [ "$FAKE_QWENPAW_FAIL" = install ]; then
+    echo "❌ Failed to install plugin: simulated"
+    exit 0
+  fi
+  id=$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$3/plugin.json" | head -n1)
+  dst="$plugins/$id"
+  if [ -d "$dst" ] && [ "$4" != "--force" ]; then
+    echo "❌ Plugin '$id' already installed. Use --force to overwrite."
+    exit 0
+  fi
+  rm -rf "$dst"
+  mkdir -p "$plugins"
+  cp -R "$3" "$dst"
+  exit 0
+fi
+if [ "$1" = plugin ] && [ "$2" = uninstall ]; then
+  read -r answer
+  [ "$answer" = y ] || exit 1
+  if [ "$FAKE_QWENPAW_FAIL" = uninstall ]; then
+    echo "❌ Failed to uninstall plugin: simulated"
+    exit 0
+  fi
+  rm -rf "$plugins/$3"
+  exit 0
+fi
+exit 0
+"#,
+    );
+    path
+}
+
+fn apply_qwenpaw_env(guard: &EnvGuard, world: &World, fake_bin: &Path) -> (PathBuf, PathBuf) {
+    let log = world.prefix.join("qwenpaw.log");
+    guard.set("QWENPAW_BIN", fake_bin);
+    guard.set("FAKE_QWENPAW_LOG", &log);
+    let plugin_dir = world.user_home.join(".qwenpaw/plugins/tokenless");
+    (log, plugin_dir)
+}
+
+fn stage_qwenpaw() -> World {
+    stage(
+        "qwenpaw",
+        "plugin",
+        "{datadir}/adapters/{component}/qwenpaw/",
+        stage_qwenpaw_bundle,
+    )
+}
+
+#[test]
+fn qwenpaw_enable_status_disable_delegates_to_cli() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let claim = match manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("enable")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    assert_eq!(claim.plugin_id.as_deref(), Some("tokenless"));
+    assert!(matches!(claim.driver_payload, DriverPayload::QwenPaw(_)));
+    assert!(
+        claim.materialized_files.is_empty(),
+        "qwenpaw owns the copied tree; ANOLISA must not claim its files"
+    );
+
+    let log_text = std::fs::read_to_string(&log).expect("qwenpaw log");
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l == format!("plugin install {} --force", world.resource_root.display())),
+        "must hand the bundle root to the CLI: {log_text}"
+    );
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l == format!("WORKING_DIR={}", world.user_home.join(".qwenpaw").display())),
+        "must pin the working directory: {log_text}"
+    );
+    assert!(plugin_dir.join("plugin.json").is_file());
+    assert!(plugin_dir.join("requirements.txt").is_file());
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+    assert!(status.entries[0].report.conditions.iter().any(|c| {
+        c.kind == AdapterConditionKind::PluginRegistered && c.status == ConditionStatus::True
+    }));
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qwenpaw"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    let log_text = std::fs::read_to_string(&log).expect("qwenpaw log");
+    assert!(
+        log_text.lines().any(|l| l == "plugin uninstall tokenless"),
+        "disable must uninstall through the CLI: {log_text}"
+    );
+    assert!(!plugin_dir.exists(), "plugin directory must be gone");
+    assert!(
+        world.user_home.join(".qwenpaw").is_dir(),
+        "working directory itself must survive"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qwenpaw")
+            .is_none()
+    );
+}
+
+#[test]
+fn qwenpaw_enable_fails_closed_when_cli_exits_zero_without_installing() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+    guard.set("FAKE_QWENPAW_FAIL", Path::new("install"));
+
+    let err = world
+        .manager()
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect_err("install that produced no plugin must fail");
+    assert!(
+        matches!(err, AdapterError::FrameworkCli { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("simulated"),
+        "failure must surface the CLI's message: {err}"
+    );
+    assert!(!plugin_dir.exists());
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qwenpaw")
+        .cloned()
+        .expect("write-ahead receipt kept for retry");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+    let log_text = std::fs::read_to_string(&log).expect("qwenpaw log");
+    assert!(
+        !log_text.lines().any(|l| l.starts_with("plugin uninstall")),
+        "a failed install must not trigger an uninstall: {log_text}"
+    );
+}
+
+#[test]
+fn qwenpaw_reenable_reinstalls_with_force() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("first enable");
+    std::fs::write(plugin_dir.join("stale"), b"x").expect("stale marker");
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("second enable");
+
+    let log_text = std::fs::read_to_string(&log).expect("qwenpaw log");
+    let installs = log_text
+        .lines()
+        .filter(|l| l.starts_with("plugin install ") && l.ends_with(" --force"))
+        .count();
+    assert_eq!(
+        installs, 2,
+        "every enable reinstalls with --force: {log_text}"
+    );
+    assert!(
+        !plugin_dir.join("stale").exists(),
+        "re-enable replaces the installed tree"
+    );
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
+#[test]
+fn qwenpaw_reenable_fails_closed_when_stale_bundle_remains() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (_log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("first enable");
+    // The installed tree no longer holds the source bundle (an older
+    // install), and the reinstall fails: the CLI exits 0 and leaves that
+    // tree, whose manifest still carries the expected id.
+    std::fs::write(plugin_dir.join("plugin.py"), b"plugin = 'previous'\n")
+        .expect("stale plugin.py");
+    guard.set("FAKE_QWENPAW_FAIL", Path::new("install"));
+
+    let err = manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect_err("a stale bundle must not pass as installed");
+    assert!(
+        matches!(err, AdapterError::FrameworkCli { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("does not match the source bundle"),
+        "failure must name the stale file: {err}"
+    );
+    assert!(
+        plugin_dir.join("plugin.json").is_file(),
+        "the previous tree is left for QwenPaw"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qwenpaw")
+        .cloned()
+        .expect("receipt kept for retry");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn qwenpaw_disable_keeps_receipt_when_uninstall_fails() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (_log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("enable");
+
+    guard.set("FAKE_QWENPAW_FAIL", Path::new("uninstall"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qwenpaw"), false)
+        .expect("disable runs");
+    assert!(
+        !disabled.claim_removed,
+        "receipt kept when hot-unload fails"
+    );
+    assert!(!disabled.report.cleanup_complete);
+    assert!(
+        plugin_dir.is_dir(),
+        "a failed hot-unload must leave the directory for retry"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qwenpaw")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+
+    guard.set("FAKE_QWENPAW_FAIL", Path::new("none"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qwenpaw"), false)
+        .expect("retry runs");
+    assert!(disabled.claim_removed, "retry completes the cleanup");
+    assert!(disabled.report.cleanup_complete);
+    assert!(!plugin_dir.exists());
+}
+
+#[test]
+fn qwenpaw_disable_uses_working_directory_from_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("enable");
+    assert!(plugin_dir.is_dir());
+
+    // ~/.copaw appearing after enable moves the ambient resolution; the
+    // receipt still names ~/.qwenpaw and the CLI must be pointed there.
+    std::fs::create_dir_all(world.user_home.join(".copaw")).expect("mkdir ~/.copaw");
+    let disabled = manager
+        .disable(COMPONENT, Some("qwenpaw"), false)
+        .expect("disable");
+    assert!(
+        disabled.claim_removed,
+        "cleanup completes: {:?}",
+        disabled.report
+    );
+    assert!(disabled.report.cleanup_complete);
+    assert!(!plugin_dir.exists());
+    let log_text = std::fs::read_to_string(&log).expect("read fake CLI log");
+    let expected = format!("WORKING_DIR={}", world.user_home.join(".qwenpaw").display());
+    assert_eq!(
+        log_text.lines().rfind(|l| l.starts_with("WORKING_DIR=")),
+        Some(expected.as_str()),
+        "uninstall must use the receipt's working directory: {log_text}"
+    );
+}
+
+#[test]
+fn qwenpaw_disable_without_cli_keeps_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (_log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("enable");
+
+    guard.set("QWENPAW_BIN", &world.prefix.join("no-such-qwenpaw"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qwenpaw"), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed, "receipt kept when CLI absent");
+    assert!(!disabled.report.cleanup_complete);
+    assert!(
+        plugin_dir.is_dir(),
+        "without the CLI the plugin directory must be left alone"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qwenpaw")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::CleanupFailed
+    );
+}
+
+#[test]
+fn qwenpaw_dry_run_enable_writes_nothing() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let outcome = world
+        .manager()
+        .enable(COMPONENT, Some("qwenpaw"), true)
+        .expect("dry-run enable");
+    let EnableOutcome::Planned { plan, .. } = outcome else {
+        panic!("dry run must only plan");
+    };
+    let register = plan.register_command.expect("install command in plan");
+    assert!(
+        register.ends_with(&format!(
+            "qwenpaw plugin install {} --force",
+            world.resource_root.display()
+        )),
+        "plan must show the CLI invocation: {register}"
+    );
+    assert!(!log.exists(), "dry run must not run the CLI");
+    assert!(!plugin_dir.exists());
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qwenpaw")
+            .is_none()
+    );
+}
+
+#[test]
+fn qwenpaw_status_degraded_when_plugin_removed_externally() {
+    let guard = EnvGuard::acquire();
+    let world = stage_qwenpaw();
+    let fake = write_fake_qwenpaw(&world.prefix);
+    let (_log, plugin_dir) = apply_qwenpaw_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qwenpaw"), false)
+        .expect("enable");
+    std::fs::remove_dir_all(&plugin_dir).expect("remove plugin dir");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    assert!(status.entries[0].report.conditions.iter().any(|c| {
+        c.kind == AdapterConditionKind::PluginRegistered && c.status == ConditionStatus::False
+    }));
+
+    // A different plugin occupying the directory is not ours either.
+    std::fs::create_dir_all(&plugin_dir).expect("recreate");
+    std::fs::write(plugin_dir.join("plugin.json"), br#"{"id":"someone-else"}"#).expect("other");
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
 }

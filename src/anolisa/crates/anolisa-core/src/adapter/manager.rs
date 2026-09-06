@@ -3668,6 +3668,8 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         "qoder" => Some(&["plugin"]),
         // dsh bundles are native plugins registered per explicit profile.
         "dsh" => Some(&["plugin"]),
+        // QwenPaw installs a directory-named plugin through its own CLI.
+        "qwenpaw" => Some(&["plugin"]),
         // Extension frameworks require an explicit type. Qwen Code delegates
         // artifact and activation mutations to its native CLI.
         "cosh" | "qwencode" => Some(&["extension"]),
@@ -4018,12 +4020,13 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
 
     // Resource ids that a real disable actually acts on. Empty plugin ids
     // (skill-bundle receipts carry no plugin resource) are excluded.
-    // `hermes_plugin_id` is the plugin resource id for Hermes receipts:
-    // real Hermes disable first runs `hermes plugins disable <id>` before
-    // removing the plugin directory, so its dry-run plan needs the extra
-    // CLI-disable line that OpenClaw (registry-only) does not.
+    // `cli_step` names the plugin resource id and verb for receipts whose
+    // real disable first runs a framework CLI step (`hermes plugins disable
+    // <id>`, `qwenpaw plugin uninstall <id>`) before removing the plugin
+    // directory, so their dry-run plan needs the extra CLI line that
+    // OpenClaw (registry-only) does not.
     let mut cleanup_ids: Vec<&str> = Vec::new();
-    let hermes_plugin_id: Option<&str> = match &claim.driver_payload {
+    let cli_step: Option<(&str, &str)> = match &claim.driver_payload {
         DriverPayload::OpenClaw(oc) => {
             cleanup_ids.extend(oc.skill_resources.iter().map(String::as_str));
             if !oc.plugin_resource.is_empty() {
@@ -4037,7 +4040,7 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
                 None
             } else {
                 cleanup_ids.push(&h.plugin_resource);
-                Some(h.plugin_resource.as_str())
+                Some((h.plugin_resource.as_str(), "disable"))
             }
         }
         DriverPayload::Cosh(c) => {
@@ -4085,6 +4088,10 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
             }
             None
         }
+        DriverPayload::QwenPaw(q) => {
+            cleanup_ids.push(&q.plugin_resource);
+            Some((q.plugin_resource.as_str(), "uninstall"))
+        }
     };
 
     // Whether disable uninstalls (Claude Code / Qoder semantics) rather than
@@ -4127,12 +4134,17 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
                 messages.push(format!("would remove symlink {}", link.display()));
             }
             ClaimResourceKind::ExternalPath { path } => {
-                // Hermes stores its plugin as a directory (ExternalPath) but
-                // disable also runs a CLI step first — surface it.
-                if Some(resource.id.as_str()) == hermes_plugin_id
+                // Hermes and QwenPaw store the plugin as a directory
+                // (ExternalPath) but disable also runs a CLI step first —
+                // surface it.
+                if let Some((cli_resource, verb)) = cli_step
+                    && cli_resource == resource.id
                     && let Some(plugin_id) = claim.plugin_id.as_deref()
                 {
-                    messages.push(format!("would disable hermes plugin '{plugin_id}'"));
+                    messages.push(format!(
+                        "would {verb} {} plugin '{plugin_id}'",
+                        claim.framework
+                    ));
                 }
                 messages.push(format!("would remove {}", path.display()));
             }
@@ -4956,11 +4968,20 @@ mod tests {
         assert!(ok("dsh", Some("plugin")));
         assert!(ok("dsh", None), "dsh defaults to plugin");
         assert!(ok("qwencode", Some("extension")));
+        assert!(ok("qwenpaw", Some("plugin")));
+        assert!(ok("qwenpaw", None), "qwenpaw defaults to plugin");
     }
 
     #[test]
     fn framework_type_matrix_rejects_extension_on_plugin_frameworks() {
-        for fw in ["openclaw", "hermes", "codex", "claude-code", "qoder"] {
+        for fw in [
+            "openclaw",
+            "hermes",
+            "codex",
+            "claude-code",
+            "qoder",
+            "qwenpaw",
+        ] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("extension"))
                 .expect_err(&format!("{fw} + extension must be rejected"));
             assert!(
@@ -8809,6 +8830,76 @@ dest = "{datadir}/skills"
                 .iter()
                 .any(|m| m == "would remove /home/user/.hermes"),
             "must NOT claim to remove the hermes home: {:#?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn plan_disable_report_qwenpaw_plugin_adapter() {
+        use crate::adapter::claim::{
+            CLAIM_SCHEMA_VERSION, ClaimResource, ClaimResourceKind, ClaimStatus,
+            DRIVER_SCHEMA_VERSION, DriverPayload, QwenPawClaim,
+        };
+
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "test-comp".to_string(),
+            framework: "qwenpaw".to_string(),
+            plugin_id: Some("test-comp".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-09-04T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/fake/adapters/test-comp/qwenpaw"),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: vec![
+                ClaimResource {
+                    id: "qwenpaw_home".to_string(),
+                    purpose: "qwenpaw_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.qwenpaw"),
+                    },
+                },
+                ClaimResource {
+                    id: "qwenpaw_plugin".to_string(),
+                    purpose: "qwenpaw_plugin_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.qwenpaw/plugins/test-comp"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::QwenPaw(QwenPawClaim {
+                home_resource: "qwenpaw_home".to_string(),
+                plugin_resource: "qwenpaw_plugin".to_string(),
+            }),
+        };
+
+        let report = plan_disable_report(&claim);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m == "would uninstall qwenpaw plugin 'test-comp'"),
+            "must describe the qwenpaw CLI uninstall step: {:#?}",
+            report.messages
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.qwenpaw/plugins/test-comp"),
+            "must describe the plugin directory removal: {:#?}",
+            report.messages
+        );
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.qwenpaw"),
+            "must NOT claim to remove the qwenpaw working directory: {:#?}",
             report.messages
         );
     }

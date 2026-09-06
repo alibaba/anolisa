@@ -589,6 +589,9 @@ pub enum DriverPayload {
     /// Qwen Code driver payload.
     #[serde(rename = "qwencode")]
     QwenCode(QwenCodeClaim),
+    /// QwenPaw driver payload.
+    #[serde(rename = "qwenpaw")]
+    QwenPaw(QwenPawClaim),
     /// DeepSeek Harness (`dsh`) native plugin payload.
     #[serde(rename = "dsh")]
     Dsh(DshClaim),
@@ -732,6 +735,19 @@ pub struct QwenCodeClaim {
     pub extension_dir_resource: String,
     /// Resource id of the installed extension
     /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
+}
+
+/// QwenPaw driver payload. QwenPaw copies, validates and hot-loads the
+/// plugin through its own CLI; the receipt references the working directory
+/// and the installed plugin directory the CLI populated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenPawClaim {
+    /// Resource id of the QwenPaw working directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub home_resource: String,
+    /// Resource id of the installed plugin directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
     pub plugin_resource: String,
 }
 
@@ -1612,6 +1628,69 @@ mod tests {
         let json = serde_json::to_string(&claim).expect("serialize Hermes JSON");
         let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse Hermes JSON");
         assert_eq!(claim, parsed);
+    }
+
+    fn sample_qwenpaw_claim() -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "qwenpaw".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-09-04T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwenpaw"),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: vec![
+                ClaimResource {
+                    id: "qwenpaw_home".to_string(),
+                    purpose: "qwenpaw_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qwenpaw"),
+                    },
+                },
+                ClaimResource {
+                    id: "qwenpaw_plugin".to_string(),
+                    purpose: "qwenpaw_plugin_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qwenpaw/plugins/tokenless"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::QwenPaw(QwenPawClaim {
+                home_resource: "qwenpaw_home".to_string(),
+                plugin_resource: "qwenpaw_plugin".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn qwenpaw_claim_round_trips_and_validates() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let claim = sample_qwenpaw_claim();
+        let wrapper = Wrapper {
+            adapter_claims: vec![claim.clone()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize QwenPaw to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse QwenPaw from TOML");
+        assert_eq!(
+            wrapper, parsed,
+            "QwenPaw round-trip mismatch; TOML:\n{text}"
+        );
+        let json = serde_json::to_string(&claim).expect("serialize QwenPaw JSON");
+        let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse QwenPaw JSON");
+        assert_eq!(claim, parsed);
+        let layout = FsLayout::system(None);
+        claim
+            .validate(&layout, &[PathBuf::from("/home/alice/.qwenpaw")])
+            .expect("QwenPaw claim validates under its working directory");
     }
 
     #[test]

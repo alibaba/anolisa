@@ -13,6 +13,7 @@ use super::hermes::HermesDriver;
 use super::openclaw::OpenClawDriver;
 use super::qoder::QoderDriver;
 use super::qwencode::QwenCodeDriver;
+use super::qwenpaw::QwenPawDriver;
 
 /// Immutable collection of the built-in framework drivers.
 pub struct DriverRegistry {
@@ -32,6 +33,7 @@ impl DriverRegistry {
                 Box::new(ClaudeCodeDriver::new()),
                 Box::new(QoderDriver::new()),
                 Box::new(QwenCodeDriver::new()),
+                Box::new(QwenPawDriver::new()),
             ],
         }
     }
@@ -76,6 +78,7 @@ mod tests {
         assert!(reg.contains("claude-code"));
         assert!(reg.contains("qoder"));
         assert!(reg.contains("qwencode"));
+        assert!(reg.contains("qwenpaw"));
         assert_eq!(
             reg.names(),
             vec![
@@ -86,7 +89,8 @@ mod tests {
                 "codex",
                 "claude-code",
                 "qoder",
-                "qwencode"
+                "qwencode",
+                "qwenpaw"
             ]
         );
     }
