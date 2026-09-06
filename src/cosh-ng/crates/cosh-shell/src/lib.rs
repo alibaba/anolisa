@@ -41,6 +41,9 @@ mod path_prompt_tests;
 mod question;
 #[path = "raw_input/public.rs"]
 pub mod raw_input;
+#[cfg(test)]
+#[path = "tools/readonly_rules/traversal_tests.rs"]
+mod readonly_traversal_tests;
 #[path = "shell_host/public.rs"]
 pub mod shell_host;
 #[allow(dead_code)]

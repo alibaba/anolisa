@@ -130,6 +130,14 @@ mod tests {
 
         assert!(piped.contains("metacharacter"));
         assert!(mutation.contains("allowlist"));
+
+        // Issue #2184 vector-level pin: ANSI-C `$'...'` quoting is denied
+        // by the shell-meta gate before any path check, so the quoting
+        // bypass never reaches the readonly path predicate.
+        for command in ["cat $'/proc/version'", "cat $'/etc/shadow'"] {
+            let err = readonly_tokens(command).unwrap_err();
+            assert!(err.contains("metacharacter"), "{command}: {err}");
+        }
     }
 
     #[test]
