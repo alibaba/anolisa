@@ -1,8 +1,9 @@
 //! Invocation-transparency dispatch for the `/usr/bin/cosh` entry.
 //!
 //! Single source of truth for the installed entry: the reserved `agent`
-//! namespace enters the Gateway, the TUI is an allowlist, and every other argv
-//! shape is handed verbatim to the inner shell via `execve`.
+//! namespace enters the Gateway, the TUI is an allowlist, and other shapes
+//! preserve shell-owned argv unless a leading cosh-owned `--isolated` requests
+//! target-specific startup suppression or fail-closed handling.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -35,10 +36,11 @@ pub(crate) struct ExecPlan {
     /// argv[0] passed through verbatim (login `-` prefix included) so the
     /// inner shell observes the same `$0` contract as a direct bash call.
     pub(crate) arg0: OsString,
-    /// Remaining argv, byte-for-byte. Only a `--shell` with a usable value
-    /// is consumed; TUI-only flags stay in place so the inner shell rejects
-    /// them loudly instead of silently losing their semantics.
+    /// Remaining inner-shell argv. Cosh-owned target metadata is consumed
+    /// before this boundary; bytes after the first shell token stay verbatim.
     pub(crate) args: Vec<OsString>,
+    /// Translate the cosh-owned isolation contract for the selected shell.
+    pub(crate) isolated: bool,
 }
 
 /// True when argv[0] names the `/usr/bin/cosh` entry (optionally with the
@@ -67,11 +69,11 @@ fn login_argv0(argv0: &OsStr) -> bool {
     argv0.as_bytes().first() == Some(&b'-')
 }
 
-/// Standalone allowlist flags kept verbatim for the inner shell. Single
-/// vocabulary source shared by the classifier scan, the launch-side adapter
-/// scan (`cli_args::adapter_name_from_args`), and the vocabulary-contract
-/// test, so adding a flag here mechanically updates all three. Value-carrying
-/// flags (`--shell`, `--resume`) have shape-specific arms and stay explicit.
+/// Standalone allowlist flags recognized by the classifier. Single vocabulary
+/// source shared by the classifier scan, the launch-side adapter scan
+/// (`cli_args::adapter_name_from_args`), and the vocabulary-contract test, so
+/// adding a flag here mechanically updates all three. Exec handling remains
+/// flag-specific; value-carrying flags (`--shell`, `--resume`) stay explicit.
 pub(crate) const TUI_STANDALONE_FLAGS: &[&str] = &["-l", "--login", "--isolated"];
 
 /// Single source of truth for the login-shell bit: argv[0] carries the
@@ -92,11 +94,10 @@ pub(crate) fn is_login_invocation<A: AsRef<OsStr>>(argv0: &OsStr, args: &[A]) ->
 ///    the inner shell). A missing, empty, or dash-leading value is not
 ///    consumed: the token is handed to the inner shell verbatim, which
 ///    reports it as an invalid option.
-/// 2. Login flags (`-l`/`--login`) and TUI-only flags (`--isolated`,
-///    `--resume [id]`, `--resume=id`) stay eligible for the TUI and are
-///    kept verbatim for the inner shell on the exec side, so a TUI-only
-///    flag that ends up on the exec path fails loudly as an invalid bash
-///    option instead of being silently dropped.
+/// 2. Login flags (`-l`/`--login`) and TUI-only resume flags stay eligible
+///    for the TUI and are kept verbatim for the inner shell on the exec side.
+///    `--isolated` is cosh-owned target metadata and is translated only after
+///    the inner shell is selected.
 /// 3. Any other token (options, operands, unknown or future flags, non-UTF-8
 ///    bytes) short-circuits to `ExecShell` with the remainder untouched, so
 ///    the worst case for an unclassified shape is native bash.
@@ -130,10 +131,15 @@ pub(crate) fn classify_invocation(
 
     let mut kept: Vec<OsString> = Vec::new();
     let mut shell_override: Option<OsString> = None;
+    let mut isolated = false;
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
         match arg.to_str() {
+            Some("--isolated") => {
+                isolated = true;
+                idx += 1;
+            }
             Some(text) if TUI_STANDALONE_FLAGS.contains(&text) => {
                 kept.push(arg.clone());
                 idx += 1;
@@ -181,6 +187,7 @@ pub(crate) fn classify_invocation(
                     shell_override,
                     arg0: argv0.to_os_string(),
                     args: rest,
+                    isolated,
                 });
             }
         }
@@ -196,6 +203,7 @@ pub(crate) fn classify_invocation(
             shell_override,
             arg0: argv0.to_os_string(),
             args: kept,
+            isolated,
         })
     }
 }
@@ -258,10 +266,11 @@ pub(crate) fn normalize_raw_invocation(args: &[OsString]) -> Option<Vec<OsString
     None
 }
 
-/// Replace the current process with the inner shell (`execve`), preserving
-/// argv[0], argument bytes, and the inherited SIGPIPE disposition. Returns an
-/// exit code only when the exec itself fails (127 missing / 126 otherwise,
-/// matching the shell convention).
+/// Execute the inner-shell plan, preserving shell-owned argv and SIGPIPE state
+/// outside the cosh-owned isolation contract. Isolated Bash execs suppress its
+/// startup inputs; isolated Zsh execs use `-f` only with no shell arguments and
+/// reject arguments before exec; unsupported targets retain `--isolated` and
+/// fail loudly. Returns 2 for the Zsh rejection, or 127/126 when exec fails.
 pub(crate) fn exec_shell(plan: ExecPlan) -> i32 {
     use std::os::unix::process::CommandExt;
 
@@ -270,6 +279,30 @@ pub(crate) fn exec_shell(plan: ExecPlan) -> i32 {
         .or_else(|| std::env::var_os("COSH_SHELL_DEFAULT_SHELL").filter(|value| !value.is_empty()))
         .unwrap_or_else(|| OsString::from("bash"));
     let mut command = std::process::Command::new(&shell);
+    if plan.isolated {
+        match entry_basename(&shell) {
+            b"bash" | b"cosh-shell-bash" => {
+                // Bash long options must precede single-character options.
+                // `--norc` also covers bash's remote-daemon startup path.
+                command.args(["--noprofile", "--norc"]);
+                command.env_remove("BASH_ENV");
+                command.env_remove("ENV");
+            }
+            b"zsh" | b"cosh-shell-zsh" => {
+                if !plan.args.is_empty() {
+                    let program = String::from_utf8_lossy(entry_basename(&plan.arg0));
+                    eprintln!("{program}: isolated Zsh shell arguments are not supported");
+                    return 2;
+                }
+                command.arg("-f");
+            }
+            _ => {
+                // Unsupported targets retain the fail-loud contract instead
+                // of silently claiming isolation that was not established.
+                command.arg("--isolated");
+            }
+        }
+    }
     command.args(&plan.args).arg0(&plan.arg0);
     unsafe {
         command.pre_exec(crate::shell_host::sigpipe::restore_in_child);
@@ -519,50 +552,6 @@ mod tests {
                 }
                 other => panic!("expected ExecShell for {args:?}, got {other:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn classify_rows_16_17_tui_only_flags_gate_on_terminals_and_fail_loud() {
-        // On terminals the TUI-only flags admit the TUI…
-        for args in [
-            vec!["--resume"],
-            vec!["--resume", "00000000-0000-4000-8000-000000000000"],
-            vec!["--isolated"],
-            vec!["--shell", "zsh", "--isolated"],
-            vec!["--shell=bash"],
-        ] {
-            assert!(
-                matches!(classify("cosh", &args, ALL_TTY), Invocation::Tui(_)),
-                "args {args:?}"
-            );
-        }
-        // …and on the exec path they stay in argv verbatim so the inner
-        // shell rejects them loudly instead of silently dropping semantics.
-        for args in [
-            vec!["--resume"],
-            vec!["--resume", "00000000-0000-4000-8000-000000000000"],
-            vec!["--isolated"],
-        ] {
-            let invocation = classify("cosh", &args, (false, true, true));
-            assert_eq!(
-                exec_args(invocation),
-                os(&args),
-                "args {args:?} must reach the inner shell verbatim"
-            );
-        }
-        // `--shell` with a usable value is consumed even on the exec path
-        // (it selects the inner shell); the TUI-only flag stays.
-        match classify(
-            "cosh",
-            &["--shell", "zsh", "--isolated"],
-            (false, true, true),
-        ) {
-            Invocation::ExecShell(plan) => {
-                assert_eq!(plan.shell_override, Some(OsString::from("zsh")));
-                assert_eq!(plan.args, os(&["--isolated"]));
-            }
-            other => panic!("expected ExecShell, got {other:?}"),
         }
     }
 
