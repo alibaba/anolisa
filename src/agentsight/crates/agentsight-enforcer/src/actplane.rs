@@ -45,7 +45,7 @@ struct ActiveBinding {
     binding: Binding,
     credential_policy: Option<CredentialExfiltrationPolicy>,
     /// When the target process runs inside a PID namespace, this holds the
-    /// global kernel PID resolved by [`resolve_kernel_pid`].  `None` when
+    /// global kernel PID resolved by [`resolve_to_host_pid`].  `None` when
     /// the namespace PID equals the kernel PID (root namespace).
     kernel_pid: Option<i32>,
     reasons: Vec<String>,
@@ -98,6 +98,10 @@ pub struct ActPlaneBackend {
     stop: Arc<AtomicBool>,
     poller: Mutex<Option<JoinHandle<()>>>,
     lifecycle: Mutex<()>,
+    /// True when the enforcer is running in the init PID namespace.
+    /// File-delete-guard requires this for correct cap_task seeding and
+    /// domain propagation.  When false, health reports file_delete_guard=false.
+    in_init_pidns: bool,
 }
 
 impl ActPlaneBackend {
@@ -148,6 +152,7 @@ impl ActPlaneBackend {
             stop,
             poller: Mutex::new(Some(poller)),
             lifecycle: Mutex::new(()),
+            in_init_pidns: is_init_pid_namespace(),
         })
     }
 
@@ -182,9 +187,19 @@ impl ActPlaneBackend {
 
     fn prepare_binding(
         &self,
-        request: ApplyPolicy,
+        mut request: ApplyPolicy,
         credential_policy: Option<CredentialExfiltrationPolicy>,
     ) -> Result<PreparedBinding, BackendError> {
+        // Resolve namespace-local PID to host PID BEFORE start-time validation,
+        // so that the stale-process check reads the correct /proc/<host_pid>/stat.
+        let host_pid = resolve_to_host_pid(request.root_pid, request.process_start_time);
+        if host_pid != request.root_pid {
+            eprintln!(
+                "resolve_to_host_pid: namespace pid {} -> host pid {}",
+                request.root_pid, host_pid
+            );
+            request.root_pid = host_pid;
+        }
         let actual_start = read_process_start_time(request.root_pid)?;
         if actual_start != request.process_start_time {
             return Err(BackendError::StaleProcess {
@@ -231,15 +246,8 @@ impl ActPlaneBackend {
                 )
             })?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
-        let kernel_pid = resolve_kernel_pid(request.root_pid);
-        if kernel_pid != request.root_pid {
-            eprintln!(
-                "PID namespace detected: namespace pid {} -> kernel pid {}",
-                request.root_pid, kernel_pid
-            );
-        }
         self.engine
-            .seed_label_in_domain(kernel_pid, id, label)
+            .seed_label_in_domain(request.root_pid, id, label)
             .map_err(|error| kernel_error("seed target process domain", error))?;
 
         let control_pid = std::process::id() as i32;
@@ -257,13 +265,10 @@ impl ActPlaneBackend {
             label_mask: u64::MAX,
             ..CapState::default()
         };
-        let kpid = if kernel_pid != request.root_pid {
-            Some(kernel_pid)
-        } else {
-            None
-        };
+        // After prepare_binding, request.root_pid is already the host PID
+        // (resolve_to_host_pid was called there).  No separate kernel_pid needed.
         if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
-            let cleanup = self.cleanup_binding(&request, id, kpid);
+            let cleanup = self.cleanup_binding(&request, id, None);
             return Err(kernel_error_with_cleanup(
                 "bind control process",
                 error,
@@ -274,7 +279,7 @@ impl ActPlaneBackend {
             .reload
             .append_policy_delta(control_pid, id, &compiled.bytes)
         {
-            let cleanup = self.cleanup_binding(&request, id, kpid);
+            let cleanup = self.cleanup_binding(&request, id, None);
             return Err(kernel_error_with_cleanup(
                 "append policy delta",
                 error,
@@ -282,7 +287,7 @@ impl ActPlaneBackend {
             ));
         }
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
-            let cleanup = self.cleanup_binding(&request, id, kpid);
+            let cleanup = self.cleanup_binding(&request, id, None);
             return Err(kernel_error_with_cleanup(
                 "unbind control process",
                 error,
@@ -301,7 +306,7 @@ impl ActPlaneBackend {
             ActiveBinding {
                 binding: binding.clone(),
                 credential_policy,
-                kernel_pid: kpid,
+                kernel_pid: None,
                 reasons: compiled.reasons,
                 rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
                 label_names: compiled
@@ -374,8 +379,9 @@ impl EnforcementBackend for ActPlaneBackend {
         // state so a host without an active BPF-LSM reports file_delete_guard=false
         // (fail-closed) instead of advertising a capability that silently enforces
         // nothing.
-        capabilities.file_delete_guard =
-            self.engine.supports_file_delete_guard() && ebpf_ifc_engine::bpf_lsm_active();
+        capabilities.file_delete_guard = self.engine.supports_file_delete_guard()
+            && ebpf_ifc_engine::bpf_lsm_active()
+            && self.in_init_pidns;
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
@@ -1145,45 +1151,116 @@ fn kernel_error_with_cleanup(
     BackendError::KernelFailure(message)
 }
 
-/// Translate a potentially namespace-local PID to the global kernel PID.
+/// Resolve a potentially namespace-local PID to the global (init namespace)
+/// kernel PID that BPF `handle_fork` / `cap_fork` will use.
 ///
-/// When a process runs inside a PID namespace (containers, WSL2, etc.),
-/// `/proc/<pid>/status` contains an `NSpid:` line listing the PID at each
-/// nesting level — the first value is always the global kernel PID.  BPF
-/// helpers like `bpf_get_current_pid_tgid()` return that global PID, so
-/// `cap_task` entries must be keyed by it for `handle_fork` lookups to
-/// succeed.
+/// The enforcer **must** run in the init PID namespace for this to work.
+/// When it does, host `/proc/<pid>/status` exposes the full `NSpid` chain.
 ///
-/// Returns `ns_pid` unchanged when running in the root namespace (no
-/// `NSpid` line, or only one level listed).
-///
-/// **Assumption**: the enforcer process runs in the root PID namespace,
-/// so host `/proc/<pid>/status` exposes the full `NSpid` chain.  If the
-/// enforcer is ever deployed inside a sidecar container sharing the
-/// target's PID namespace, this function becomes a no-op and a
-/// different identity resolution strategy is needed.
-fn resolve_kernel_pid(ns_pid: i32) -> i32 {
-    let path = format!("/proc/{ns_pid}/status");
-    let status = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return ns_pid,
+/// **Algorithm**:
+/// 1. Fast path: `/proc/<input_pid>/stat` exists and `start_time` matches →
+///    the PID is valid in the host namespace.  Return `NSpid[0]` (always the
+///    host PID when reading from init ns).
+/// 2. Slow path: the PID does not exist in host `/proc` or `start_time` does
+///    not match (namespace-local PID collides with a different host process).
+///    Scan `/proc/*/status` for a process whose innermost `NSpid` value equals
+///    `input_pid` and whose `start_time` matches.  Return its host PID.
+/// 3. Fallback: no match found — return `input_pid` unchanged and let the
+///    caller handle the stale-process / not-found case.
+fn resolve_to_host_pid(input_pid: i32, input_start_time: u64) -> i32 {
+    // Fast path: pid exists in host /proc and start_time matches.
+    if let Ok(start_time) = proc_start_time(input_pid) {
+        if start_time == input_start_time {
+            return first_nspid(input_pid).unwrap_or(input_pid);
+        }
+        // pid exists but belongs to a different process (namespace collision).
+    }
+
+    // Slow path: scan /proc for a process whose innermost NSpid == input_pid
+    // and whose start_time matches.
+    let proc_dir = match fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(_) => return input_pid,
+    };
+    for entry in proc_dir.flatten() {
+        let name = entry.file_name();
+        let Ok(host_pid) = name.to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if host_pid <= 0 {
+            continue;
+        }
+        let nspid = read_nspid_chain(host_pid);
+        if nspid.len() < 2 {
+            continue; // not in a nested namespace
+        }
+        if *nspid.last().unwrap() != input_pid {
+            continue; // innermost ns PID doesn't match
+        }
+        if let Ok(pst) = proc_start_time(host_pid) {
+            if pst == input_start_time {
+                return nspid[0]; // host PID
+            }
+        }
+    }
+
+    input_pid // fallback
+}
+
+/// Read the `NSpid:` chain from `/proc/<pid>/status`.  Returns a Vec where
+/// index 0 is the outermost (host) PID and the last element is the innermost
+/// (namespace-local) PID.
+fn read_nspid_chain(pid: i32) -> Vec<i32> {
+    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return vec![];
     };
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("NSpid:") {
-            let mut parts = rest.split_whitespace();
-            if let Some(first) = parts.next() {
-                // Only translate when there are multiple levels (i.e. we are
-                // inside a nested PID namespace).
-                if parts.next().is_some() {
-                    if let Ok(global) = first.parse::<i32>() {
-                        return global;
-                    }
-                }
-            }
-            break;
+            return rest
+                .split_whitespace()
+                .filter_map(|s| s.parse::<i32>().ok())
+                .collect();
         }
     }
-    ns_pid
+    vec![]
+}
+
+/// Return the first (host-namespace) value from the `NSpid:` line of
+/// `/proc/<pid>/status`, or `None` if unavailable.
+fn first_nspid(pid: i32) -> Option<i32> {
+    read_nspid_chain(pid).first().copied()
+}
+
+/// Read `start_time` (field 22) from `/proc/<pid>/stat`.
+fn proc_start_time(pid: i32) -> Result<u64, ()> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|_| ())?;
+    let after_comm = &stat[stat.rfind(')').ok_or(())? + 2..];
+    after_comm
+        .split_ascii_whitespace()
+        .nth(19) // field 22 = index 19 after ')'
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or(())
+}
+
+/// Check whether the current process runs in the init PID namespace by
+/// comparing its pid-namespace inode with that of PID 1.
+fn is_init_pid_namespace() -> bool {
+    let Ok(self_ns) = fs::read_link("/proc/self/ns/pid") else {
+        return false; // can't read → assume not init, fail-closed
+    };
+    let Ok(init_ns) = fs::read_link("/proc/1/ns/pid") else {
+        return false;
+    };
+    let result = self_ns == init_ns;
+    if !result {
+        eprintln!(
+            "agentsight-enforcer: not in init PID namespace \
+             (self={}, pid1={}); file_delete_guard will be disabled",
+            self_ns.display(),
+            init_ns.display(),
+        );
+    }
+    result
 }
 
 #[cfg(test)]
