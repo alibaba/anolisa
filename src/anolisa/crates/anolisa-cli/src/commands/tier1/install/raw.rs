@@ -2,6 +2,7 @@
 //! command. Execution moved to the planner-driven pipeline: `dispatch.rs`
 //! drives the plan, `owned_ops.rs` performs the side effects.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anolisa_core::download::{DownloadCache, DownloadError};
@@ -172,6 +173,37 @@ pub(crate) fn resolve_raw(
             .map(|s| format!("distribution index {index_url}: {}", s.reason)),
     );
     let entry = index.resolve(&query).map_err(|err| {
+        if matches!(err, ResolveError::NotFound) {
+            let package_entries: Vec<_> = index
+                .entries
+                .iter()
+                .filter(|entry| entry.component == package)
+                .filter(|entry| entry.channel == query.channel.unwrap_or("stable"))
+                .collect();
+            let requested_platform_exists = package_entries
+                .iter()
+                .any(|entry| entry.os == env.os && (entry.arch == env.arch || entry.arch == "any"));
+            if !requested_platform_exists {
+                let available_platforms: BTreeSet<_> = package_entries
+                    .iter()
+                    .map(|entry| format!("{}/{}", entry.os, entry.arch))
+                    .collect();
+                if !available_platforms.is_empty() {
+                    let available_platforms = available_platforms
+                        .into_iter()
+                        .map(|platform| format!("  - {platform}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return CliError::InvalidArgument {
+                        command: COMMAND.to_string(),
+                        reason: format!(
+                            "{package} is not available for {}/{}\n\navailable platforms:\n{available_platforms}",
+                            env.os, env.arch,
+                        ),
+                    };
+                }
+            }
+        }
         // A pinned version the installable index cannot satisfy gets a
         // dedicated refusal, symmetric with the rpm backend's version-pin
         // errors. The unfiltered index decides the wording: a version that

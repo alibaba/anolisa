@@ -1162,6 +1162,199 @@ fn install_resolves_legacy_template_form_repo_url() {
     );
 }
 
+fn write_platform_matrix_repo(root: &std::path::Path) -> String {
+    let repo_url = write_local_repo_component(root, "cosh-ng", "1.0.0", &["system"]);
+    std::fs::write(
+        root.join("v1/index.toml"),
+        r#"schema_version = 1
+channel = "stable"
+
+[[entries]]
+component = "cosh-ng"
+version = "1.0.0"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+
+[[entries]]
+component = "cosh-ng"
+version = "1.1.0"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "x86_64"
+install_modes = ["system"]
+
+[[entries]]
+component = "cosh-ng"
+version = "1.0.0"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "macos"
+arch = "aarch64"
+install_modes = ["user"]
+
+[[entries]]
+component = "cosh-ng"
+version = "1.0.0"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+os = "windows"
+arch = "x86_64"
+install_modes = ["user"]
+
+[[entries]]
+component = "cosh-ng"
+version = "1.0.0"
+channel = "beta"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "freebsd"
+arch = "x86_64"
+install_modes = ["user"]
+
+[[entries]]
+component = "portable"
+version = "1.0.0"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+os = "linux"
+arch = "any"
+pkg_base = "debian"
+install_modes = ["system"]
+"#,
+    )
+    .expect("write platform matrix index");
+    repo_url
+}
+
+#[test]
+fn raw_resolution_reports_sorted_deduplicated_available_platforms() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_platform_matrix_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let env = anolisa_env::EnvFacts {
+        arch: "aarch64".to_string(),
+        ..linux_env()
+    };
+
+    let err = match resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "cosh-ng".to_string(),
+            package: "cosh-ng".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            repository_origin: None,
+            version: None,
+            warnings: Vec::new(),
+        },
+    ) {
+        Ok(_) => panic!("linux/aarch64 must not resolve"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert_eq!(
+        err.reason(),
+        "cosh-ng is not available for linux/aarch64\n\navailable platforms:\n  - linux/x86_64\n  - macos/aarch64"
+    );
+}
+
+#[test]
+fn raw_resolution_keeps_unknown_package_not_found_diagnostic() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_platform_matrix_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let env = anolisa_env::EnvFacts {
+        arch: "aarch64".to_string(),
+        ..linux_env()
+    };
+
+    let err = match resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "unknown".to_string(),
+            package: "unknown".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            repository_origin: None,
+            version: None,
+            warnings: Vec::new(),
+        },
+    ) {
+        Ok(_) => panic!("unknown package must not resolve"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("cannot resolve package 'unknown'")
+            && err
+                .reason()
+                .contains("no distribution entry matches the query"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(!err.reason().contains("available platforms"));
+}
+
+#[test]
+fn raw_resolution_treats_any_arch_as_the_requested_platform() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_platform_matrix_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let env = anolisa_env::EnvFacts {
+        arch: "aarch64".to_string(),
+        ..linux_env()
+    };
+
+    let err = match resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "portable".to_string(),
+            package: "portable".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            repository_origin: None,
+            version: None,
+            warnings: Vec::new(),
+        },
+    ) {
+        Ok(_) => panic!("mismatched package base must not resolve"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.reason().contains("cannot resolve package 'portable'")
+            && err
+                .reason()
+                .contains("no distribution entry matches the query"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(!err.reason().contains("available platforms"));
+}
+
 #[test]
 fn install_unpublished_version_is_invalid_argument() {
     let tmp = tempdir().expect("tmpdir");
