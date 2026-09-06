@@ -320,6 +320,23 @@ def main() -> None:
         content_origin = "api_response"
     raw_status = str(input_data.get("status", "")).lower()
     shell_process_result = model_visible_before if isinstance(model_visible_before, dict) else None
+    if (
+        shell_process_result is None
+        and tool_name in SHELL_TOOLS
+        and isinstance(model_visible_before, str)
+    ):
+        # Cosh-NG hands shell output over as text: cosh-core's
+        # wrap_tool_response always wraps the raw output into a string
+        # llmContent, and the PostToolUse payload carries no is_error or
+        # status marker. A JSON shell envelope inside that text keeps its
+        # exit_code / stderr / error fields, so parse it for error
+        # detection — v1 classified these hook-side; under Protocol v2
+        # the hook must supply the status and Core owns the diagnosis.
+        parsed_envelope = try_parse_json(model_visible_before)
+        if isinstance(parsed_envelope, str):
+            parsed_envelope = try_parse_json(parsed_envelope)
+        if isinstance(parsed_envelope, dict):
+            shell_process_result = parsed_envelope
     shell_process_error = (
         tool_name in SHELL_TOOLS
         and shell_process_result is not None
@@ -349,10 +366,10 @@ def main() -> None:
     # Shell envelopes often carry a large stdout alongside the actual failure
     # in a short stderr. Error results are never replaced, so send the error
     # stream to Core for diagnosis while the host keeps the original envelope.
-    if status == "error" and tool_name in SHELL_TOOLS and isinstance(model_visible_before, dict):
+    if status == "error" and tool_name in SHELL_TOOLS and shell_process_result is not None:
         error_parts = []
         for field in ("stderr", "error"):
-            value = model_visible_before.get(field)
+            value = shell_process_result.get(field)
             if isinstance(value, str) and value.strip():
                 error_parts.append(value)
         if error_parts:
