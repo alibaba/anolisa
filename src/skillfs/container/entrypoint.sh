@@ -2,13 +2,9 @@
 #
 # SkillFS sidecar entrypoint.
 #
-# Runs the preflight checks, then `exec`s SkillFS so the FUSE process replaces
-# this shell as PID 1. That is what makes the kubelet's SIGTERM land directly on
-# SkillFS, which unmounts cleanly on its way out.
-#
-# There is deliberately no `sleep infinity`, no retry loop, and no trap that
-# keeps the container alive after SkillFS exits: a dead mount must surface as a
-# container restart, not as a healthy container serving nothing.
+# Builds the fixed foreground-mount command and hands it to the PID 1
+# supervisor. The supervisor performs preflight before every attempt, verifies
+# real I/O through the existing mount probe, and remounts a failed session.
 #
 # Configuration (environment):
 #   SKILLFS_SOURCE      absolute path to the writable skill source root
@@ -50,17 +46,6 @@ fi
 log "skillfs version: $("$SKILLFS_BIN" --version 2>&1 | head -1)"
 log "uid=$(id -u) gid=$(id -g) source=${SOURCE_DIR:-<unset>} mountpoint=${MOUNTPOINT:-<unset>}"
 
-if [[ "${SKILLFS_SKIP_PREFLIGHT:-0}" == "1" ]]; then
-	log "WARNING: SKILLFS_SKIP_PREFLIGHT=1, skipping prerequisite validation"
-else
-	/usr/local/bin/skillfs-preflight
-	preflight_status=$?
-	if ((preflight_status != 0)); then
-		log "FAIL: preflight exited $preflight_status; not starting the mount"
-		exit "$preflight_status"
-	fi
-fi
-
 # Word splitting on SKILLFS_EXTRA_ARGS is intentional: the value is an argument
 # list, not a single argument.
 declare -a extra=()
@@ -68,8 +53,9 @@ if [[ -n "$EXTRA_ARGS" ]]; then
 	read -r -a extra <<<"$EXTRA_ARGS"
 fi
 
-# `--foreground` keeps SkillFS as the container's main process so kubelet owns
-# restart; `--managed` and its detached supervisor must not be used here.
+# `--foreground` keeps SkillFS as a direct child that this container's PID 1
+# supervisor can stop, reap, and restart. The detached `--managed` mode and its
+# separate supervisor must not be used here.
 # `--allow-other` is what lets the Agent container's UID reach the propagated
 # view. Both flags are fixed by the sidecar contract and are not configurable
 # through SKILLFS_EXTRA_ARGS.
@@ -85,5 +71,11 @@ if ((${#extra[@]} > 0)); then
 	cmd+=("${extra[@]}")
 fi
 
-log "exec: ${cmd[*]}"
-exec "${cmd[@]}"
+SUPERVISOR_BIN="${SKILLFS_SUPERVISOR_BIN:-/usr/local/bin/skillfs-supervisor}"
+if [[ "$SUPERVISOR_BIN" != /* || ! -x "$SUPERVISOR_BIN" ]]; then
+	log "FAIL: supervisor '$SUPERVISOR_BIN' must be an executable absolute path"
+	exit 127
+fi
+
+log "supervise: ${cmd[*]}"
+exec "$SUPERVISOR_BIN" "${cmd[@]}"

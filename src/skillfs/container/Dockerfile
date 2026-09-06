@@ -1,8 +1,9 @@
 # Dedicated SkillFS FUSE sidecar image.
 #
-# This image runs ONE process: `skillfs mount ... --foreground --allow-other`.
-# It deliberately does not include or start any other ANOLISA service, and it
-# does not depend on systemd or the SkillFS managed-mount supervisor.
+# This image runs one PID 1 supervisor around
+# `skillfs mount ... --foreground --allow-other`. It deliberately does not
+# include or start any other ANOLISA service, and it does not depend on systemd
+# or the SkillFS managed-mount supervisor.
 #
 # Build context: the `src/skillfs` component directory.
 #   docker build -f container/Dockerfile .
@@ -76,7 +77,7 @@ ARG SOURCE_URL=https://github.com/alibaba/anolisa
 # probe scripts use; they are named explicitly rather than assumed from the base
 # image, so a slimmer base cannot silently break startup:
 #
-#   bash                  all three scripts
+#   bash                  all four scripts
 #   coreutils             stat, realpath, id, timeout, wc, install, sleep, head
 #   grep, gawk, sed       fuse.conf and /proc/self/mountinfo parsing
 #   findutils             the example seeding step in the reference manifest
@@ -110,12 +111,14 @@ COPY --from=builder /build/target/release/skillfs /usr/local/bin/skillfs
 COPY container/entrypoint.sh /usr/local/bin/skillfs-sidecar-entrypoint
 COPY container/preflight.sh /usr/local/bin/skillfs-preflight
 COPY container/mount-probe.sh /usr/local/bin/skillfs-mount-probe
+COPY container/supervisor.sh /usr/local/bin/skillfs-supervisor
 
 RUN set -eux; \
     chmod 0755 /usr/local/bin/skillfs \
         /usr/local/bin/skillfs-sidecar-entrypoint \
         /usr/local/bin/skillfs-preflight \
-        /usr/local/bin/skillfs-mount-probe; \
+        /usr/local/bin/skillfs-mount-probe \
+        /usr/local/bin/skillfs-supervisor; \
     skillfs --version
 
 # Defaults match src/skillfs/deploy/kubernetes. Override per deployment.
@@ -132,6 +135,14 @@ ENV SKILLFS_SOURCE=/var/lib/skillfs/source \
     SKILLFS_EXTRA_ARGS="" \
     SKILLFS_PROBE_FILE=skills/skillfs-container-example/SKILL.md \
     SKILLFS_PROBE_TIMEOUT=5 \
+    SKILLFS_SUPERVISOR_PROBE_INTERVAL_SECONDS=2 \
+    SKILLFS_SUPERVISOR_FAILURE_THRESHOLD=2 \
+    SKILLFS_SUPERVISOR_STABLE_HEALTHY_PROBES=3 \
+    SKILLFS_SUPERVISOR_STARTUP_TIMEOUT_SECONDS=30 \
+    SKILLFS_SUPERVISOR_STOP_TIMEOUT_SECONDS=10 \
+    SKILLFS_SUPERVISOR_MAX_FAILED_ATTEMPTS=5 \
+    SKILLFS_SUPERVISOR_BACKOFF_INITIAL_SECONDS=1 \
+    SKILLFS_SUPERVISOR_BACKOFF_MAX_SECONDS=30 \
     RUST_LOG=info
 
 LABEL org.opencontainers.image.title="SkillFS FUSE sidecar" \
@@ -142,6 +153,6 @@ LABEL org.opencontainers.image.title="SkillFS FUSE sidecar" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="The Anolisa Authors"
 
-# The entrypoint runs preflight and then `exec`s skillfs, so skillfs becomes
-# PID 1 and receives SIGTERM directly from the kubelet.
+# The entrypoint execs the supervisor as PID 1. It forwards termination signals
+# to the foreground mount worker and performs bounded cleanup before exiting.
 ENTRYPOINT ["/usr/local/bin/skillfs-sidecar-entrypoint"]
