@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 mod cmd;
 
 use cosh_platform::detect::Distro;
+use cosh_types::error::{CoshError, ErrorCode};
 use cosh_types::output::{CoshResponse, ResponseMeta};
 
 #[derive(Parser)]
@@ -65,7 +66,29 @@ fn main() {
         .with_target(true)
         .try_init();
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Help and version are clap "errors" but should behave as before:
+            // print text to stdout and exit 0.
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let _ = e.print();
+                std::process::exit(0);
+            }
+            // All other clap errors: emit JSON envelope on stdout, exit 1.
+            let distro = Distro::detect();
+            let start = Instant::now();
+            let error = CoshError::new(ErrorCode::InvalidInput, e.to_string(), "cli")
+                .with_details(serde_json::json!({"kind": format!("{:?}", e.kind())}));
+            std::process::exit(print_failure(
+                error,
+                build_meta("cli", &distro, start, false),
+            ));
+        }
+    };
     let distro = Distro::detect();
     let start = Instant::now();
 

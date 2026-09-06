@@ -1824,6 +1824,95 @@ fn test_invalid_subcommand_fails() {
     assert!(!output.status.success());
 }
 
+// --- Clap errors emit JSON envelope (issue #1548) ---
+
+/// Clap errors (missing required argument) must emit a JSON envelope on stdout
+/// with exit code 1, not clap's default text on stderr with exit code 2.
+#[test]
+fn test_clap_error_missing_arg_emits_json_envelope() {
+    let output = cosh_bin().args(["pkg", "install"]).output().unwrap();
+
+    // Exit code must be 1 (application error), not 2 (clap default).
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "clap errors should exit with code 1, not 2"
+    );
+
+    // stdout must contain a valid JSON envelope.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON envelope");
+
+    assert_eq!(json["ok"], false, "envelope ok field must be false");
+    assert!(
+        !json["error"]["message"].as_str().unwrap_or("").is_empty(),
+        "error message must not be empty"
+    );
+    assert_eq!(
+        json["error"]["subsystem"], "cli",
+        "error subsystem must be 'cli'"
+    );
+    assert_eq!(
+        json["meta"]["subsystem"], "cli",
+        "meta subsystem must be 'cli'"
+    );
+}
+
+/// Clap errors (unrecognized subcommand) must emit a JSON envelope on stdout.
+#[test]
+fn test_clap_error_invalid_subcommand_emits_json_envelope() {
+    let output = cosh_bin().arg("nonexistent-subcommand").output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON envelope");
+
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("nonexistent-subcommand"),
+        "error message should mention the invalid subcommand"
+    );
+}
+
+/// Clap errors (no subcommand) must emit a JSON envelope on stdout.
+#[test]
+fn test_clap_error_no_subcommand_emits_json_envelope() {
+    let output = cosh_bin().output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON envelope");
+
+    assert_eq!(json["ok"], false);
+    assert!(
+        !json["error"]["message"].as_str().unwrap_or("").is_empty(),
+        "error message must not be empty"
+    );
+}
+
+/// --help and --version must still print text to stdout and exit 0
+/// (not a JSON envelope).
+#[test]
+fn test_help_still_prints_text_not_json() {
+    let output = cosh_bin().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Help text should not be a JSON envelope.
+    assert!(
+        !stdout.starts_with('{'),
+        "help output should not be a JSON envelope"
+    );
+    assert!(stdout.contains("Computable Operating System Harness"));
+}
+
 // --- Regression: issue #1551 compound command contract ---
 
 #[test]
