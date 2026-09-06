@@ -6,12 +6,16 @@
 
 blaze is a **daemon-only** per-host sandbox orchestrator. All sandbox management is exposed via HTTP API; the binary only handles daemon lifecycle (start / reload / doctor).
 
-Two-crate workspace:
+Four-crate workspace:
 
 - **blaze-core** (library): policy engine, lifecycle state machine, backend selector, kernel hook registry, config schema. Zero I/O beyond local TOML/JSON parsing.
-- **blazed** (binary): daemon HTTP server (UDS + TCP), spawner implementations, metrics endpoint, CLI for daemon lifecycle commands.
+- **blaze-provider-api** (library): public source-level contracts for build-time data-plane providers and optional lifecycle extensions.
+- **blaze-provider-conformance** (library and example): reusable validation for provider responses and a minimal provider implementation.
+- **blazed** (library and binary): daemon composition, HTTP server (UDS + TCP), spawner implementations, metrics endpoint, and CLI for daemon lifecycle commands.
 
-Dependency direction: `blazed` → `blaze-core`. No reverse dependency.
+Dependency direction: `blaze-provider-api` → `blaze-core`;
+`blaze-provider-conformance` → `blaze-provider-api`; `blazed` → all three
+library crates. No reverse dependency reaches into `blazed`.
 
 ## Build & Test
 
@@ -27,6 +31,8 @@ Platform: Linux (x86_64 + aarch64) for production. macOS builds succeed but spaw
 ## Key Design Constraints
 
 - **Daemon-only API model**: No CLI client for sandbox operations. All instance and template management is done via HTTP endpoints on UDS (`/run/blaze/api.sock`) or TCP (`:14159`). The CLI subcommands (`daemon start`, `daemon reload`, `daemon doctor`) only manage daemon lifecycle.
+- **Build-time data-plane providers**: Downstream crates implement the public `DataPlaneProvider` source contract and pass an implementation to `BlazeDaemonBuilder`. The standard `blazed` binary uses the file provider. Provider selection is fixed when the binary is built; runtime plugin discovery and selection through the standard daemon configuration are unsupported.
+- **Reusable extension surface**: Public types, comments, examples, fixtures, and diagnostics describe observable resource roles, capabilities, lifecycle transitions, and stable error categories. Provider-specific resource topology and configuration belong to the provider crate that defines them. Examples must remain understandable and executable from repository-tracked sources and fixtures.
 - **BackendSpawner trait**: All backend-specific process management is behind `BackendSpawner` (`spawn`, `probe`, `cleanup_orphan`, and defaulted `restore`/`restore_capability`) and `BackendInstance` (`backend`, `try_wait`, `kill`, plus defaulted `pause`, `resume`, `snapshot`, and the capture-orchestration hooks `quiesce_for_capture`/`unquiesce_after_capture`, which delegate to pause/resume and are overridden as no-ops by backends whose capture primitive freezes the workload itself; the quiesce must hold until `unquiesce_after_capture`, because storage synchronization and rootfs capture run after `snapshot` returns). Adding a new backend means implementing the required methods and registering it in `daemon::build_spawners()`.
 - **Policy-driven backend selection**: Workload class → policy file → prioritized backend list. The daemon probes backends at startup and selects the first available. Never hardcode backend preference in application logic.
 - **Lifecycle state machine**: 13 states. The main branches are Pending →

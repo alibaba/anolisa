@@ -2,29 +2,30 @@
 
 [中文版](lifecycle-state-consistency_zh.md)
 
-Blaze has three related lifecycle boundaries. Before serving requests, it must
-reconstruct a complete persisted sandbox inventory without exposing a partial
-result. While serving requests, it exposes lifecycle and guest operations only
-through the sandbox namespace and rejects reserved reusable-capacity operations
-before they can change ownership. Checkpoint capture must publish artifacts,
-checkpoint history, and lifecycle state in a recoverable order. Retired
-`Reset`, `Warm`, and `start_path = "warm"` values remain decodable so startup
-can clean non-terminal records that contain them.
+Blaze coordinates several related lifecycle boundaries: complete startup
+inventory publication, optional provider inventory and backend adoption,
+recoverable checkpoint and hibernation ordering, and scoped provider capacity
+control. Retired `Reset`, `Warm`, and `start_path = "warm"` values remain
+decodable only so startup can clean non-terminal records that contain them.
 
-This document defines all three boundaries. The inventory-publication protocol
-does not change the HTTP API, configuration keys, or persisted JSON format. The
-management API section defines the sandbox namespace and the reserved
-reusable-capacity boundary. The checkpoint section defines four sandbox routes —
-capture, history, pruning, and restore — the durable operation fields used to recover
-interrupted capture, and the restore journal and lifecycle contract that keep an
-interrupted restore recoverable.
+The base inventory-publication protocol does not change the management HTTP or
+configuration surface. Optional provider extensions add implementation-neutral
+durable ownership records while keeping provider references out of management
+responses. The sections below define startup reconciliation, checkpoint
+capture and restore, and the boundary between data-plane capacity and complete
+reusable sandbox instances.
 
 ## Terms and owned objects
 
-The **state root** is the directory configured by `daemon.state_dir`. Each
-persisted sandbox record is stored in one canonically named UUID directory
-below that root. Its `state.json` file contains the lifecycle record used
-during restart.
+The **configured state root** is the directory named by `daemon.state_dir`.
+The standard file daemon also uses it as the **effective state root**. A daemon
+with a build-time provider derives a non-UUID effective child from the provider
+contract revision and instance identity, while retaining the configured root
+as its process-coordination boundary. The exact public rule is documented in
+[Build-time Data-plane Providers](build-time-data-plane-providers.md#lifecycle-state-namespace).
+Each persisted sandbox record is stored in one canonically named UUID directory
+below the effective root. Its `state.json` file contains the lifecycle record
+used during restart.
 
 `StateStore` is the supported entry point for lifecycle-record persistence. It
 keeps the opened state-root directory object for its lifetime instead of
@@ -40,8 +41,9 @@ backend operations.
 ## Writer coordination
 
 A production daemon takes a non-blocking exclusive advisory lock on the opened
-state root before it scans lifecycle records. Another Blaze daemon following
-the same protocol cannot start with that state root until the first daemon
+configured state root before it scans lifecycle records. A build-time provider
+daemon also locks its effective child root. Another Blaze daemon following the
+same protocol cannot start with that configured root until the first daemon
 releases the lock.
 
 Inside one daemon, the startup scan holds the `StateStore` run-directory map
@@ -59,7 +61,9 @@ writers inside one daemon.
 Startup follows this order:
 
 1. Open the configured state root, take its advisory lock, and retain that
-   opened directory object.
+   opened directory object. For a build-time provider, create and open the
+   identity-derived effective child relative to the retained descriptor and
+   lock it as well.
 2. Enumerate UUID-owned entries and build private instance and retained-owner
    maps. For every UUID entry, require:
    - a canonical lowercase, hyphenated UUID directory name;
@@ -76,8 +80,12 @@ Startup follows this order:
    directory and `state.json` against the objects accepted by the first scan.
 5. Only after every check succeeds, publish the retained-owner map and return
    the instance map to `ServerState`.
-6. Reconcile the accepted sandbox records, then bind the configured Unix and
-   TCP API listeners.
+6. If the provider exposes `DataPlaneInventory`, freeze and validate one
+   complete provider snapshot before per-sandbox reconciliation. Adopt a clean
+   `Running` sandbox only when its durable record, exact provider lease, and
+   live backend identity agree; quarantine mismatches as `RecoveryRequired`.
+   A provider without that extension follows the standard cleanup path.
+7. Bind the configured Unix and TCP API listeners only after reconciliation.
 
 The name-set comparison must finish before object revalidation begins. This
 ordering prevents an early owner from being accepted while the final directory
@@ -96,11 +104,13 @@ operator inspection and repair. Existing cleanup of state-publication staging
 entries remains separate from rejected-record handling.
 
 After a complete inventory has been accepted, startup reconciliation processes
-each non-terminal sandbox independently. A cleanup failure for one sandbox can
-retain that sandbox in memory as `RecoveryRequired` without turning the already
-validated inventory into a partial one. Blaze attempts to persist the recovery
-state; if that write also fails, reconciliation reports the additional error
-and the durable record may still contain its previous state.
+each non-terminal sandbox independently. It may adopt a sandbox through the
+optional provider inventory contract or clean it through the standard path. An
+adoption mismatch or cleanup failure can retain that sandbox in memory as
+`RecoveryRequired` without turning the validated inventory into a partial one.
+Blaze attempts to persist the recovery state; if that write also fails,
+reconciliation reports the additional error and the durable record may still
+contain its previous state.
 
 ## Checkpoint lifecycle and recovery
 
@@ -108,9 +118,14 @@ and the durable record may still contain its previous state.
 `GET /v1/sandboxes/{id}/checkpoints` lists its committed history. Both
 operations hold the same per-sandbox operation lock used by lifecycle and
 guest requests. Capture requires a `Running` record with no unfinished
-operation, a live matching backend owner, and explicit capture support from
-both the backend and storage provider. An unsupported combination returns
-`501 Not Implemented` before the backend is paused or lifecycle state changes.
+operation, a live matching backend owner, and full capture support from the
+backend. A data plane that declares `daemon_managed_storage` also requires
+storage capture support, whether its active lease comes from the standard file
+provider or another build-time provider. The provider-owned extension path
+instead requires a finalized lease and `DataPlaneCheckpoint`, whose reference
+owns the complete writable-root and guest-memory image. An unsupported
+combination returns `501 Not Implemented` before the backend is quiesced or
+lifecycle state changes.
 
 Capture uses this durable order:
 
@@ -118,12 +133,15 @@ Capture uses this durable order:
    directory.
 2. Persist checkpoint intent, including the generated checkpoint ID, before
    pausing the backend.
-3. Pause the backend, record that durable phase, capture backend state and the
-   provider-owned writable root, then publish an integrity-checked manifest by
-   a no-replace rename.
-4. Persist publication, atomically move the sandbox checkpoint HEAD, and
+3. Quiesce the backend and record that durable phase. Capture backend state;
+   then either capture the writable root through standard storage or ask
+   `DataPlaneCheckpoint` to freeze root and memory at the same boundary.
+4. Publish checkpoint format 3 by a no-replace rename. Provider content is
+   represented by an implementation-neutral durable reference that is omitted
+   from management responses.
+5. Persist publication, atomically move the sandbox checkpoint HEAD, and
    persist the HEAD-update phase.
-5. Resume and revalidate the backend, pass through `Checkpointed` back to
+6. Resume and revalidate the backend, pass through `Checkpointed` back to
    `Running`, record `last_checkpoint`, clear the operation, and persist the
    final lifecycle record.
 
@@ -185,9 +203,12 @@ instead of retried as an empty prune.
 `POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` replaces a running sandbox
 from one verified full checkpoint. Before mutation, Blaze verifies the complete
 checkpoint ancestry and artifacts, matches the policy, image, backend, version,
-and snapshot kind, and requires explicit backend and storage restore
-capabilities. Unsupported combinations return `501 Not Implemented` while the
-current backend and lifecycle record remain unchanged.
+and snapshot kind, and requires an explicit backend restore capability. A
+checkpoint captured through `daemon_managed_storage` also requires storage
+restore; a checkpoint containing a provider-owned reference requires
+`DataPlaneCheckpoint` from the matching provider instance. Unsupported
+combinations return `501 Not Implemented` while the current backend and
+lifecycle record remain unchanged.
 
 Restore uses this durable order:
 
@@ -216,19 +237,25 @@ Action-style reset and destroy paths are unregistered and return
 `DELETE /v1/sandboxes/{id}`. Checkpoint capture, listing, pruning, and restore
 use the four routes defined in the preceding section.
 
-The following reserved management routes also return `501 Not Implemented` and
-do not manage reusable capacity:
+An optional build-time data-plane provider may implement scoped capacity
+reporting and drain through:
 
-- `GET /v1/pools`;
-- `GET /v1/pools/{backend}/{class}`;
-- `POST /v1/pools/{backend}/{class}/drain`; and
-- `PUT /v1/pools/{backend}/{class}/sizing`.
+- `GET /v1/pools/{backend}/{class}`; and
+- `POST /v1/pools/{backend}/{class}/drain`.
+
+These routes observe or drain provider-owned data-plane resources only. They do
+not manage reusable backend processes, network resources, or sandbox lifecycle
+records. `{class}` is the canonical public capacity-requirement digest, not a
+workload-policy or provider label. The standard file provider returns
+`501 Not Implemented` for both.
+`GET /v1/pools` and `PUT /v1/pools/{backend}/{class}/sizing` remain reserved and
+always return `501`.
 
 `GET /v1/health` retains its `storage_pool` object for response compatibility;
 the file provider reports zero ready, capacity, pending, and quarantined slots.
 The metrics endpoint does not publish a reset counter because no reset route is
-registered. Pool-hit and pool-miss counters also remain absent because reusable
-capacity has no supported success path.
+registered. Pool-hit and pool-miss counters also remain absent because the
+public lifecycle does not observe provider-managed capacity claims.
 
 New sandbox creation always records `start_path = "cold"`. Lifecycle
 transitions cannot enter `Reset` or `Warm`, so no supported path can produce or

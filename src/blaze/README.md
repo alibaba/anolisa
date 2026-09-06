@@ -142,6 +142,17 @@ ends.
 See the [Storage Artifact Synchronization user guide](../../docs/user-guide/en/runtime/blaze.md#storage-artifact-synchronization)
 for configuration, selection, retry, and worker shutdown behavior.
 
+### Build-time data-plane extensions
+
+The standard daemon uses the file data plane. Downstream developers may
+implement the public source-level provider contract in an extension crate and
+compose a purpose-built daemon with `BlazeDaemonBuilder`; the standard daemon
+configuration does not switch implementations at runtime, and a failed
+build-time provider does not fall back to files.
+See [build-time data-plane providers](docs/design/build-time-data-plane-providers.md)
+for the lifecycle contract, example, compatibility boundary, and deferred
+capabilities.
+
 ## API Endpoints
 
 Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
@@ -163,8 +174,8 @@ Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
 | POST | `/v1/sandboxes/{id}/hibernate` | Persist VM state and release the live backend |
 | POST | `/v1/sandboxes/{id}/resume` | Resume a hibernated sandbox and wait for enabled guest transport |
 | GET | `/v1/pools` | Reserved; returns `501` |
-| GET | `/v1/pools/{backend}/{class}` | Reserved; returns `501` |
-| POST | `/v1/pools/{backend}/{class}/drain` | Reserved; returns `501` |
+| GET | `/v1/pools/{backend}/{class}` | Report a build-time provider's data-plane capacity partition; the standard file provider returns `501` |
+| POST | `/v1/pools/{backend}/{class}/drain` | Drain a build-time provider's data-plane capacity partition without evicting active sandboxes; the standard file provider returns `501` |
 | PUT | `/v1/pools/{backend}/{class}/sizing` | Reserved; returns `501` |
 | GET | `/v1/templates` | List published template names |
 | GET | `/v1/templates/{name}` | Inspect published template metadata |
@@ -173,6 +184,12 @@ Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
+
+For provider capacity routes, `{class}` is a 64-character lowercase digest of
+the public root-filesystem and guest-memory capacities, not a provider or
+workload-class name. See
+[Provider Data-plane Capacity](docs/design/provider-capacity.md) for the
+canonical digest, accounting, and drain contracts.
 
 Upgrade compatibility accepts and ignores only this exact daemon section:
 
@@ -258,23 +275,28 @@ See the
 for writer coordination, inventory publication, reset rejection, legacy-state
 cleanup, and failure boundaries.
 
-The operation journal records create and destroy operations and the durable
-phase reached by checkpoint capture. An interrupted create is cleaned up rather
-than resumed, and an existing backend process is not adopted after restart.
-Startup recovery destroys an interrupted sandbox instead of restoring its
-checkpoint. Failed recovery does not run in a background retry loop. Reset
-remains unavailable and does not restore a checkpoint.
+The operation journal records the durable boundaries of create, destroy,
+checkpoint, restore, hibernate, and resume operations. An unfinished operation
+is never resumed or adopted after restart. With the standard file data plane,
+startup cleans non-terminal runtime ownership instead of adopting a live
+backend. A build-time provider may adopt a clean `Running` sandbox only through
+`DataPlaneInventory`, and only when the durable sandbox record, the exact
+`Committed` or `Finalized` provider lease, and the live backend identity all
+agree. A mismatch is quarantined and retained as `RecoveryRequired`. Reset
+remains unavailable and never restores a checkpoint.
 
 ### Checkpoint capture and history
 
-`POST /v1/sandboxes/{id}/checkpoint` captures a running sandbox when both its
-backend and storage provider advertise full-capture support. A successful
-request pauses the backend, captures VM state, guest memory, and the writable
-root filesystem, publishes a self-contained integrity manifest, moves the
-sandbox checkpoint HEAD, and resumes the backend. The response includes the
-complete manifest plus the `checkpoint_id` and `instance_id` fields.
-Unsupported backend or storage combinations return HTTP 501 before changing
-sandbox state.
+`POST /v1/sandboxes/{id}/checkpoint` requires full snapshot support from the
+selected backend. Data-plane handling follows the provider's declared
+integration mode, not the mere presence of a provider lease. The optional
+`DataPlaneCheckpoint` extension owns one complete writable-root and
+guest-memory image. A provider that declares `daemon_managed_storage` instead
+uses the configured storage provider for root capture and does not need that
+extension; the standard file provider follows this path. Unsupported
+combinations return HTTP 501 before the backend is quiesced or sandbox state
+changes. New captures publish checkpoint format 3; formats 1 and 2 remain
+readable when their original backend and storage requirements are available.
 
 `GET /v1/sandboxes/{id}/checkpoints` returns committed history summaries,
 including parentage, logical size, current-HEAD status, and HEAD reachability.
@@ -290,8 +312,9 @@ running sandbox with no unfinished operation; every other lifecycle state
 returns HTTP 409.
 
 Prune records its operation before changing the catalog and moves each selected
-checkpoint to a uniquely named tombstone before recursively deleting its
-version-2 payload tree. HTTP 200 is returned only after every tombstone created
+checkpoint to a uniquely named tombstone before recursively deleting the
+payload-subtree layout used by checkpoint formats 2 and 3. HTTP 200 is returned
+only after every tombstone created
 by the request has been removed and the checkpoint namespace has been
 synchronized. A partial or uncertain cleanup marks the sandbox
 `RecoveryRequired`; another prune request then returns HTTP 409 without changing
@@ -316,10 +339,14 @@ preflight reads every stored artifact, so prune time and storage input/output
 grow with the total checkpoint history. Operators should investigate storage
 corruption instead of repeatedly calling prune.
 
-`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` is available only when the
-current storage provider and checkpoint backend advertise compatible restore
-capabilities. The daemon verifies the selected checkpoint, its parent chain,
-runtime identity, and all artifact hashes before changing runtime state.
+`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` requires a compatible
+backend restore adapter. A checkpoint captured through
+`daemon_managed_storage` requires storage restore support, even when its active
+lease came from a build-time provider. Only a checkpoint containing a
+provider-owned immutable reference requires the current build-time provider to
+expose `DataPlaneCheckpoint` and match the recorded provider identity. The
+daemon verifies the selected checkpoint, its parent chain, runtime identity,
+and all artifact hashes before changing runtime state.
 
 The file provider stages a separate rootfs copy while the current backend is
 still running. After the old backend stops, the daemon selects that copy,
@@ -334,6 +361,15 @@ stopped — retains the resources that actually exist and marks the sandbox
 `RecoveryRequired`, so a later destroy can finish cleanup without losing
 process ownership.
 
+For a provider-owned checkpoint, Blaze prepares a distinct replacement lease
+from the immutable reference while the current backend remains running; it
+never reuses the active lease. After the stop boundary, Blaze starts the
+replacement from the daemon-owned backend payload and provider resources,
+validates readiness, commits the replacement, publishes `Running`, finalizes
+provider ownership, and releases the predecessor lease. A failure after the
+stop boundary retains the ownership records required for cleanup and enters
+`RecoveryRequired`.
+
 `last_checkpoint` continues to mean the most recent completed capture. Restore
 moves catalog HEAD but does not rewrite capture history.
 
@@ -343,13 +379,18 @@ for response fields, supported capability combinations, and failure handling.
 ### Hibernation and resume
 
 Hibernation is available only when the running backend supports full snapshot
-capture and its configured adapter can restore the same backend version. These
-compatibility checks happen before the lifecycle journal changes, so an
-unsupported combination leaves the sandbox running. How the workload is brought
-to a consistent stop is left to the backend's quiesce-for-capture hook, whose
-default pauses the backend; a self-freezing backend (one whose capture
-primitive stops the workload itself) overrides that hook and needs no separate
-pause support. A successful hibernate:
+capture and its configured adapter can restore the same backend version.
+Provider-owned hibernation additionally requires `DataPlaneSuspend`, a
+finalized lease, and guest protocol version 1 with `prepare_hibernate`,
+`reseed_rng`, and `post_restore`. A provider that declares
+`daemon_managed_storage` uses the configured storage provider instead and does
+not need the suspension extension. These compatibility checks happen before
+the lifecycle journal changes, so an unsupported combination leaves the
+sandbox running. How the workload is brought to a consistent stop is left to
+the backend's quiesce-for-capture hook, whose default pauses the backend; a
+self-freezing backend overrides that hook and needs no separate pause support.
+
+On the standard file path, a successful hibernate:
 
 1. records intent, quiesces the backend for capture, and writes the backend
    payload and memory into a hidden staging directory;
@@ -364,18 +405,27 @@ when persisting the hibernating intent crosses an uncertain durability boundary
 it: the durable record may then disagree with the live runtime, so the sandbox
 is retained as `RecoveryRequired` instead.
 
-Resume verifies the manifest identity, exact file set, and artifact digests
-before starting a replacement backend. The manager owns that backend before
-waiting for optional guest readiness and commits `Running` only after a final
-liveness check. A failure before the replacement backend starts returns the
-sandbox to `Hibernated` so the request can be retried; if the replacement's
-cleanup cannot be confirmed, its owner and the operation journal remain
-available through `RecoveryRequired`.
+On the provider-owned extension path, the provider freezes one complete
+immutable writable-root and guest-memory image at the same quiescent boundary
+as the backend snapshot. After the backend stops, Blaze stops and releases the
+active lease; the hibernated sandbox retains only the immutable suspension
+reference.
 
-The storage slot remains allocated while hibernated. A successful resume also
-retains the latest hibernation image until the next hibernate replaces it or an
-explicit destroy removes it. The daemon does not automatically complete an
-interrupted hibernate or resume after restart.
+Resume verifies the manifest identity, exact file set, and artifact digests
+before starting a replacement backend. The standard file path may wait for
+optional guest readiness. The provider path always prepares a fresh exclusive
+lease and must complete entropy injection and guest clock synchronization
+before publishing `Running`. A failure before the replacement backend starts
+returns the sandbox to `Hibernated` so the request can be retried; if the
+replacement's cleanup cannot be confirmed, its owner and operation journal
+remain available through `RecoveryRequired`.
+
+The daemon-managed path retains its storage slot while hibernated. The
+provider-owned extension path retains no active lease and prepares a fresh
+lease for every resume. Both paths retain the latest resumable image or
+reference until the next hibernate replaces it or an explicit destroy removes
+it. The daemon does not automatically complete an interrupted hibernate or
+resume after restart.
 
 See the [hibernation and resume user guide](../../docs/user-guide/en/runtime/blaze.md#hibernation-and-resume)
 for the status-code contract, artifact verification, and failure ownership.
