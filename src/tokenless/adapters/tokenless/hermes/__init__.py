@@ -76,13 +76,63 @@ def _validate_hooks_dir(path: str) -> str | None:
     return None
 
 
+# Symbols that must exist in the shared hook_utils module.  When a candidate
+# passes the trust check but ships an older hook_utils.py that lacks these
+# symbols (e.g. a stale install from a previous adapter version), the
+# candidate is rejected and the search continues to later paths.  The
+# lifecycle migration made the Hermes adapter a thin Core client, so the
+# required symbols are the Protocol v2 request builders and the compress
+# runner it imports at load time.
+_HOOK_UTILS_REQUIRED_SYMBOLS = (
+    "build_pre_tool_request",
+    "build_post_tool_request",
+    "run_compress",
+)
+
+
+def _check_api_compat(candidate_dir: str) -> str | None:
+    """Trial-import hook_utils from *candidate_dir* and verify required symbols.
+
+    Returns ``None`` when the module loads and exposes every symbol in
+    :data:`_HOOK_UTILS_REQUIRED_SYMBOLS`, otherwise a human-readable
+    rejection reason.  On success the freshly imported module is kept in
+    ``sys.modules`` so the subsequent ``from hook_utils import …`` reuses
+    it rather than a stale cached copy.  On rejection the ``sys.path``
+    mutation is cleaned up and the previously cached module (if any) is
+    restored so later candidates start from a clean state.
+    """
+    sys.path.insert(0, candidate_dir)
+    saved = sys.modules.pop("hook_utils", None)
+    try:
+        import hook_utils as _trial  # type: ignore[import-not-found]
+        missing = [s for s in _HOOK_UTILS_REQUIRED_SYMBOLS
+                   if not hasattr(_trial, s)]
+        if missing:
+            if saved is not None:
+                sys.modules["hook_utils"] = saved
+            else:
+                sys.modules.pop("hook_utils", None)
+            return f"API mismatch: missing {', '.join(missing)}"
+        # Success — keep the freshly imported module in sys.modules.
+        return None
+    except Exception as exc:
+        if saved is not None:
+            sys.modules["hook_utils"] = saved
+        else:
+            sys.modules.pop("hook_utils", None)
+        return f"import failed: {exc}"
+    finally:
+        sys.path.pop(0)
+
+
+
 def _resolve_hook_utils() -> tuple[str, list[str]]:
     """Locate a trusted shared hooks directory and make it importable.
 
     Returns ``(resolved_path, candidate_list)``.  The resolved path is
     inserted at the front of ``sys.path`` so the shared ``hook_utils``
     module can be imported.  Raises :exc:`ImportError` when no candidate
-    passes the trust policy.
+    passes both the trust policy and the API compatibility check.
     """
     # Resolve real home from passwd DB for user-install fallback path
     # (NOT $HOME — env-controllable).
@@ -119,11 +169,17 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
     rejections: list[str] = []
     for candidate in candidates:
         reason = _validate_hooks_dir(candidate)
-        if reason is None:
-            resolved = os.path.realpath(candidate)
-            sys.path.insert(0, resolved)
-            return resolved, candidates
-        rejections.append(f"  - {candidate}: {reason}")
+        if reason is not None:
+            rejections.append(f"  - {candidate}: {reason}")
+            continue
+        # Trust check passed — verify API compat (version mismatch guard).
+        resolved = os.path.realpath(candidate)
+        api_reason = _check_api_compat(resolved)
+        if api_reason is not None:
+            rejections.append(f"  - {candidate}: {api_reason}")
+            continue
+        sys.path.insert(0, resolved)
+        return resolved, candidates
 
     raise ImportError(
         "tokenless: no trusted shared hook_utils module (common/hooks/) found.\n"

@@ -373,6 +373,395 @@ def classify_env_error(tool_response) -> tuple[str | None, str | None]:
     return None, None
 
 
+# -- RTK prefix anchoring -------------------------------------------------------
+
+# Shell metacharacters that separate command-list / pipeline segments.
+# Newlines separate segments too (see _shell_word_spans).  ``&`` needs
+# special care: inside fd redirections (``2>&1``, ``&>``) it is ordinary
+# word material, not a separator.
+_SEGMENT_META_CHARS = frozenset(";|&")
+
+# Gap characters that start a new segment: the metacharacters above plus
+# newline, which terminates a command exactly like ``;`` does.
+_SEGMENT_BOUNDARY_CHARS = frozenset(";|&\n")
+
+# Characters that terminate a word: whitespace plus segment metacharacters.
+_WORD_BREAK_CHARS = " \t\n\r;|&"
+
+# Transparent wrappers that delegate to the real command.  They do not
+# consume the command position of a segment, so a following ``rtk`` is
+# still anchored.
+_TRANSPARENT_WRAPPERS = frozenset((
+    "sudo", "doas", "pkexec",
+    "env", "nice", "nohup", "stdbuf", "time", "timeout",
+))
+
+# RTK's own built-in transparent prefixes (rtk >= 0.43 contract, see rtk
+# registry SHELL_PREFIX_BUILTINS / ROUTABLE_WRAPPER_PREFIXES): rtk strips
+# them before routing and re-prepends them in front of the ``rtk`` wrapper
+# it inserts, so its rewrite output can start a segment with e.g.
+# ``noglob rtk git status`` or ``uv run rtk pytest tests/``.  Anchoring
+# must treat them exactly like the shell wrappers above.
+_RTK_BUILTIN_TRANSPARENT_PREFIXES = (
+    "uv run",
+    "noglob", "command", "builtin", "exec", "nocorrect",
+)
+
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _is_env_assignment(token: str) -> bool:
+    """Return True when *token* looks like a leading shell env assignment."""
+    return bool(_ENV_ASSIGNMENT_RE.match(token))
+
+
+def _is_segment_boundary(cmd: str, i: int) -> bool:
+    """Return True when the metacharacter at ``cmd[i]`` separates segments.
+
+    ``&`` is not a separator when it is part of an fd redirection —
+    ``2>&1`` / ``>&2`` (fd duplication) or bash ``&> file`` — so those
+    stay inside their word.  ``;``, ``|`` and newlines always separate.
+    """
+    if cmd[i] != "&":
+        return True
+    if i > 0 and cmd[i - 1] == ">":
+        return False
+    if i + 1 < len(cmd) and cmd[i + 1] == ">":
+        return False
+    return True
+
+
+def _shell_word_spans(cmd: str):
+    """Lex *cmd* into word spans, tracking real segment boundaries.
+
+    Returns a list of ``(start, end, new_segment)`` tuples where
+    ``cmd[start:end]`` is a maximal shell word and ``new_segment`` marks
+    that the word starts a fresh command segment: it is the first word,
+    or at least one real separator sits between it and the previous
+    word.  Real separators are unquoted, unescaped ``;`` / ``|`` / ``&``
+    metacharacters and newlines — exactly the boundaries a shell honors.
+    Backslash-escaped metacharacters (``\\;``) and metacharacters inside
+    single or double quotes are ordinary word material, never boundaries,
+    and ``&`` inside fd redirections (``2>&1``, ``&>``) stays in its
+    word.  Quoted spans remain glued into the surrounding word and keep
+    their original surface.  Returns ``None`` when a quote is never
+    closed.
+    """
+    spans: list[tuple[int, int, bool]] = []
+    i = 0
+    n = len(cmd)
+    prev_end = -1
+    while i < n:
+        c = cmd[i]
+        if c in _WORD_BREAK_CHARS and (
+            c not in _SEGMENT_META_CHARS or _is_segment_boundary(cmd, i)
+        ):
+            i += 1
+            continue
+        # Start of a word.
+        start = i
+        while i < n:
+            c = cmd[i]
+            if c in _WORD_BREAK_CHARS:
+                if c in _SEGMENT_META_CHARS and not _is_segment_boundary(cmd, i):
+                    # fd redirection (& in 2>&1 / &>) stays inside the word.
+                    i += 1
+                    continue
+                break
+            if c == "'":
+                j = cmd.find("'", i + 1)
+                if j < 0:
+                    return None
+                i = j + 1
+                continue
+            if c == '"':
+                i += 1
+                closed = False
+                while i < n:
+                    if cmd[i] == '"':
+                        closed = True
+                        i += 1
+                        break
+                    if cmd[i] == "\\" and i + 1 < n and cmd[i + 1] in '"$`\\':
+                        i += 2
+                        continue
+                    i += 1
+                if not closed:
+                    return None
+                continue
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            i += 1
+        if prev_end < 0:
+            new_segment = True
+        else:
+            gap = cmd[prev_end:start]
+            new_segment = any(ch in _SEGMENT_BOUNDARY_CHARS for ch in gap)
+        spans.append((start, i, new_segment))
+        prev_end = i
+    return spans
+
+
+def _rtk_config_path() -> str | None:
+    """Return rtk's global config.toml path, mirroring rtk's own lookup.
+
+    rtk reads ``Config::load()`` from ``dirs::config_dir()/rtk/config.toml``:
+    ``~/Library/Application Support`` on macOS, ``%APPDATA%`` on Windows,
+    and ``$XDG_CONFIG_HOME`` (fallback ``~/.config``) elsewhere.  The hook
+    reads the same file so anchoring knows the user's configured
+    ``transparent_prefixes``.
+    """
+    home = os.path.expanduser("~")
+    if not home or not os.path.isabs(home):
+        return None
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "rtk", "config.toml")
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return os.path.join(appdata, "rtk", "config.toml") if appdata else None
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    base = xdg if os.path.isabs(xdg) else os.path.join(home, ".config")
+    return os.path.join(base, "rtk", "config.toml")
+
+
+_HOOKS_TABLE_RE = re.compile(r"^\[hooks\][ \t]*(?:[#;].*)?$")
+_ARRAY_RE = re.compile(r"transparent_prefixes[ \t]*=[ \t]*\[(?P<body>[^\]]*)\]", re.S)
+_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|\'([^\']*)\'')
+
+
+def _parse_hooks_transparent_prefixes(text: str) -> tuple[str, ...]:
+    """Best-effort extraction of ``[hooks].transparent_prefixes``.
+
+    Only used when :mod:`tomllib` is unavailable (Python < 3.11).  Reads
+    the ``[hooks]`` table body (up to the next table header) and pulls the
+    string literals out of the ``transparent_prefixes`` array.  Handles
+    multi-line arrays, double-quoted values with ``\\"`` / ``\\\\``
+    escapes, and single-quoted literal values — the shapes rtk's own
+    ``toml::to_string_pretty`` writer and hand-edited configs produce.
+    """
+    lines = text.splitlines()
+    body: list[str] = []
+    in_hooks = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_hooks = bool(_HOOKS_TABLE_RE.match(stripped))
+            continue
+        if in_hooks:
+            body.append(line)
+    if not body:
+        return ()
+    match = _ARRAY_RE.search("\n".join(body))
+    if not match:
+        return ()
+    values: list[str] = []
+    for sm in _STRING_RE.finditer(match.group("body")):
+        if sm.group(1) is not None:
+            values.append(sm.group(1).replace('\\"', '"').replace("\\\\", "\\"))
+        else:
+            values.append(sm.group(2))
+    return tuple(values)
+
+
+# Configured-prefix cache keyed by (path, mtime) so long-lived hosts
+# (hermes plugin) notice config edits without re-parsing on every call.
+_configured_prefix_cache: dict[tuple, tuple[str, ...]] = {}
+
+
+def _rtk_transparent_prefixes() -> tuple[str, ...]:
+    """Return the user's configured rtk transparent prefixes (may be empty).
+
+    Mirrors rtk's ``[hooks].transparent_prefixes``: arbitrary multi-word
+    wrapper strings (e.g. ``shadowenv exec --``) that rtk strips before
+    routing and re-prepends in front of the ``rtk`` wrapper in its rewrite
+    output.  Missing, unreadable, or unparseable config yields an empty
+    tuple — anchoring then still covers the built-in prefixes.
+    """
+    path = _rtk_config_path()
+    if not path:
+        return ()
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        return ()
+    key = (path, mtime)
+    cached = _configured_prefix_cache.get(key)
+    if cached is not None:
+        return cached
+    prefixes: tuple[str, ...] = ()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        try:
+            import tomllib
+
+            data = tomllib.loads(text)
+            values = data.get("hooks", {}).get("transparent_prefixes", [])
+            if isinstance(values, list):
+                prefixes = tuple(v for v in values if isinstance(v, str))
+        except ModuleNotFoundError:
+            prefixes = _parse_hooks_transparent_prefixes(text)
+        except Exception:
+            prefixes = ()
+    except OSError:
+        prefixes = ()
+    # Mirror rtk's normalize_transparent_prefixes: trim, drop empties, dedup.
+    prefixes = tuple(dict.fromkeys(p.strip() for p in prefixes if p.strip()))
+    _configured_prefix_cache.clear()  # keep at most one entry
+    _configured_prefix_cache[key] = prefixes
+    return prefixes
+
+
+# Word-list cache keyed by the configured-prefix tuple so unchanged
+# configs reuse the compiled matcher input.
+_prefix_word_lists_cache: dict[tuple[str, ...], tuple[tuple[str, ...], ...]] = {}
+
+
+def _transparent_prefix_word_lists() -> tuple[tuple[str, ...], ...]:
+    """All transparent prefixes as word tuples, longest match first.
+
+    Merges the shell wrappers, RTK's built-in prefixes, and the user's
+    configured ``transparent_prefixes``; each prefix is split into words
+    and the list is sorted by word count then total length (descending),
+    mirroring rtk's longest-prefix-first matching so e.g. a configured
+    ``docker exec mycontainer`` wins over a bare ``docker``.
+    """
+    configured = _rtk_transparent_prefixes()
+    cached = _prefix_word_lists_cache.get(configured)
+    if cached is None:
+        merged = set(_TRANSPARENT_WRAPPERS)
+        merged.update(_RTK_BUILTIN_TRANSPARENT_PREFIXES)
+        merged.update(p.strip() for p in configured if p.strip())
+        word_lists = [tuple(prefix.split()) for prefix in merged if prefix.strip()]
+        word_lists.sort(
+            key=lambda words: (len(words), sum(len(w) for w in words)),
+            reverse=True,
+        )
+        cached = tuple(word_lists)
+        _prefix_word_lists_cache.clear()  # keep at most one entry
+        _prefix_word_lists_cache[configured] = cached
+    return cached
+
+
+def _match_transparent_prefix(rewritten: str, spans: list, index: int,
+                              prefix_words: tuple) -> int:
+    """Return how many word spans starting at *index* form a transparent prefix.
+
+    Tries every known prefix word list (longest first) against the raw
+    word surfaces and returns the span count of the first (longest) match,
+    or 0 when none matches.  A match never crosses a segment boundary:
+    every span after the first must belong to the same segment.
+    """
+    total = len(spans)
+    for words in prefix_words:
+        count = len(words)
+        if count == 0 or index + count > total:
+            continue
+        matched = True
+        for offset in range(count):
+            span_start, span_end, new_segment = spans[index + offset]
+            if offset and new_segment:
+                matched = False
+                break
+            if rewritten[span_start:span_end] != words[offset]:
+                matched = False
+                break
+        if matched:
+            return count
+    return 0
+
+
+def _anchor_rtk_prefix(rewritten: str, rtk_bin: str) -> str:
+    """Replace bare `rtk` wrapper tokens with the resolved binary path.
+
+    rtk prints rewrites with a literal `rtk` prefix, which only resolves
+    when the shell executing the tool call has the rtk location on its
+    PATH. Agent runtimes with a trimmed PATH (e.g. IDE tool environments
+    without ~/.local/bin) would fail every rewritten command with exit
+    127 even though the hook resolved rtk successfully. Anchoring makes
+    the rewritten command self-contained.
+
+    The pass swaps the first unquoted `rtk` word of each segment *in
+    command position* — at segment start or right after a real segment
+    boundary: an unquoted, unescaped ``&&`` / ``||`` / ``;`` / ``|`` /
+    ``&`` connective or a newline.  Command position survives leading
+    environment assignments, transparent wrappers such as `sudo`, and RTK's
+    transparent-prefix protocol: rtk
+    strips its built-in prefixes (``uv run``, ``noglob``, ``command``,
+    ``builtin``, ``exec``, ``nocorrect``) plus the user-configured
+    multi-word ``[hooks].transparent_prefixes`` before routing and
+    re-prepends them in front of the ``rtk`` wrapper it inserts, so
+    outputs like ``noglob rtk git status`` or
+    ``shadowenv exec -- rtk git status`` must anchor the `rtk` behind
+    the full prefix sequence.  Prefixes are matched as whole word
+    sequences, longest first, never crossing a segment boundary.  Once a
+    segment's command position is consumed by any other word — a plain
+    command like ``echo``, or a wrapper option such as ``sudo -u`` /
+    ``command -v`` whose operand or query argument must never be
+    anchored — a later bare ``rtk`` in that segment is treated as a
+    positional argument and left untouched.  Boundaries are detected from
+    the raw command text with full quote and escape awareness, so a
+    backslash-escaped operator (``grep foo\\; rtk file`` — the ``\\;``
+    is an argument, not a separator) never starts a new segment and
+    operators inside quotes never do either, while a newline between two
+    commands starts one exactly like ``;``.  Words keep their original
+    surface: quoted patterns like ``grep -E 'foo|rtk bar'`` are never
+    modified, unquoted globs like ``*.txt`` are not re-quoted into
+    literals, fd redirections (``2>&1``, ``2>/dev/null``) and command
+    substitutions (``$(date)``) stay intact, and everything outside the
+    replaced ``rtk`` words is copied through byte-for-byte (including all
+    whitespace and newlines).  Unparseable input is returned untouched.
+    """
+    import shlex as _shlex
+
+    spans = _shell_word_spans(rewritten)
+    if spans is None:
+        return rewritten
+
+    quoted = _shlex.quote(rtk_bin)
+    prefix_words = _transparent_prefix_word_lists()
+
+    parts: list[str] = []
+    pos = 0
+    index = 0
+    total = len(spans)
+    command_pending = True
+    while index < total:
+        start, end, new_segment = spans[index]
+        if new_segment:
+            command_pending = True
+        if not command_pending:
+            index += 1
+            continue
+        word = rewritten[start:end]
+        if _is_env_assignment(word):
+            index += 1
+            continue
+        matched = _match_transparent_prefix(rewritten, spans, index, prefix_words)
+        if matched:
+            index += matched
+            continue
+        if word == "rtk":
+            parts.append(rewritten[pos:start])
+            parts.append(quoted)
+            pos = end
+            command_pending = False
+        else:
+            # Any other word consumes the command position — including
+            # wrapper options (``-u``, ``-v``, ...) whose operands (e.g.
+            # the username in ``sudo -u rtk true``) or query arguments
+            # (``command -v rtk``) must never be anchored.  rtk itself
+            # never composes a dash option in front of the rtk wrapper it
+            # inserts, so this only affects passed-through user literals.
+            command_pending = False
+        index += 1
+    if pos == 0:
+        return rewritten
+    parts.append(rewritten[pos:])
+    return "".join(parts)
+
+
 # -- Context file for rewrite session tracking --
 
 _CONTEXT_DIR = os.path.join(os.path.expanduser("~"), ".tokenless")
