@@ -9,6 +9,24 @@
 
 ## [未发布]
 
+## [0.3.10] - 2026-09-06
+
+### 新增
+
+- 现在可通过 `anolisa adapter` 发现、启用、查看和禁用 QwenPaw 插件适配器。
+  安装包含 QwenPaw 适配器包的 Tokenless 后，可使用
+  `anolisa adapter enable tokenless qwenpaw` 启用。安装和移除均调用 QwenPaw
+  CLI，并校验操作后的插件文件；移除失败时保留插件目录和操作凭据以便重试，
+  清理时使用启用时记录的工作目录
+  ([#3075](https://github.com/alibaba/anolisa/pull/3075))。
+
+### 修复
+
+- `anolisa logs --limit N` 现在按追加顺序选取最近 N 条匹配记录，并在结果中
+  将较早的记录排在前面，不再返回最早的匹配记录。因此，默认 50 条的限制在日志
+  增长后仍会显示近期活动；扫描已有日志时也不再阻塞新记录的追加
+  ([#2618](https://github.com/alibaba/anolisa/pull/2618))。
+
 ## [0.3.9] - 2026-09-02
 
 ### 新增

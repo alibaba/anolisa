@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-09-06
+
+### Added
+
+- QwenPaw plugin adapters can now be discovered, enabled, inspected, and
+  disabled through `anolisa adapter`. For Tokenless packages that include the
+  QwenPaw bundle, use `anolisa adapter enable tokenless qwenpaw`. Installation
+  and removal use QwenPaw's CLI and verify the resulting plugin files; failed
+  removal preserves the plugin directory and receipt for a retry, and cleanup
+  uses the working directory recorded at enable time
+  ([#3075](https://github.com/alibaba/anolisa/pull/3075)).
+
+### Fixed
+
+- `anolisa logs --limit N` now returns the most recent N matching records in
+  append order, with the oldest record in that window first, instead of
+  returning the earliest matches. The default limit of 50 therefore shows
+  recent activity as logs grow, and scanning existing logs no longer blocks
+  new records from being appended
+  ([#2618](https://github.com/alibaba/anolisa/pull/2618)).
+
 ## [0.3.9] - 2026-09-02
 
 ### Added

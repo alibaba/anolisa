@@ -143,7 +143,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Sep 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sun Sep 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Manage QwenPaw plugin adapters through the framework CLI with verified cleanup.
+- Log limits now return recent matches without blocking new log appends during scans.
+
+* Wed Sep 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.9-1
 - Dry-runs now preview supported commands and reject unsupported requests before effects.
 - Self-updates now write redacted central operation-log records.
 - Raw repository defaults no longer advertise inactive cache settings.
