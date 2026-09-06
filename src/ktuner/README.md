@@ -87,3 +87,33 @@ All output goes to **stdout as JSON**. Errors go to **stderr as JSON**. No ANSI 
 - **Code-execution deny-list**: `kernel.core_pattern`, `kernel.modprobe`, `kernel.hotplug`, `kernel.poweroff_cmd`, `kernel.modules_disabled`, `kernel.kexec_load_disabled`, `kernel.usermodehelper.*`, `fs.binfmt_misc.*` are unconditionally blocked from any write path (tune/fix/rollback). Matching is done on the resolved filesystem path, not the parameter spelling, so slash/dot/traversal variants are all caught.
 - **Rollback safety**: Partial failures preserve the rollback ledger; originals are never lost.
 - **No autonomous root**: ktuner checks `euid == 0` and errors out if not root. cosh's sandbox-guard + permission prompt ensure the human approves before any `sudo ktuner tune` executes.
+
+## Installation
+
+Install ktuner via the ANOLISA component manager (RPM backend):
+
+```bash
+sudo anolisa install ktuner --backend rpm
+```
+
+ktuner ships as an RPM only. Pass `--backend rpm` explicitly: the default
+backend resolves raw artifacts and has no ktuner release, and there is no
+cross-backend fallback.
+
+Install via yum/dnf:
+
+```bash
+sudo yum install ktuner
+```
+
+Installs:
+- `/usr/local/bin/ktuner` — CLI binary
+- `/usr/share/anolisa/components/ktuner/component.toml` — component contract
+
+Or build from source:
+
+```bash
+cd src/ktuner
+cargo build --release
+sudo install -m 0755 target/release/ktuner /usr/local/bin/ktuner
+```

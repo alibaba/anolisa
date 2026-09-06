@@ -232,7 +232,7 @@
       "label": "component:ktuner",
       "commit_scope": "ktuner",
       "commit_scope_aliases": [],
-      "release_tag_prefix": null,
+      "release_tag_prefix": "ktuner/v",
       "ci_key": "ktuner",
       "issue_triagers": [],
       "status": "incubating"
