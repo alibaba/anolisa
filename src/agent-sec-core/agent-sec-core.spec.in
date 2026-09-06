@@ -47,10 +47,6 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 
-%{!?systemd_user_post:%{error:missing %%systemd_user_post; install systemd-rpm-macros in the rpmbuild environment}}
-%{!?systemd_user_preun:%{error:missing %%systemd_user_preun; install systemd-rpm-macros in the rpmbuild environment}}
-%{!?systemd_user_postun:%{error:missing %%systemd_user_postun; install systemd-rpm-macros in the rpmbuild environment}}
-
 # Metapackage: pull all subpackages
 Requires:       agent-sec-cli = %{version}-%{release}
 Requires:       agent-sec-cosh-hook = %{version}-%{release}

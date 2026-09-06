@@ -233,10 +233,106 @@ jobs:
           PYEOF
 
       - name: Uninstall skills package before E2E tests
-        run: rpm -e agent-sec-skills --nodeps
+        run: |
+          set -euo pipefail
+
+          echo "=== Capture agent-sec-skills RPM-owned non-directory payload paths ==="
+          skills_owned_paths="$(mktemp)"
+          : > "$skills_owned_paths"
+          while IFS= read -r path; do
+            if [[ ! -e "$path" && ! -L "$path" ]]; then
+              echo "WARN: rpmdb path missing before uninstall: agent-sec-skills: $path"
+              continue
+            fi
+            if [[ -d "$path" && ! -L "$path" ]]; then
+              continue
+            fi
+            printf '%s\n' "$path" >> "$skills_owned_paths"
+          done < <(rpm -ql agent-sec-skills)
+
+          rpm -e agent-sec-skills --nodeps
+          if rpm -q agent-sec-skills >/dev/null 2>&1; then
+            echo "ERROR: agent-sec-skills is still installed"
+            exit 1
+          fi
+
+          failed=0
+          while IFS= read -r path; do
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "ERROR: agent-sec-skills RPM-owned payload path still exists after uninstall: $path"
+              failed=1
+            fi
+          done < "$skills_owned_paths"
+
+          exit "$failed"
 
       - name: Run E2E tests on installed RPM
         run: make -C src/agent-sec-core test-e2e-rpm
+
+      - name: Test RPM uninstallation
+        run: |
+          set -euo pipefail
+
+          echo "=== Installed agent-sec packages before uninstall ==="
+          mapfile -t pkgs < <(rpm -qa 'agent-sec-*' | sort)
+          if (( ${#pkgs[@]} == 0 )); then
+            echo "ERROR: no agent-sec RPM packages remain to uninstall"
+            exit 1
+          fi
+          printf '  %s\n' "${pkgs[@]}"
+
+          echo "=== Capture RPM-owned non-directory payload paths ==="
+          owned_paths="$(mktemp)"
+          : > "$owned_paths"
+          for pkg in "${pkgs[@]}"; do
+            while IFS= read -r path; do
+              if [[ ! -e "$path" && ! -L "$path" ]]; then
+                echo "WARN: rpmdb path missing before uninstall: $pkg: $path"
+                continue
+              fi
+              if [[ -d "$path" && ! -L "$path" ]]; then
+                continue
+              fi
+              printf '%s\n' "$path" >> "$owned_paths"
+            done < <(rpm -ql "$pkg")
+          done
+          sort -u -o "$owned_paths" "$owned_paths"
+          sed -n '1,200p' "$owned_paths"
+
+          echo "=== Remove remaining RPM packages ==="
+          rpm -e "${pkgs[@]}"
+
+          echo "=== Verify RPM packages removed ==="
+          remaining_pkgs="$(rpm -qa 'agent-sec-*' | sort)"
+          if [[ -n "$remaining_pkgs" ]]; then
+            echo "ERROR: agent-sec RPM packages are still installed"
+            printf '%s\n' "$remaining_pkgs"
+            exit 1
+          fi
+
+          echo "=== Verify RPM-owned non-directory payload paths removed ==="
+          failed=0
+          while IFS= read -r path; do
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "ERROR: RPM-owned payload path still exists after uninstall: $path"
+              failed=1
+            fi
+          done < "$owned_paths"
+
+          echo "=== Non-owned leftovers under agent-sec roots (informational) ==="
+          for root in \
+            /opt/agent-sec \
+            /usr/share/anolisa/extensions/agent-sec-core \
+            /usr/share/anolisa/adapters/sec-core \
+            /usr/share/anolisa/components/sec-core \
+            /usr/share/anolisa/skills; do
+            if [[ -e "$root" ]]; then
+              echo "--- $root ---"
+              find "$root" -mindepth 1 -maxdepth 4 -print | sort | sed -n '1,200p'
+            fi
+          done
+
+          exit "$failed"
 
       - name: Upload RPM artifacts
         if: github.event_name != 'pull_request'
