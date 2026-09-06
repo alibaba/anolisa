@@ -2373,9 +2373,19 @@ fn eval_dirty_background_ratio(
 }
 
 fn eval_sched_min_granularity(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/sched_min_granularity_ns";
+    eval_sched_min_granularity_at(info, recs, "/proc/sys/kernel/sched_min_granularity_ns")
+}
+
+// Path-parameterized core so tests can force the absent branch with a probe
+// path that exists on no host, instead of betting on the CI kernel lacking
+// the real node.
+fn eval_sched_min_granularity_at(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    path: &str,
+) -> usize {
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if info.cpu_cores > 32 && current < 10_000_000 {
@@ -2398,7 +2408,7 @@ fn eval_sched_min_granularity(info: &SystemInfo, recs: &mut Vec<Recommendation>)
 fn eval_icmp_echo_ignore_broadcasts(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -2418,7 +2428,7 @@ fn eval_icmp_echo_ignore_broadcasts(_info: &SystemInfo, recs: &mut Vec<Recommend
 fn eval_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/accept_source_route";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -2438,7 +2448,7 @@ fn eval_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 fn eval_tcp_rfc1337(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_rfc1337";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -2459,7 +2469,7 @@ fn eval_tcp_rfc1337(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_secure_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/secure_redirects";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -2480,7 +2490,7 @@ fn eval_secure_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_mmap_min_addr(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/mmap_min_addr";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 65536 {
@@ -2502,7 +2512,7 @@ fn eval_mmap_min_addr(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_default_accept_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/accept_redirects";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -2522,7 +2532,7 @@ fn eval_default_accept_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendati
 fn eval_default_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/accept_source_route";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -2542,7 +2552,7 @@ fn eval_default_accept_source_route(_info: &SystemInfo, recs: &mut Vec<Recommend
 fn eval_sched_latency_ns(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_latency_ns";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 32 {
         return 1;
@@ -2568,7 +2578,7 @@ fn eval_sched_latency_ns(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_tcp_challenge_ack_limit(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_challenge_ack_limit";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current <= 100 {
@@ -2590,7 +2600,7 @@ fn eval_tcp_challenge_ack_limit(_info: &SystemInfo, recs: &mut Vec<Recommendatio
 fn eval_rp_filter_all(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/rp_filter";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -2610,7 +2620,7 @@ fn eval_rp_filter_all(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_busy_read(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/busy_read";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -2635,7 +2645,7 @@ fn eval_busy_read(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_nmi_watchdog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/nmi_watchdog";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 1 {
@@ -2656,7 +2666,7 @@ fn eval_nmi_watchdog(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_stat_interval(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/stat_interval";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     if info.cpu_cores < 32 {
         return 1;
@@ -2679,7 +2689,7 @@ fn eval_stat_interval(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 fn eval_hung_task_timeout(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/hung_task_timeout_secs";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -2700,7 +2710,7 @@ fn eval_hung_task_timeout(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_netdev_budget_usecs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/netdev_budget_usecs";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -2725,7 +2735,7 @@ fn eval_netdev_budget_usecs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/dirty_bytes";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -2749,7 +2759,7 @@ fn eval_dirty_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
 fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_child_runs_first";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let has_server = info.has_process("nginx")
         || info.has_process("httpd")
@@ -2776,7 +2786,7 @@ fn eval_sched_child_runs_first(info: &SystemInfo, recs: &mut Vec<Recommendation>
 fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/page-cluster";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let has_ssd = info
         .disks
@@ -2804,7 +2814,7 @@ fn eval_page_cluster(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_rmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/rmem_default";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -2829,7 +2839,7 @@ fn eval_rmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_wmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/wmem_default";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -2853,7 +2863,7 @@ fn eval_wmem_default(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_sched_nr_migrate(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_nr_migrate";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 32 {
         return 1;
@@ -2879,7 +2889,7 @@ fn eval_sched_nr_migrate(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_notsent_lowat";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current > 131072 {
@@ -2899,7 +2909,7 @@ fn eval_tcp_notsent_lowat(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_tcp_dsack(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_dsack";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -2920,7 +2930,7 @@ fn eval_tcp_dsack(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_unix_max_dgram_qlen(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/unix/max_dgram_qlen";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 1024 {
@@ -2941,7 +2951,7 @@ fn eval_unix_max_dgram_qlen(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_rps_sock_flow_entries(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/rps_sock_flow_entries";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -2966,7 +2976,7 @@ fn eval_rps_sock_flow_entries(info: &SystemInfo, recs: &mut Vec<Recommendation>)
 fn eval_neigh_gc_thresh3(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_thresh3";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 4096 {
@@ -2987,7 +2997,7 @@ fn eval_neigh_gc_thresh3(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_neigh_gc_thresh1(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_thresh1";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 2048 {
@@ -3007,7 +3017,7 @@ fn eval_neigh_gc_thresh1(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_neigh_gc_thresh2(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_thresh2";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 4096 {
@@ -3028,7 +3038,7 @@ fn eval_neigh_gc_thresh2(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_tcp_retries1(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_retries1";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current > 3 {
@@ -3048,7 +3058,7 @@ fn eval_tcp_retries1(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 fn eval_tcp_limit_output_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_limit_output_bytes";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
@@ -3069,7 +3079,7 @@ fn eval_tcp_limit_output_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
 fn eval_dev_weight(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/dev_weight";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -3093,7 +3103,7 @@ fn eval_dev_weight(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_printk(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/printk";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let level: u64 = content
@@ -3118,7 +3128,7 @@ fn eval_printk(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_watchdog_thresh(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/watchdog_thresh";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores < 32 {
         return 1;
@@ -3141,7 +3151,7 @@ fn eval_watchdog_thresh(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_admin_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/admin_reserve_kbytes";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -3164,7 +3174,7 @@ fn eval_admin_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 fn eval_nr_open(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/nr_open";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 1048576 {
@@ -3184,7 +3194,7 @@ fn eval_nr_open(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_arp_announce(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/arp_announce";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     if info.network.len() < 2 || has_bond() {
         return 1;
@@ -3208,7 +3218,7 @@ fn eval_arp_announce(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/arp_ignore";
     if !info.param_exists(path) {
-        return 0;
+        return 1;
     }
     if info.network.len() < 2 || has_bond() {
         return 1;
@@ -3232,7 +3242,7 @@ fn eval_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_default_log_martians(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/log_martians";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -3252,7 +3262,7 @@ fn eval_default_log_martians(_info: &SystemInfo, recs: &mut Vec<Recommendation>)
 fn eval_laptop_mode(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/laptop_mode";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 && info.memory_total_gb >= 16 {
@@ -3272,7 +3282,7 @@ fn eval_laptop_mode(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
 fn eval_tcp_adv_win_scale(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_adv_win_scale";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -3300,7 +3310,7 @@ fn eval_tcp_adv_win_scale(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_sched_tunable_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_tunable_scaling";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
@@ -3326,7 +3336,7 @@ fn eval_sched_tunable_scaling(info: &SystemInfo, recs: &mut Vec<Recommendation>)
 fn eval_panic_on_oops(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/panic_on_oops";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -3346,7 +3356,7 @@ fn eval_panic_on_oops(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_oom_dump_tasks(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/oom_dump_tasks";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -3366,7 +3376,7 @@ fn eval_oom_dump_tasks(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_tcp_moderate_rcvbuf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_moderate_rcvbuf";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -3389,7 +3399,7 @@ fn eval_tcp_moderate_rcvbuf(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_flow_limit_table_len(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/flow_limit_table_len";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let max_speed = info.network.iter().map(|n| n.speed_mbps).max().unwrap_or(0);
     if max_speed < 10000 {
@@ -3417,7 +3427,7 @@ fn eval_flow_limit_table_len(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 fn eval_tcp_l3mdev_accept(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_l3mdev_accept";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -3440,7 +3450,7 @@ fn eval_tcp_l3mdev_accept(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_panic_on_warn(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/panic_on_warn";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -3460,7 +3470,7 @@ fn eval_panic_on_warn(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/dirty_background_bytes";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -3491,7 +3501,7 @@ fn eval_dirty_background_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>
 fn eval_hardlockup_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/hardlockup_panic";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     // Hard-lockup detection relies on the NMI watchdog. ktuner separately
     // recommends disabling nmi_watchdog for perf — if it is already off, this
@@ -3525,7 +3535,7 @@ fn eval_hardlockup_panic(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_rt_runtime_us";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = std::fs::read_to_string(path)
         .unwrap_or_default()
@@ -3549,7 +3559,7 @@ fn eval_sched_rt_runtime(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_tcp_thin_linear_timeouts(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_thin_linear_timeouts";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -3572,7 +3582,7 @@ fn eval_tcp_thin_linear_timeouts(info: &SystemInfo, recs: &mut Vec<Recommendatio
 fn eval_arp_notify(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/arp_notify";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.network.len() < 2 || has_bond() {
         return 1;
@@ -3596,7 +3606,7 @@ fn eval_arp_notify(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_default_arp_announce(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/arp_announce";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.network.len() < 2 {
         return 1;
@@ -3620,7 +3630,7 @@ fn eval_default_arp_announce(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 fn eval_default_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/arp_ignore";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.network.len() < 2 {
         return 1;
@@ -3643,7 +3653,7 @@ fn eval_default_arp_ignore(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_default_send_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/send_redirects";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 1 {
@@ -3663,7 +3673,7 @@ fn eval_default_send_redirects(_info: &SystemInfo, recs: &mut Vec<Recommendation
 fn eval_suid_dumpable(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/suid_dumpable";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -3683,7 +3693,7 @@ fn eval_suid_dumpable(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_icmp_ignore_bogus(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/icmp_ignore_bogus_error_responses";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -3703,7 +3713,7 @@ fn eval_icmp_ignore_bogus(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_arp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/all/arp_filter";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.network.len() <= 1 || has_bond() {
         return 1;
@@ -3729,7 +3739,7 @@ fn eval_arp_filter(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_sched_cfs_bandwidth_slice(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_cfs_bandwidth_slice_us";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
@@ -3755,7 +3765,7 @@ fn eval_sched_cfs_bandwidth_slice(info: &SystemInfo, recs: &mut Vec<Recommendati
 fn eval_tcp_tw_recycle(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_tw_recycle";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -3777,7 +3787,7 @@ fn eval_tcp_tw_recycle(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_tcp_orphan_retries(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_orphan_retries";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -3805,7 +3815,7 @@ fn eval_tcp_orphan_retries(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_tcp_early_retrans(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_early_retrans";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -3825,7 +3835,7 @@ fn eval_tcp_early_retrans(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_ip_no_pmtu_disc(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/ip_no_pmtu_disc";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current != 0 {
@@ -3845,7 +3855,7 @@ fn eval_ip_no_pmtu_disc(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_sched_wakeup_granularity(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_wakeup_granularity_ns";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
@@ -3872,7 +3882,7 @@ fn eval_sched_wakeup_granularity(info: &SystemInfo, recs: &mut Vec<Recommendatio
 fn eval_extfrag_threshold(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/extfrag_threshold";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 32 {
         return 1;
@@ -3898,7 +3908,7 @@ fn eval_extfrag_threshold(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> 
 fn eval_msgmax(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/msgmax";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 65536 {
@@ -3918,7 +3928,7 @@ fn eval_msgmax(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_msgmnb(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/msgmnb";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 65536 {
@@ -3945,7 +3955,7 @@ fn eval_msgmnb(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_user_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/user_reserve_kbytes";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -3975,7 +3985,7 @@ fn eval_user_reserve_kbytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_shm_rmid_forced(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/shm_rmid_forced";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -3996,7 +4006,7 @@ fn eval_shm_rmid_forced(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sem";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let has_db = info
         .processes
@@ -4032,7 +4042,7 @@ fn eval_sem(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_stale_time";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current > 120 {
@@ -4052,7 +4062,7 @@ fn eval_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_shmmni(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/shmmni";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let has_db = info
         .processes
@@ -4079,7 +4089,7 @@ fn eval_shmmni(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_protected_fifos(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/protected_fifos";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -4099,7 +4109,7 @@ fn eval_protected_fifos(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_tcp_fack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_fack";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4122,7 +4132,7 @@ fn eval_tcp_fack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_tcp_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_reordering";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4145,7 +4155,7 @@ fn eval_tcp_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_sched_energy_aware(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_energy_aware";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 1 {
@@ -4165,7 +4175,7 @@ fn eval_sched_energy_aware(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_percpu_pagelist_high_fraction(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/percpu_pagelist_high_fraction";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -4191,7 +4201,7 @@ fn eval_percpu_pagelist_high_fraction(info: &SystemInfo, recs: &mut Vec<Recommen
 fn eval_accept_ra(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv6/conf/default/accept_ra";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current > 0 {
@@ -4211,7 +4221,7 @@ fn eval_accept_ra(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_tcp_recovery(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_recovery";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4235,7 +4245,7 @@ fn eval_tcp_recovery(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_tcp_comp_sack_delay(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_comp_sack_delay_ns";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4258,7 +4268,7 @@ fn eval_tcp_comp_sack_delay(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_skb_frag_coalesce(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/skb_defer_max";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 64 {
@@ -4278,7 +4288,7 @@ fn eval_skb_frag_coalesce(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_neigh_proxy_delay(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/proxy_delay";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current > 80 {
@@ -4298,7 +4308,7 @@ fn eval_neigh_proxy_delay(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_tcp_pacing_ca_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_pacing_ca_ratio";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4321,7 +4331,7 @@ fn eval_tcp_pacing_ca_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_tcp_pacing_ss_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_pacing_ss_ratio";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4346,7 +4356,7 @@ fn eval_tcp_pacing_ss_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_tcp_comp_sack_nr(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_comp_sack_nr";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4371,7 +4381,7 @@ fn eval_tcp_comp_sack_nr(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_tcp_thin_dupack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_thin_dupack";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4394,7 +4404,7 @@ fn eval_tcp_thin_dupack(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_tcp_invalid_ratelimit(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_invalid_ratelimit";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 500 {
@@ -4416,7 +4426,7 @@ fn eval_tcp_invalid_ratelimit(_info: &SystemInfo, recs: &mut Vec<Recommendation>
 fn eval_tcp_init_cwnd(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_init_cwnd";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4441,7 +4451,7 @@ fn eval_tcp_init_cwnd(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 fn eval_tcp_tso_win_divisor(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_tso_win_divisor";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4464,7 +4474,7 @@ fn eval_tcp_tso_win_divisor(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_sched_schedstats(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/sched_schedstats";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores < 4 {
         return 1;
@@ -4488,7 +4498,7 @@ fn eval_sched_schedstats(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_inotify_max_queued_events(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/inotify/max_queued_events";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 65536 {
@@ -4510,7 +4520,7 @@ fn eval_inotify_max_queued_events(_info: &SystemInfo, recs: &mut Vec<Recommendat
 fn eval_tcp_max_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_max_reordering";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4533,7 +4543,7 @@ fn eval_tcp_max_reordering(info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_tcp_retrans_collapse(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_retrans_collapse";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4557,7 +4567,7 @@ fn eval_tcp_retrans_collapse(info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 fn eval_tcp_app_win(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_app_win";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4582,7 +4592,7 @@ fn eval_tcp_app_win(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize 
 fn eval_ip_default_ttl(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/ip_default_ttl";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 64 {
@@ -4602,7 +4612,7 @@ fn eval_ip_default_ttl(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_tcp_frto(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_frto";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4626,7 +4636,7 @@ fn eval_tcp_frto(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_icmp_ratelimit(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/icmp_ratelimit";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -4646,7 +4656,7 @@ fn eval_icmp_ratelimit(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_igmp_max_memberships(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/igmp_max_memberships";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 256 {
@@ -4666,7 +4676,7 @@ fn eval_igmp_max_memberships(_info: &SystemInfo, recs: &mut Vec<Recommendation>)
 fn eval_randomize_va_space_full(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/randomize_va_space";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 1 {
@@ -4681,13 +4691,13 @@ fn eval_randomize_va_space_full(_info: &SystemInfo, recs: &mut Vec<Recommendatio
             writable: true,
         });
     }
-    0
+    1
 }
 
 fn eval_max_user_instances(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/inotify/max_user_instances";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 512 {
@@ -4709,7 +4719,7 @@ fn eval_max_user_instances(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_keys_maxkeys(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/keys/maxkeys";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 2000 {
@@ -4730,7 +4740,7 @@ fn eval_keys_maxkeys(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usiz
 fn eval_numa_stat(info: &SystemInfo, _recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/numa_stat";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.numa_nodes <= 1 {
         return 1;
@@ -4747,7 +4757,7 @@ fn eval_numa_stat(info: &SystemInfo, _recs: &mut Vec<Recommendation>) -> usize {
 fn eval_tcp_base_mss(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_base_mss";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4770,7 +4780,7 @@ fn eval_tcp_base_mss(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize
 fn eval_tcp_min_tso_segs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_min_tso_segs";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4793,7 +4803,7 @@ fn eval_tcp_min_tso_segs(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_neigh_default_gc_interval(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_interval";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 30 {
@@ -4813,7 +4823,7 @@ fn eval_neigh_default_gc_interval(_info: &SystemInfo, recs: &mut Vec<Recommendat
 fn eval_neigh_default_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/gc_stale_time";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 120 {
@@ -4833,7 +4843,7 @@ fn eval_neigh_default_gc_stale_time(_info: &SystemInfo, recs: &mut Vec<Recommend
 fn eval_tcp_fastopen_blackhole_timeout(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_fastopen_blackhole_timeout_sec";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4856,7 +4866,7 @@ fn eval_tcp_fastopen_blackhole_timeout(info: &SystemInfo, recs: &mut Vec<Recomme
 fn eval_max_queued_signals(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/rtsig-max";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 4096 {
@@ -4877,7 +4887,7 @@ fn eval_max_queued_signals(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_tcp_available_ulp(info: &SystemInfo, _recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_available_ulp";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -4888,13 +4898,13 @@ fn eval_tcp_available_ulp(info: &SystemInfo, _recs: &mut Vec<Recommendation>) ->
             return 1;
         }
     }
-    0
+    1
 }
 
 fn eval_keys_maxbytes(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/keys/maxbytes";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 25000 {
@@ -4914,7 +4924,7 @@ fn eval_keys_maxbytes(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_pipe_max_size(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/pipe-max-size";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 1048576 {
@@ -4937,7 +4947,7 @@ fn eval_pipe_max_size(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_shmall(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/shmall";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     let target_pages = (info.memory_total_gb * 1024 * 1024 * 1024 / 4096) / 2;
@@ -4961,7 +4971,7 @@ fn eval_shmall(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
 fn eval_compact_memory(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/compact_memory";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let proactive_path = "/proc/sys/vm/compaction_proactiveness";
     if std::path::Path::new(proactive_path).exists() {
@@ -4980,13 +4990,13 @@ fn eval_compact_memory(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
         }
         return 1;
     }
-    0
+    1
 }
 
 fn eval_min_slab_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/min_slab_ratio";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -5012,7 +5022,7 @@ fn eval_min_slab_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_tcp_autocorking(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_autocorking";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -5035,7 +5045,7 @@ fn eval_tcp_autocorking(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_tcp_workaround_signed_windows(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_workaround_signed_windows";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -5058,7 +5068,7 @@ fn eval_tcp_workaround_signed_windows(info: &SystemInfo, recs: &mut Vec<Recommen
 fn eval_protected_regular(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/fs/protected_regular";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -5080,7 +5090,7 @@ fn eval_protected_regular(_info: &SystemInfo, recs: &mut Vec<Recommendation>) ->
 fn eval_bpf_jit_enable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/bpf_jit_enable";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -5104,7 +5114,7 @@ fn eval_bpf_jit_enable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
 fn eval_bpf_jit_harden(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/bpf_jit_harden";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -5125,7 +5135,7 @@ fn eval_bpf_jit_harden(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
 fn eval_tcp_available_congestion(_info: &SystemInfo, _recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/tcp_available_congestion_control";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let content = read_sysctl_string(path);
     if !content.contains("bbr") {
@@ -5141,7 +5151,7 @@ fn eval_tcp_available_congestion(_info: &SystemInfo, _recs: &mut Vec<Recommendat
 fn eval_somaxconn_large(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/core/somaxconn";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -5160,13 +5170,13 @@ fn eval_somaxconn_large(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> us
             writable: true,
         });
     }
-    0
+    1
 }
 
 fn eval_promote_secondaries(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/conf/default/promote_secondaries";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -5186,7 +5196,7 @@ fn eval_promote_secondaries(_info: &SystemInfo, recs: &mut Vec<Recommendation>) 
 fn eval_unres_qlen_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/neigh/default/unres_qlen_bytes";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current < 131072 && info.max_net_speed() >= 10000 {
@@ -5207,7 +5217,7 @@ fn eval_unres_qlen_bytes(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
 fn eval_ip_nonlocal_bind(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/net/ipv4/ip_nonlocal_bind";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     // HA / VIP setups (keepalived VRRP, HAProxy binding to floating IPs) require
     // ip_nonlocal_bind=1 on purpose — don't recommend disabling it there.
@@ -5235,7 +5245,7 @@ fn eval_conntrack_tcp_timeout_established(
 ) -> usize {
     let path = "/proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if !info.has_listen_sockets() {
         return 1;
@@ -5258,7 +5268,7 @@ fn eval_conntrack_tcp_timeout_established(
 fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/softlockup_all_cpu_backtrace";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 32 {
         return 1;
@@ -5281,7 +5291,7 @@ fn eval_softlockup_all_cpu_backtrace(info: &SystemInfo, recs: &mut Vec<Recommend
 fn eval_compact_unevictable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/vm/compact_unevictable_allowed";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.memory_total_gb < 64 {
         return 1;
@@ -5304,7 +5314,7 @@ fn eval_compact_unevictable(info: &SystemInfo, recs: &mut Vec<Recommendation>) -
 fn eval_perf_cpu_time_max_percent(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/perf_cpu_time_max_percent";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     if info.cpu_cores <= 16 {
         return 1;
@@ -5328,7 +5338,7 @@ fn eval_perf_cpu_time_max_percent(info: &SystemInfo, recs: &mut Vec<Recommendati
 fn eval_hung_task_warnings(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
     let path = "/proc/sys/kernel/hung_task_warnings";
     if !std::path::Path::new(path).exists() {
-        return 0;
+        return 1;
     }
     let current = read_sysctl_u64(path);
     if current == 0 {
@@ -5350,7 +5360,7 @@ fn eval_overcommit_ratio(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> u
     let oc_path = "/proc/sys/vm/overcommit_memory";
     let ratio_path = "/proc/sys/vm/overcommit_ratio";
     if !std::path::Path::new(ratio_path).exists() {
-        return 0;
+        return 1;
     }
     let oc_mode = read_sysctl_u64(oc_path);
     if oc_mode != 2 {
@@ -7763,5 +7773,27 @@ mod tests {
         if oc != 2 {
             assert!(recs.is_empty());
         }
+    }
+
+    #[test]
+    fn test_absent_param_counts_as_checked() {
+        // Each eval_* function should return 1 even when the param does not
+        // exist, so that total_checked reflects all rules attempted. The probe
+        // path lives under /proc/sys, which is never user-writable, so it is
+        // guaranteed absent on every host — the absent branch is exercised
+        // deterministically regardless of kernel version.
+        let path = "/proc/sys/kernel/ktuner_test_absent_probe";
+        assert!(!std::path::Path::new(path).exists());
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let count = eval_sched_min_granularity_at(&info, &mut recs, path);
+        assert_eq!(
+            count, 1,
+            "eval_* must return 1 regardless of param presence"
+        );
+        assert!(
+            recs.is_empty(),
+            "absent param must not emit a recommendation"
+        );
     }
 }
