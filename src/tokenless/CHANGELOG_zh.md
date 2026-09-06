@@ -9,6 +9,32 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.0] - 2026-09-06
+
+### 新增
+
+- 大型 JSON 记录数组现在可以按 32 条记录的基础预算保留代表性记录、错误、异常结构和数值离群点，并通过 Stash 恢复完整集合。若紧凑 JSON 或 TOON 候选可节省至少 15%，则优先采用，避免进一步缩减记录 ([#3047](https://github.com/alibaba/anolisa/pull/3047))。
+- 现在可以压缩识别出的 Cargo、pytest、npm/Jest、Go、Make/C 和通用构建/测试日志，省略重复的常规进度，同时保留诊断、摘要、阶段信息和堆栈。支持的构建/测试命令会保留原生日志供此路径压缩，具备恢复能力时可取回省略的区间 ([#3067](https://github.com/alibaba/anolisa/pull/3067))。
+- Cosh-NG、Claude Code、Qoder CLI、OpenCode、Hermes 和 DeepSeek Harness 现在可以通过已有 Shell 工具恢复省略内容。成功执行的独立 `tokenless retrieve HASH` 命令结果不会再次压缩；恢复要求 CLI 可用，且宿主能够替换当前工具结果，其中 Claude Code 要求 2.1.121 或更新版本 ([#3052](https://github.com/alibaba/anolisa/pull/3052))。
+- 新增 QwenPaw 插件，在进程内提供 Schema 压缩、RTK 命令改写、响应/TOON 压缩和静态 `tokenless_retrieve` 工具。安装时选择匹配版本的 SDK Wheel，支持的内置工具表之外的工具保持原样 ([#3075](https://github.com/alibaba/anolisa/pull/3075))。
+
+### 变更
+
+- **不兼容变更：** `tokenless compress` 现在仅接受 Protocol v2 的 `before_model`、`pre_tool`、`post_tool` 和 `retrieve` 请求，移除 Protocol v1 和 `tokenless mcp serve`。Core、适配器和自定义调用方必须同步升级，并提供必需的显式恢复能力声明 ([#2978](https://github.com/alibaba/anolisa/pull/2978), [#3068](https://github.com/alibaba/anolisa/pull/3068))。
+- **不兼容变更：** Rust 调用方现在使用 Runtime 生命周期方法替代 `TokenlessRuntime::compress`。直接调用响应压缩的代码需要从已移除的 `tokenless-pipeline` Crate 和 `tokenless_schema::ResponseCompressor` 迁移至 Runtime 或 `tokenless-compressors` API ([#2974](https://github.com/alibaba/anolisa/pull/2974), [#2978](https://github.com/alibaba/anolisa/pull/2978))。
+- **不兼容变更：** Python SDK 现在通过类型化生命周期请求调用 `before_model`、`pre_tool`、`post_tool` 和 `retrieve`，移除旧的 `ModelRequest`、`ToolCall`、`ToolResult` 和 `ToolResponseCompressor` API。AgentScope 集成要求为自定义工具提供 `ToolContract` 元数据，并暴露一个静态恢复工具 ([#2986](https://github.com/alibaba/anolisa/pull/2986), [#3029](https://github.com/alibaba/anolisa/pull/3029))。
+- 恢复提示现在直接给出可用的 Shell 命令或配置的静态工具名，并使用裸 Hash，便于 Agent 选择正确的恢复动作。历史 `<<tokenless:HASH>>` 标记仍可读取；自定义 `retrieve_tool_name` 必须符合工具名规则 ([#3068](https://github.com/alibaba/anolisa/pull/3068))。
+- 生命周期 Schema 压缩现在要求提供授权静态恢复工具，并具备可用的 Stash。缺少该能力的 Common BeforeModel Hook 会保留原始 Schema ([#2978](https://github.com/alibaba/anolisa/pull/2978), [#2995](https://github.com/alibaba/anolisa/pull/2995), [#3029](https://github.com/alibaba/anolisa/pull/3029))。
+- 生命周期压缩现在保留声明为文件内容的结果，以及已经由 RTK 优化的结果。Common Hook 会传递每次调用的优化状态，缺少稳定工具调用 ID 时保持命令参数不变 ([#2974](https://github.com/alibaba/anolisa/pull/2974), [#2978](https://github.com/alibaba/anolisa/pull/2978), [#2995](https://github.com/alibaba/anolisa/pull/2995))。
+- **不兼容变更：** OpenClaw 现在使用 `post_tool_enabled` 控制 PostTool 优化，移除原有的响应、TOON、跳过工具和 Shell 工具策略配置。DeepSeek Harness 也改用共享压缩策略，替代适配器专用阈值和工具列表。OpenClaw 仍仅支持持久化记录的无损更新，不支持当前轮结果替换或恢复 ([#3009](https://github.com/alibaba/anolisa/pull/3009), [#3036](https://github.com/alibaba/anolisa/pull/3036))。
+- Hermes 现在将 PreTool 改写和 PostTool 结果处理交给 Core，使用共享响应与 TOON 策略替代适配器本地决策；旧版 Hermes 仍保留阻止原命令并建议改写命令的兼容方式 ([#3018](https://github.com/alibaba/anolisa/pull/3018))。
+- 压缩统计现在通过 `content_origin`、`applied_operations` 和 `recoverability` 替代 `seam` 与 `compressor_chain`；授权恢复事件也会记录 Agent、Session 和工具调用归属 ([#2978](https://github.com/alibaba/anolisa/pull/2978))。
+
+### 修复
+
+- OpenClaw 现在读取插件自身配置，即使全局配置存在冲突值，显式启用和禁用设置也能生效 ([#3009](https://github.com/alibaba/anolisa/pull/3009))。
+- npm 包现在将共享 Hook 分发脚本作为可执行普通文件打包，避免 `npm pack` 忽略源码符号链接后，已安装插件无法调用 Tokenless ([#3068](https://github.com/alibaba/anolisa/pull/3068))。
+
 ## [0.7.14] - 2026-08-26
 
 ### 新增

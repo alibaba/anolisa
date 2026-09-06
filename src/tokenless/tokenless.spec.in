@@ -504,6 +504,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sun Sep 06 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.0-1
+- Migrate CLI, Python SDK and adapters to Protocol v2 lifecycle requests
+- Add recoverable JSON record reduction and build/test log compression
+- Add shell and static-tool recovery instructions and the QwenPaw plugin
+- Fix OpenClaw configuration and packaged shared hook dispatchers
+
 * Wed Aug 26 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.14-1
 - feat(tokenless): unify external compression entry
 - feat(tokenless): attribute statistics and retrieval events

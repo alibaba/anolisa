@@ -9,6 +9,32 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-06
+
+### Added
+
+- Large JSON record arrays can now retain representative records, errors, unusual shapes, and numeric outliers under a 32-record base budget, with the complete collection available through Stash. Compact JSON and TOON candidates that save at least 15% take priority over record reduction ([#3047](https://github.com/alibaba/anolisa/pull/3047)).
+- Recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic build/test logs can now drop repeated routine progress while preserving diagnostics, summaries, phases, and stack traces. Supported build/test commands keep their native output for this compression, and omitted intervals remain retrievable when recovery is available ([#3067](https://github.com/alibaba/anolisa/pull/3067)).
+- Cosh-NG, Claude Code, Qoder CLI, OpenCode, Hermes, and DeepSeek Harness can now recover omitted content through their existing shell tools. Successful standalone `tokenless retrieve HASH` results bypass further compression; recovery requires a reachable CLI and a host that can replace the current tool result, including Claude Code 2.1.121 or newer ([#3052](https://github.com/alibaba/anolisa/pull/3052)).
+- A QwenPaw plugin now provides in-process schema compression, RTK command rewriting, response/TOON compression, and a static `tokenless_retrieve` tool. Installation selects the matching SDK wheel, and tools outside the supported built-in table pass through unchanged ([#3075](https://github.com/alibaba/anolisa/pull/3075)).
+
+### Changed
+
+- **Breaking:** `tokenless compress` now accepts only Protocol v2 `before_model`, `pre_tool`, `post_tool`, and `retrieve` requests; Protocol v1 and `tokenless mcp serve` have been removed. Core, adapters, and custom callers must upgrade together, including the required explicit recovery capability ([#2978](https://github.com/alibaba/anolisa/pull/2978), [#3068](https://github.com/alibaba/anolisa/pull/3068)).
+- **Breaking:** Rust callers now use the Runtime lifecycle methods in place of `TokenlessRuntime::compress`. Direct response-compression callers must migrate from the removed `tokenless-pipeline` crate and `tokenless_schema::ResponseCompressor` to the Runtime or `tokenless-compressors` APIs ([#2974](https://github.com/alibaba/anolisa/pull/2974), [#2978](https://github.com/alibaba/anolisa/pull/2978)).
+- **Breaking:** The Python SDK now uses typed lifecycle requests with `before_model`, `pre_tool`, `post_tool`, and `retrieve`; the old `ModelRequest`, `ToolCall`, `ToolResult`, and `ToolResponseCompressor` APIs have been removed. AgentScope integrations require `ToolContract` metadata for custom tools and expose one static retrieval tool ([#2986](https://github.com/alibaba/anolisa/pull/2986), [#3029](https://github.com/alibaba/anolisa/pull/3029)).
+- Recovery instructions now name the available shell command or configured static tool and use a bare hash, so agents can choose the correct recovery action. Historical `<<tokenless:HASH>>` markers remain readable; custom `retrieve_tool_name` settings must satisfy the tool-name rules ([#3068](https://github.com/alibaba/anolisa/pull/3068)).
+- Lifecycle schema compression now requires an authorized static recovery tool and an available Stash. Common BeforeModel hooks without that capability preserve the original schemas ([#2978](https://github.com/alibaba/anolisa/pull/2978), [#2995](https://github.com/alibaba/anolisa/pull/2995), [#3029](https://github.com/alibaba/anolisa/pull/3029)).
+- Lifecycle compression now preserves declared file contents and results already optimized by RTK. Common hooks carry per-call optimization state, and hooks without a stable tool-call ID leave command arguments unchanged ([#2974](https://github.com/alibaba/anolisa/pull/2974), [#2978](https://github.com/alibaba/anolisa/pull/2978), [#2995](https://github.com/alibaba/anolisa/pull/2995)).
+- **Breaking:** OpenClaw now uses `post_tool_enabled` for PostTool optimization; its former response, TOON, skip-tool, and shell-tool policy settings have been removed. DeepSeek Harness also uses the shared compression policy instead of adapter-specific thresholds and tool lists. OpenClaw remains limited to lossless transcript updates without same-turn replacement or retrieval ([#3009](https://github.com/alibaba/anolisa/pull/3009), [#3036](https://github.com/alibaba/anolisa/pull/3036)).
+- Hermes now delegates PreTool rewriting and PostTool result handling to Core, using the shared response and TOON policy instead of adapter-local decisions; older Hermes releases retain block-and-suggest command rewriting ([#3018](https://github.com/alibaba/anolisa/pull/3018)).
+- Compression statistics now expose `content_origin`, `applied_operations`, and `recoverability` in place of `seam` and `compressor_chain`; authorized retrieval events also carry agent, session, and tool-call attribution ([#2978](https://github.com/alibaba/anolisa/pull/2978)).
+
+### Fixed
+
+- OpenClaw now reads plugin-local configuration, so explicit enable and disable settings take effect even when global configuration contains conflicting values ([#3009](https://github.com/alibaba/anolisa/pull/3009)).
+- npm packages now include executable shared hook dispatchers as regular files, so installed plugins can invoke Tokenless even though `npm pack` omits source symlinks ([#3068](https://github.com/alibaba/anolisa/pull/3068)).
+
 ## [0.7.14] - 2026-08-26
 
 ### Added

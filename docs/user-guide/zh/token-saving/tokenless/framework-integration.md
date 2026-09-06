@@ -332,8 +332,8 @@ Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调�
 wheel 不会被 `plugin install` 升级。因此安装脚本会通过 `qwenpaw` 命令背后的解释器确认 `anolisa_tokenless`
 可导入且具备插件需要的 SDK 接口，没有 wheel 匹配当前平台（`requirements.txt` 列出 Linux x86_64、Linux aarch64
 和 macOS arm64）时安装失败。插件本身也会拒绝在旧版 wheel 上注册并在日志中给出所需的 release，而不是在第一次模型
-调用时报错。插件需要 Tokenless 0.7.14 之后新增的恢复入口，因此在下一次版本号提升之前构建的软件包会指向一个不含
-该接口的 wheel：此时插件可以安装，但只会记录所需的 release 并保持禁用，直到装上该 release。工作目录与 QwenPaw 本身的解析一致：`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
+调用时报错。插件需要 Tokenless 0.8.0 引入的恢复入口。请在 QwenPaw 的 Python 环境中安装与插件 Release 匹配的
+SDK Wheel；0.7.14 Wheel 不提供这些 API。工作目录与 QwenPaw 本身的解析一致：`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
 `~/.copaw`，否则 `~/.qwenpaw`。没有 `qwenpaw` 命令时安装脚本打印提示并以 0 退出，`make setup` 在未安装 QwenPaw
 的主机上可以完整跑完。
 

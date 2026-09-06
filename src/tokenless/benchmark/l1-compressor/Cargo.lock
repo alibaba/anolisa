@@ -686,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.7.14"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "rusqlite",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-compressors"
-version = "0.7.14"
+version = "0.8.0"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-protocol"
-version = "0.7.14"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.7.14"
+version = "0.8.0"
 dependencies = [
  "regex",
  "serde_json",
