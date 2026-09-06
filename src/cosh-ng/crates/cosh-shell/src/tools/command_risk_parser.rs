@@ -3,17 +3,20 @@ use super::command_risk::CommandShape;
 /// Non-persistent output-suppression sink allowlist (issue #1667
 /// implementation boundaries): a `[N]>` / `[N]>>` redirection is treated
 /// as output suppression instead of a filesystem write only when the
-/// target is an unquoted, non-expanded literal from this table. The fd
-/// words `[N]>&1` / `[N]>&2` (duplication onto the conventional output
-/// targets) and `[N]>&-` (close) are exempted by policy as descriptor
-/// operations, not filesystem writes; see the fd word probe in
-/// `parse_command` for the policy rationale (issue #2054, spec
-/// `shell-fd-dup-redirection-risk`). Every other form (regular files,
-/// quoted or expanded targets, other numeric targets, `&>`, `>&file`,
-/// bash's move form `[N]>&M-`) keeps the fail-closed RedirectionWrite
-/// high-risk path. Extending this table requires revisiting the issue
-/// #1667 boundaries and the decision-matrix tests in
-/// `command_risk_tests.rs`.
+/// target is an unquoted, non-expanded literal from this table, or a
+/// whole-word quoted form of such a literal (`2>'/dev/null'`,
+/// `2>"/dev/null"`, issue #1752 — quotes around a sink entry cannot
+/// introduce expansion because the entries contain no `$`, backtick or
+/// backslash). The fd words `[N]>&1` / `[N]>&2` (duplication onto the
+/// conventional output targets) and `[N]>&-` (close) are exempted by
+/// policy as descriptor operations, not filesystem writes; see the fd
+/// word probe in `parse_command` for the policy rationale (issue #2054,
+/// spec `shell-fd-dup-redirection-risk`). Every other form (regular
+/// files, expanded or partially quoted targets, other numeric targets,
+/// `&>`, `>&file`, bash's move form `[N]>&M-`) keeps the fail-closed
+/// RedirectionWrite high-risk path. Extending this table requires
+/// revisiting the issue #1667 boundaries and the decision-matrix tests
+/// in `command_risk_tests.rs`.
 const SAFE_OUTPUT_SINKS: &[&str] = &["/dev/null"];
 
 /// Segment separator kind recorded at each `&&`/`||`/`;`/newline break.
@@ -257,6 +260,80 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 {
                     lookahead.next();
                     consumed += 1;
+                }
+                // Issue #1752: a target whose whole word is single- or
+                // double-quoted (`2>'/dev/null'`, `2>"/dev/null"`) still
+                // undergoes quote removal to the literal sink path —
+                // quotes cannot introduce expansion for a SAFE_OUTPUT_SINK
+                // entry, whose bytes contain no `$`, backtick or backslash
+                // — so it joins the null-suppression channel like the
+                // unquoted form. Only this exact whole-word form is
+                // exempted: the closing quote must end the word (a suffix
+                // like `'/dev/null'x` concatenates into a different path,
+                // and `{`/`}` are not word boundaries in the
+                // redirection-word position) and the dequoted content must
+                // match the allowlist byte-for-byte, so expanded
+                // (`"$F"`), suffixed, and non-sink quoted targets keep the
+                // fail-closed path below byte-for-byte.
+                if !guarded {
+                    if let Some(&quote_ch) = lookahead.peek() {
+                        if matches!(quote_ch, '\'' | '"') {
+                            let mut quoted_scan = lookahead.clone();
+                            let mut quoted_consumed = 0usize;
+                            quoted_scan.next();
+                            quoted_consumed += 1;
+                            let mut quoted_target = String::new();
+                            let mut quote_closed = false;
+                            while let Some(&next) = quoted_scan.peek() {
+                                if next == quote_ch {
+                                    quoted_scan.next();
+                                    quoted_consumed += 1;
+                                    quote_closed = true;
+                                    break;
+                                }
+                                if matches!(
+                                    next,
+                                    ' ' | '\t'
+                                        | '\n'
+                                        | ';'
+                                        | '|'
+                                        | '&'
+                                        | '<'
+                                        | '>'
+                                        | '('
+                                        | ')'
+                                        | '{'
+                                        | '}'
+                                ) {
+                                    break;
+                                }
+                                quoted_target.push(next);
+                                quoted_scan.next();
+                                quoted_consumed += 1;
+                            }
+                            // Keep the workspace Rust 1.74 MSRV;
+                            // `Option::is_none_or` is newer.
+                            #[allow(clippy::unnecessary_map_or)]
+                            let word_ends = quote_closed
+                                && quoted_scan.peek().map_or(true, |next| {
+                                    matches!(
+                                        next,
+                                        ' ' | '\t' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')'
+                                    )
+                                });
+                            if word_ends && SAFE_OUTPUT_SINKS.contains(&quoted_target.as_str()) {
+                                if fd_candidate {
+                                    token.clear();
+                                    token_quoted = false;
+                                }
+                                for _ in 0..consumed + quoted_consumed {
+                                    chars.next();
+                                }
+                                null_redirections += 1;
+                                continue;
+                            }
+                        }
+                    }
                 }
                 let mut target = String::new();
                 let mut literal = true;

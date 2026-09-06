@@ -903,11 +903,14 @@ fn redirection_fail_closed_paths_stay_high() {
     assert_eq!(write.impact, RiskImpact::High);
     assert!(write.reasons.contains(&"redirection-write"));
 
-    // V-M8: quoted or expanded targets fail closed.
+    // V-M8 (narrowed by issue #1752): expanded and non-sink quoted
+    // targets fail closed. Whole-word quoted safe sinks
+    // (`cat log 2>'/dev/null'`) moved to the null-suppression channel —
+    // see `command_risk_quoted_tests` (lib-only test module).
     for command in [
         "cat log 2>\"$F\"",
-        "cat log 2>'/dev/null'",
         "cat log 2>$FILE",
+        "cat log 2>\"/tmp/evil\"",
     ] {
         let assessment = ask(command);
         assert_eq!(assessment.impact, RiskImpact::High, "{command}");
