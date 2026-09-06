@@ -261,6 +261,57 @@ fn test_version_output() {
     assert!(stdout.contains("cosh-cli"));
 }
 
+// --- clap errors must produce JSON envelope (issue #1548) ---
+
+#[test]
+fn test_clap_missing_argument_returns_json_envelope() {
+    let output = cosh_bin().args(["pkg", "install"]).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "clap error should exit 1, not 2"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+    assert_eq!(json["error"]["subsystem"], "cli");
+    assert_eq!(json["meta"]["subsystem"], "cli");
+    assert_eq!(json["meta"]["dry_run"], false);
+}
+
+#[test]
+fn test_clap_unknown_subcommand_returns_json_envelope() {
+    let output = cosh_bin().arg("nonexistent-subcommand").output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "clap error should exit 1, not 2"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+    assert_eq!(json["error"]["subsystem"], "cli");
+}
+
+#[test]
+fn test_clap_no_subcommand_returns_json_envelope() {
+    let output = cosh_bin().output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "clap error should exit 1, not 2"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}\nstdout={stdout}"));
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "InvalidInput");
+}
+
 #[test]
 fn test_pkg_help() {
     let output = cosh_bin().args(["pkg", "--help"]).output().unwrap();

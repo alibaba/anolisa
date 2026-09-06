@@ -65,9 +65,50 @@ fn main() {
         .with_target(true)
         .try_init();
 
-    let cli = Cli::parse();
-    let distro = Distro::detect();
     let start = Instant::now();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // --help and --version are display requests, not errors.
+            // Print to stdout and exit 0, preserving clap's default behavior.
+            if e.kind() == clap::error::ErrorKind::DisplayHelp
+                || e.kind() == clap::error::ErrorKind::DisplayVersion
+            {
+                let _ = e.print();
+                std::process::exit(0);
+            }
+            // All other clap errors (missing args, unknown subcommand, etc.)
+            // go through the JSON envelope contract: stdout + exit 1.
+            // render() yields plain text (no ANSI codes) so the JSON message
+            // stays clean even when stdout is a tty.
+            let error = cosh_types::error::CoshError::new(
+                cosh_types::error::ErrorCode::InvalidInput,
+                e.render().to_string().trim().to_string(),
+                "cli",
+            )
+            .recoverable(true)
+            .with_hint("Run with --help to see available commands and options".to_string());
+            let meta = ResponseMeta {
+                subsystem: "cli".to_string(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                distro: Some(Distro::detect().id_str().to_string()),
+                dry_run: false,
+                warning: None,
+            };
+            let resp: CoshResponse<()> = CoshResponse::failure(error, meta);
+            match serde_json::to_string_pretty(&resp) {
+                Ok(json) => println!("{}", json),
+                Err(_) => {
+                    // Last-resort fallback: hand-crafted JSON so stdout is never empty.
+                    println!(
+                        r#"{{"ok":false,"error":{{"code":"InvalidInput","message":"clap error (serialization failed)","recoverable":true,"subsystem":"cli"}},"meta":{{"subsystem":"cli","duration_ms":0,"dry_run":false}}}}"#
+                    );
+                }
+            }
+            std::process::exit(1);
+        }
+    };
+    let distro = Distro::detect();
 
     let exit_code = match cli.command {
         Commands::Pkg { action } => cmd::pkg::run(action, &distro, start),
