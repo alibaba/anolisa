@@ -24,7 +24,8 @@ mkdir -p \
     "$ADAPTERS/codex/.codex-plugin" \
     "$ADAPTERS/agentscope/build/lib/tokenless_agentscope" \
     "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info" \
-    "$ADAPTERS/qwencode/hooks"
+    "$ADAPTERS/qwencode/hooks" \
+    "$ADAPTERS/qwenpaw"
 
 cat > "$SOURCE/Cargo.toml" <<EOF
 [workspace]
@@ -51,6 +52,10 @@ write_json_version "$ADAPTERS/qoder/.qoder-plugin/plugin.json"
 write_json_version "$ADAPTERS/claude-code/.claude-plugin/plugin.json"
 write_json_version "$ADAPTERS/codex/.codex-plugin/plugin.json"
 write_json_version "$ADAPTERS/qwencode/qwen-extension.json"
+write_json_version "$ADAPTERS/qwenpaw/plugin.json"
+printf 'plugin = None\n' > "$ADAPTERS/qwenpaw/plugin.py"
+printf 'anolisa-tokenless @ https://github.com/alibaba/anolisa/releases/download/tokenless/v%s/anolisa_tokenless-%s-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; sys_platform == "linux"\n' \
+    "$VERSION" "$VERSION" > "$ADAPTERS/qwenpaw/requirements.txt"
 printf '{"name":"anolisa-tokenless"}\n' \
     > "$ADAPTERS/claude-code/.claude-plugin/marketplace.json"
 printf 'version: "%s"\n' "$VERSION" > "$ADAPTERS/hermes/plugin.yaml"

@@ -18,6 +18,7 @@ Python SDK 及其 AgentScope 专用子文档放在 [Python SDK 指南](sdk.md) �
 | DeepSeek Harness | `dsh` | 未注册 | 未注册 | 把已接受的单文本结果委托给 Core；支持 Marker 命令恢复 | 对可替换文本由 Core 选择 | 未注册 |
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 对可替换文本由 Pipeline 选择 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 宿主没有替换字段，因此透传 | — | — |
+| QwenPaw | `qwenpaw` | — | 替换 `execute_shell_command` 的输入 | 在 AgentScope 中间件链中替换工具结果的文本块 | 对可替换文本由 Core 选择 | ✅ |
 
 “—”表示该能力不可用：当前 Adapter 没有注册，或当前宿主版本不会运行；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -176,6 +177,7 @@ anolisa adapter enable tokenless claude-code
 anolisa adapter enable tokenless codex
 anolisa adapter enable tokenless opencode
 anolisa adapter enable tokenless qwencode
+anolisa adapter enable tokenless qwenpaw
 anolisa adapter enable tokenless dsh \
   --profile web \
   --profile headless
@@ -230,7 +232,7 @@ npm 的 postinstall 脚本会尝试把 Adapter 资源复制到：
 
 应确认该目录确实存在。Adapter 复制属于补充步骤，失败时只输出警告，不会让二进制安装失败；因此可能出现命令可用但这里没有资源副本的情况。目录缺失时应检查 npm postinstall 警告，并优先改用 anolisa 管理的安装。
 
-npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode 和 Qwen Code 可以运行各自的安装脚本：
+npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode、Qwen Code 和 QwenPaw 可以运行各自的安装脚本：
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
@@ -319,6 +321,29 @@ OpenCode 启动时会自动加载配置目录下的 Plugin。使用上述 Tokenl
 ### Qwen Code
 
 Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调用验证。
+
+### QwenPaw
+
+该 Adapter 是一个 QwenPaw Plugin：`anolisa adapter enable tokenless qwenpaw` 和自带的安装脚本都会执行
+`qwenpaw plugin install <bundle> --force`，由 QwenPaw 把插件复制到 `<工作目录>/plugins/tokenless/`，
+并把其 `requirements.txt` 安装进 QwenPaw 自己的 Python 环境。该依赖是对应 GitHub Release 中的
+`anolisa_tokenless` wheel，因此首次安装需要联网。QwenPaw 只在其解释器的包元数据里找不到 `anolisa_tokenless`
+时才运行 pip，所以离线主机可先用 `pip install` 把 wheel 装进 QwenPaw 的 Python 环境；同样的规则意味着已装过的旧版
+wheel 不会被 `plugin install` 升级。因此安装脚本会通过 `qwenpaw` 命令背后的解释器确认 `anolisa_tokenless`
+可导入且具备插件需要的 SDK 接口，没有 wheel 匹配当前平台（`requirements.txt` 列出 Linux x86_64、Linux aarch64
+和 macOS arm64）时安装失败。插件本身也会拒绝在旧版 wheel 上注册并在日志中给出所需的 release，而不是在第一次模型
+调用时报错。插件需要 Tokenless 0.7.14 之后新增的恢复入口，因此在下一次版本号提升之前构建的软件包会指向一个不含
+该接口的 wheel：此时插件可以安装，但只会记录所需的 release 并保持禁用，直到装上该 release。工作目录与 QwenPaw 本身的解析一致：`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
+`~/.copaw`，否则 `~/.qwenpaw`。没有 `qwenpaw` 命令时安装脚本打印提示并以 0 退出，`make setup` 在未安装 QwenPaw
+的主机上可以完整跑完。
+
+正在运行的 QwenPaw 会热加载插件；否则启动 QwenPaw 即可。Schema 压缩和 `tokenless_retrieve` 工具从下一次
+模型调用开始生效；命令重写发生在 QwenPaw 的审批步骤之后，因此已批准的 `execute_shell_command` 会执行改写后的
+命令。只有 QwenPaw 内置工具会被分类：`execute_shell_command` 为命令输出，`read_file`、`recall_history`、`view_image`、
+`view_video` 为文件内容，其余内置工具为 API 响应；Skill、MCP 工具以及后续 QwenPaw 版本新增的工具原样
+透传。QwenPaw 自己的工具结果裁剪在 Tokenless 之后运行，且保留结果头部（最近两条工具结果 50000 字节，更早的 3000
+字节，溢出部分写入 `tool_results/`），因此压缩结果末尾的恢复指令只在结果未超出该预算时可见；被省略的内容仍可用
+`tokenless retrieve` 从 Stash 取回。统计记录按 QwenPaw 工作区写入 `<workspace>/.tokenless`，运行 `tokenless stats list --data-dir` 时指向该目录。
 
 ## AgentScope 框架集成
 

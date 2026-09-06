@@ -141,6 +141,22 @@
         "install":   "qwencode/scripts/install.sh",
         "uninstall": "qwencode/scripts/uninstall.sh"
       }
+    },
+    "qwenpaw": {
+      "compatibleVersions": ">=2.0.0 <3.0.0",
+      "capabilities": {
+        "hooks": [
+          "compress-schema",
+          "rewrite",
+          "compress-response",
+          "compress-toon"
+        ]
+      },
+      "actions": {
+        "detect":    "qwenpaw/scripts/detect.sh",
+        "install":   "qwenpaw/scripts/install.sh",
+        "uninstall": "qwenpaw/scripts/uninstall.sh"
+      }
     }
   }
 }

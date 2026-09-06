@@ -119,6 +119,7 @@ anolisa adapter scan
 | DeepSeek Harness（dsh） | `anolisa adapter enable tokenless dsh --profile <profile>` |
 | OpenCode | `anolisa adapter enable tokenless opencode` |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` |
+| QwenPaw | `anolisa adapter enable tokenless qwenpaw` |
 
 接入后重启对应的 Agent CLI 或 IDE。OpenClaw 还需要运行
 `openclaw gateway restart`；如果安全检查拒绝 Plugin，请按照

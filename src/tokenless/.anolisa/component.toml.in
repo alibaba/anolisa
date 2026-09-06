@@ -103,6 +103,20 @@ detect = { binary = "hermes" }
 entry = "plugin.yaml"
 
 [[adapters]]
+framework = "qwenpaw"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qwenpaw"
+dest = "{datadir}/adapters/{component}/qwenpaw/"
+detect = { binary = "qwenpaw" }
+
+[adapters.bundle]
+# QwenPaw plugin manifest. The built-in qwenpaw driver hands the bundle to
+# `qwenpaw plugin install`, which copies it, validates plugin.py and installs
+# requirements.txt into QwenPaw's own Python environment.
+entry = "plugin.json"
+
+[[adapters]]
 framework = "qoder"
 adapter_type = "plugin"
 plugin_id = "tokenless"

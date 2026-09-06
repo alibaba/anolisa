@@ -86,6 +86,7 @@ tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内�
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON + Marker 命令恢复
 - **DeepSeek Harness 插件** — 通过 DSH 原生 `tools/post-execute` 接入响应压缩、Marker 命令恢复和环境错误归因
 - **Qwen Code Extension** — Tool Ready（已硬关闭）+ 命令重写；当前宿主不支持工具后输出替换，并跳过声明的 Schema 事件
+- **QwenPaw 插件** — 通过 QwenPaw 插件系统注册 AgentScope 中间件，进程内调用 `anolisa_tokenless` wheel，提供 Schema 压缩、RTK 命令重写、响应/TOON 压缩和 `tokenless_retrieve` 静态工具恢复
 
 OpenClaw Plugin 只保留宿主事件转换与逐调用状态：`before_tool_call` 把 `exec` 参数交给
 `tokenless compress`，`tool_result_persist` 把 OpenClaw 自己持久化的 Tool Result 交给同一
@@ -284,6 +285,22 @@ make opencode-install
 不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
 `XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 安装后重启 OpenCode 即可加载插件。
+
+### QwenPaw 安装
+
+QwenPaw 适配器是一个原生 QwenPaw 插件：`plugin.py` 通过 `api.register_middleware` 注册
+AgentScope 中间件，通过 `api.register_tool` 注册 `tokenless_retrieve` 工具，并直接调用进程内的
+`anolisa_tokenless.TokenlessSdk`。`on_model_call` 压缩工具 Schema，`on_acting` 在 QwenPaw 审批之后
+用 RTK 改写 `execute_shell_command` 的输入，并替换 QwenPaw 内置工具结果中的文本块（文件读取类工具和内置表之外的工具原样透传）。
+
+```bash
+make qwenpaw-install
+```
+
+安装器执行 `qwenpaw plugin install <bundle> --force`，由 QwenPaw 把 Bundle 复制到
+`<工作目录>/plugins/tokenless/`（`QWENPAW_WORKING_DIR`，否则 `COPAW_WORKING_DIR`，否则已存在的
+`~/.copaw`，否则 `~/.qwenpaw`），并按 `requirements.txt` 从对应 GitHub Release
+安装 `anolisa_tokenless` wheel。统计记录写入 `<workspace>/.tokenless`。
 
 ### DeepSeek Harness 插件
 

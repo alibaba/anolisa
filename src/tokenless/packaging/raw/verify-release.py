@@ -85,6 +85,7 @@ def verify_versions(root: Path, contract: Path) -> str:
         adapters / "claude-code" / ".claude-plugin" / "plugin.json",
         adapters / "codex" / ".codex-plugin" / "plugin.json",
         adapters / "qwencode" / "qwen-extension.json",
+        adapters / "qwenpaw" / "plugin.json",
     )
     versions = {str(path.relative_to(root)): read_json_version(path) for path in json_manifests}
     hermes = adapters / "hermes" / "plugin.yaml"
@@ -94,6 +95,18 @@ def verify_versions(root: Path, contract: Path) -> str:
         raise SystemExit(
             f"ERROR: generated adapter versions do not match {expected}: "
             + ", ".join(drift)
+        )
+    # The QwenPaw requirements file is stamped too, but as wheel URLs: a
+    # stale or unstamped version there only fails inside `qwenpaw plugin install`.
+    requirements = adapters / "qwenpaw" / "requirements.txt"
+    text = requirements.read_text(encoding="utf-8")
+    referenced = set(re.findall(r"/tokenless/v([^/]+)/", text)) | set(
+        re.findall(r"anolisa_tokenless-([^-]+)-", text)
+    )
+    if "@VERSION@" in text or referenced != {expected}:
+        raise SystemExit(
+            f"ERROR: {requirements.relative_to(root)} does not reference "
+            f"tokenless {expected}: {sorted(referenced) or 'no wheel URL'}"
         )
     return expected
 

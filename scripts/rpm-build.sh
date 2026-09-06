@@ -509,6 +509,8 @@ build_tokenless() {
         --exclude='adapters/tokenless/claude-code/.claude-plugin/plugin.json' \
         --exclude='adapters/tokenless/codex/.codex-plugin/plugin.json' \
         --exclude='adapters/tokenless/qwencode/qwen-extension.json' \
+        --exclude='adapters/tokenless/qwenpaw/plugin.json' \
+        --exclude='adapters/tokenless/qwenpaw/requirements.txt' \
         . | tar -xf - -C "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"

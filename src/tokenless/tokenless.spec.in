@@ -60,6 +60,9 @@ Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/to
 Hermes Agent plugin (response compression, TOON encoding, command rewriting via RTK,
 and Tool Ready) is available under /usr/share/anolisa/adapters/tokenless/hermes/.
 Run the install script to register with Hermes: hermes/scripts/install.sh
+QwenPaw plugin (schema compression, response/TOON compression, command rewriting via RTK)
+is available under /usr/share/anolisa/adapters/tokenless/qwenpaw/.
+Run the install script to register with QwenPaw: qwenpaw/scripts/install.sh
 Claude Code plugin (RTK command rewriting, response/TOON compression, and Tool Ready
 environment pre-check) is available under /usr/share/anolisa/adapters/tokenless/claude-code/.
 Register it with the official `claude plugin marketplace add` / `claude plugin install`
@@ -101,6 +104,7 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/dist
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
@@ -165,6 +169,15 @@ install -m 0644 adapters/tokenless/hermes/plugin.yaml %{buildroot}%{_datadir}/an
 install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
+
+# Install QwenPaw plugin (AgentScope middleware + install scripts). The
+# anolisa_tokenless wheel is pulled by QwenPaw from requirements.txt.
+install -m 0755 adapters/tokenless/qwenpaw/plugin.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/
+install -m 0644 adapters/tokenless/qwenpaw/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/
+install -m 0644 adapters/tokenless/qwenpaw/requirements.txt %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/
+install -m 0755 adapters/tokenless/qwenpaw/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/
+install -m 0755 adapters/tokenless/qwenpaw/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/
+install -m 0755 adapters/tokenless/qwenpaw/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/
 
 # Install the native Qoder CLI plugin. The wrapper resolves implementation
 # scripts from common/hooks/ so the hook logic remains shared.
@@ -248,6 +261,8 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/dsh/dist
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenpaw
+%dir %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
@@ -289,6 +304,12 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/plugin.py
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/plugin.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/requirements.txt
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/uninstall.sh
 # Qoder CLI plugin — native hook wrapper resolves scripts from common/hooks/.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/plugin.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/hooks.json
@@ -456,6 +477,19 @@ if [ $1 -eq 0 ]; then
         bash "$HERMES_SCRIPT" || true
     elif [ -d "$HOME/.hermes/plugins/tokenless" ]; then
         rm -rf "$HOME/.hermes/plugins/tokenless" 2>/dev/null || true
+    fi
+    # Uninstall qwenpaw plugin (via qwenpaw CLI or manual cleanup)
+    QWENPAW_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qwenpaw/scripts/uninstall.sh"
+    if [ -f "$QWENPAW_SCRIPT" ]; then
+        bash "$QWENPAW_SCRIPT" || true
+    else
+        # Same resolution as uninstall.sh: QWENPAW_WORKING_DIR, COPAW_WORKING_DIR,
+        # an existing ~/.copaw, else ~/.qwenpaw.
+        QWENPAW_WD="${QWENPAW_WORKING_DIR:-${COPAW_WORKING_DIR:-}}"
+        if [ -z "$QWENPAW_WD" ]; then
+            if [ -d "$HOME/.copaw" ]; then QWENPAW_WD="$HOME/.copaw"; else QWENPAW_WD="$HOME/.qwenpaw"; fi
+        fi
+        rm -rf "$QWENPAW_WD/plugins/tokenless" 2>/dev/null || true
     fi
     # Uninstall claude-code plugin (remove via claude CLI or strip settings.json).
     # Note: %preun runs as root so this only touches root's ~/.claude — per-user

@@ -12,6 +12,8 @@ adapters/tokenless/qoder/.qoder-plugin/plugin.json
 adapters/tokenless/claude-code/.claude-plugin/plugin.json
 adapters/tokenless/codex/.codex-plugin/plugin.json
 adapters/tokenless/qwencode/qwen-extension.json
+adapters/tokenless/qwenpaw/plugin.json
+adapters/tokenless/qwenpaw/requirements.txt
 python/agentscope/pyproject.toml
 python/agentscope/build/
 python/agentscope/src/*.egg-info/

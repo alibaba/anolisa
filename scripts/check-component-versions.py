@@ -43,6 +43,7 @@ VERSION_TEMPLATES = (
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/claude-code/.claude-plugin/plugin.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/codex/.codex-plugin/plugin.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qwencode/qwen-extension.json.in"),
+    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qwenpaw/plugin.json.in"),
 )
 AGENT_MEMORY_JSON = (
     "src/agent-memory/adapters/agent-memory/manifest.json",

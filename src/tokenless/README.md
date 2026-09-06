@@ -21,6 +21,7 @@ Agent adapters are available for:
 - **Codex plugin** — RTK command rewriting, environment-failure diagnostics, and registered but hard-disabled Tool Ready via Codex's native hook system.
 - **OpenCode plugin** — schema/response/TOON compression, Marker-directed recovery, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
 - **Qwen Code extension** — command rewriting and registered but hard-disabled Tool Ready; current host releases cannot replace post-tool output and skip the declared schema event.
+- **QwenPaw plugin** — schema compression, RTK command rewriting, response/TOON compression, and static-tool recovery through an AgentScope middleware registered by QwenPaw's plugin system; the plugin embeds the `anolisa_tokenless` wheel in-process.
 - **DeepSeek Harness plugin** — native response compression, Marker-directed recovery, and environment-error attribution through DSH's `tools/post-execute` seam.
 
 For framework developers, the Python SDK has a framework-neutral layer and an **AgentScope-specific
@@ -46,6 +47,7 @@ retrieval, and attribution.
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Environment diagnostics ✅, Response compression — protocol-blocked |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅, Marker-command recovery ✅ |
 | Qwen Code extension | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response/Schema replacement unavailable in current host |
+| QwenPaw plugin | — | Schema compression ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Retrieve Tool recovery ✅ |
 | DeepSeek Harness plugin | — | Response compression ✅, Marker-command recovery ✅, Environment-error attribution ✅ |
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
@@ -130,6 +132,7 @@ Token-Less/
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
 │   ├── codex/                   # Codex plugin + scripts
 │   ├── opencode/                # OpenCode local plugin + scripts
+│   ├── qwenpaw/                 # QwenPaw plugin (AgentScope middleware) + scripts
 │   └── dsh/                     # Native DeepSeek Harness bundle
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
@@ -674,6 +677,30 @@ If a response contains a Retrieve Marker, OpenCode can run the embedded
 `tokenless retrieve` command through its existing shell tool. The adapter sends
 the successful recovery result through the Core bypass without recompressing it.
 
+## QwenPaw Plugin
+
+The QwenPaw adapter is a native QwenPaw plugin. Its `plugin.py` registers an
+AgentScope middleware through `api.register_middleware` and a
+`tokenless_retrieve` tool through `api.register_tool`, and calls the in-process
+`anolisa_tokenless.TokenlessSdk` directly:
+
+| Feature | Middleware hook | Behavior | Status |
+|---|---|---|---|
+| Schema compression | `on_model_call` | Compresses tool schemas and appends the retrieve tool | ✅ Active |
+| Command rewriting | `on_acting` | Rewrites `execute_shell_command` input via RTK after QwenPaw's approval step | ✅ Active |
+| Response + TOON compression | `on_acting` | Replaces text blocks of the tool result for QwenPaw's built-in tools; file readers and tools outside the built-in table pass through untouched | ✅ Active |
+| Recovery | `tokenless_retrieve` tool | Restores omitted content from the hash in a visible recovery instruction | ✅ Active |
+
+```bash
+make qwenpaw-install
+```
+
+The installer runs `qwenpaw plugin install <bundle> --force`; QwenPaw copies the
+bundle into `<working dir>/plugins/tokenless/` (`QWENPAW_WORKING_DIR`, else
+`COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`) and installs
+the `anolisa_tokenless` wheel listed in `requirements.txt` from the matching
+GitHub Release. Records are written under `<workspace>/.tokenless`.
+
 ## DeepSeek Harness Plugin
 
 The native DSH bundle sends replaceable single-text tool results through
@@ -868,6 +895,8 @@ tool-output savings and retrieval overhead separately.
 | `make codex-uninstall` | Remove Codex plugin |
 | `make opencode-install` | Install OpenCode local plugin |
 | `make opencode-uninstall` | Remove OpenCode local plugin |
+| `make qwenpaw-install` | Install QwenPaw plugin via the qwenpaw CLI |
+| `make qwenpaw-uninstall` | Remove QwenPaw plugin |
 | `make setup` | Full setup: build + install + all adapters |
 
 Override install paths:
@@ -926,6 +955,7 @@ layout and single-target interface.
 | `adapters/tokenless/claude-code/` | Claude Code adapter — marketplace + plugin + hooks dispatcher |
 | `adapters/tokenless/codex/` | Codex adapter — plugin + Python hook scripts |
 | `adapters/tokenless/opencode/` | OpenCode adapter — local JavaScript plugin + lifecycle scripts |
+| `adapters/tokenless/qwenpaw/` | QwenPaw adapter — plugin manifest, AgentScope middleware, wheel requirements + lifecycle scripts |
 | `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
 | `third_party/patches/` | Patches for vendored third_party sources |
 | `packaging/raw/` | Component-owned ANOLISA raw packer and target validation |
