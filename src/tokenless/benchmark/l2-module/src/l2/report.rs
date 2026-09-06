@@ -508,7 +508,7 @@ impl Report {
             .filter(|c| c.input_asymmetry.is_some())
             .collect();
         if !asymmetric.is_empty() {
-            md.push_str("### Not directly comparable\n\n");
+            md.push_str("## Not directly comparable\n\n");
             for cat in asymmetric {
                 md.push_str(&format!(
                     "- **{}**: {}\n",
