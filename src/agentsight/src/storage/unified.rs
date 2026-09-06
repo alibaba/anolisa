@@ -38,7 +38,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::sqlite::connection::default_base_path;
 use super::sqlite::{AuditStore, HttpStore, TokenConsumptionStore, TokenStore};
@@ -183,12 +183,55 @@ impl Storage {
         // crash or a config change), prune immediately rather than waiting for
         // the next purge interval.
         if storage.max_db_size_bytes > 0 {
-            if let Err(e) = storage.purge_oversized() {
-                log::warn!("Startup size-based cleanup failed: {e}");
-            }
+            storage.startup_purge_with_retry();
         }
 
         Ok(storage)
+    }
+
+    /// Run the startup size-based purge, retrying on transient lock contention.
+    ///
+    /// Reopening a large database right after the previous process exits often
+    /// collides with that process's exit-time WAL checkpoint (see
+    /// [`Drop for Storage`]), which holds the write lock long enough to exceed
+    /// the connection `busy_timeout`; the purge then fails with `SQLITE_BUSY` /
+    /// `SQLITE_LOCKED`. This scenario is most likely on exactly the large
+    /// databases that need the startup purge, so retry with backoff instead of
+    /// giving up on the first collision.
+    ///
+    /// Only lock errors are retried — any other error (e.g. a corrupt
+    /// database) is terminal and must not stall startup for the full backoff.
+    /// When every attempt is locked out, the purge is skipped; the
+    /// insert-count-triggered purge in [`Self::store`] compensates once traffic
+    /// resumes.
+    fn startup_purge_with_retry(&self) {
+        let mut attempt = 0usize;
+        loop {
+            let err = match self.purge_oversized() {
+                Ok(()) => return,
+                Err(e) => e,
+            };
+
+            if is_retryable_lock(&err) {
+                if let Some(delay) = STARTUP_PURGE_BACKOFF.get(attempt) {
+                    log::debug!(
+                        "Startup size-based cleanup locked (attempt {}), retrying in {delay:?}: {err}",
+                        attempt + 1,
+                    );
+                    std::thread::sleep(*delay);
+                    attempt += 1;
+                    continue;
+                }
+                log::warn!(
+                    "Startup size-based cleanup still locked after {} attempts; skipping \
+                     — the insert-triggered purge will compensate once traffic resumes: {err}",
+                    STARTUP_PURGE_BACKOFF.len() + 1,
+                );
+            } else {
+                log::warn!("Startup size-based cleanup failed: {err}");
+            }
+            return;
+        }
     }
 
     /// Create a new Storage with default SQLite config
@@ -595,6 +638,34 @@ fn purge_share(rows: u64, pct: f64) -> usize {
     ((rows as f64 * pct) as usize).max(1)
 }
 
+/// Backoff delays between successive startup size-based purge attempts.
+///
+/// The number of entries is the number of *retries*; total attempts are one
+/// more (the initial try plus one per delay). Capped near 13s so a persistently
+/// locked database does not stall startup indefinitely.
+const STARTUP_PURGE_BACKOFF: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(9),
+];
+
+/// Whether a [`Storage::purge_oversized`] error is a transient SQLite lock
+/// (`SQLITE_BUSY` / `SQLITE_LOCKED`) worth retrying, as opposed to a terminal
+/// error (corrupt database, disk failure, …) that a retry cannot fix.
+///
+/// Store methods propagate `rusqlite::Error` unwrapped through `anyhow`, so the
+/// lock code is recoverable via `downcast_ref`.
+fn is_retryable_lock(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(e, _))
+            if matches!(
+                e.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +675,33 @@ mod tests {
     fn test_noop_storage_is_noop() {
         let storage = Storage::noop();
         assert!(storage.is_noop());
+    }
+
+    #[test]
+    fn retryable_lock_matches_busy_and_locked() {
+        // SQLITE_BUSY = 5, SQLITE_LOCKED = 6.
+        for raw in [5, 6] {
+            let err = anyhow::Error::from(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(raw),
+                None,
+            ));
+            assert!(
+                is_retryable_lock(&err),
+                "raw code {raw} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn retryable_lock_rejects_terminal_errors() {
+        // A non-lock SqliteFailure (SQLITE_CORRUPT = 11) must not be retried.
+        let corrupt = anyhow::Error::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(11),
+            None,
+        ));
+        assert!(!is_retryable_lock(&corrupt));
+        // A non-SQLite error must not be retried either.
+        assert!(!is_retryable_lock(&anyhow::anyhow!("unrelated failure")));
     }
 
     #[test]
