@@ -22,11 +22,15 @@ fi
 # 2. Try plugin install (preferred).
 if PLUGIN_SRC=$(find_plugin_src openclaw); then
     if [ "$DRY_RUN" = "1" ]; then
-        echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force"
+        echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force --accept-capabilities"
         echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins enable ws-ckpt"
         exit 0
     fi
-    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" --force
+    # OpenClaw 2026.9.2 gates plugins that declare capabilities (kind "tool" with
+    # activation.onStartup) behind a capability-consent prompt. Installing without
+    # --accept-capabilities fails rc=1: 'Plugin "ws-ckpt" requires capability consent'.
+    # Accept capabilities explicitly so the plugin installs and the CLI can start.
+    env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" --force --accept-capabilities
     env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins enable ws-ckpt 2>/dev/null || true
     echo "openclaw ws-ckpt plugin installed and enabled successfully (from $PLUGIN_SRC)"
     exit 0
