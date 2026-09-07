@@ -6,7 +6,8 @@
 //!
 //! # Detection Rules (by priority)
 //!
-//! 1. **Tool Sequence Repetition** — same tool names emitted N times consecutively
+//! 1. **Tool Sequence Repetition** — same tool calls (name + argument
+//!    fingerprint) emitted N times consecutively
 //! 2. **Output Similarity Loop** — similar LLM output text repeated N times
 //! 3. **Token Burn Without Progress** — input tokens growing but output stays the same
 
@@ -38,12 +39,42 @@ impl Default for LoopDetectorConfig {
     }
 }
 
+/// Identity of a single tool call for loop comparison.
+///
+/// Two calls count as a repetition only when both the tool name and the
+/// argument fingerprint match, so the same tool invoked with different
+/// arguments (e.g. a terminal tool running different commands) is not a loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallKey {
+    pub name: String,
+    /// Stable hash of the serialized JSON arguments; `None` when the provider
+    /// omitted arguments. `None == None`, which keeps the legacy name-only
+    /// comparison for providers that never emit arguments.
+    pub args_fingerprint: Option<u64>,
+}
+
+impl ToolCallKey {
+    /// Hash the serialized arguments into a stable per-process fingerprint.
+    ///
+    /// serde_json preserves key order (`preserve_order`), so repeated calls
+    /// serialized by the same agent yield identical strings. Order-differing
+    /// but semantically equal arguments hash differently, which only makes
+    /// detection more conservative (never a new false positive).
+    pub fn fingerprint_args(args: &serde_json::Value) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        args.to_string().hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 /// Lightweight summary of a recent LLM call used for loop detection.
 #[derive(Debug, Clone)]
 pub struct RecentCallSummary {
     pub call_id: String,
-    /// Tool names invoked by this call's output (e.g. ["read_file", "search"])
-    pub tool_call_names: Vec<String>,
+    /// Tool calls invoked by this call's output, in emission order
+    pub tool_calls: Vec<ToolCallKey>,
     /// Snippet of output text (first ~200 chars) for similarity calculation
     pub output_text_snippet: String,
     pub input_tokens: i64,
@@ -131,7 +162,8 @@ impl LoopDetector {
         None
     }
 
-    /// Rule 1: Check if the last N tool-bearing calls have the same tool sequence.
+    /// Rule 1: Check if the last N tool-bearing calls repeat the same tool sequence
+    /// with identical arguments (see [`ToolCallKey`]).
     ///
     /// Only considers calls that actually have tool_call outputs (ignores pure-text
     /// responses). This handles architectures like OpenClaw where each tool call
@@ -140,10 +172,8 @@ impl LoopDetector {
         let threshold = self.config.tool_sequence_repeat_threshold;
 
         // Filter to only calls that have tool calls (ignore pure-text responses)
-        let tool_bearing: Vec<&RecentCallSummary> = calls
-            .iter()
-            .filter(|c| !c.tool_call_names.is_empty())
-            .collect();
+        let tool_bearing: Vec<&RecentCallSummary> =
+            calls.iter().filter(|c| !c.tool_calls.is_empty()).collect();
 
         if tool_bearing.len() < threshold {
             return None;
@@ -152,13 +182,14 @@ impl LoopDetector {
         // Look at the last N tool-bearing calls
         let tail = &tool_bearing[tool_bearing.len().saturating_sub(threshold)..];
 
-        // Check if all tool sequences in the tail are identical
-        let reference = &tail[0].tool_call_names;
-        let all_same = tail[1..].iter().all(|c| &c.tool_call_names == reference);
+        // Check if all tool call sequences in the tail are identical
+        let reference = &tail[0].tool_calls;
+        let all_same = tail[1..].iter().all(|c| &c.tool_calls == reference);
 
         if all_same {
+            let repeated_tools: Vec<&str> = reference.iter().map(|k| k.name.as_str()).collect();
             Some(serde_json::json!({
-                "repeated_tools": reference,
+                "repeated_tools": repeated_tools,
                 "repeat_count": threshold,
             }))
         } else {
@@ -355,10 +386,38 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Build a call whose tool calls carry no arguments (fingerprint `None`).
     fn make_call(tool_names: Vec<&str>, output: &str, input_tokens: i64) -> RecentCallSummary {
         RecentCallSummary {
             call_id: format!("call-{input_tokens}"),
-            tool_call_names: tool_names.into_iter().map(|s| s.to_string()).collect(),
+            tool_calls: tool_names
+                .into_iter()
+                .map(|s| ToolCallKey {
+                    name: s.to_string(),
+                    args_fingerprint: None,
+                })
+                .collect(),
+            output_text_snippet: output.to_string(),
+            input_tokens,
+            output_tokens: 100,
+        }
+    }
+
+    /// Build a call whose tool calls carry JSON arguments.
+    fn make_call_with_args(
+        tools: Vec<(&str, serde_json::Value)>,
+        output: &str,
+        input_tokens: i64,
+    ) -> RecentCallSummary {
+        RecentCallSummary {
+            call_id: format!("call-{input_tokens}"),
+            tool_calls: tools
+                .into_iter()
+                .map(|(name, args)| ToolCallKey {
+                    name: name.to_string(),
+                    args_fingerprint: Some(ToolCallKey::fingerprint_args(&args)),
+                })
+                .collect(),
             output_text_snippet: output.to_string(),
             input_tokens,
             output_tokens: 100,
@@ -415,6 +474,97 @@ mod tests {
         let result = detector.detect("conv-1", None, None, None, 1000, &calls);
         // Rule 1 won't trigger (sequences differ), Rule 2/3 also won't trigger
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_same_tool_different_args_not_a_loop() {
+        // Regression for #2691: five consecutive `terminal` calls each running a
+        // different command are normal multi-step work, not a dead loop.
+        let detector = LoopDetector::default();
+        let commands = [
+            "pip list",
+            "find / -name detect.sh",
+            "cat detect.sh",
+            "bash detect.sh",
+            "bash install.sh",
+        ];
+        let calls: Vec<RecentCallSummary> = commands
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                make_call_with_args(
+                    vec![("terminal", serde_json::json!({ "command": cmd }))],
+                    &format!("step {i} done"),
+                    (i as i64 + 1) * 100,
+                )
+            })
+            .collect();
+        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        assert!(
+            result.is_none(),
+            "different arguments must not count as repetition"
+        );
+    }
+
+    #[test]
+    fn test_same_tool_same_args_loop_detected() {
+        // Identical tool name AND identical arguments repeated is a genuine loop.
+        let detector = LoopDetector::default();
+        let args = serde_json::json!({ "command": "cat /tmp/missing.txt" });
+        let calls: Vec<RecentCallSummary> = (1..=5)
+            .map(|i| {
+                make_call_with_args(
+                    vec![("terminal", args.clone())],
+                    &format!("attempt {i}"),
+                    i * 100,
+                )
+            })
+            .collect();
+        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        assert!(result.is_some());
+        let event = result.unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(event.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(detail["rule"], "tool_sequence_repetition");
+        assert_eq!(detail["repeated_tools"], serde_json::json!(["terminal"]));
+    }
+
+    #[test]
+    fn test_args_presence_mismatch_not_a_loop() {
+        // A call with arguments and one without must not compare equal even for
+        // the same tool name.
+        let detector = LoopDetector::default();
+        let args = serde_json::json!({ "command": "ls" });
+        let calls: Vec<RecentCallSummary> = (1..=5)
+            .map(|i| {
+                if i % 2 == 0 {
+                    make_call_with_args(
+                        vec![("terminal", args.clone())],
+                        &format!("out {i}"),
+                        i * 100,
+                    )
+                } else {
+                    make_call(vec!["terminal"], &format!("out {i}"), i * 100)
+                }
+            })
+            .collect();
+        let result = detector.detect("conv-1", None, None, None, 1000, &calls);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_fingerprint_args_stability() {
+        let a = serde_json::json!({ "command": "ls", "cwd": "/tmp" });
+        let b = serde_json::json!({ "command": "ls", "cwd": "/tmp" });
+        let c = serde_json::json!({ "command": "ls", "cwd": "/home" });
+        assert_eq!(
+            ToolCallKey::fingerprint_args(&a),
+            ToolCallKey::fingerprint_args(&b)
+        );
+        assert_ne!(
+            ToolCallKey::fingerprint_args(&a),
+            ToolCallKey::fingerprint_args(&c)
+        );
     }
 
     #[test]

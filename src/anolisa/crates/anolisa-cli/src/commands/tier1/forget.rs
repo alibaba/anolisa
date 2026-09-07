@@ -11,23 +11,18 @@
 //! observed/managed RPM stays installed in rpmdb; an owned component's files
 //! stay on disk (use `anolisa uninstall` to remove those).
 
-use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use serde::Serialize;
 
-use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
-use anolisa_core::domain::ProviderBinding;
-use anolisa_core::facts::{JournalEvidence, pending_journal_for};
-use anolisa_core::lock::InstallLock;
-use anolisa_core::state::{ObjectKind, OperationRecord};
-use anolisa_core::state_store::StateStore;
-use anolisa_platform::privilege;
+use anolisa_core::execution::{CommandOutcomeStatus, ExecutionIntent};
 
 use crate::color::Palette;
-use crate::commands::common;
-use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
+
+use self::application::{ForgetApplicationOutcome, ForgetRequest};
+
+mod application;
 
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "forget";
@@ -65,258 +60,46 @@ struct ForgetPayload {
 /// Returns [`CliError`] when the component is absent, still has enabled adapter
 /// receipts, or the state write fails.
 pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let input = args.component.as_str();
-    let command = format!("forget {input}");
-    let layout = common::resolve_layout(ctx);
-    let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
-    let store = view.writable.state;
-    let target = resolved.as_str();
-
-    // Forget also resolves quarantined records: it is the documented exit for
-    // legacy state the migration refused to classify and repair cannot
-    // recover.
-    let provenance = record_provenance(&store, target);
-    let provenance = provenance.ok_or_else(|| CliError::NotInstalled {
-        command: command.clone(),
-        reason: format!(
-            "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
-        ),
-    })?;
-    let journal_dir = rpm_install::journal_dir(&layout);
-    ensure_no_pending_journal(
-        JournalEvidence::new(&journal_dir, &store.operations),
-        target,
-        &command,
+    let outcome = application::run(
+        ForgetRequest {
+            component: &args.component,
+            intent: execution_intent(ctx.dry_run),
+        },
+        ctx,
     )?;
-
-    // Adapter receipts must be released before the component is dropped:
-    // silently orphaning a registered plugin is worse than refusing. This guard
-    // is a fast-fail and the dry-run preview; `persist_forget` re-checks
-    // authoritatively under the lock. Mirrors `uninstall`, pointing at
-    // `adapter disable`.
-    if !ctx.dry_run {
-        ensure_no_adapter_claims(&store, target, &command)?;
-    }
-
-    if ctx.dry_run {
-        let payload = ForgetPayload {
-            component: target.to_string(),
-            provenance,
-            install_mode: ctx.install_mode.as_str().to_string(),
+    let payload = match outcome {
+        ForgetApplicationOutcome::Preview { subject } => ForgetPayload {
+            component: subject.component,
+            provenance: subject.provenance,
+            install_mode: subject.install_mode,
             forgotten: false,
             dry_run: true,
             operation_id: None,
-        };
-        render_forget(ctx, &payload);
-        return Ok(());
-    }
-
-    let (operation_id, provenance) = persist_forget(ctx, target, &command)?;
-    let payload = ForgetPayload {
-        component: target.to_string(),
-        provenance,
-        install_mode: ctx.install_mode.as_str().to_string(),
-        forgotten: true,
-        dry_run: false,
-        operation_id: Some(operation_id),
+        },
+        ForgetApplicationOutcome::Applied { subject, outcome } => {
+            debug_assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+            for warning in outcome.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            ForgetPayload {
+                component: subject.component,
+                provenance: subject.provenance,
+                install_mode: subject.install_mode,
+                forgotten: true,
+                dry_run: false,
+                operation_id: outcome.operation_id().map(str::to_string),
+            }
+        }
     };
     render_forget(ctx, &payload);
     Ok(())
 }
 
-/// Provenance label for the record `forget` would drop — active or
-/// quarantined — or `None` when nothing is tracked under this name.
-fn record_provenance(store: &StateStore, component: &str) -> Option<&'static str> {
-    if let Some(installation) = store.find(ObjectKind::Component, component) {
-        return Some(match &installation.binding {
-            ProviderBinding::Owned { .. } => "owned",
-            ProviderBinding::Delegated { relation, .. } => relation.label(),
-        });
-    }
-    store
-        .quarantined
-        .iter()
-        .any(|q| q.record.kind == ObjectKind::Component && q.record.name == component)
-        .then_some("quarantined")
-}
-
-/// Refuse to drop a component that still has enabled adapter receipts.
-fn ensure_no_adapter_claims(
-    store: &StateStore,
-    target: &str,
-    command: &str,
-) -> Result<(), CliError> {
-    let mut frameworks: Vec<&str> = store
-        .adapter_claims
-        .iter()
-        .filter(|claim| claim.component == target)
-        .map(|claim| claim.framework.as_str())
-        .collect();
-    if frameworks.is_empty() {
-        return Ok(());
-    }
-    frameworks.sort_unstable();
-    frameworks.dedup();
-    Err(CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!(
-            "'{target}' has enabled adapters ({}); run `anolisa adapter disable {target}` for each framework before forgetting",
-            frameworks.join(", ")
-        ),
-    })
-}
-
-/// Remove the component's state record and local manifest snapshot under the
-/// install lock, then append an audit record. No package/component files are
-/// removed. Returns the operation id and the provenance the lock observed.
-fn persist_forget(
-    ctx: &CliContext,
-    component: &str,
-    command: &str,
-) -> Result<(String, &'static str), CliError> {
-    let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
-        .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to load installed state: {err}"),
-    })?;
-
-    // The planner treats pending recovery as a global precondition for every
-    // lifecycle mutation except repair. Forget bypasses the planner, so it
-    // must enforce the same rule under the authoritative lock; otherwise the
-    // surviving journal could later recreate the record just removed here.
-    let journal_dir = rpm_install::journal_dir(&layout);
-    ensure_no_pending_journal(
-        JournalEvidence::new(&journal_dir, &store.operations),
-        component,
-        command,
-    )?;
-
-    // Authoritative adapter-claim guard, under the lock. The check in `handle`
-    // is only a fast-fail / dry-run preview: a concurrent `adapter enable`
-    // landing between that read and this removal would otherwise orphan its
-    // receipt once the component record is gone. Re-checking the freshly
-    // reloaded state here closes that window.
-    ensure_no_adapter_claims(&store, component, command)?;
-
-    // Re-validate record presence under the lock (a concurrent
-    // uninstall/forget may have dropped it), and report the provenance the
-    // lock actually observed rather than the pre-lock read.
-    let provenance = record_provenance(&store, component).ok_or_else(|| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!(
-            "component '{component}' disappeared from state during forget; nothing removed"
-        ),
-    })?;
-    let legacy_manifest_dir = store
-        .find(ObjectKind::Component, component)
-        .map(|installation| {
-            common::legacy_component_manifest_dir_for_installation(&layout, installation, command)
-        })
-        .transpose()?
-        .flatten();
-    store.remove(ObjectKind::Component, component);
-    remove_component_manifest_snapshot(&layout, component, command)?;
-    if let Some(dir) = legacy_manifest_dir {
-        remove_manifest_snapshot_dir(&dir, command)?;
-    }
-
-    let now = now_iso8601();
-    let lock_ts = Utc::now();
-    let operation_id = format!(
-        "op-forget-{}-{}",
-        lock_ts.format("%Y%m%d%H%M%S"),
-        lock_ts.timestamp_subsec_nanos()
-    );
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: now.clone(),
-        finished_at: Some(now.clone()),
-        parent_operation_id: None,
-    });
-
-    store.save(&state_path).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to save state: {err}"),
-    })?;
-
-    // Audit log is best-effort: the state already persisted, so a log failure
-    // downgrades to a warning instead of unwinding.
-    let log = CentralLog::open(layout.central_log.clone());
-    let record = LogRecord {
-        kind: LogKind::Operation,
-        operation_id: Some(operation_id.clone()),
-        command: command.to_string(),
-        source: "anolisa-cli".to_string(),
-        component: Some(component.to_string()),
-        severity: Severity::Info,
-        message: format!(
-            "forgot ANOLISA state for component {component}; no package operation performed"
-        ),
-        actor: "cli".to_string(),
-        install_mode: Some(ctx.install_mode.as_str().to_string()),
-        started_at: now.clone(),
-        finished_at: Some(now),
-        status: Some(LogStatus::Ok),
-        objects: vec![component.to_string()],
-        backup_ids: Vec::new(),
-        warnings: Vec::new(),
-        details: serde_json::Value::Null,
-    };
-    if let Err(err) = log.append(&record) {
-        eprintln!("warning: failed to write central log: {err}");
-    }
-    Ok((operation_id, provenance))
-}
-
-fn ensure_no_pending_journal(
-    evidence: JournalEvidence<'_>,
-    component: &str,
-    command: &str,
-) -> Result<(), CliError> {
-    let pending = pending_journal_for(evidence, component).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to inspect operation journals: {err}"),
-    })?;
-    if let Some(path) = pending {
-        return Err(CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "component '{component}' has a pending operation journal at {}; run `anolisa repair {component}` before forgetting its state",
-                path.display()
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn remove_component_manifest_snapshot(
-    layout: &anolisa_platform::fs_layout::FsLayout,
-    component: &str,
-    command: &str,
-) -> Result<(), CliError> {
-    let dir = common::installed_component_manifest_dir(layout, component, command)?;
-    remove_manifest_snapshot_dir(&dir, command)
-}
-
-fn remove_manifest_snapshot_dir(dir: &std::path::Path, command: &str) -> Result<(), CliError> {
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "failed to remove component manifest snapshot at {}: {err}",
-                dir.display()
-            ),
-        }),
+fn execution_intent(dry_run: bool) -> ExecutionIntent {
+    if dry_run {
+        ExecutionIntent::Plan
+    } else {
+        ExecutionIntent::Apply
     }
 }
 
@@ -373,11 +156,6 @@ fn render_forget(ctx: &CliContext, payload: &ForgetPayload) {
     }
 }
 
-/// RFC3339 UTC timestamp, seconds precision (matches the install/update paths).
-fn now_iso8601() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,14 +165,25 @@ mod tests {
 
     use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus, DriverPayload, OpenClawClaim};
     use anolisa_core::state::{
-        InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus, Ownership,
-        RpmMetadata,
+        InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
+        Ownership, RpmMetadata,
     };
+    use anolisa_core::state_store::StateStore;
     use anolisa_core::transaction::Transaction;
 
+    use crate::commands::common;
+    use crate::commands::tier1::rpm_install;
     use crate::context::InstallMode;
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,
@@ -480,6 +269,8 @@ mod tests {
             enabled_at: "2026-06-01T10:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp/anolisa-forget-test"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -531,6 +322,193 @@ mod tests {
             anolisa_platform::fs_layout::FsLayout::provenance_path_for_snapshot(&snapshot);
         std::fs::write(provenance, "schema_version = 1\n").expect("write provenance");
         dir
+    }
+
+    #[test]
+    fn local_dry_run_maps_to_plan_intent() {
+        assert_eq!(execution_intent(true), ExecutionIntent::Plan);
+        assert_eq!(execution_intent(false), ExecutionIntent::Apply);
+    }
+
+    #[test]
+    fn forget_preview_returns_typed_subject_without_persistent_effects() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object(
+                "copilot-shell",
+                "copilot-shell",
+                "2.2.0-1.al8",
+            )],
+            Vec::new(),
+        );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
+        let layout = common::resolve_layout(&c);
+        let operations_before = load_store(&c).operations.len();
+        assert!(!layout.lock_file.exists(), "fixture must start unlocked");
+        assert!(
+            !layout.central_log.exists(),
+            "fixture must start without a central log"
+        );
+
+        let outcome = application::run(
+            ForgetRequest {
+                component: "copilot-shell",
+                intent: ExecutionIntent::Plan,
+            },
+            &c,
+        )
+        .expect("preview");
+
+        let ForgetApplicationOutcome::Preview { subject } = outcome else {
+            panic!("plan intent must return a preview");
+        };
+        assert_eq!(subject.component, "copilot-shell");
+        assert_eq!(subject.provenance, "adopted");
+        assert_eq!(subject.install_mode, "system");
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "preview must keep the state record"
+        );
+        assert_eq!(load_store(&c).operations.len(), operations_before);
+        assert!(snapshot_dir.exists(), "preview must keep the snapshot");
+        assert!(!layout.lock_file.exists(), "preview must not create a lock");
+        assert!(
+            !layout.central_log.exists(),
+            "preview must not create a central log"
+        );
+    }
+
+    #[test]
+    fn forget_quarantined_preview_is_effect_free() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&c, vec![unclassifiable_object("mystery")], Vec::new());
+        let layout = common::resolve_layout(&c);
+
+        let outcome = application::run(
+            ForgetRequest {
+                component: "mystery",
+                intent: ExecutionIntent::Plan,
+            },
+            &c,
+        )
+        .expect("quarantined preview");
+
+        let ForgetApplicationOutcome::Preview { subject } = outcome else {
+            panic!("plan intent must return a preview");
+        };
+        assert_eq!(subject.component, "mystery");
+        assert_eq!(subject.provenance, "quarantined");
+        assert!(
+            load_store(&c)
+                .quarantined
+                .iter()
+                .any(|entry| entry.record.name == "mystery"),
+            "preview must keep the quarantined record"
+        );
+        assert!(!layout.lock_file.exists(), "preview must not create a lock");
+        assert!(
+            !layout.central_log.exists(),
+            "preview must not create a central log"
+        );
+    }
+
+    #[test]
+    fn forget_apply_returns_completed_typed_outcome() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object(
+                "copilot-shell",
+                "copilot-shell",
+                "2.2.0-1.al8",
+            )],
+            Vec::new(),
+        );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
+
+        let outcome = application::run(
+            ForgetRequest {
+                component: "copilot-shell",
+                intent: ExecutionIntent::Apply,
+            },
+            &c,
+        )
+        .expect("apply");
+
+        let ForgetApplicationOutcome::Applied { subject, outcome } = outcome else {
+            panic!("apply intent must return an applied outcome");
+        };
+        assert_eq!(subject.component, "copilot-shell");
+        assert_eq!(subject.provenance, "adopted");
+        assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+        assert!(outcome.operation_id().is_some());
+        assert_eq!(
+            outcome.changes(),
+            &[application::ForgetChange::StateRecordDropped]
+        );
+        assert!(outcome.warnings().is_empty());
+        let after = load_store(&c);
+        assert!(
+            after.find(ObjectKind::Component, "copilot-shell").is_none(),
+            "apply must drop the state record"
+        );
+        assert!(
+            after
+                .operations
+                .iter()
+                .any(|operation| Some(operation.id.as_str()) == outcome.operation_id()),
+            "the typed operation id must match persisted state"
+        );
+        assert!(!snapshot_dir.exists(), "apply must remove the snapshot");
+    }
+
+    #[test]
+    fn central_log_failure_is_a_non_terminal_outcome_warning() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object(
+                "copilot-shell",
+                "copilot-shell",
+                "2.2.0-1.al8",
+            )],
+            Vec::new(),
+        );
+        let layout = common::resolve_layout(&c);
+        std::fs::create_dir_all(&layout.central_log).expect("block central log file creation");
+
+        let outcome = application::run(
+            ForgetRequest {
+                component: "copilot-shell",
+                intent: ExecutionIntent::Apply,
+            },
+            &c,
+        )
+        .expect("central log failure stays non-terminal");
+
+        let ForgetApplicationOutcome::Applied { outcome, .. } = outcome else {
+            panic!("apply intent must return an applied outcome");
+        };
+        assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+        assert_eq!(outcome.warnings().len(), 1);
+        assert!(
+            outcome.warnings()[0].contains("failed to write central log"),
+            "got: {:?}",
+            outcome.warnings()
+        );
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "central log failure must not undo persisted state"
+        );
     }
 
     /// forget drops the state record and records the operation; no package
@@ -657,9 +635,29 @@ mod tests {
         );
     }
 
-    /// Forgetting an absent component routes to NOT_INSTALLED (exit 2).
+    /// Forgetting an absent but index-supported component routes to
+    /// NOT_INSTALLED (exit 2).
     #[test]
-    fn forget_unknown_component_routes_to_not_installed() {
+    fn forget_absent_supported_component_routes_to_not_installed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let err = handle(
+            ForgetArgs {
+                component: "agentsight".to_string(),
+            },
+            &c,
+        )
+        .expect_err("absent component must error");
+        assert_eq!(err.code(), "NOT_INSTALLED");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.reason().contains("not installed"));
+    }
+
+    /// A name neither state nor the component index knows is rejected as an
+    /// unsupported component, not reported as merely not installed
+    /// (issue #2630).
+    #[test]
+    fn forget_unsupported_component_is_rejected() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let err = handle(
@@ -668,10 +666,13 @@ mod tests {
             },
             &c,
         )
-        .expect_err("absent component must error");
-        assert_eq!(err.code(), "NOT_INSTALLED");
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.reason().contains("not installed"));
+        .expect_err("unsupported component must error");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("unsupported component 'ghost'"),
+            "got: {}",
+            err.reason()
+        );
     }
 
     /// A component with an adapter receipt is refused until the adapter is
@@ -710,6 +711,89 @@ mod tests {
         );
     }
 
+    /// Dry-run must preview the same adapter-claim refusal as a real run.
+    /// A success preview would tell the operator the drop is clear, then the
+    /// real forget would fail and leave adapters still claiming the record.
+    #[test]
+    fn forget_dry_run_refuses_with_enabled_adapter_claim() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
+        seed(
+            &c,
+            vec![rpm_observed_object(
+                "copilot-shell",
+                "copilot-shell",
+                "2.2.0-1.al8",
+            )],
+            vec![sample_claim("copilot-shell", "openclaw")],
+        );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
+        let err = handle(
+            ForgetArgs {
+                component: "copilot-shell".to_string(),
+            },
+            &c,
+        )
+        .expect_err("dry-run must preview the same adapter refusal as execute");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.reason().contains("adapter disable"),
+            "reason must point at adapter disable: {}",
+            err.reason()
+        );
+        assert!(
+            err.reason().contains("openclaw"),
+            "reason must name the blocking framework: {}",
+            err.reason()
+        );
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "dry-run refusal must leave the state record",
+        );
+        assert!(
+            snapshot_dir.exists(),
+            "dry-run refusal must leave the manifest snapshot",
+        );
+    }
+
+    /// A receipt on a different component must not block this forget, including
+    /// on dry-run. The preview still succeeds and still leaves this record.
+    #[test]
+    fn forget_dry_run_ignores_unrelated_adapter_claim() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
+        seed(
+            &c,
+            vec![
+                rpm_observed_object("copilot-shell", "copilot-shell", "2.2.0-1.al8"),
+                rpm_observed_object("tokenless", "tokenless", "1.0.0-1.al8"),
+            ],
+            vec![sample_claim("tokenless", "openclaw")],
+        );
+        handle(
+            ForgetArgs {
+                component: "copilot-shell".to_string(),
+            },
+            &c,
+        )
+        .expect("unrelated adapter receipt must not block this dry-run");
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "dry-run must not drop the targeted record",
+        );
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "tokenless")
+                .is_some(),
+            "dry-run must not touch the unrelated record",
+        );
+    }
+
     /// `persist_forget` enforces the adapter-claim guard under the lock, not only
     /// in `handle`. Calling it directly — bypassing the pre-lock fast-fail, as a
     /// concurrent `adapter enable` effectively would — on a state that already
@@ -729,7 +813,7 @@ mod tests {
             )],
             vec![sample_claim("copilot-shell", "openclaw")],
         );
-        let err = persist_forget(&c, "copilot-shell", "forget copilot-shell")
+        let err = application::persist_forget(&c, "copilot-shell", "forget copilot-shell")
             .expect_err("locked claim check must refuse");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
@@ -742,6 +826,33 @@ mod tests {
                 .find(ObjectKind::Component, "copilot-shell")
                 .is_some(),
             "record must remain when the locked claim check refuses",
+        );
+    }
+
+    #[test]
+    fn persist_forget_rechecks_record_presence_under_lock() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object("tokenless", "tokenless", "1.0.0-1.al8")],
+            Vec::new(),
+        );
+
+        let err = application::persist_forget(&c, "copilot-shell", "forget copilot-shell")
+            .expect_err("locked record check must refuse a disappeared component");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("disappeared from state"),
+            "got: {}",
+            err.reason()
+        );
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "tokenless")
+                .is_some(),
+            "the unrelated state record must remain"
         );
     }
 
@@ -769,7 +880,7 @@ mod tests {
         )
         .expect("pending journal");
 
-        let err = persist_forget(&c, "copilot-shell", "forget copilot-shell")
+        let err = application::persist_forget(&c, "copilot-shell", "forget copilot-shell")
             .expect_err("locked pending recovery check must block forget");
 
         assert!(err.reason().contains("anolisa repair copilot-shell"));
@@ -826,7 +937,7 @@ mod tests {
         let layout = common::resolve_layout(ctx);
         let repo_v1 = layout.prefix.join("repo").join("v1");
         fs::create_dir_all(&repo_v1).expect("mkdir repo");
-        fs::write(repo_v1.join("components.toml"), index).expect("write components.toml");
+        fs::write(repo_v1.join("components-v2.toml"), index).expect("write components-v2.toml");
         fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
         fs::write(
             layout.etc_dir.join("repo.toml"),
@@ -860,10 +971,11 @@ mod tests {
         seed_component_index(
             &c,
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "rpm"
@@ -905,10 +1017,11 @@ name = "copilot-shell"
         seed_component_index(
             &c,
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.aliases]]
 kind = "rpm-package"

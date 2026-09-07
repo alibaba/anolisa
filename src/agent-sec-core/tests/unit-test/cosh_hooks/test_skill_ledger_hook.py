@@ -3,12 +3,12 @@
 The hook is self-contained (no agent_sec_cli imports), so we test it
 by piping JSON via subprocess — identical to the code_scanner_hook tests.
 
-Tests are grouped into three categories:
+Tests are grouped into four categories:
 
-1. **Fail-open paths** — invalid input, wrong tool, missing skill dir.
-   These never invoke the CLI and verify the hook always returns allow.
-2. **Skill directory resolution** — project-level lookup, missing SKILL.md.
-3. **Output mapping** — exposure summary message → prompt formatting.
+1. **Early fail-open paths** — invalid input and wrong tools.
+2. **Host input compatibility** — legacy Cosh and Cosh-NG normalization.
+3. **Skill directory resolution** — project-level lookup, context binding.
+4. **Output mapping** — exposure summary message → prompt formatting.
    Uses a mock CLI script to return canned show results, verifying that only
    ``message`` controls user prompts.
 """
@@ -41,6 +41,7 @@ skill_ledger_hook = load_standalone_hook(
 )
 
 _COSH_MANIFEST = Path(_COSH_HOOK).parents[1] / "cosh-extension.json"
+_UNSET = object()
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,34 @@ def _make_skill_event(skill_name, cwd=".", skill_file_path=None):
     return event
 
 
+def _make_ng_skill_event(
+    skill_name,
+    cwd=".",
+    skill_file_path=None,
+    *,
+    action=_UNSET,
+    legacy_skill=_UNSET,
+):
+    """Build a Cosh-NG skill event, optionally omitting its action."""
+    tool_input = {"name": skill_name}
+    if action is not _UNSET:
+        tool_input["action"] = action
+    if legacy_skill is not _UNSET:
+        tool_input["skill"] = legacy_skill
+    event = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "skill",
+        "tool_input": tool_input,
+        "cwd": cwd,
+    }
+    if skill_file_path is not None:
+        event["skill_context"] = {
+            "skill_name": skill_name,
+            "file_path": str(skill_file_path),
+        }
+    return event
+
+
 def _create_skill_dir(parent, name="test-skill", manifest_name=None):
     """Create a minimal skill directory with a SKILL.md file.
 
@@ -125,7 +154,18 @@ def test_missing_or_invalid_enabled_value_defaults_to_true(monkeypatch, value):
     assert skill_ledger_hook.env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
 
 
-def test_injects_trace_context_into_skill_ledger_show_command(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"skill": "test-skill"},
+        {"action": "invoke", "name": "test-skill"},
+        {"name": "test-skill"},
+    ],
+    ids=["legacy", "ng-explicit-invoke", "ng-implicit-invoke"],
+)
+def test_injects_trace_context_into_skill_ledger_show_command(
+    monkeypatch, capsys, tool_input
+):
     captured = {}
 
     def fake_run(args, **kwargs):
@@ -153,7 +193,7 @@ def test_injects_trace_context_into_skill_ledger_show_command(monkeypatch, capsy
                 {
                     "hook_event_name": "PreToolUse",
                     "tool_name": "skill",
-                    "tool_input": {"skill": "test-skill"},
+                    "tool_input": tool_input,
                     "cwd": "/project",
                     "trace_id": "trace-1",
                     "session_id": "session-1",
@@ -191,12 +231,12 @@ def test_injects_trace_context_into_skill_ledger_show_command(monkeypatch, capsy
 
 
 # ---------------------------------------------------------------------------
-# Fail-open tests — these never invoke the real CLI
+# Early exits and infrastructure fail-open tests
 # ---------------------------------------------------------------------------
 
 
 class TestFailOpen:
-    """Every error / unrecognized input must produce ``{"decision": "allow"}``."""
+    """Infrastructure errors and unrelated inputs remain fail-open."""
 
     def test_hook_disabled_short_circuits_before_work(self, monkeypatch, capsys):
         monkeypatch.setattr(skill_ledger_hook, "_HOOK_ENABLED", False)
@@ -247,42 +287,6 @@ class TestFailOpen:
         output = _run_hook({"tool_input": {"skill": "test"}})
         assert output == {"decision": "allow"}
 
-    def test_missing_skill_name_allows(self):
-        output, stderr = _run_hook(
-            {"tool_name": "skill", "tool_input": {}},
-            return_stderr=True,
-        )
-        assert output == {"decision": "allow"}
-        assert "reason" not in output
-        assert "empty or missing" in stderr
-
-    def test_empty_skill_name_allows(self):
-        output, stderr = _run_hook(
-            {"tool_name": "skill", "tool_input": {"skill": ""}},
-            return_stderr=True,
-        )
-        assert output == {"decision": "allow"}
-        assert "reason" not in output
-        assert "empty or missing" in stderr
-
-    def test_whitespace_skill_name_allows(self):
-        output, stderr = _run_hook(
-            {"tool_name": "skill", "tool_input": {"skill": "   "}},
-            return_stderr=True,
-        )
-        assert output == {"decision": "allow"}
-        assert "reason" not in output
-        assert "empty or missing" in stderr
-
-    def test_nonstring_skill_name_allows(self):
-        output, stderr = _run_hook(
-            {"tool_name": "skill", "tool_input": {"skill": 42}},
-            return_stderr=True,
-        )
-        assert output == {"decision": "allow"}
-        assert "reason" not in output
-        assert "must be a string" in stderr
-
     def test_skill_dir_not_found_allows(self):
         """Skill name that resolves to no on-disk directory → fail-open."""
         output, stderr = _run_hook(
@@ -322,6 +326,196 @@ class TestFailOpen:
 
 
 # ---------------------------------------------------------------------------
+# Host input compatibility and contract validation
+# ---------------------------------------------------------------------------
+
+
+class TestHostInputCompatibility:
+    """Bind Ledger checks to the identity each Cosh generation executes."""
+
+    @pytest.mark.parametrize(
+        "action",
+        [_UNSET, None, 42, {}],
+        ids=["missing", "null", "number", "object"],
+    )
+    def test_ng_missing_or_nonstring_action_is_implicit_invoke(
+        self, mock_cli_env, action
+    ):
+        env = mock_cli_env["make_env"](
+            json.dumps({"latestStatus": "drifted", "message": "drifted latest"})
+        )
+        output = _run_hook(
+            _make_ng_skill_event(
+                "test-skill",
+                mock_cli_env["cwd"],
+                action=action,
+            ),
+            env_override=env,
+        )
+
+        assert output["decision"] == "ask"
+        assert "drifted latest" in output["reason"]
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"action": "list"},
+            {
+                "action": "list",
+                "name": "ignored-name",
+                "skill": "conflicting-name",
+            },
+        ],
+        ids=["missing-identity", "conflicting-identities"],
+    )
+    def test_ng_list_is_a_silent_side_effect_free_allow(
+        self, monkeypatch, capsys, tool_input
+    ):
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_read_policy",
+            lambda: pytest.fail("policy should not be read"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_validate_skill_context",
+            lambda *_args: pytest.fail("context should not be validated"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_resolve_skill_dir_from_context",
+            lambda *_args: pytest.fail("skills should not be resolved"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_resolve_skill_dir",
+            lambda *_args: pytest.fail("skills should not be resolved by name"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_ensure_keys",
+            lambda *_args: pytest.fail("keys should not be initialized"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook.subprocess,
+            "run",
+            lambda *_args, **_kwargs: pytest.fail("CLI should not be called"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "tool_name": "skill",
+                        "tool_input": tool_input,
+                        "skill_context": None,
+                    }
+                )
+            ),
+        )
+
+        skill_ledger_hook.main()
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == {"decision": "allow"}
+        assert captured.err == ""
+
+    def test_matching_ng_and_legacy_identities_are_accepted(self, mock_cli_env):
+        env = mock_cli_env["make_env"](
+            json.dumps({"latestStatus": "drifted", "message": "drifted latest"})
+        )
+        output = _run_hook(
+            _make_ng_skill_event(
+                "test-skill",
+                mock_cli_env["cwd"],
+                action="invoke",
+                legacy_skill="test-skill",
+            ),
+            env_override=env,
+        )
+
+        assert output["decision"] == "ask"
+        assert "test-skill" in output["reason"]
+
+    def test_conflicting_ng_and_legacy_identities_are_rejected(self):
+        output = _run_hook(
+            _make_ng_skill_event(
+                "canonical-name",
+                action="invoke",
+                legacy_skill="other-name",
+            ),
+            env_override={"SKILL_LEDGER_MODE": "block"},
+        )
+
+        assert output["decision"] == "block"
+        assert "identities conflict" in output["reason"]
+
+    def test_identity_whitespace_is_not_normalized(self):
+        assert skill_ledger_hook._normalize_skill_call({"name": " test-skill "}) == (
+            " test-skill ",
+            None,
+            False,
+        )
+
+    @pytest.mark.parametrize(
+        ("tool_input", "expected_detail"),
+        [
+            ({}, "skill is empty or missing"),
+            ({"skill": "   "}, "skill is empty or missing"),
+            ({"skill": 42}, "skill must be a string"),
+            ({"action": "invoke"}, "name is empty or missing"),
+            ({"name": "   "}, "name is empty or missing"),
+            ({"name": 42}, "name must be a string"),
+            ({"action": "inspect", "name": "test-skill"}, "unsupported Cosh-NG action"),
+        ],
+        ids=[
+            "legacy-missing",
+            "legacy-blank",
+            "legacy-nonstring",
+            "ng-missing",
+            "ng-blank",
+            "ng-nonstring",
+            "ng-unknown-action",
+        ],
+    )
+    def test_invalid_invocations_are_contract_errors(self, tool_input, expected_detail):
+        output = _run_hook(
+            {"tool_name": "skill", "tool_input": tool_input},
+            env_override={"SKILL_LEDGER_MODE": "block"},
+        )
+
+        assert output["decision"] == "block"
+        assert expected_detail in output["reason"]
+
+    @pytest.mark.parametrize(
+        ("policy", "expected_decision", "visible_reason", "debug_stderr"),
+        [
+            ("observe", "allow", False, True),
+            ("warn", "allow", True, False),
+            ("ask", "ask", True, False),
+            ("block", "block", True, False),
+        ],
+    )
+    def test_contract_errors_follow_policy(
+        self,
+        policy,
+        expected_decision,
+        visible_reason,
+        debug_stderr,
+    ):
+        output, stderr = _run_hook(
+            {"tool_name": "skill", "tool_input": {"action": "invoke"}},
+            env_override={"SKILL_LEDGER_MODE": policy},
+            return_stderr=True,
+        )
+
+        assert output["decision"] == expected_decision
+        assert ("reason" in output) is visible_reason
+        assert ("cannot bind the invoked identity" in stderr) is debug_stderr
+
+
+# ---------------------------------------------------------------------------
 # Skill directory resolution tests
 # ---------------------------------------------------------------------------
 
@@ -347,7 +541,10 @@ class TestSkillDirResolution:
         assert output["decision"] == "ask"
         assert "reason" in output, "Skill dir not found — CLI was never called"
 
-    def test_skill_context_resolves_name_directory_mismatch(self, mock_cli_env):
+    @pytest.mark.parametrize("profile", ["legacy", "ng"])
+    def test_skill_context_resolves_name_directory_mismatch(
+        self, mock_cli_env, profile
+    ):
         """skill_context.file_path should locate project skills by real path.
 
         This covers the case where the Skill tool receives the frontmatter
@@ -361,8 +558,9 @@ class TestSkillDirResolution:
         env = mock_cli_env["make_env"](
             json.dumps({"latestStatus": "drifted", "message": "drifted latest"})
         )
+        make_event = _make_skill_event if profile == "legacy" else _make_ng_skill_event
         output = _run_hook(
-            _make_skill_event(
+            make_event(
                 "frontmatter-name",
                 mock_cli_env["cwd"],
                 Path(skill_dir) / "SKILL.md",
@@ -371,6 +569,59 @@ class TestSkillDirResolution:
         )
         assert output["decision"] == "ask"
         assert "drifted latest" in output["reason"]
+
+    @pytest.mark.parametrize(
+        "skill_context",
+        [
+            None,
+            [],
+            {},
+            {"skill_name": "test-skill"},
+            {"file_path": "/project/SKILL.md"},
+            {"skill_name": 42, "file_path": "/project/SKILL.md"},
+            {"skill_name": "test-skill", "file_path": "   "},
+        ],
+        ids=[
+            "null",
+            "array",
+            "empty",
+            "missing-path",
+            "missing-name",
+            "nonstring-name",
+            "blank-path",
+        ],
+    )
+    def test_present_malformed_context_is_a_contract_error(self, skill_context):
+        event = _make_skill_event("test-skill")
+        event["skill_context"] = skill_context
+
+        output = _run_hook(
+            event,
+            env_override={"SKILL_LEDGER_MODE": "block"},
+        )
+
+        assert output["decision"] == "block"
+        assert "skill_context" in output["reason"]
+
+    def test_context_identity_cannot_override_invoked_identity(self, tmp_path):
+        skill_file = tmp_path / "SKILL.md"
+        skill_file.write_text("---\nname: context-name\n---\n")
+        event = _make_ng_skill_event(
+            "invoked-name",
+            action="invoke",
+        )
+        event["skill_context"] = {
+            "skill_name": "context-name",
+            "file_path": str(skill_file),
+        }
+
+        output = _run_hook(
+            event,
+            env_override={"SKILL_LEDGER_MODE": "block"},
+        )
+
+        assert output["decision"] == "block"
+        assert "conflicts with the invoked identity" in output["reason"]
 
     def test_skill_context_skips_only_unresolvable_supported_base(self, mock_cli_env):
         """A bad project base should not discard user/system base checks."""

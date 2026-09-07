@@ -10,6 +10,30 @@ use crate::types::{
 use loader::load_external_hook_configs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Arc;
+
+// Each Unix registration owns a descriptor for the engine lifetime. Keep a
+// fixed budget so project discovery cannot starve later process and log I/O.
+const MAX_EXTERNAL_HOOKS: usize = 64;
+// Hold these descriptors while pinning hooks, then release them so later
+// process, pipe, PTY, and logging operations retain real kernel headroom.
+#[cfg(unix)]
+const EXTERNAL_HOOK_FD_HEADROOM: usize = 32;
+
+#[cfg(unix)]
+fn reserve_external_hook_headroom(operation: &'static str) -> Option<Vec<std::fs::File>> {
+    let reserve = loader::reserve_hook_descriptor_headroom(EXTERNAL_HOOK_FD_HEADROOM);
+    if reserve.is_none() {
+        tracing::warn!(
+            target: "cosh_hook",
+            operation,
+            reserved_descriptors = EXTERNAL_HOOK_FD_HEADROOM,
+            "insufficient descriptor headroom for external hooks"
+        );
+    }
+    reserve
+}
 
 #[path = "engine/loader.rs"]
 mod loader;
@@ -62,6 +86,8 @@ pub enum HookSourceInfo {
 pub struct HookEngine {
     builtin_hooks: Vec<Box<dyn BuiltinHook>>,
     external_hooks: Vec<ExternalHookConfig>,
+    #[cfg(unix)]
+    external_hook_executables: Vec<Arc<std::fs::File>>,
 }
 
 impl Default for HookEngine {
@@ -75,6 +101,8 @@ impl HookEngine {
         Self {
             builtin_hooks: Vec::new(),
             external_hooks: Vec::new(),
+            #[cfg(unix)]
+            external_hook_executables: Vec::new(),
         }
     }
 
@@ -83,6 +111,24 @@ impl HookEngine {
     }
 
     pub fn register_external(&mut self, config: ExternalHookConfig) {
+        if self.external_hooks.len() >= MAX_EXTERNAL_HOOKS {
+            tracing::warn!(
+                target: "cosh_hook",
+                max_external_hooks = MAX_EXTERNAL_HOOKS,
+                "external hook registry is full"
+            );
+            return;
+        }
+        #[cfg(unix)]
+        {
+            let Some(_descriptor_headroom) = reserve_external_hook_headroom("register") else {
+                return;
+            };
+            let Some(executable) = loader::open_hook_executable(&config.path) else {
+                return;
+            };
+            self.external_hook_executables.push(Arc::new(executable));
+        }
         self.external_hooks.push(config);
     }
 
@@ -91,16 +137,24 @@ impl HookEngine {
     }
 
     pub fn load_project_hooks_from_root(&mut self, project_root: &Path, trusted: bool) {
+        #[cfg(unix)]
+        let Some(_descriptor_headroom) = reserve_external_hook_headroom("load_project") else {
+            return;
+        };
         let root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let hooks_dir = root.join(".cosh/hooks");
-        self.load_external_hooks_from_dir(
-            &hooks_dir,
-            ExternalHookSource::Project,
-            Some(root),
-            trusted,
-        );
+        let remaining = MAX_EXTERNAL_HOOKS.saturating_sub(self.external_hooks.len());
+        let loaded = loader::load_project_external_hook_configs(&root, trusted, remaining);
+        self.extend_external_hooks(loaded);
+    }
+
+    fn extend_external_hooks(&mut self, loaded: Vec<loader::LoadedExternalHookConfig>) {
+        for loaded_hook in loaded {
+            #[cfg(unix)]
+            self.external_hook_executables.push(loaded_hook.executable);
+            self.external_hooks.push(loaded_hook.config);
+        }
     }
 
     fn load_external_hooks_from_dir(
@@ -110,12 +164,13 @@ impl HookEngine {
         project_root: Option<PathBuf>,
         trusted: bool,
     ) {
-        self.external_hooks.extend(load_external_hook_configs(
-            dir,
-            source,
-            project_root,
-            trusted,
-        ));
+        #[cfg(unix)]
+        let Some(_descriptor_headroom) = reserve_external_hook_headroom("load_external") else {
+            return;
+        };
+        let remaining = MAX_EXTERNAL_HOOKS.saturating_sub(self.external_hooks.len());
+        let loaded = load_external_hook_configs(dir, source, project_root, trusted, remaining);
+        self.extend_external_hooks(loaded);
     }
 
     pub fn evaluate(&self, block: &CommandBlock) -> Vec<EvaluatedHookFinding> {
@@ -167,7 +222,12 @@ impl HookEngine {
                 continue;
             }
             if matcher::matches_command(&ext.matcher, &input) {
-                if let Some(finding) = runtime::run_external_hook(ext, &input) {
+                if let Some(finding) = runtime::run_external_hook(
+                    ext,
+                    #[cfg(unix)]
+                    &self.external_hook_executables[registration_index],
+                    &input,
+                ) {
                     findings.push(EvaluatedHookFinding::external(
                         format!("external:{registration_index}"),
                         finding,

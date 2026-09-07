@@ -21,7 +21,7 @@ use libbpf_rs::{
 };
 use std::{mem::MaybeUninit, net::Ipv4Addr};
 
-use super::pidns::observer_in_init_pidns;
+use super::pidns::proc_root_is_init_pidns;
 use super::shared_maps::{MapKind, SharedMaps};
 
 // --- Generated skeleton ---
@@ -69,7 +69,7 @@ impl TcpSniff {
             .context("failed to open tcpsniff BPF object")?;
 
         // Tell BPF which namespace to report event pids in.
-        open_skel.rodata_mut().observer_pidns_is_init = observer_in_init_pidns();
+        open_skel.rodata_mut().observer_pidns_is_init = proc_root_is_init_pidns();
 
         // Reuse the shared ring buffer.
         shared

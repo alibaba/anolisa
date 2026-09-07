@@ -1,5 +1,5 @@
 name: agent-sec-core-hermes-plugin
-version: 0.10.0
+version: 0.12.0
 description: "OS-level security guardrails for Hermes Agent — powered by agent-sec-cli"
 provides_hooks:
   - pre_llm_call
@@ -8,5 +8,3 @@ provides_hooks:
   - pre_tool_call
   - post_tool_call
   - post_llm_call
-  - transform_llm_output
-  - on_session_end

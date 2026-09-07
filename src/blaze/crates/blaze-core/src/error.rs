@@ -29,6 +29,10 @@ pub enum BlazeError {
     #[error("invalid sandbox state transition: {from} -> {to}")]
     InvalidStateTransition { from: String, to: String },
 
+    /// A lifecycle caller tried to replace an unfinished durable operation.
+    #[error("sandbox operation already in progress: active={active}, requested={requested}")]
+    OperationInProgress { active: String, requested: String },
+
     #[error("hook '{hook_name}' error: {msg}")]
     HookError { hook_name: String, msg: String },
 

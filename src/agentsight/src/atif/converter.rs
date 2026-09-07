@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use agentsight_atif::{
-    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, FinalMetrics, Metrics, Observation,
-    ObservationResult, Step, StepSource, ToolCall,
+    ATIF_SCHEMA_VERSION, Agent, AtifTrajectory, EXTRA_IS_ERROR, FinalMetrics, Metrics, Observation,
+    ObservationResult, Step, StepSource, ToolCall, same_call_id,
 };
 
 use crate::genai::semantic::{
@@ -418,7 +418,7 @@ fn build_agent_step(
                     } => {
                         let tc_id = id
                             .clone()
-                            .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
+                            .unwrap_or_else(|| format!("auto_{step_id}_{}", tool_calls.len()));
                         tool_calls.push(ToolCall {
                             tool_call_id: tc_id,
                             function_name: name.clone(),
@@ -460,9 +460,9 @@ fn build_agent_step(
                                 name,
                                 arguments,
                             } => {
-                                let tc_id = id
-                                    .clone()
-                                    .unwrap_or_else(|| format!("auto_{}", tool_calls.len()));
+                                let tc_id = id.clone().unwrap_or_else(|| {
+                                    format!("auto_{step_id}_{}", tool_calls.len())
+                                });
                                 tool_calls.push(ToolCall {
                                     tool_call_id: tc_id,
                                     function_name: name.clone(),
@@ -616,6 +616,14 @@ fn build_observation(
 }
 
 /// Scan input messages for ToolCallResponse parts, matching by tool_call_id.
+///
+/// Role is deliberately not filtered. Agents disagree about where a tool result
+/// belongs: some emit a `tool`-role message, others attach the response to the
+/// following `user` turn. Measured against a live capture, every
+/// `tool_call_response` sat on a `user` message and none on a `tool` message, so
+/// gating on role dropped all of them and left every observation empty. The part
+/// type is the reliable discriminator — `ToolCallResponse` is the only variant
+/// carrying a result, and assistant turns only ever carry `ToolCall`.
 fn collect_tool_responses(
     messages: &[InputMessage],
     tc_ids: &HashMap<&str, usize>,
@@ -624,29 +632,50 @@ fn collect_tool_responses(
 ) {
     let mut positional_idx: usize = 0;
     for msg in messages {
-        if msg.role != "tool" {
-            continue;
-        }
         for part in &msg.parts {
             if let MessagePart::ToolCallResponse { id, response } = part {
+                // Providers report tool failure out of band: Anthropic wraps a
+                // failed result as `{"content": …, "is_error": true}`. Keep the
+                // flag as structured data so consumers never have to re-derive
+                // failure from the flattened text.
+                let is_error = response.get(EXTRA_IS_ERROR).and_then(|v| v.as_bool());
+                let extra = is_error.map(|flag| {
+                    HashMap::from([(EXTRA_IS_ERROR.to_string(), serde_json::Value::Bool(flag))])
+                });
+
                 // ATIF allows any JSON for observation content, but downstream
                 // consumers (analyzers, dashboard) render it as text — flatten
                 // structured responses to a JSON string rather than nesting.
-                let content_str = match response {
+                //
+                // The error envelope is unwrapped rather than serialised whole:
+                // classification looks for lines that *start* with an error
+                // token, and a `{"content":"Error: …` prefix defeats that check
+                // on precisely the results the flag marks as failures.
+                let payload = if is_error.is_some() {
+                    response.get("content").unwrap_or(response)
+                } else {
+                    response
+                };
+                let content_str = match payload {
                     serde_json::Value::String(s) => s.clone(),
                     other => serde_json::to_string(other).unwrap_or_default(),
                 };
 
-                // Try to match by ID first
+                // Match by ID first, tolerating the separator differences some
+                // agents introduce when echoing a call id back.
                 if let Some(tc_id) = id {
-                    if let Some(&idx) = tc_ids.get(tc_id.as_str()) {
+                    let found = tc_ids
+                        .iter()
+                        .find(|(known, _)| same_call_id(known, tc_id))
+                        .map(|(_, idx)| *idx);
+                    if let Some(idx) = found {
                         if !matched[idx] {
                             matched[idx] = true;
                             results.push(ObservationResult {
                                 source_call_id: Some(tc_id.clone()),
                                 content: Some(serde_json::Value::String(content_str)),
                                 subagent_trajectory_ref: None,
-                                extra: None,
+                                extra: extra.clone(),
                             });
                             continue;
                         }
@@ -658,15 +687,17 @@ fn collect_tool_responses(
                     positional_idx += 1;
                 }
                 if positional_idx < matched.len() {
+                    let source_call_id = id.clone().or_else(|| {
+                        tc_ids.iter().find_map(|(known, idx)| {
+                            (*idx == positional_idx).then(|| (*known).to_string())
+                        })
+                    });
                     matched[positional_idx] = true;
                     results.push(ObservationResult {
-                        source_call_id: Some(
-                            id.clone()
-                                .unwrap_or_else(|| format!("auto_{positional_idx}")),
-                        ),
+                        source_call_id,
                         content: Some(serde_json::Value::String(content_str)),
                         subagent_trajectory_ref: None,
-                        extra: None,
+                        extra: extra.clone(),
                     });
                     positional_idx += 1;
                 }
@@ -908,6 +939,104 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn tool_failure_flag_survives_as_structured_signal() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-err".into()),
+                name: "Read".into(),
+                arguments: Some(serde_json::json!({"file_path": "/tmp/missing"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let failed_response = vec![InputMessage {
+            role: "tool".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-err".into()),
+                response: serde_json::json!({"content": "file not found", "is_error": true}),
+            }],
+            name: None,
+        }];
+        let events = vec![
+            call_event(1, 1_000_000_000, Some(agent_turn), None, Some("read it")),
+            call_event(2, 3_000_000_000, None, Some(failed_response), None),
+        ];
+
+        let doc = convert_trace_to_atif("trace-err", events).unwrap();
+        let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
+
+        // Readable without string-matching the flattened text, which is what
+        // makes "the tool failed" a deterministic judgment downstream.
+        assert_eq!(result.is_error(), Some(true));
+
+        // The envelope is unwrapped, not serialised whole. Classification looks
+        // for lines that *start* with an error token, so a leftover
+        // `{"content":"…` prefix would defeat it on precisely the results the
+        // flag marks as failures.
+        let text = result
+            .content
+            .as_ref()
+            .and_then(|c| c.as_str())
+            .expect("content is flattened to a string");
+        assert_eq!(text, "file not found", "got {text:?}");
+
+        // A result nobody flagged is unknown, not passing.
+        let ok_doc = convert_trace_to_atif("trace-ok", two_call_chain()).unwrap();
+        let ok_result = &ok_doc.steps[2].observation.as_ref().unwrap().results[0];
+        assert_eq!(ok_result.is_error(), None);
+    }
+
+    #[test]
+    fn tool_response_on_a_user_turn_still_populates_observation() {
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-u".into()),
+                name: "Bash".into(),
+                arguments: Some(serde_json::json!({"command": "ls /nope"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        // Shape taken from a live capture: the result rides on the *user* turn,
+        // not on a `tool`-role message.
+        let replayed = vec![InputMessage {
+            role: "user".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-u".into()),
+                response: serde_json::json!({
+                    "content": "ls: cannot access '/nope': No such file or directory",
+                    "is_error": true
+                }),
+            }],
+            name: None,
+        }];
+        let events = vec![
+            call_event(1, 1_000_000_000, Some(agent_turn), None, Some("list it")),
+            call_event(2, 3_000_000_000, None, Some(replayed), None),
+        ];
+
+        let doc = convert_trace_to_atif("trace-user-turn", events).unwrap();
+        let results = &doc.steps[2]
+            .observation
+            .as_ref()
+            .expect("a user-carried tool response must still produce an observation")
+            .results;
+        assert_eq!(results[0].source_call_id.as_deref(), Some("tc-u"));
+        assert!(
+            results[0]
+                .content
+                .as_ref()
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.contains("No such file")),
+            "content={:?}",
+            results[0].content
+        );
+        assert_eq!(results[0].is_error(), Some(true));
+    }
+
+    #[test]
     fn empty_events_are_rejected() {
         assert!(convert_trace_to_atif("t", vec![]).is_err());
         assert!(convert_session_to_atif("s", vec![]).is_err());
@@ -1033,5 +1162,117 @@ pub(crate) mod tests {
             extract_last_user_text_from_input(&messages),
             Some("Q2".to_string())
         );
+    }
+    #[test]
+    fn generated_call_ids_are_unique_across_steps_and_reused_by_results() {
+        let tool_turn = |name: &str| {
+            vec![OutputMessage {
+                role: "assistant".into(),
+                parts: vec![MessagePart::ToolCall {
+                    id: None,
+                    name: name.into(),
+                    arguments: Some(serde_json::json!({"value": name})),
+                }],
+                name: None,
+                finish_reason: Some("tool_call".into()),
+            }]
+        };
+        let response = |text: &str| {
+            vec![InputMessage {
+                role: "tool".into(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: None,
+                    response: serde_json::json!(text),
+                }],
+                name: None,
+            }]
+        };
+        let events = vec![
+            call_event(
+                1,
+                1_000_000_000,
+                Some(tool_turn("first")),
+                None,
+                Some("run"),
+            ),
+            call_event(
+                2,
+                3_000_000_000,
+                Some(tool_turn("second")),
+                Some(response("first result")),
+                None,
+            ),
+            call_event(
+                3,
+                5_000_000_000,
+                None,
+                Some(response("second result")),
+                None,
+            ),
+        ];
+
+        let doc = convert_trace_to_atif("trace-auto", events).unwrap();
+        let acting: Vec<&Step> = doc
+            .steps
+            .iter()
+            .filter(|step| {
+                step.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+            })
+            .collect();
+        assert_eq!(acting.len(), 2);
+
+        let first_id = &acting[0].tool_calls.as_ref().unwrap()[0].tool_call_id;
+        let second_id = &acting[1].tool_calls.as_ref().unwrap()[0].tool_call_id;
+        assert_ne!(first_id, second_id);
+        assert!(first_id.starts_with("auto_"));
+        assert!(second_id.starts_with("auto_"));
+
+        for step in acting {
+            let call_id = &step.tool_calls.as_ref().unwrap()[0].tool_call_id;
+            let result_id = step.observation.as_ref().unwrap().results[0]
+                .source_call_id
+                .as_deref();
+            assert_eq!(result_id, Some(call_id.as_str()));
+        }
+    }
+
+    #[test]
+    fn non_string_error_content_remains_reversible_after_flattening() {
+        let payload = serde_json::json!({
+            "error": {"code": 404, "path": "/tmp/missing"},
+            "hints": ["retry", "check path"]
+        });
+        let agent_turn = vec![OutputMessage {
+            role: "assistant".into(),
+            parts: vec![MessagePart::ToolCall {
+                id: Some("tc-json".into()),
+                name: "Read".into(),
+                arguments: Some(serde_json::json!({"file_path": "/tmp/missing"})),
+            }],
+            name: None,
+            finish_reason: Some("tool_call".into()),
+        }];
+        let failed_response = vec![InputMessage {
+            role: "tool".into(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-json".into()),
+                response: serde_json::json!({"content": payload, "is_error": true}),
+            }],
+            name: None,
+        }];
+        let events = vec![
+            call_event(1, 1_000_000_000, Some(agent_turn), None, Some("read it")),
+            call_event(2, 3_000_000_000, None, Some(failed_response), None),
+        ];
+
+        let doc = convert_trace_to_atif("trace-json-error", events).unwrap();
+        let result = &doc.steps[2].observation.as_ref().unwrap().results[0];
+        assert_eq!(result.is_error(), Some(true));
+
+        let flattened = result.content.as_ref().and_then(|v| v.as_str()).unwrap();
+        let restored: serde_json::Value = serde_json::from_str(flattened).unwrap();
+        assert_eq!(restored, payload);
     }
 }

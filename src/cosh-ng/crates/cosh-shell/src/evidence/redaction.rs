@@ -5,6 +5,10 @@ use regex::Regex;
 use crate::tools::{classify_command_interaction, OutputStability};
 use crate::types::{CommandBlock, CommandStatus};
 
+mod shell_word;
+
+use shell_word::redact_shell_cookie_headers;
+
 const PROVIDER_COMMAND_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,12 +97,20 @@ fn redact_home_path(value: &str) -> String {
 
 pub(crate) fn redact_sensitive_text(text: &str) -> (String, bool) {
     let (mut redacted, mut changed) = redact_private_key_blocks(text);
+    let next = conservative_cookie_header_pattern()
+        .replace_all(&redacted, "$prefix<redacted>")
+        .into_owned();
+    changed |= next != redacted;
+    redacted = next;
+    let (next, cookie_changed) = redact_shell_cookie_headers(&redacted);
+    redacted = next;
+    changed |= cookie_changed;
     for (pattern, replacement) in [
-        (cookie_header_pattern(), "$prefix<redacted>"),
         (authorization_pattern(), "$prefix$scheme <redacted>"),
         (bearer_pattern(), "$prefix<redacted>"),
         (url_password_pattern(), "$prefix<redacted>@"),
         (sensitive_flag_pattern(), "$prefix<redacted>"),
+        (sensitive_cookie_assignment_pattern(), "$prefix<redacted>"),
         (sensitive_assignment_pattern(), "$prefix<redacted>"),
         (github_token_pattern(), "<redacted>"),
         (opaque_token_pattern(), "<redacted>"),
@@ -152,12 +164,13 @@ fn private_key_marker_range(line: &str, marker: &str) -> Option<(usize, usize)> 
     Some((start, start + marker_end + "PRIVATE KEY-----".len()))
 }
 
-fn cookie_header_pattern() -> &'static Regex {
+fn conservative_cookie_header_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?im)(?P<prefix>^(?:set-cookie|cookie)\s*:\s*).*$")
-            .unwrap_or_else(|_| unreachable!("static cookie pattern must compile"))
+        Regex::new(
+            r#"(?im)(?P<prefix>(?:^(?:set-cookie|cookie)\s*:\s*|\s(?:set-cookie|cookie)\s*:\s+))[^=\s;,]+\s*=\s*[^\r\n]*"#,
+        )
+        .unwrap_or_else(|_| unreachable!("static cookie pattern must compile"))
     })
 }
 
@@ -166,7 +179,7 @@ fn authorization_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
-            r"(?i)(?P<prefix>\bauthorization\s*(?::|=)\s*)(?P<scheme>bearer|basic|token)?\s*(?P<value>[^\s,;&]+)",
+            r"(?i)(?P<prefix>(?-u:\b)authorization\s*(?::|=)\s*)(?P<scheme>bearer|basic|token)?\s*(?P<value>[^\s,;&]+)",
         )
         .unwrap_or_else(|_| unreachable!("static authorization pattern must compile"))
     })
@@ -176,7 +189,7 @@ fn bearer_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?i)(?P<prefix>\bbearer\s+)[A-Za-z0-9._~+/=-]+")
+        Regex::new(r"(?i)(?P<prefix>(?-u:\b)bearer\s+)[A-Za-z0-9._~+/=-]+")
             .unwrap_or_else(|_| unreachable!("static bearer pattern must compile"))
     })
 }
@@ -185,7 +198,7 @@ fn url_password_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@/\s]+@")
+        Regex::new(r"(?i)(?P<prefix>(?-u:\b)[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^@/\s]+@")
             .unwrap_or_else(|_| unreachable!("static URL password pattern must compile"))
     })
 }
@@ -230,8 +243,7 @@ fn sensitive_assignment_pattern() -> &'static Regex {
                    dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|
                    client[_-]?secret|security[_-]?token|refresh[_-]?token|
                    access[_-]?token|github[_-]?token|id[_-]?token|
-                   password|passphrase|passwd|api[_-]?key|apikey|token|secret|
-                   cookie|set[_-]?cookie)
+                   password|passphrase|passwd|api[_-]?key|apikey|token|secret)
                 ["']?
                 \s*(?:=|:)\s*
             )
@@ -247,11 +259,33 @@ fn sensitive_assignment_pattern() -> &'static Regex {
     })
 }
 
+fn sensitive_cookie_assignment_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // Cookie colons are reserved for structured JSON or name=value headers.
+        Regex::new(
+            r#"(?ix)
+            (?P<prefix>
+                (?:^|[^A-Za-z0-9_-])["']?(?:cookie|set[_-]?cookie)["']?\s*=\s*|
+                ["'](?:cookie|set[_-]?cookie)["']\s*:\s*
+            )
+            (?:
+                "(?:\\(?:\r?\n|[^\r\n])|[^"\\])*(?:"|$)|
+                '[^']*(?:'|$)|
+                \\(?:\r?\n|[^\r\n])|
+                [^\s;&|()<>"'\\]
+            )+
+            "#,
+        )
+        .unwrap_or_else(|_| unreachable!("static cookie assignment pattern must compile"))
+    })
+}
+
 fn github_token_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+        Regex::new(r"(?-u:\b)(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static GitHub token pattern must compile"))
     })
 }
@@ -259,9 +293,9 @@ fn github_token_pattern() -> &'static Regex {
 fn opaque_token_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
-        // The pattern is a compile-time constant covered by the tests below.
+        // A five-character sk- suffix needs a digit to exclude sk-hynix prose.
         Regex::new(
-            r"\b(?:sk-[A-Za-z0-9_-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|(?i:xox.)-[A-Za-z0-9-]{10,})\b",
+            r"(?-u:\b)(?:sk-(?:[A-Za-z0-9_-]{6,}|[0-9][A-Za-z0-9_-]{4}|[A-Za-z0-9_-][0-9][A-Za-z0-9_-]{3}|[A-Za-z0-9_-]{2}[0-9][A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3}[0-9][A-Za-z0-9_-]|[A-Za-z0-9_-]{4}[0-9])|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|(?i:xox.)-[A-Za-z0-9-]{10,})(?-u:\b)",
         )
         .unwrap_or_else(|_| unreachable!("static opaque token pattern must compile"))
     })
@@ -271,7 +305,7 @@ fn jwt_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+        Regex::new(r"(?-u:\b)eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static JWT pattern must compile"))
     })
 }
@@ -280,7 +314,7 @@ fn aws_access_key_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\b(?P<prefix>AKIA|ASIA)[A-Z0-9]{16}\b")
+        Regex::new(r"(?-u:\b)(?P<prefix>AKIA|ASIA)[A-Z0-9]{16}(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static AWS access key pattern must compile"))
     })
 }
@@ -289,7 +323,7 @@ fn alibaba_access_key_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
-        Regex::new(r"\bLTAI[A-Za-z0-9]{12,32}\b")
+        Regex::new(r"(?-u:\b)LTAI[A-Za-z0-9]{12,32}(?-u:\b)")
             .unwrap_or_else(|_| unreachable!("static Alibaba access key pattern must compile"))
     })
 }
@@ -348,9 +382,10 @@ mod tests {
             "cookie=assignment-cookie set-cookie=assignment-set-cookie ",
             "'https://example.test/?client_secret=query-value&next=ok'\n",
             "https://user:url-password@example.test/path\n",
-            r#"{"api_key":"json-value","password":"json-password"}"#,
+            r#"{"api_key":"json-value","password":"json-password","cookie":"json-cookie-value"}"#,
             "\nAuthorization: Basic dXNlcjpwYXNz\n",
             "Cookie: session=private; other=value\n",
+            "Set-Cookie: csrf=set-cookie-header-value; Path=/\n",
         );
 
         let (redacted, changed) = redact_sensitive_text(input);
@@ -371,9 +406,11 @@ mod tests {
             "url-password",
             "json-value",
             "json-password",
+            "json-cookie-value",
             "dXNlcjpwYXNz",
             "session=private",
             "other=value",
+            "set-cookie-header-value",
         ] {
             assert!(!redacted.contains(secret), "{redacted}");
         }

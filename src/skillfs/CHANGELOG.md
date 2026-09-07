@@ -1,11 +1,67 @@
 # Changelog
 
+[中文版](CHANGELOG_zh.md)
+
 All notable changes to SkillFS are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.2] - 2026-08-27
+
+### Added
+
+- An optional Alibaba Cloud Linux 4 sidecar image now provides a reproducible
+  alternative to the existing Debian image, with bilingual guidance for
+  building and operating both variants
+  ([#2777](https://github.com/alibaba/anolisa/pull/2777),
+  [#2787](https://github.com/alibaba/anolisa/pull/2787)).
+
+### Fixed
+
+- Startup reconciliation now retries transient notify-daemon endpoint failures
+  with bounded backoff, allowing hidden skills to converge automatically when
+  the daemon starts late or restarts
+  ([#2790](https://github.com/alibaba/anolisa/pull/2790)).
+- Flat normal-mode mounts now resolve categorized skills through their stored
+  physical directories, so writes, truncation, renames, and synchronization no
+  longer fail with `ENOENT`
+  ([#2901](https://github.com/alibaba/anolisa/pull/2901)).
+
+## [0.4.1] - 2026-08-21
+
+### Added
+
+- A Kubernetes sidecar deployment now lets a privileged SkillFS container
+  expose its FUSE view to a non-privileged workload, including readable paths
+  advertised by `skill-discover`
+  ([#2057](https://github.com/alibaba/anolisa/pull/2057)).
+- Optional mutual HMAC-SHA256 authentication now protects control and notify
+  sockets across container namespaces through `--trusted-peer-key-file` and
+  `--notify-auth-key-file`, while existing host authentication remains
+  unchanged ([#2449](https://github.com/alibaba/anolisa/pull/2449)).
+
+### Changed
+
+- The reference Kubernetes deployment now marks the Pod unready after one
+  failed FUSE read and restarts only the SkillFS sidecar after two liveness
+  failures, allowing workloads to recover without restarting
+  ([#2705](https://github.com/alibaba/anolisa/pull/2705)).
+
+### Fixed
+
+- Nested Hermes skills can now update activation state through the control
+  socket with layout-relative identifiers such as `category/skill`
+  ([#2407](https://github.com/alibaba/anolisa/pull/2407)).
+- Activation metadata permissions, in-place backing aliases, and control
+  listener startup now fail closed instead of exposing metadata, accepting an
+  unsafe source, or leaving an unusable endpoint
+  ([#2407](https://github.com/alibaba/anolisa/pull/2407)).
+- The bundled `skillfs-mount` skill now names the shipped analysis scripts and
+  accurately describes managed mounts and writable source behavior
+  ([#1798](https://github.com/alibaba/anolisa/pull/1798)).
 
 ## [0.4.0] - 2026-07-24
 

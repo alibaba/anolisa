@@ -60,12 +60,35 @@ impl AuditAnalyzer {
             return None;
         }
 
-        // Extract model from request body if available
-        let model = http_record
+        // Parse the request body once; it feeds model, provider and
+        // session_id extraction below.
+        let request_json = http_record
             .request_body
             .as_ref()
-            .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok());
+
+        // Extract model from request body if available
+        let model = request_json
+            .as_ref()
             .and_then(|json| json.get("model")?.as_str().map(|s| s.to_string()));
+
+        // Provider resolution: the parsed token usage is authoritative; fall
+        // back to the endpoint path (compatible-mode completion paths still
+        // resolve here because matching is substring-based).
+        let provider = token_record
+            .map(|t| t.provider.clone())
+            .filter(|p| !p.is_empty() && p != "unknown")
+            .or_else(|| {
+                crate::analyzer::message::MessageParser::detect_provider(&http_record.path)
+                    .map(|s| s.to_string())
+            });
+
+        // Session id: same first-layer source the GenAI pipeline uses —
+        // clients that embed it in the request metadata get it at no cost.
+        let session_id = request_json
+            .as_ref()
+            .and_then(|b| b.get("metadata"))
+            .and_then(crate::analyzer::message::types::session_id_from_metadata);
 
         let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) =
             match token_record {
@@ -87,7 +110,7 @@ impl AuditAnalyzer {
             comm: http_record.comm.clone(),
             duration_ns: http_record.duration_ns,
             extra: AuditExtra::LlmCall {
-                provider: None,
+                provider,
                 model,
                 request_method: Some(http_record.method.clone()),
                 request_path: Some(http_record.path.clone()),
@@ -98,7 +121,7 @@ impl AuditAnalyzer {
                 cache_read_tokens,
                 is_sse: http_record.is_sse,
             },
-            session_id: None,
+            session_id,
         })
     }
 
@@ -231,6 +254,7 @@ mod tests {
             response_headers: "{}".into(),
             response_body: response_body.map(|s| s.to_string()),
             duration_ns: 1000,
+            first_output_timestamp_ns: None,
             is_sse,
             sse_event_count: 0,
         }
@@ -283,5 +307,56 @@ mod tests {
         if let AuditExtra::LlmCall { is_sse, .. } = &result.unwrap().extra {
             assert!(*is_sse, "SSE call must have is_sse=true");
         }
+    }
+
+    #[test]
+    fn test_analyze_http_fills_provider_from_token_record() {
+        let analyzer = AuditAnalyzer::new();
+        let record = make_http_record("/v1/chat/completions", false, None);
+        let token = TokenRecord::new(1, "test".into(), "anthropic".into(), 1, 1);
+        let audit = analyzer.analyze_http(&record, Some(&token)).unwrap();
+        if let AuditExtra::LlmCall { provider, .. } = &audit.extra {
+            assert_eq!(provider.as_deref(), Some("anthropic"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_analyze_http_falls_back_to_path_provider() {
+        let analyzer = AuditAnalyzer::new();
+        // No token record and an "unknown" provider must both fall back to
+        // path detection, including for compatible-mode paths.
+        let record = make_http_record("/compatible-mode/v1/chat/completions", false, None);
+        let audit = analyzer.analyze_http(&record, None).unwrap();
+        if let AuditExtra::LlmCall { provider, .. } = &audit.extra {
+            assert_eq!(provider.as_deref(), Some("openai"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+
+        let record = make_http_record("/v1/messages", false, None);
+        let token = TokenRecord::new(1, "test".into(), "unknown".into(), 1, 1);
+        let audit = analyzer.analyze_http(&record, Some(&token)).unwrap();
+        if let AuditExtra::LlmCall { provider, .. } = &audit.extra {
+            assert_eq!(provider.as_deref(), Some("anthropic"));
+        } else {
+            panic!("expected LlmCall extra");
+        }
+    }
+
+    #[test]
+    fn test_analyze_http_extracts_session_id_from_request_metadata() {
+        let analyzer = AuditAnalyzer::new();
+        let mut record = make_http_record("/v1/messages", true, None);
+        record.request_body =
+            Some(r#"{"model":"test-model","metadata":{"session_id":"sess-42"}}"#.to_string());
+        let audit = analyzer.analyze_http(&record, None).unwrap();
+        assert_eq!(audit.session_id.as_deref(), Some("sess-42"));
+
+        // No metadata → session_id stays None.
+        let record = make_http_record("/v1/messages", true, None);
+        let audit = analyzer.analyze_http(&record, None).unwrap();
+        assert_eq!(audit.session_id, None);
     }
 }

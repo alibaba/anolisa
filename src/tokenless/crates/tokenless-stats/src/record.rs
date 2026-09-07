@@ -41,7 +41,7 @@ impl FromStr for OperationType {
             "compress-response" => Ok(OperationType::CompressResponse),
             "rewrite-command" => Ok(OperationType::RewriteCommand),
             "compress-toon" => Ok(OperationType::CompressToon),
-            other => Err(format!("unknown operation type: {}", other)),
+            other => Err(format!("unknown operation type: {other}")),
         }
     }
 }
@@ -127,6 +127,35 @@ pub struct StatsRecord {
     /// Stash entry count at record time (a gauge of stash growth). `None` for
     /// pre-stash records or operations without a stash store attached.
     pub stash_size: Option<i64>,
+    /// Detected content taxonomy (protocol `content_type` wire string).
+    /// `None` for low-level paths and operations without a detector.
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Origin declared by the adapter (protocol `content_origin` wire
+    /// string). `None` outside the unified entry point.
+    ///
+    /// Roadmap §4.7 wants this to separate a protected-path passthrough from
+    /// an ordinary no-savings outcome when tuning the release list. It cannot
+    /// do that yet: `record_compression` returns before writing any row when
+    /// `after_tokens >= before_tokens`, so neither outcome is recorded at
+    /// all. This column is what those rows will carry once a recording policy
+    /// emits them.
+    #[serde(default)]
+    pub content_origin: Option<String>,
+    /// Lifecycle operations that shaped the emitted content.
+    #[serde(default)]
+    pub applied_operations: Option<Vec<String>>,
+    /// Recovery state of the emitted content.
+    #[serde(default)]
+    pub recoverability: Option<String>,
+    /// Token counter identity used for this row's estimates. `None` outside
+    /// the unified entry.
+    #[serde(default)]
+    pub tokenizer_id: Option<String>,
+    /// Truncations without an emitted recovery marker. `None` outside the
+    /// unified entry or when the operation cannot truncate.
+    #[serde(default)]
+    pub unrecoverable_truncations: Option<i64>,
 }
 
 impl StatsRecord {
@@ -159,6 +188,12 @@ impl StatsRecord {
             stash_writes: None,
             stash_errors: None,
             stash_size: None,
+            content_type: None,
+            content_origin: None,
+            applied_operations: None,
+            recoverability: None,
+            tokenizer_id: None,
+            unrecoverable_truncations: None,
         }
     }
 
@@ -228,6 +263,25 @@ impl StatsRecord {
         self
     }
 
+    /// Sets lifecycle metadata written by the shared recording path.
+    pub fn with_entry_metadata(
+        mut self,
+        content_type: Option<String>,
+        content_origin: Option<String>,
+        applied_operations: Option<Vec<String>>,
+        recoverability: Option<String>,
+        tokenizer_id: impl Into<String>,
+        unrecoverable_truncations: Option<i64>,
+    ) -> Self {
+        self.content_type = content_type;
+        self.content_origin = content_origin;
+        self.applied_operations = applied_operations;
+        self.recoverability = recoverability;
+        self.tokenizer_id = Some(tokenizer_id.into());
+        self.unrecoverable_truncations = unrecoverable_truncations;
+        self
+    }
+
     /// Characters saved by compression
     pub fn chars_saved(&self) -> usize {
         self.before_chars.saturating_sub(self.after_chars)
@@ -260,7 +314,7 @@ impl StatsRecord {
     pub fn format_summary_line(&self) -> String {
         let pid = self
             .source_pid
-            .map(|p| format!(" pid:{}", p))
+            .map(|p| format!(" pid:{p}"))
             .unwrap_or_default();
         let session = self.session_id.as_deref().unwrap_or("-");
         let tool = self.tool_use_id.as_deref().unwrap_or("-");

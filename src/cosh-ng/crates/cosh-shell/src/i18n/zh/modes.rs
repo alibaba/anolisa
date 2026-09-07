@@ -8,8 +8,25 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModesTitle => "模式",
         MessageId::ModeApprovalLine => "审批: {mode}",
         MessageId::ModeAnalysisLine => "分析: {mode}",
+        MessageId::ModeRoutingLine => "输入路由: {mode}",
         MessageId::ModeSummaryFooter => {
-            "使用 /mode approval [recommend|auto|trust] 或 /mode analysis [smart|auto|manual]。"
+            "使用 /mode approval、/mode analysis 或 /mode routing 查看详情。"
+        }
+        MessageId::RoutingModeTitle => "输入路由",
+        MessageId::RoutingModeCurrentBody => "当前: {mode}",
+        MessageId::RoutingModeSetBody => "输入路由已设置为 {mode}。",
+        MessageId::RoutingModeUnavailableBody => {
+            "Native 会话不支持切换输入路由；请在启动时选择 Enhanced。"
+        }
+        MessageId::RoutingModeUnknownBody => "未知输入路由模式: {mode}",
+        MessageId::RoutingModeUsageFooter => {
+            "使用 /mode routing assisted|shell-only。"
+        }
+        MessageId::RoutingModeAssistedFooter => {
+            "无法识别的自然语言输入可能路由给 Agent；命令执行后洞察仍可用。"
+        }
+        MessageId::RoutingModeShellOnlyFooter => {
+            "输入始终交给 Shell；命令执行后洞察仍可用。"
         }
         MessageId::ModeRemovedTitle => "模式命令已移除",
         MessageId::ModeRemovedBody => "/mode {mode} 不再支持。",
@@ -18,7 +35,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeLanguageFooter => "使用 /config language [auto|en-US|zh-CN]。",
         MessageId::ModeUnknownBody => "未知模式: {mode}",
         MessageId::ModeUnknownFooter => {
-            "使用 /mode approval recommend|auto|trust 或 /mode analysis smart|auto|manual。"
+            "使用 /mode approval、/mode analysis 或 /mode routing。"
         }
         MessageId::ApprovalModeTitle => "审批模式",
         MessageId::ApprovalModeSetBody => "模式已设置为 {mode}。",

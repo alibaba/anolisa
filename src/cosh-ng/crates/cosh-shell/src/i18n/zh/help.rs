@@ -15,10 +15,34 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::PromptDraftFooterSubmitted => "已发送给 Agent",
         MessageId::PromptDraftFooterCancelled => "草稿已取消",
+        MessageId::AgentComposerTitle => "Agent Composer",
+        MessageId::PromptDraftRuntimeLabel => "Runtime",
+        MessageId::AgentComposerFooterEditing => {
+            "Enter 发送 · Shift+Enter 换行 · Tab 补全 · @路径 · /skill:名称 · Esc 取消"
+        }
+        MessageId::AgentComposerRejectedTitle => "已跳过引用",
+        MessageId::AgentComposerRejectedInvalidPathLine => {
+            "{path}：不是有效的工作空间相对路径"
+        }
+        MessageId::AgentComposerRejectedUnavailablePathLine => {
+            "{path}：路径不存在，或不是文件/目录"
+        }
+        MessageId::AgentComposerRejectedOutsideWorkspaceLine => {
+            "{path}：解析后的路径超出工作空间"
+        }
+        MessageId::AgentComposerRejectedWorkspaceUnavailableLine => {
+            "{path}：Shell 工作空间不可用"
+        }
+        MessageId::AgentComposerRejectedLimitLine => {
+            "{path}：已达到 16 个引用的上限"
+        }
+        MessageId::AgentComposerRejectedFooter => {
+            "已跳过的引用不会作为 Agent 上下文发送。"
+        }
         MessageId::HelpGroupPrompt => "Prompt",
         MessageId::HelpSummaryDraft => "打开多行 Prompt 草稿卡（?? 回车等效）",
         MessageId::PromptMultilineEntryHint => {
-            "多行提问可输入 ?? 后回车，或使用 /draft 打开草稿卡"
+            "多行提问可输入 ?? 后回车；一次性 cosh-core 请求可使用 /agent"
         }
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",
@@ -34,7 +58,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeAnalysis => {
             "选择建议模式、自动分析或关闭主动介入；控制被动建议与失败命令 Insight"
         }
-        MessageId::HelpSummaryAgent => "发起明确的 Agent 请求",
+        MessageId::HelpSummaryModeRouting => "选择未知自然语言输入是否可以路由给 Agent",
+        MessageId::HelpSummaryAgent => "组稿一次性 Agent 请求",
         MessageId::HelpSummaryExplain => "分析上一个失败命令",
         MessageId::HelpSummaryCancel => "取消正在运行的 Agent 工作",
         MessageId::HelpSummaryDetails => "查看审批或活动详情",

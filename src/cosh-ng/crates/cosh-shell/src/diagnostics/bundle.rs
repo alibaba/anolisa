@@ -259,7 +259,7 @@ fn config_json(config: &CoshConfig) -> Value {
     json!({
         "shell_default": redact(&config.shell_default),
         "analysis_mode": redact(&config.analysis_mode),
-        "approval_mode": redact(&config.approval_mode),
+        "approval_mode": redact(config.approval_mode.label()),
         "adapter_default": redact(&config.adapter_default),
         "language": redact(&config.language),
         "startup_banner": config.startup_banner,

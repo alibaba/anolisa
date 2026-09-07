@@ -11,14 +11,14 @@
  *
  * Resolves the platform-specific binary package and creates launcher
  * symlinks at bin/ that delegate to the native binaries, then installs the
- * bundled framework adapters into the user-level data directory searched by
+ * bundled Agent adapters into the user-level data directory searched by
  * the adapter hook dispatcher (run-hook.sh).
  *
  * Platform packages follow the naming convention:
  *   @anolisa/tokenless-{os}-{arch}
  *
- * Each platform package ships three native binaries:
- *   bin/tokenless, bin/rtk, bin/toon
+ * Each platform package ships two native binaries:
+ *   bin/tokenless, bin/rtk
  *
  * Exit codes: on a supported platform, a missing platform package or a
  * missing binary is a hard failure (non-zero exit) so `npm install` fails
@@ -47,7 +47,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = join(__dirname, '..');
 const binDir = join(packageRoot, 'bin');
 
-const BINARIES = ['tokenless', 'rtk', 'toon'];
+const BINARIES = ['tokenless', 'rtk'];
 
 // Map Node.js platform/arch to package names
 const PLATFORM_MAP = {
@@ -175,7 +175,7 @@ function main() {
 }
 
 /**
- * Install the bundled framework adapters (hook scripts and install helpers —
+ * Install the bundled Agent adapters (hook scripts and install helpers —
  * plain bash/python, OS independent) into the user-level data directory that
  * the hook dispatcher (common/hooks/run-hook.sh) already searches:
  *   ~/.local/share/anolisa/adapters/tokenless
@@ -194,9 +194,9 @@ function installAdapters() {
     rmSync(dest, { recursive: true, force: true });
     mkdirSync(destParent, { recursive: true });
     cpSync(adaptersSrc, dest, { recursive: true });
-    console.log(`anolisa-tokenless: Installed framework adapters to ${dest}`);
+    console.log(`anolisa-tokenless: Installed Agent adapters to ${dest}`);
     console.log(
-      'anolisa-tokenless: To register an adapter with your agent framework, run its install script, e.g.:',
+      'anolisa-tokenless: To register an adapter with an Agent product, run its install script, e.g.:',
     );
     console.log(`  bash ${join(dest, 'claude-code', 'scripts', 'install.sh')}`);
   } catch (err) {

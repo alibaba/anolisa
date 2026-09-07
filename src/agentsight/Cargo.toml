@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     ".",
+    "crates/actplane-ifc-compiler",
     "crates/agentsight-audit",
     "crates/agentsight-atif",
     "crates/agentsight-enforcer",
@@ -9,6 +10,7 @@ members = [
     "crates/agentsight-opt-store",
     "crates/agentsight-trajectory-collector",
     "crates/enforcement-protocol",
+    "crates/ebpf-ifc-engine",
 ]
 
 [workspace.package]
@@ -39,7 +41,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [package]
 name = "agentsight"
-version = "0.9.1"
+version = "0.12.0"
 edition = "2024"
 
 [features]
@@ -149,3 +151,10 @@ libbpf-cargo = "0.23.3"
 bindgen = "0.69.4"
 cc = "1.1.31"
 cbindgen = "0.27"
+
+# Redirect the pinned ActPlane git dependencies to the reviewed vendored copies.
+# The git+rev pins above are what scripts/build-enforcer.sh attests against; this
+# [patch] makes the workspace build the vendored crates without a network fetch.
+[patch."https://github.com/eunomia-bpf/ActPlane.git"]
+actplane-ifc-compiler = { path = "crates/actplane-ifc-compiler" }
+ebpf-ifc-engine = { path = "crates/ebpf-ifc-engine" }

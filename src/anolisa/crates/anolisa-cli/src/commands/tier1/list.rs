@@ -1,6 +1,6 @@
 //! `anolisa list` — list available components from the component index.
 //!
-//! Reads the repo-side `components.toml` (the component identity index),
+//! Reads the repo-side `components-v2.toml` (the component identity index),
 //! merges install status from `installed.toml`, and renders as a human
 //! table or `--json` envelope.
 
@@ -21,7 +21,9 @@ use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::state_view::{StateScope, StateView, StateVisibility};
 use crate::context::{CliContext, InstallMode};
-use crate::resolution::{ComponentIndex, ComponentIndexEntry, load_component_index};
+use crate::resolution::{
+    ComponentIndex, ComponentIndexEntry, ComponentTarget, load_component_index,
+};
 use crate::response::{CliError, render_json};
 
 use self::render::render_human;
@@ -44,6 +46,10 @@ pub struct Row {
     pub display_name: String,
     pub summary: String,
     pub backends: Vec<String>,
+    /// OS/architecture targets declared by the component index.
+    pub targets: Vec<ComponentTarget>,
+    /// Whether the component declares support for the current host target.
+    pub target_available: bool,
     pub status: String,
     pub local_state: String,
     pub ownership: String,
@@ -96,6 +102,8 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
         &args,
         &view,
         rpm_query.as_ref().map(|query| query as &dyn PackageQuery),
+        &env.os,
+        &env.arch,
     );
 
     if ctx.json {
@@ -110,7 +118,7 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     if !ctx.quiet {
         render_warnings(&view.warnings);
-        render_human(&rows, ctx.no_color);
+        render_human(&rows, ctx.no_color, &env.os, &env.arch);
     }
     Ok(())
 }
@@ -121,6 +129,18 @@ fn build_rows(
     args: &ListArgs,
     state: &StateStore,
     rpm_query: Option<&dyn PackageQuery>,
+) -> Vec<Row> {
+    build_rows_for_target(index, args, state, rpm_query, "linux", "x86_64")
+}
+
+#[cfg(test)]
+fn build_rows_for_target(
+    index: &ComponentIndex,
+    args: &ListArgs,
+    state: &StateStore,
+    rpm_query: Option<&dyn PackageQuery>,
+    os: &str,
+    arch: &str,
 ) -> Vec<Row> {
     index
         .components
@@ -133,6 +153,8 @@ fn build_rows(
             Some(entry_to_row(
                 entry,
                 projection,
+                os,
+                arch,
                 RowScope {
                     scope: "none".to_string(),
                     active: false,
@@ -150,6 +172,8 @@ fn build_rows_from_view(
     args: &ListArgs,
     view: &StateView,
     rpm_query: Option<&dyn PackageQuery>,
+    os: &str,
+    arch: &str,
 ) -> Vec<Row> {
     let visible_components = view.visible_components();
     index
@@ -178,7 +202,7 @@ fn build_rows_from_view(
                                 .map(str::to_string),
                             state_path: Some(record.root.state_path.display().to_string()),
                         };
-                        Some(entry_to_row(entry, projection, row_scope))
+                        Some(entry_to_row(entry, projection, os, arch, row_scope))
                     })
                     .collect::<Vec<_>>();
             }
@@ -201,6 +225,8 @@ fn build_rows_from_view(
             vec![entry_to_row(
                 entry,
                 projection,
+                os,
+                arch,
                 RowScope {
                     scope: scope.to_string(),
                     active: false,
@@ -224,12 +250,20 @@ struct RowScope {
 fn entry_to_row(
     entry: &ComponentIndexEntry,
     projection: LocalProjection,
+    os: &str,
+    arch: &str,
     row_scope: RowScope,
 ) -> Row {
     let backends: Vec<String> = entry.backends.iter().map(|b| b.kind.clone()).collect();
     let local_state = projection.local_state.label().to_string();
     let ownership = projection.ownership_label().to_string();
-    let action = projection.action_label().to_string();
+    let target_available = entry.supports_target(os, arch);
+    let install_available = target_available && !backends.is_empty();
+    let action = if install_available || projection.action_label() != "install" {
+        projection.action_label().to_string()
+    } else {
+        "unavailable".to_string()
+    };
     Row {
         name: entry.name.clone(),
         display_name: entry
@@ -238,6 +272,8 @@ fn entry_to_row(
             .unwrap_or_else(|| entry.name.clone()),
         summary: entry.summary.clone().unwrap_or_default(),
         backends,
+        targets: entry.targets.clone(),
+        target_available,
         status: projection.status,
         local_state,
         ownership,

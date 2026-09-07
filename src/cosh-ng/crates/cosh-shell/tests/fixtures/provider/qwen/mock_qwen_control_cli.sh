@@ -1,6 +1,7 @@
 #!/bin/bash
 # Mock co/qwen control protocol. Allow response only needs behavior=allow.
 read -r line
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
 echo '{"type":"system","subtype":"init","model":"mock-qwen","session_id":"mock-qwen-control"}'
 read -r line
 echo '{"type":"control_request","request_id":"qwen-req-001","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"sh -c '\''node -e \"process.stdout.write(\\\"cosh-control-protocol\\\")\"'\''"},"tool_use_id":"call_qwen001"}}'

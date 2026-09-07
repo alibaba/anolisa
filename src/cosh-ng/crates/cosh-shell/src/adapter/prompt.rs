@@ -593,10 +593,11 @@ fn runtime_frame_prompt(
     let cwd = provider_safe_command_facts(&request.command_block).cwd;
     format!(
         "\n\nruntime_frame:\n\
-         cwd: {}{}{}",
+         cwd: {}{}{}{}",
         cwd,
         rich_context_prompt(request, access, allow_output_requests),
-        runtime_context_hints_prompt(request)
+        runtime_context_hints_prompt(request),
+        crate::types::composer::composer_prompt(request)
     )
 }
 

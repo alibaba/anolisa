@@ -4,6 +4,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 failures=0
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
 
 require_literal() {
     local file="$1"
@@ -47,11 +49,106 @@ require_in_order() {
     fi
 }
 
-for builder in src/agentsight/scripts/rpm-build.sh scripts/rpm-build.sh .github/workflows/_rpm-build.yaml; do
-    require_literal "$builder" "./scripts/build-enforcer.sh"
-    require_literal "$builder" "target/release/agentsight-enforcer"
-    require_literal "$builder" "agentsight-enforcer.service"
+require_file() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        printf 'missing staged file %s\n' "$file" >&2
+        failures=$((failures + 1))
+    fi
+}
+
+fixture_root="$tmp_dir/source"
+fixture_payload="$tmp_dir/payload"
+mkdir -p "$fixture_root/target/release" "$fixture_root/scripts"
+for file in \
+    target/release/agentsight \
+    target/release/agentsight-enforcer \
+    scripts/agentsight-start.sh \
+    scripts/agentsight.service \
+    scripts/agentsight-enforcer.service \
+    agentsight.json \
+    component.toml \
+    README.md \
+    README_zh.md \
+    LICENSE; do
+    printf 'fixture: %s\n' "$file" > "$fixture_root/$file"
 done
+
+AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
+    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" "$fixture_payload"
+
+for file in \
+    agentsight \
+    agentsight-enforcer \
+    agentsight-start \
+    agentsight.service \
+    agentsight-enforcer.service \
+    agentsight.json \
+    component.toml \
+    README.md \
+    README_zh.md \
+    LICENSE; do
+    require_file "$fixture_payload/$file"
+done
+
+existing_payload="$tmp_dir/existing-payload"
+mkdir -p "$existing_payload"
+printf 'preserve me\n' > "$existing_payload/sentinel"
+if AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
+    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" \
+    "$existing_payload" >"$tmp_dir/existing.out" 2>"$tmp_dir/existing.err"; then
+    printf 'existing RPM payload destination unexpectedly replaced\n' >&2
+    failures=$((failures + 1))
+fi
+if [[ ! -f "$existing_payload/sentinel" ]] \
+    || [[ "$(cat "$existing_payload/sentinel")" != "preserve me" ]]; then
+    printf 'existing RPM payload destination was modified\n' >&2
+    failures=$((failures + 1))
+fi
+
+complete_list="$tmp_dir/complete-rpm-files.txt"
+cat > "$complete_list" <<'EOF'
+/usr/local/bin/agentsight
+/usr/local/bin/agentsight-enforcer
+/usr/local/bin/agentsight-start
+/usr/lib/systemd/system/agentsight.service
+/usr/lib/systemd/system/agentsight-enforcer.service
+/etc/agentsight/config.json
+/usr/share/anolisa/components/agentsight/component.toml
+EOF
+
+bash "$repo_root/src/agentsight/scripts/verify-rpm-package.sh" \
+    --file-list "$complete_list"
+
+incomplete_list="$tmp_dir/incomplete-rpm-files.txt"
+grep -v -E 'agentsight-enforcer($|\.service$)' "$complete_list" > "$incomplete_list"
+if bash "$repo_root/src/agentsight/scripts/verify-rpm-package.sh" \
+    --file-list "$incomplete_list" >"$tmp_dir/incomplete.out" 2>"$tmp_dir/incomplete.err"; then
+    printf 'incomplete RPM file list unexpectedly passed\n' >&2
+    failures=$((failures + 1))
+else
+    require_literal_from_path() {
+        local file="$1"
+        local expected="$2"
+        if ! grep -Fq -- "$expected" "$file"; then
+            printf 'missing verifier diagnostic %s\n' "$expected" >&2
+            failures=$((failures + 1))
+        fi
+    }
+    require_literal_from_path "$tmp_dir/incomplete.err" "/usr/local/bin/agentsight-enforcer"
+    require_literal_from_path "$tmp_dir/incomplete.err" \
+        "/usr/lib/systemd/system/agentsight-enforcer.service"
+fi
+
+require_literal src/agentsight/scripts/rpm-build.sh \
+    './scripts/stage-rpm-payload.sh "$TARBALL_DIR"'
+require_literal scripts/rpm-build.sh \
+    '"${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"'
+require_literal .github/workflows/_rpm-build.yaml \
+    '"$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"'
+require_literal .github/workflows/_rpm-build.yaml \
+    '"$AGENTSIGHT_VERIFY_RPM" "$rpm_path"'
 
 require_literal src/agentsight/agentsight.spec.in \
     "install -p -m 0755 agentsight-enforcer %{buildroot}/usr/local/bin/"

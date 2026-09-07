@@ -56,6 +56,18 @@ clap (v4.5)
   Source: https://crates.io/crates/clap
   Licensed under the MIT License
 
+toon-format (v0.5)
+  Source: https://crates.io/crates/toon-format
+  Copyright (c) 2025-PRESENT Shreyas S Bhat
+  Copyright (c) 2025-PRESENT Johann Schopplich
+  Licensed under the MIT License
+
+  TOON (Token-Oriented Object Notation) is a lossless JSON re-encoding
+  that eliminates JSON syntax overhead (quotes, commas, colons,
+  braces), achieving 30-60% token savings on structured/tabular data.
+  Statically linked into the tokenless binaries as a sequential second
+  stage after ResponseCompressor.
+
 All dependencies are used in compliance with their original license terms.
 
 =========================================================================
@@ -71,18 +83,6 @@ rtk (src/tokenless/third_party/rtk/)
   token optimization, providing command rewriting and output filtering
   to achieve 60-90% token savings on common development commands.
   Included in the tokenless component.
-
-toon (src/tokenless/third_party/toon/)
-  Git submodule from https://github.com/toon-format/toon-rust.git
-  Copyright (c) 2025-PRESENT Shreyas S Bhat
-  Copyright (c) 2025-PRESENT Johann Schopplich
-  Licensed under the MIT License
-
-  TOON (Token-Oriented Object Notation) is a lossless binary JSON
-  codec that eliminates JSON syntax overhead (quotes, commas, colons,
-  braces), achieving 30-60% token savings on structured/tabular data.
-  Integrated into the tokenless response compression pipeline as a
-  sequential second stage after ResponseCompressor.
 
 ripgrep (src/copilot-shell/dist/)
   Vendored binary

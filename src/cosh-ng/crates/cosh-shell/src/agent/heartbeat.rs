@@ -265,6 +265,10 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                     );
                 }
             }
+            AgentEvent::ToolHookVerdict { .. } => {
+                // Audit-only marker: the status line is already driven by the
+                // tool result events around it.
+            }
             AgentEvent::AgentCompleted { summary, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusCompleted).to_string();
                 active_run.current_message = display_agent_summary(summary, &i18n);

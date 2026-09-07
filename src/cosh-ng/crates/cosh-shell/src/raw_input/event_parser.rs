@@ -1,5 +1,6 @@
 use crate::input::InputClassifier;
 
+use super::path_prompt_candidate::zsh_path_candidate_should_hold;
 use super::soft_newline::{
     soft_newline_sequence_len, soft_newline_suffix_len, CANONICAL_SOFT_NEWLINE,
 };
@@ -23,6 +24,9 @@ pub(super) struct CandidateLineBuffer {
     in_paste: bool,
     /// True once any bracketed-paste opener was consumed into this draft.
     saw_paste: bool,
+    /// Buffer offset immediately after the latest completed paste payload.
+    /// Bytes after this offset were typed outside the paste wrapper.
+    paste_closed_at: Option<usize>,
     /// Trailing bytes that form a proper prefix of a paste delimiter,
     /// held until the next chunk resolves them (#1721).
     pending_partial: Vec<u8>,
@@ -88,11 +92,13 @@ impl CandidateLineBuffer {
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
                 self.in_paste = true;
                 self.saw_paste = true;
+                self.paste_closed_at = None;
                 idx += BRACKETED_PASTE_START.len();
                 continue;
             }
             if bytes[idx..].starts_with(BRACKETED_PASTE_END) {
                 self.in_paste = false;
+                self.paste_closed_at = Some(self.bytes.len());
                 idx += BRACKETED_PASTE_END.len();
                 continue;
             }
@@ -169,6 +175,7 @@ impl CandidateLineBuffer {
         self.forced_agent_suggestion_id = None;
         self.in_paste = false;
         self.saw_paste = false;
+        self.paste_closed_at = None;
         self.pending_partial.clear();
         self.pending_pasted_cr = false;
     }
@@ -179,6 +186,7 @@ impl CandidateLineBuffer {
         self.forced_agent_suggestion_id = None;
         self.in_paste = false;
         self.saw_paste = false;
+        self.paste_closed_at = None;
         self.pending_pasted_cr = false;
         let mut bytes = std::mem::take(&mut self.bytes);
         // A held partial delimiter is plain user bytes if the draft flushes
@@ -189,6 +197,10 @@ impl CandidateLineBuffer {
 
     pub(super) fn visible_line_bytes(&self) -> &[u8] {
         &self.bytes[..visible_line_end(&self.bytes, self.soft_newline_enabled)]
+    }
+
+    pub(super) fn paste_closed_at(&self) -> Option<usize> {
+        self.paste_closed_at
     }
 
     fn pop_visible_char(&mut self) {
@@ -239,7 +251,7 @@ pub(super) enum CandidateLineStatus {
     Unsafe,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct NativeLineState {
     visible: Vec<u8>,
     /// The mirror no longer matches readline's buffer: Tab completion or
@@ -274,6 +286,14 @@ impl NativeLineState {
         } else {
             Some(&self.visible)
         }
+    }
+
+    pub(super) fn history_mirror_requires_fail_closed(&self) -> bool {
+        self.dirty && !self.in_paste && self.pending_paste_delimiter.is_empty()
+    }
+
+    pub(super) fn paste_sequence_open(&self) -> bool {
+        self.in_paste || !self.pending_paste_delimiter.is_empty()
     }
 
     pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
@@ -396,9 +416,28 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
             Some("approval [recommend|auto|trust] | analysis [smart|auto|manual]".to_string())
         }
         "/details" if parts.next().is_none() => Some("<id>".to_string()),
-        _ => crate::slash::registry::visible_slash_commands()
-            .find(|spec| spec.name.starts_with(token) && spec.name != token)
-            .map(|spec| spec.usage.to_string()),
+        _ => {
+            // List every matching command: returning only the first prefix
+            // match hides same-prefix siblings (`/sta` hid `/stats`). Names
+            // are deduplicated so multi-spec commands (`/mode`) still count
+            // as a single candidate and keep their usage hint.
+            let mut names: Vec<&'static str> = Vec::new();
+            let mut sole_usage = None;
+            for spec in crate::slash::registry::visible_slash_commands() {
+                if spec.name.starts_with(token) && spec.name != token && !names.contains(&spec.name)
+                {
+                    names.push(spec.name);
+                    if names.len() == 1 {
+                        sole_usage = Some(spec.usage);
+                    }
+                }
+            }
+            match names.len() {
+                0 => None,
+                1 => sole_usage.map(str::to_string),
+                _ => Some(names.join(" · ")),
+            }
+        }
     }
 }
 
@@ -440,16 +479,19 @@ pub(crate) fn redact_extension_setting_value(input: &[u8]) -> Vec<u8> {
 pub(super) fn starts_native_intercept_candidate(
     bytes: &[u8],
     native_line_state: &NativeLineState,
+    buffer_non_ascii_prefix: bool,
 ) -> bool {
-    // Only explicit slash and `??` routes are buffered. Ordinary text and
-    // paste bytes stay owned by the Shell.
+    // Zsh also buffers a potential Han-leading path prompt because its ZLE
+    // buffer cannot be cleared safely after submit-time classification.
     if !native_line_state.is_at_line_start() {
         return false;
     }
-    if first_visible_input_byte(bytes) == Some(b'/') {
+    let visible = first_visible_input_bytes(bytes);
+    if visible.first() == Some(&b'/')
+        || (buffer_non_ascii_prefix && zsh_path_candidate_should_hold(visible))
+    {
         return true;
     }
-    let visible = first_visible_input_bytes(bytes);
     // A lone `?` may be the first half of a `??` marker typed key by key
     // (#1932): own the line now so the follow-up decides the route; any
     // non-`??` continuation flushes back to bash byte-identically.
@@ -607,5 +649,47 @@ fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
         [0x1b, b'[', parameters @ ..] => parameters.iter().all(|byte| matches!(byte, 0x20..=0x3f)),
         [0x1b, b'O'] => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{starts_native_intercept_candidate, NativeLineState};
+
+    #[test]
+    fn native_intercept_candidate_only_starts_at_line_start() {
+        let mut state = NativeLineState::default();
+
+        assert!(starts_native_intercept_candidate(b"/", &state, false));
+        assert!(starts_native_intercept_candidate(
+            b"?? hello",
+            &state,
+            false
+        ));
+        assert!(!starts_native_intercept_candidate(
+            "你".as_bytes(),
+            &state,
+            false
+        ));
+        assert!(starts_native_intercept_candidate(
+            "你".as_bytes(),
+            &state,
+            true
+        ));
+        state.observe_shell_bytes(b"vim .");
+        assert!(!starts_native_intercept_candidate(b"/", &state, true));
+        assert!(!starts_native_intercept_candidate(
+            b"?? hello",
+            &state,
+            true
+        ));
+        assert!(!starts_native_intercept_candidate(
+            "你".as_bytes(),
+            &state,
+            true
+        ));
+
+        state.observe_shell_bytes(b"\n");
+        assert!(starts_native_intercept_candidate(b"/mode", &state, false));
     }
 }

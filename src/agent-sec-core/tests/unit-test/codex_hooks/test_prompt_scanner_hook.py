@@ -43,8 +43,12 @@ _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "prompt_scanner_hook.py")
 # ---------------------------------------------------------------------------
 
 
-def _run_hook(input_data, *, env_override=None):
-    """Run prompt_scanner_hook.py as subprocess and return parsed JSON output."""
+def _run_hook_process(input_data, *, env_override=None):
+    """Run prompt_scanner_hook.py as subprocess and return the raw process.
+
+    Kept separate from :func:`_run_hook` so diagnostics on stderr stay
+    assertable instead of being discarded with the JSON decision.
+    """
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -59,6 +63,12 @@ def _run_hook(input_data, *, env_override=None):
         env=env,
     )
     assert proc.returncode == 0, f"Hook crashed: stderr={proc.stderr}"
+    return proc
+
+
+def _run_hook(input_data, *, env_override=None):
+    """Run prompt_scanner_hook.py as subprocess and return parsed JSON output."""
+    proc = _run_hook_process(input_data, env_override=env_override)
     if not proc.stdout.strip():
         return {}
     return json.loads(proc.stdout)
@@ -313,6 +323,47 @@ class TestDenyMode:
         )
         assert output["decision"] == "block"
         assert "置信度" not in output["reason"]
+
+
+class TestScanModeDiagnostics:
+    """Only a misconfigured PROMPT_SCANNER_SCAN_MODE may reach stderr.
+
+    The empty prompt returns before the CLI call, so stderr carries the
+    configuration diagnostic alone.
+    """
+
+    def test_invalid_scan_mode_reports_fallback(self):
+        proc = _run_hook_process(
+            {"prompt": ""},
+            env_override={"PROMPT_SCANNER_SCAN_MODE": "banana"},
+        )
+        assert (
+            "[prompt-scanner] invalid PROMPT_SCANNER_SCAN_MODE 'banana'; "
+            "using 'standard'" in proc.stderr
+        )
+
+    @pytest.mark.parametrize("scan_mode", ["fast", "standard", "strict", "  STRICT "])
+    def test_valid_scan_mode_stays_silent(self, scan_mode):
+        proc = _run_hook_process(
+            {"prompt": ""},
+            env_override={"PROMPT_SCANNER_SCAN_MODE": scan_mode},
+        )
+        assert proc.stderr == ""
+
+    def test_unset_scan_mode_stays_silent(self):
+        env = os.environ.copy()
+        env.pop("PROMPT_SCANNER_SCAN_MODE", None)
+        proc = subprocess.run(
+            [sys.executable, _HOOK_SCRIPT],
+            input=json.dumps({"prompt": ""}),
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert proc.returncode == 0
+        assert proc.stderr == ""
 
 
 class TestUnknownMode:

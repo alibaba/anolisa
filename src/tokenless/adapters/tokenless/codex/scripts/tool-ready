@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Codex PreToolUse tool-ready environment pre-check with auto-fix.
+"""Codex PreToolUse Tool Ready adapter, currently a silent pass-through.
 
-Reads a PreToolUse hook request from stdin, runs a two-phase
-check-then-fix pipeline via ``tokenless env-check``, and blocks the
-tool if required dependencies are still missing after auto-fix.
+Release builds of ``tokenless env-check`` return ``UNKNOWN`` with
+``enabled:false``, which this adapter silently passes through. The retained
+legacy pipeline below remains dormant until the readiness model is redesigned
+and intentionally re-enabled in source.
 
-Pipeline: Check → Fix → Re-check
+Legacy pipeline: Check → Fix → Re-check
   1. CHECK:   ``tokenless env-check --json --tool <name>``
   2. FIX:     ``tokenless env-check --fix --json --tool <name>``
   3. RE-CHECK: parse result after fix attempt

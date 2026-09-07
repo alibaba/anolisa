@@ -403,4 +403,252 @@ mod tests {
             "a request with a pending card must never be drained"
         );
     }
+
+    /// #2639: a hook `ask` decision plus a `tool_input_patch` reaches the
+    /// shell as a control approval carrying the rewritten command. When the
+    /// provider's streamed tool call for the same call escapes the
+    /// control-protocol staging grace, both land in one batch. The refused
+    /// streamed fallback must not abandon the batch, or the control approval
+    /// stays unhomed and the #1940 batch drain denies a card the user is
+    /// still owed.
+    #[test]
+    fn batch_drain_keeps_hook_ask_approval_behind_refused_tool_call() {
+        let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+        let mut state = InlineState::default();
+        // Control-protocol adapter: the tail record pass ignores streamed
+        // tool calls exactly as it does for cosh-core.
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        assert!(adapter.capabilities().control_protocol);
+        let mut active_run = test_active_run();
+        active_run.provider_name = "cosh-core";
+        active_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
+        state.agent_run.active = Some(active_run);
+        // This run already handed a shell command to the foreground, so the
+        // shell-request policy refuses any further streamed shell fallback.
+        state.control.mark_provider_shell_handoff_run("request-1");
+        let mut output = Vec::new();
+
+        {
+            let active_run = state.agent_run.active.as_mut().expect("active run");
+            active_run.governed_events.push(governed(
+                AgentEvent::ToolCall {
+                    run_id: "request-1".to_string(),
+                    tool_id: Some("tool-7".to_string()),
+                    name: "run_shell_command".to_string(),
+                    input: r#"{"command":"rm -rf /tmp/sec_demo"}"#.to_string(),
+                },
+                GovernancePolicyDecision::NeedsUserApproval,
+            ));
+            active_run.governed_events.push(governed(
+                AgentEvent::ToolPermissionRequest {
+                    run_id: "request-1".to_string(),
+                    request_id: "approval-7".to_string(),
+                    tool_name: "run_shell_command".to_string(),
+                    tool_input: serde_json::json!({
+                        "command": "linux-sandbox --sandbox-policy-cwd /tmp -- bash -c 'rm -rf /tmp/sec_demo'"
+                    }),
+                    tool_use_id: "tool-7".to_string(),
+                    hook_requires_approval: true,
+                    audit_ref: None,
+                },
+                GovernancePolicyDecision::NeedsUserApproval,
+            ));
+        }
+        state
+            .control
+            .approval_ledger_mut()
+            .register("request-1", "approval-7");
+
+        render_new_agent_structured_events(&mut state, &mut output, &adapter)
+            .expect("render mixed batch");
+
+        let pending = state
+            .approvals
+            .requests
+            .iter()
+            .find(|request| request.request_id.as_deref() == Some("approval-7"))
+            .expect("hook ask approval must reach a decision surface");
+        assert_eq!(pending.status, ApprovalRequestStatus::Pending);
+        assert!(pending.hook_requires_approval);
+        assert_eq!(
+            state.approvals.active_panel_id.as_deref(),
+            Some(pending.id.as_str())
+        );
+        let responses: Vec<_> = approval_rx
+            .try_iter()
+            .filter_map(|message| match message {
+                crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            })
+            .collect();
+        assert!(
+            !responses
+                .iter()
+                .any(|response| response.request_id == "approval-7"),
+            "a surfaced approval must never be denied by the batch drain: {responses:?}"
+        );
+    }
+
+    /// #2639 companion: when the shell-request policy itself refuses a
+    /// control approval, that refusal is the request's terminal response. It
+    /// must settle the #1940 ledger, so the batch drain neither re-denies it
+    /// nor lets the tail record pass offer the refused command as a card.
+    #[test]
+    fn policy_refused_control_request_is_answered_exactly_once() {
+        let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+        let mut state = InlineState::default();
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        assert!(adapter.capabilities().control_protocol);
+        let mut active_run = test_active_run();
+        active_run.provider_name = "cosh-core";
+        active_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
+        state.agent_run.active = Some(active_run);
+        // The host already executed this exact control request and delivered
+        // its result, so the policy refuses the replay.
+        state
+            .control
+            .provider_tool_mut()
+            .claim_host_executed_shell_result("request-1", "approval-5", Some("tool-5"))
+            .expect("claim host result");
+        let mut output = Vec::new();
+
+        state
+            .agent_run
+            .active
+            .as_mut()
+            .expect("active run")
+            .governed_events
+            .push(governed(
+                AgentEvent::ToolPermissionRequest {
+                    run_id: "request-1".to_string(),
+                    request_id: "approval-5".to_string(),
+                    tool_name: "run_shell_command".to_string(),
+                    tool_input: serde_json::json!({ "command": "rm -rf /tmp/sec_demo" }),
+                    tool_use_id: "tool-5".to_string(),
+                    hook_requires_approval: false,
+                    audit_ref: None,
+                },
+                GovernancePolicyDecision::NeedsUserApproval,
+            ));
+        state
+            .control
+            .approval_ledger_mut()
+            .register("request-1", "approval-5");
+
+        render_new_agent_structured_events(&mut state, &mut output, &adapter)
+            .expect("render refused batch");
+
+        let responses: Vec<_> = approval_rx
+            .try_iter()
+            .filter_map(|message| match message {
+                crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            })
+            .collect();
+        let terminal: Vec<_> = responses
+            .iter()
+            .filter(|response| response.request_id == "approval-5")
+            .collect();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "a policy refusal is the only terminal response: {responses:?}"
+        );
+        assert!(matches!(
+            terminal[0].decision,
+            ApprovalDecision::Deny { .. }
+        ));
+        // The refusal is recorded as resolved, never as a card the user
+        // could approve after the provider was already told no.
+        assert!(state
+            .approvals
+            .requests
+            .iter()
+            .all(|request| request.status != ApprovalRequestStatus::Pending));
+        assert!(state.approvals.active_panel_id.is_none());
+        // And the ledger records the response, as every control_response
+        // exit is required to (see runtime::approval_ledger).
+        assert!(state
+            .control
+            .approval_ledger()
+            .unresponded_for_run("request-1")
+            .is_empty());
+    }
+
+    #[test]
+    fn detached_policy_refusal_waits_for_terminal_sweep() {
+        let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+        let mut detached_run = test_active_run();
+        detached_run
+            .request
+            .context_hints
+            .push(crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string());
+        detached_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
+        let run_request = detached_run.request.clone();
+        let mut state = InlineState::default();
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        assert!(adapter.capabilities().control_protocol);
+        let mut output = Vec::new();
+        let request = governed(
+            AgentEvent::ToolPermissionRequest {
+                run_id: "request-1".to_string(),
+                request_id: "approval-8".to_string(),
+                tool_name: "run_shell_command".to_string(),
+                tool_input: serde_json::json!({ "command": "rm -rf /tmp/sec_demo" }),
+                tool_use_id: "tool-8".to_string(),
+                hook_requires_approval: false,
+                audit_ref: None,
+            },
+            GovernancePolicyDecision::NeedsUserApproval,
+        );
+        state
+            .control
+            .approval_ledger_mut()
+            .register("request-1", "approval-8");
+
+        render_agent_structured_events(
+            &mut state,
+            &[request],
+            Some(&run_request),
+            detached_run.origin,
+            &mut output,
+            &adapter,
+        )
+        .expect("render detached refusal");
+
+        assert!(state.approvals.requests.is_empty());
+        assert_eq!(
+            state
+                .control
+                .approval_ledger()
+                .unresponded_for_run("request-1"),
+            vec!["approval-8"]
+        );
+        assert!(approval_rx.try_iter().next().is_none());
+
+        crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+            &mut state,
+            "request-1",
+            &detached_run.handle,
+        );
+
+        let responses: Vec<_> = approval_rx
+            .try_iter()
+            .filter_map(|message| match message {
+                crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            })
+            .collect();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].request_id, "approval-8");
+        assert!(matches!(
+            responses[0].decision,
+            ApprovalDecision::Deny { .. }
+        ));
+        assert!(state
+            .control
+            .approval_ledger()
+            .unresponded_for_run("request-1")
+            .is_empty());
+    }
 }

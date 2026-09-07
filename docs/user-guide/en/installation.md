@@ -16,6 +16,37 @@ The `anolisa` CLI is the unified entry point for managing all ANOLISA components
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
+The same installer can manage one published component immediately after it
+prepares the CLI. Pass the registry name, backend, and scope. Raw is the
+default backend. On Alibaba Cloud Linux 4, install cosh-ng through the RPM
+backend so dnf selects the matching system libraries:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`--cosh-ng` is shorthand for `--component cosh-ng`. Component, backend, and
+platform checks remain owned by the CLI, so the installer does not maintain a
+second component allowlist. In explicit system mode, the script uses `sudo`
+only for the component action; the CLI remains in the current user directory.
+Without `--install-mode`, scope follows the normal ANOLISA euid default.
+
+The script installs the CLI to `~/.local/bin` by default, but the shell runs
+the first `anolisa` found in `PATH`. If an older npm or Homebrew installation
+comes first, the installer reports both paths and versions and exits without
+printing `done`. It never removes another channel's files. Put the standalone
+installation first and refresh the current shell:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
+```
+
+Persist that `export` in the profile read by Bash or Zsh. Fish users can run
+`fish_add_path --move "$HOME/.local/bin"`. To remove the older installation instead,
+use its owner: `npm uninstall -g @anolisa/cli` or `brew uninstall anolisa`.
+
 ### Option B: YUM (Alinux)
 
 ```bash
@@ -75,7 +106,7 @@ anolisa install <component>
 | Component | Description | Supported modes |
 |-----------|-------------|-----------------|
 | `cosh` | Copilot Shell — AI terminal assistant | user, system |
-| `cosh-ng` | AI-native Linux terminal and deterministic Agent runtime (experimental) | **system** |
+| `cosh-ng` | AI-native terminal and deterministic Agent runtime (experimental) | system (Linux), user or system (macOS arm64) |
 | `os-skills` | System management and DevOps skills | user, system |
 | `tokenless` | Token optimization (compression) | user, system |
 | `ws-ckpt` | Workspace checkpoint/rollback | **system** |
@@ -89,11 +120,26 @@ anolisa install <component>
 > sudo anolisa --install-mode system install agentsight
 > ```
 
-Install cosh-ng in system mode, then start the terminal with `cosh`:
+On Alibaba Cloud Linux 4, install cosh-ng from the RPM backend in system mode,
+then start the terminal with `cosh`:
 
 ```bash
-sudo anolisa --install-mode system install cosh-ng
+sudo anolisa --install-mode system install cosh-ng --backend rpm
 cosh
+```
+
+The public installer combines CLI bootstrap and component installation:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+On macOS arm64, the cosh-ng raw package has a separate user-scope contract:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend raw --install-mode user
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Use the component name `sec-core` with the ANOLISA CLI. The Alinux RPM keeps
@@ -218,6 +264,13 @@ Remove a specific component:
 anolisa uninstall <component>
 ```
 
+The public installer also accepts an installed component name for removal. It
+refreshes the stable CLI first, then delegates to `anolisa uninstall`:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --install-mode system --uninstall
+```
+
 There is no batch uninstall command. List the installed records, then remove
 each intended component explicitly so its authority and package-removal policy
 are reviewed independently:
@@ -235,6 +288,12 @@ Update a specific component:
 
 ```bash
 anolisa update <component>
+```
+
+Update a selected component and the script-installed stable CLI together:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --install-mode system --upgrade
 ```
 
 Update all installed components:

@@ -4,6 +4,7 @@ pub(crate) mod agent_render;
 mod question;
 #[path = "renderer.rs"]
 mod renderer;
+pub(crate) mod wrap;
 
 pub(crate) use agent_render::*;
 pub(crate) use question::OPTION_DETAIL_SEPARATOR;

@@ -37,43 +37,39 @@
 //! rows and merges the delegated refreshes (U5) into one native transaction.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use anolisa_core::adapter::claim;
+use anolisa_core::adapter::claim::{self, AdapterSourceRevision};
+use anolisa_core::adapter::manager::{AdapterManager, VisibleRoot};
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
-use anolisa_core::domain::{
-    InstallationScope, ManagementRelation, NativePm, OwnedArtifact, ProviderBinding,
+use anolisa_core::component_snapshot::{
+    ComponentSnapshot, ComponentSnapshotRequest, SnapshotProbe,
 };
-use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
-use anolisa_core::facts::{JournalEvidence, ObserveRequest, assemble_facts};
-use anolisa_core::lock::InstallLock;
-use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
+use anolisa_core::domain::{InstallationScope, ManagementRelation, OwnedArtifact, ProviderBinding};
+use anolisa_core::facts::{FactsError, assemble_component_snapshot, lifecycle_facts_from_snapshot};
+use anolisa_core::owned_executor::OwnedExecutionError;
 use anolisa_core::planner::{
     Facts, Intent, NativeProbe, OwnedUpdateResolution, Plan, PlanError, Step, UpdateRequest,
     VersionRelation, plan,
 };
 use anolisa_core::providers::DelegatedProvider;
-use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
-use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
-use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
+use anolisa_platform::pkg_transaction::PackageTransaction;
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::install::{
-    RawReplayOps, RawResolution, refresh_datadir_contract_snapshot, resolve_raw,
-    resolve_raw_inputs_for_component,
+    RawResolution, refresh_datadir_contract_snapshot, resolve_raw, resolve_raw_inputs_for_component,
 };
-use super::recovery::LockedJournalGate;
 use super::rpm_install;
 use crate::color::Palette;
 use crate::commands::common;
@@ -85,12 +81,12 @@ use crate::response::{self, CliError};
 // `pub(crate)` so `anolisa upgrade` (issue #1411) can reuse the read-only
 // planner (`check::compute_update_check_report`) instead of re-deriving it.
 pub(crate) mod all;
+mod application;
 pub(crate) mod check;
+mod self_update;
 
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "update";
-
-const CLI_CHANGELOG_URL: &str = "https://agentic-os.sh/#anolisa-cli-changelog";
 
 const ANOLISA_RPM_REPO_ID: &str = "anolisa-configured";
 
@@ -183,7 +179,7 @@ pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
     // `args_conflicts_with_subcommands` guarantees `command` and `component`
     // are never both set, so a present subcommand always wins.
     match (args.command, args.component) {
-        (Some(UpdateCommands::SelfBin), _) => handle_self_update(ctx),
+        (Some(UpdateCommands::SelfBin), _) => self_update::handle(ctx),
         (Some(UpdateCommands::All), _) => all::handle_update_all(ctx),
         (None, Some(component)) => handle_component_update(&component, ctx),
         (None, None) => Err(CliError::InvalidArgument {
@@ -258,192 +254,44 @@ pub(crate) struct AdapterAction {
     pub(crate) command: String,
 }
 
-/// Trusted adapter bundle revisions captured from the component contract and
-/// ANOLISA-managed resource roots.
-pub(crate) type AdapterBundleSnapshot = BTreeMap<String, Option<String>>;
+/// Package-manager-owned adapter revisions captured around an update.
+pub(crate) type AdapterRevisionSnapshot = BTreeMap<String, Option<AdapterSourceRevision>>;
 
-const SYSTEM_BUNDLE_CHANGED_REASON: &str = "adapter bundle changed during system update";
+const SYSTEM_REVISION_CHANGED_REASON: &str = "adapter source revision changed during system update";
 
-/// Capture every adapter bundle declared by `component` without consulting
+/// Capture every adapter revision declared by `component` without consulting
 /// receipt state.
 ///
-/// Contract resolution and destination expansion are scoped to the active
-/// layout's trusted state and datadir roots. The resulting paths are
-/// revalidated as ANOLISA-owned before they are read, so a privileged update
-/// never lets user-controlled receipt fields choose filesystem inputs.
-pub(crate) fn adapter_bundle_snapshot(
+/// Contract resolution is scoped to the active layout's state and fixed
+/// package datadir. File metadata comes from the installation's owning package
+/// manager, so runtime-created files never enter the comparison.
+pub(crate) fn adapter_revision_snapshot(
     ctx: &CliContext,
     layout: &FsLayout,
     component: &str,
-) -> AdapterBundleSnapshot {
+) -> AdapterRevisionSnapshot {
     if ctx.install_mode != crate::context::InstallMode::System {
-        return AdapterBundleSnapshot::new();
+        return AdapterRevisionSnapshot::new();
     }
-    // Environment-driven packaged-data overrides are intentionally excluded:
-    // a privileged update may read only its selected system layout and the
-    // fixed package datadir, never a caller-selected source root.
     let mut datadir_roots = vec![layout.datadir.clone()];
     if let Some(package_datadir) = layout.package_datadir()
         && !datadir_roots.contains(&package_datadir)
     {
         datadir_roots.push(package_datadir);
     }
-    let Ok(resolved) = anolisa_core::adapter::contract::resolve_component_contract_with_source(
-        component,
-        std::slice::from_ref(&layout.state_dir),
-        &datadir_roots,
+    let Ok(state) = StateStore::load_for_layout(
+        &layout.state_dir.join("installed.toml"),
+        privilege::effective_uid(),
+        layout,
     ) else {
-        return AdapterBundleSnapshot::new();
+        return AdapterRevisionSnapshot::new();
     };
-    if resolved.manifest.component.name != component {
-        return AdapterBundleSnapshot::new();
-    }
-
-    if let Some(contract_root) = anolisa_core::adapter::contract::infer_contract_datadir_root(
-        component,
-        &resolved.path,
-        &datadir_roots,
-    ) && let Some(index) = datadir_roots.iter().position(|root| root == &contract_root)
-    {
-        let preferred = datadir_roots.remove(index);
-        datadir_roots.insert(0, preferred);
-    }
-
-    let mut snapshot = AdapterBundleSnapshot::new();
-    for adapter in &resolved.manifest.adapters {
-        let Some(framework) = adapter
-            .framework
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let root = trusted_adapter_root(
-            layout,
-            component,
-            framework,
-            adapter.dest.as_deref(),
-            &datadir_roots,
-        );
-        snapshot.entry(framework.to_string()).or_insert_with(|| {
-            root.as_deref()
-                .and_then(|root| digest_bundle_tree(root, &datadir_roots))
-        });
-    }
-    snapshot
-}
-
-fn trusted_adapter_root(
-    layout: &FsLayout,
-    component: &str,
-    framework: &str,
-    dest: Option<&str>,
-    datadir_roots: &[PathBuf],
-) -> Option<PathBuf> {
-    for datadir in datadir_roots {
-        let mut scoped_layout = layout.clone();
-        scoped_layout.datadir = datadir.clone();
-        let path = match dest {
-            Some(template) => anolisa_core::expand_layout_placeholders(
-                template,
-                &scoped_layout,
-                &[("component", component)],
-            )
-            .ok()?,
-            None => datadir.join("adapters").join(component).join(framework),
-        };
-        if anolisa_core::path_safety::validate_owned_path(&scoped_layout, &path).is_ok()
-            && path.is_dir()
-        {
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// SHA-256 digest of a trusted adapter directory tree.
-///
-/// Symlink targets contribute both their path text and referent bytes, but
-/// only after the referent canonicalizes under a trusted datadir root. Reading
-/// the canonical referent instead of reopening the link keeps a link swap from
-/// redirecting the privileged read after validation.
-fn digest_bundle_tree(root: &Path, trusted_roots: &[PathBuf]) -> Option<String> {
-    use sha2::{Digest, Sha256};
-
-    fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                collect_files(&path, files)?;
-            } else if file_type.is_file() || file_type.is_symlink() {
-                files.push(path);
-            } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    format!("unsupported adapter bundle entry '{}'", path.display()),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    let canonical_trusted_roots: Vec<PathBuf> = trusted_roots
-        .iter()
-        .filter_map(|root| root.canonicalize().ok())
-        .collect();
-    let canonical_bundle_root = root.canonicalize().ok()?;
-    if !canonical_trusted_roots
-        .iter()
-        .any(|trusted_root| canonical_bundle_root.starts_with(trusted_root))
-    {
-        return None;
-    }
-
-    let mut files = Vec::new();
-    collect_files(root, &mut files).ok()?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for path in files {
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let metadata = std::fs::symlink_metadata(&path).ok()?;
-        let (entry_type, link_target, bytes) = if metadata.file_type().is_symlink() {
-            let link_target = std::fs::read_link(&path).ok()?;
-            let target_path = if link_target.is_absolute() {
-                link_target.clone()
-            } else {
-                path.parent()?.join(&link_target)
-            };
-            let canonical_target = target_path.canonicalize().ok()?;
-            if !canonical_trusted_roots
-                .iter()
-                .any(|trusted_root| canonical_target.starts_with(trusted_root))
-            {
-                return None;
-            }
-            (
-                b"symlink".as_slice(),
-                Some(link_target.to_string_lossy().into_owned().into_bytes()),
-                std::fs::read(canonical_target).ok()?,
-            )
-        } else {
-            (b"file".as_slice(), None, std::fs::read(&path).ok()?)
-        };
-        hasher.update(relative.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        hasher.update(entry_type);
-        hasher.update([0]);
-        if let Some(link_target) = link_target {
-            hasher.update((link_target.len() as u64).to_le_bytes());
-            hasher.update([0]);
-            hasher.update(link_target);
-        }
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update([0]);
-        hasher.update(bytes);
-    }
-    Some(format!("sha256:{:x}", hasher.finalize()))
+    let mut manager = AdapterManager::new(layout.clone(), None, "system-update".into());
+    manager.set_visible_roots(vec![VisibleRoot {
+        state_dir: layout.state_dir.clone(),
+        contract_datadir_roots: datadir_roots,
+    }]);
+    manager.source_revision_snapshot(component, &state)
 }
 
 /// Adapter actions a committed update of `component` leaves behind.
@@ -455,51 +303,71 @@ pub(crate) fn adapter_actions_after_update(
     ctx: &CliContext,
     store: &StateStore,
     component: &str,
-    before: &AdapterBundleSnapshot,
+    before: &AdapterRevisionSnapshot,
 ) -> Vec<AdapterAction> {
     if ctx.install_mode == crate::context::InstallMode::System {
         let layout = common::resolve_layout(ctx);
         return system_adapter_actions(
             component,
             before,
-            &adapter_bundle_snapshot(ctx, &layout, component),
+            &adapter_revision_snapshot(ctx, &layout, component),
         );
     }
-    receipt_adapter_actions(store, component)
+    receipt_adapter_actions(ctx, store, component)
 }
 
-fn receipt_adapter_actions(store: &StateStore, component: &str) -> Vec<AdapterAction> {
-    claim::stale_enabled_claims(&store.adapter_claims, component)
-        .into_iter()
-        .map(|receipt| AdapterAction {
-            component: receipt.component.clone(),
-            framework: receipt.framework.clone(),
-            reason: claim::BUNDLE_CHANGED_REASON.to_string(),
-            command: format!(
-                "anolisa adapter enable {} {}",
-                receipt.component, receipt.framework
-            ),
+fn receipt_adapter_actions(
+    ctx: &CliContext,
+    store: &StateStore,
+    component: &str,
+) -> Vec<AdapterAction> {
+    let manager = common::build_adapter_manager(ctx);
+    store
+        .adapter_claims
+        .iter()
+        .filter(|receipt| {
+            receipt.component == component
+                && receipt.status == anolisa_core::adapter::claim::ClaimStatus::Enabled
+        })
+        .filter_map(|receipt| {
+            let reason = match manager.source_revision_match(receipt, store) {
+                anolisa_core::adapter::managed_files::ManagedMatch::Matched => return None,
+                anolisa_core::adapter::managed_files::ManagedMatch::Changed(_) => {
+                    claim::SOURCE_REVISION_CHANGED_REASON.to_string()
+                }
+                anolisa_core::adapter::managed_files::ManagedMatch::Unknown(reason) => reason,
+            };
+            Some(AdapterAction {
+                component: receipt.component.clone(),
+                framework: receipt.framework.clone(),
+                reason,
+                command: format!(
+                    "anolisa adapter enable {} {}",
+                    receipt.component, receipt.framework
+                ),
+            })
         })
         .collect()
 }
 
 fn system_adapter_actions(
     component: &str,
-    before: &AdapterBundleSnapshot,
-    after: &AdapterBundleSnapshot,
+    before: &AdapterRevisionSnapshot,
+    after: &AdapterRevisionSnapshot,
 ) -> Vec<AdapterAction> {
     before
         .iter()
-        .filter_map(|(framework, before_digest)| {
-            let changed = match (before_digest, after.get(framework)) {
+        .filter_map(|(framework, before_revision)| {
+            let changed = match (before_revision, after.get(framework)) {
                 (Some(before), Some(Some(after))) => before != after,
                 (Some(_), _) => true,
-                _ => false,
+                (None, Some(Some(_))) => true,
+                (None, _) => false,
             };
             changed.then(|| AdapterAction {
                 component: component.to_string(),
                 framework: framework.clone(),
-                reason: SYSTEM_BUNDLE_CHANGED_REASON.to_string(),
+                reason: SYSTEM_REVISION_CHANGED_REASON.to_string(),
                 command: format!("anolisa adapter status {component}"),
             })
         })
@@ -530,8 +398,22 @@ pub(crate) fn render_adapter_action_notices(actions: &[AdapterAction], color: &P
 /// repo.toml), an owned record resolves its latest published version through
 /// the raw backend inside the pipeline.
 fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliError> {
-    let (query, txn) = update_backends(component, ctx)?;
-    update_component_with_deps(component, ctx, &query, &txn, privilege::is_root()).map(|_| ())
+    let outcome = application::run(
+        application::ApplicationRequest {
+            component,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+    )?;
+    render_application_outcome(ctx, outcome).map(|_| ())
+}
+
+fn execution_intent(ctx: &CliContext) -> anolisa_core::execution::ExecutionIntent {
+    if ctx.dry_run {
+        anolisa_core::execution::ExecutionIntent::Plan
+    } else {
+        anolisa_core::execution::ExecutionIntent::Apply
+    }
 }
 
 /// Real host backends for one component update: rpm query/transaction
@@ -599,6 +481,8 @@ pub(crate) struct PlannedComponentUpdate {
     /// rpmdb EVR the planning observation saw, for the wire `from` field and
     /// the merged-failure fact check.
     pub(crate) native_from: Option<String>,
+    /// Typed planner output classified by the application execution intent.
+    pub(crate) plan: Plan,
     pub(crate) route: PlannedUpdateRoute,
 }
 
@@ -609,7 +493,7 @@ pub(crate) enum PlannedUpdateRoute {
     /// Delegated step family (U5: one native update, observe, refresh).
     Delegated { steps: Vec<Step> },
     /// Owned step family (U3: replace files through the raw backend).
-    Owned { steps: Vec<Step> },
+    Owned,
 }
 
 /// Core of [`handle_component_update`] with the package backends injected so
@@ -622,6 +506,7 @@ pub(crate) enum PlannedUpdateRoute {
 /// A committed update also reports the adapters it left with a stale
 /// resource bundle (issue #1885); no-op, dry-run, and failed updates report
 /// none.
+#[cfg(test)]
 pub(crate) fn update_component_with_deps(
     input: &str,
     ctx: &CliContext,
@@ -629,14 +514,23 @@ pub(crate) fn update_component_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> ComponentUpdateResult {
-    let planned = plan_component_update(input, ctx, query, txn)?;
-    execute_planned_update(planned, ctx, query, txn, is_root)
+    let outcome = application::run_with_dependencies(
+        application::ApplicationRequest {
+            component: input,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+        query,
+        txn,
+        is_root,
+    )?;
+    render_application_outcome(ctx, outcome)
 }
 
 /// Planning prefix of a component update: resolve the record, assemble host
 /// facts (and the owned artifact resolution when the record is owned), and
 /// ask the planner for the step sequence. Read-only against the host —
-/// every side effect belongs to [`execute_planned_update`].
+/// every side effect belongs to the application execution phase.
 pub(crate) fn plan_component_update(
     input: &str,
     ctx: &CliContext,
@@ -677,62 +571,18 @@ pub(crate) fn plan_component_update(
         None => None,
     };
 
-    // Whether the record's relation would drive a native transaction —
-    // decides between hard "install rpm/dnf" guidance and replanning without
-    // the probe (an observed record refuses with "adopt first" whether or
-    // not the tooling exists).
-    let record_needs_native = matches!(
-        store
-            .find(ObjectKind::Component, target)
-            .map(|r| &r.binding),
-        Some(ProviderBinding::Delegated {
-            relation: ManagementRelation::Managed { .. } | ManagementRelation::Adopted { .. },
-            ..
-        })
-    );
-
     let provider = DelegatedProvider::new(query, txn);
-    let observe_request = ObserveRequest {
-        kind: ObjectKind::Component,
-        name: target,
+    let facts = observe_update_facts(
+        target,
         scope,
-        native_package: native_package.as_deref(),
-        observed_at: &now,
-        verify_owned_files: false,
-    };
-    let facts = match assemble_facts(
-        &observe_request,
+        native_package.as_deref(),
+        &now,
         &store,
-        Some(&provider),
+        &provider,
         &layout,
         &journal_dir,
-    ) {
-        Ok(facts) => facts,
-        // rpm missing on PATH. An update that would run a package operation
-        // cannot proceed; anything else replans without the probe so the
-        // planner can name the real way out.
-        Err(anolisa_core::facts::FactsError::Probe(
-            anolisa_core::providers::ProviderError::Query(PackageQueryError::CommandMissing {
-                command: bin,
-            }),
-        )) => {
-            if record_needs_native {
-                return Err(tooling_missing_err(&command, &bin, target));
-            }
-            assemble_facts(&observe_request, &store, None, &layout, &journal_dir).map_err(
-                |err| CliError::Runtime {
-                    command: command.clone(),
-                    reason: err.to_string(),
-                },
-            )?
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command: command.clone(),
-                reason: err.to_string(),
-            });
-        }
-    };
+        &command,
+    )?;
 
     // An owned record needs its update target resolved before planning: the
     // CLI resolves the latest published version and classifies it against
@@ -771,8 +621,10 @@ pub(crate) fn plan_component_update(
         .map(|(resolution, prior)| (prior.version.clone(), resolution.entry.version.clone()));
 
     let intent = Intent::Update(UpdateRequest { owned_resolution });
-    let route = match plan(&intent, &facts) {
-        Ok(Plan::Execute { steps, .. }) => {
+    let lifecycle_plan = plan(&intent, &facts)
+        .map_err(|err| plan_error_to_cli(err, target, &command, owned_versions.as_ref()))?;
+    let route = match &lifecycle_plan {
+        Plan::Execute { steps, .. } => {
             // Route by step family: owned plans replace files through the raw
             // backend, delegated plans re-run the native transaction.
             let is_delegated_plan = steps.iter().all(|step| {
@@ -785,20 +637,14 @@ pub(crate) fn plan_component_update(
                 )
             });
             if is_delegated_plan {
-                PlannedUpdateRoute::Delegated { steps }
+                PlannedUpdateRoute::Delegated {
+                    steps: steps.clone(),
+                }
             } else {
-                PlannedUpdateRoute::Owned { steps }
+                PlannedUpdateRoute::Owned
             }
         }
-        Ok(Plan::NoOp { .. }) => PlannedUpdateRoute::AlreadyCurrent,
-        Err(err) => {
-            return Err(plan_error_to_cli(
-                err,
-                target,
-                &command,
-                owned_versions.as_ref(),
-            ));
-        }
+        Plan::NoOp { .. } => PlannedUpdateRoute::AlreadyCurrent,
     };
 
     Ok(PlannedComponentUpdate {
@@ -810,449 +656,115 @@ pub(crate) fn plan_component_update(
         owned_execution,
         owned_versions,
         native_from: native_observed_version(&facts),
+        plan: lifecycle_plan,
         route,
     })
 }
 
-/// Execution half of [`update_component_with_deps`]: render the idempotent
-/// NoOp, replace an owned artifact's files, or run the delegated native
-/// transaction. Dry-run renders the plan and stops before any side effect.
-/// Returns the outcome plus any adapter follow-up actions (always empty on
-/// no-op, dry-run, and failure paths).
-fn execute_planned_update(
-    planned: PlannedComponentUpdate,
-    ctx: &CliContext,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-) -> ComponentUpdateResult {
-    let PlannedComponentUpdate {
-        command,
-        target,
+#[expect(clippy::too_many_arguments)]
+fn observe_update_snapshot(
+    component: &str,
+    scope: InstallationScope,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: Option<&DelegatedProvider<'_>>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+) -> Result<ComponentSnapshot, FactsError> {
+    let mut probes = vec![SnapshotProbe::State, SnapshotProbe::PendingJournal];
+    if native_package.is_some() && provider.is_some() && matches!(scope, InstallationScope::System)
+    {
+        probes.push(SnapshotProbe::NativePackage);
+    }
+    assemble_component_snapshot(
+        ComponentSnapshotRequest::new(component, scope, probes),
         native_package,
-        scope,
-        now,
-        owned_execution,
-        owned_versions,
-        native_from,
-        route,
-    } = planned;
-    let target = target.as_str();
-    let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let journal_dir = rpm_install::journal_dir(&layout);
-    let uid = privilege::effective_uid();
-
-    let steps = match route {
-        PlannedUpdateRoute::AlreadyCurrent => {
-            // U2: the recorded version is already the latest published one.
-            let (from, to) = match owned_versions {
-                Some((from, to)) => (Some(from), Some(to)),
-                None => (None, None),
-            };
-            let package = owned_execution
-                .map(|(resolution, _)| resolution.package)
-                .or(native_package);
-            render_result(
-                ctx,
-                target,
-                package.as_deref(),
-                from.as_deref(),
-                to.as_deref(),
-                false,
-                ctx.dry_run,
-                &[],
-                None,
-                &[],
-            )?;
-            return Ok((UpdateOutcome::AlreadyCurrent, Vec::new()));
-        }
-        PlannedUpdateRoute::Owned { steps } => {
-            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-            if ctx.dry_run {
-                let from_version = owned_versions.as_ref().map(|(from, _)| from.clone());
-                let to_version = owned_versions.as_ref().map(|(_, to)| to.clone());
-                let package = owned_execution
-                    .as_ref()
-                    .map(|(resolution, _)| resolution.package.clone())
-                    .or_else(|| native_package.clone());
-                render_result(
-                    ctx,
-                    target,
-                    package.as_deref(),
-                    from_version.as_deref(),
-                    to_version.as_deref(),
-                    false,
-                    true,
-                    &plan_labels,
-                    None,
-                    &[],
-                )?;
-                return Ok((UpdateOutcome::Updated, Vec::new()));
-            }
-            let (resolution, prior) = owned_execution.ok_or_else(|| CliError::Runtime {
-                command: command.clone(),
-                reason: format!(
-                    "internal: planner produced an owned plan but no resolution was prepared for '{target}'"
-                ),
-            })?;
-            let adapter_actions = update_owned(
-                target,
-                ctx,
-                &layout,
-                &state_path,
-                &journal_dir,
-                scope,
-                &now,
-                &steps,
-                &plan_labels,
-                resolution,
-                prior,
-                &command,
-            )?;
-            return Ok((UpdateOutcome::Updated, adapter_actions));
-        }
-        PlannedUpdateRoute::Delegated { steps } => steps,
-    };
-
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-
-    if ctx.dry_run {
-        render_result(
-            ctx,
-            target,
-            native_package.as_deref(),
-            native_from.as_deref(),
-            None,
-            false,
-            true,
-            &plan_labels,
-            None,
-            &[],
-        )?;
-        return Ok((UpdateOutcome::Updated, Vec::new()));
-    }
-
-    // dnf transactions need root; check up front so the user gets an
-    // actionable message instead of dnf's raw mid-transaction refusal.
-    if !is_root {
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "updating system RPM '{}' requires root privileges; re-run with sudo: `sudo anolisa update {target}`",
-                native_package.as_deref().unwrap_or(target)
-            ),
-        });
-    }
-
-    let provider = DelegatedProvider::new(query, txn);
-    let from_version = native_from;
-
-    // Real run under the install lock, with state re-read and the update
-    // authority re-validated inside it: dnf runs against the pre-lock
-    // package identity, and grafting its result onto a record a concurrent
-    // operation re-pointed or downgraded would corrupt it.
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(&state_path, uid, &layout).map_err(|err| {
-        CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    if !native_update_authorized(&store, target, native_package.as_deref()) {
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "component '{target}' changed while this update was planning; nothing was changed — re-run `anolisa update {target}`"
-            ),
-        });
-    }
-    let prior_adapter_bundles = adapter_bundle_snapshot(ctx, &layout, target);
-
-    let package = native_package.clone().unwrap_or_else(|| target.to_string());
-    let evidence = JournalEvidence::new(&journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, &command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.clone(), &command)?;
-    let operation_id = journal.operation_id.clone();
-
-    let context = RecordContext {
-        kind: ObjectKind::Component,
-        name: target.to_string(),
-        scope,
-        now: now.clone(),
-        operation_id: Some(operation_id.clone()),
-        delegated: Some(DelegatedIdentity {
-            pm: NativePm::Rpm,
-            package: package.clone(),
-        }),
-        owned_artifact: None,
-    };
-    let outcome = {
-        let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
-        execute_delegated_steps(
-            &steps,
-            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&package)),
-            &provider,
-            &mut sink,
-            &mut journal,
-            &now,
-        )
-    }
-    .map_err(|err| match err {
-        // dnf missing even though the rpmdb query succeeded: same guidance
-        // as the query-missing branch rather than a generic failure.
-        anolisa_core::executor::ExecutionError::TransactionFailed {
-            source:
-                anolisa_core::providers::ProviderError::Transaction(
-                    PackageTransactionError::CommandMissing { command: bin },
-                ),
-            ..
-        } => tooling_missing_err(&command, &bin, target),
-        other => CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "update of '{target}' failed: {other}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
-            ),
-        },
-    })?;
-
-    // The record refresh was committed by the executor's sink; the shared
-    // completion persists the operation as `partial`, refreshes the
-    // package-owned contract snapshot, and promotes the operation to `ok`
-    // once the refresh landed — so `status`/`doctor`/adapter resolution
-    // read the new contract, and a crash mid-refresh leaves a discoverable
-    // `partial` record.
-    let completion_failure = complete_delegated_update(
-        &layout,
-        ctx,
-        target,
-        &package,
-        &command,
-        &mut store,
-        &state_path,
-        OperationRecord {
-            id: operation_id.clone(),
-            command: command.clone(),
-            status: String::new(),
-            started_at: now.clone(),
-            finished_at: Some(now_iso8601()),
-            parent_operation_id: None,
-        },
-    );
-
-    let to_version = outcome
-        .observation
-        .as_ref()
-        .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone()));
-    let updated = match (&from_version, &to_version) {
-        (Some(from), Some(to)) => from != to,
-        _ => true,
-    };
-
-    append_update_log(
-        &layout,
-        ctx,
-        target,
-        &command,
-        &operation_id,
-        &now,
-        &package,
-        to_version.as_deref(),
-        completion_failure.as_deref(),
-    );
-
-    if let Some(reason) = completion_failure {
-        return Err(CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "the update of '{target}' committed, but {reason}; run `anolisa repair {target}` to reconcile"
-            ),
-        });
-    }
-
-    // A no-op transaction changed nothing, so it cannot require adapter
-    // follow-up; a committed one may have replaced adapter resources
-    // (issue #1885).
-    let adapter_actions = if updated {
-        adapter_actions_after_update(ctx, &store, target, &prior_adapter_bundles)
-    } else {
-        Vec::new()
-    };
-
-    render_result(
-        ctx,
-        target,
-        Some(&package),
-        from_version.as_deref(),
-        to_version.as_deref(),
-        updated,
-        false,
-        &plan_labels,
-        Some(&operation_id),
-        &adapter_actions,
-    )?;
-    Ok((
-        if updated {
-            UpdateOutcome::Updated
-        } else {
-            UpdateOutcome::AlreadyCurrent
-        },
-        adapter_actions,
-    ))
+        observed_at,
+        store,
+        provider,
+        layout,
+        journal_dir,
+    )
 }
 
-/// Execute an owned update plan (U3) through the raw backend: replace the
-/// recorded files with the resolved latest published version, compensating
-/// back to the previous files on failure. Returns any adapter follow-up
-/// actions the committed update produced (issue #1885).
-///
-/// The store is re-read under the install lock so the backup/remove set can
-/// never come from a stale snapshot; a version drift under the lock aborts
-/// before anything is touched.
-#[expect(clippy::too_many_arguments)]
-fn update_owned(
-    target: &str,
-    ctx: &CliContext,
-    layout: &FsLayout,
-    state_path: &Path,
-    journal_dir: &Path,
-    scope: InstallationScope,
-    now: &str,
-    steps: &[Step],
-    plan_labels: &[String],
-    resolution: RawResolution,
-    prior: OwnedArtifact,
-    command: &str,
-) -> Result<Vec<AdapterAction>, CliError> {
-    // No root pre-check: `--prefix` may point at a user-writable tree, and a
-    // genuine permission problem fails the exact step and unwinds honestly
-    // instead of a blanket refusal.
-    let resolve_warnings = resolution.warnings.clone();
-    let package = resolution.package.clone();
-    let from_version = prior.version.clone();
-    let to_version = resolution.entry.version.clone();
+fn active_adapter_claims(store: &StateStore, component: &str) -> Vec<String> {
+    store
+        .adapter_claims
+        .iter()
+        .filter(|claim| claim.component == component)
+        .map(|claim| claim.framework.clone())
+        .collect()
+}
 
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
-        .map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        })?;
-    // Hydrate a disposable view so pre-v5 required capability contracts can
-    // drive rollback without persisting inferred metadata for unrelated
-    // components when this update later saves the real store. Optional
-    // grants remain state-only inside the hydrator.
-    let mut prior_view = store.clone();
-    common::hydrate_owned_file_contracts(&mut prior_view, layout);
-    let prior = match prior_view
-        .find(ObjectKind::Component, target)
-        .map(|r| &r.binding)
-    {
-        Some(ProviderBinding::Owned { artifact }) if artifact.version == prior.version => {
-            artifact.clone()
+#[expect(clippy::too_many_arguments)]
+pub(super) fn observe_update_facts(
+    component: &str,
+    scope: InstallationScope,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: &DelegatedProvider<'_>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+    command: &str,
+) -> Result<Facts, CliError> {
+    let record_needs_native = matches!(
+        store
+            .find(ObjectKind::Component, component)
+            .map(|record| &record.binding),
+        Some(ProviderBinding::Delegated {
+            relation: ManagementRelation::Managed { .. } | ManagementRelation::Adopted { .. },
+            ..
+        })
+    );
+    let snapshot = match observe_update_snapshot(
+        component,
+        scope,
+        native_package,
+        observed_at,
+        store,
+        Some(provider),
+        layout,
+        journal_dir,
+    ) {
+        Ok(snapshot) => snapshot,
+        // A native update cannot proceed without rpm/dnf. Other relations
+        // replan without the probe so the planner can name the real way out.
+        Err(FactsError::Probe(anolisa_core::providers::ProviderError::Query(
+            PackageQueryError::CommandMissing { command: binary },
+        ))) => {
+            if record_needs_native {
+                return Err(tooling_missing_err(command, &binary, component));
+            }
+            observe_update_snapshot(
+                component,
+                scope,
+                native_package,
+                observed_at,
+                store,
+                None,
+                layout,
+                journal_dir,
+            )
+            .map_err(|err| CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            })?
         }
-        Some(ProviderBinding::Owned { artifact }) => {
+        Err(err) => {
             return Err(CliError::Runtime {
                 command: command.to_string(),
-                reason: format!(
-                    "component '{target}' changed from {} to {} while this update was resolving; nothing was changed — re-run `anolisa update {target}`",
-                    prior.version, artifact.version
-                ),
-            });
-        }
-        _ => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "component '{target}' is no longer an owned installation; nothing was changed — re-run `anolisa update {target}`"
-                ),
+                reason: err.to_string(),
             });
         }
     };
-    let prior_adapter_bundles = adapter_bundle_snapshot(ctx, layout, target);
-
-    let evidence = JournalEvidence::new(journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
-    let operation_id = journal.operation_id.clone();
-
-    let outcome = {
-        let mut ops = RawReplayOps::new(
-            ctx,
-            layout,
-            target.to_string(),
-            scope,
-            now.to_string(),
-            operation_id.clone(),
-            resolution,
-            prior,
-            &mut store,
-            state_path,
-        )
-        .with_runtime_preflight();
-        let result = execute_owned_steps(steps, &mut ops, &mut journal);
-        if result.is_ok() {
-            // Per-operation backups are rollback scratch; a failed plan keeps
-            // them on disk for forensics.
-            ops.discard_backups();
-        }
-        result
-    }
-    .map_err(|err| owned_error_to_cli(err, target, scope, command))?;
-
-    // Operation history is best-effort bookkeeping on top of the committed
-    // record, exactly like the delegated path.
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: now.to_string(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
-    }
-
-    for warning in resolve_warnings.iter().chain(outcome.warnings.iter()) {
-        eprintln!("warning: {warning}");
-    }
-
-    append_update_log(
-        layout,
-        ctx,
-        target,
-        command,
-        &operation_id,
-        now,
-        &package,
-        Some(&to_version),
-        // Owned updates replace the manifest as part of the owned artifact;
-        // there is no datadir contract refresh to fail.
-        None,
-    );
-
-    let adapter_actions = adapter_actions_after_update(ctx, &store, target, &prior_adapter_bundles);
-
-    render_result(
-        ctx,
-        target,
-        Some(&package),
-        Some(&from_version),
-        Some(&to_version),
-        true,
-        false,
-        plan_labels,
-        Some(&operation_id),
-        &adapter_actions,
-    )?;
-    Ok(adapter_actions)
+    lifecycle_facts_from_snapshot(&snapshot, active_adapter_claims(store, component), None).map_err(
+        |err| CliError::Runtime {
+            command: command.to_string(),
+            reason: err.to_string(),
+        },
+    )
 }
 
 /// Classify a resolved `candidate` version against the `installed` one,
@@ -1619,6 +1131,85 @@ pub(crate) fn append_update_log(
     }
 }
 
+fn render_application_outcome(
+    ctx: &CliContext,
+    application_outcome: application::ApplicationOutcome,
+) -> ComponentUpdateResult {
+    for warning in application_outcome.warnings() {
+        eprintln!("warning: {warning}");
+    }
+    let batch_outcome = match application_outcome.batch_outcome() {
+        application::UpdateBatchOutcome::Completed(outcome) => outcome,
+        application::UpdateBatchOutcome::Partial { reason }
+        | application::UpdateBatchOutcome::Failed { reason } => {
+            let application::ApplicationOutcome::Applied { command, .. } = &application_outcome
+            else {
+                unreachable!("only applied updates have a terminal failure")
+            };
+            return Err(CliError::Runtime {
+                command: command.clone(),
+                reason,
+            });
+        }
+    };
+    match application_outcome {
+        application::ApplicationOutcome::NoOp { subject } => {
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                subject.from_version.as_deref(),
+                subject.to_version.as_deref(),
+                false,
+                ctx.dry_run,
+                &[],
+                None,
+                &[],
+            )?;
+            Ok((batch_outcome, Vec::new()))
+        }
+        application::ApplicationOutcome::Preview { subject, steps } => {
+            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                subject.from_version.as_deref(),
+                subject.to_version.as_deref(),
+                false,
+                true,
+                &plan_labels,
+                None,
+                &[],
+            )?;
+            Ok((batch_outcome, Vec::new()))
+        }
+        application::ApplicationOutcome::Applied {
+            command: _,
+            subject,
+            steps,
+            outcome,
+            adapter_actions,
+        } => {
+            let updated = matches!(batch_outcome, UpdateOutcome::Updated);
+            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                subject.from_version.as_deref(),
+                subject.to_version.as_deref(),
+                updated,
+                false,
+                &plan_labels,
+                outcome.operation_id(),
+                &adapter_actions,
+            )?;
+            Ok((batch_outcome, adapter_actions))
+        }
+    }
+}
+
 /// Render the update result (or its dry-run preview). `adapter_actions`
 /// lists follow-up from a committed update (issue #1885); `--quiet`
 /// suppresses the human notices while `--json` always carries them.
@@ -1708,425 +1299,6 @@ pub(crate) fn now_iso8601() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// Execute CLI self-update: fetch release manifest, compare versions,
-/// download and atomically replace the running binary.
-///
-/// Also called from `anolisa self update` as a convenience alias.
-///
-/// # Errors
-///
-/// Returns [`CliError::Runtime`] when the manifest fetch, version check,
-/// download, or binary replacement fails.
-pub(in crate::commands) fn handle_self_update(ctx: &CliContext) -> Result<(), CliError> {
-    let url = self_update::update_url();
-    let current_version = env!("CARGO_PKG_VERSION");
-    let ops = SystemSelfUpdateOps;
-    let query = RpmPackageQuery::system();
-    let txn = RpmTransaction::system();
-
-    let progress_cb: Option<ProgressFn> = if !ctx.json && !ctx.quiet {
-        Some(Box::new(move |downloaded: u64, total: Option<u64>| {
-            render_progress(downloaded, total);
-        }))
-    } else {
-        None
-    };
-
-    let result = run_self_update_with_deps(
-        &url,
-        current_version,
-        ctx,
-        &ops,
-        &query,
-        &txn,
-        privilege::is_root(),
-        progress_cb.as_ref(),
-    );
-
-    // Clear the progress line before any output (success or error).
-    if progress_cb.is_some() {
-        eprint!("\r\x1b[2K");
-    }
-
-    let run = result?;
-
-    if ctx.json {
-        return render_json_outcome(&run, ctx.dry_run);
-    }
-
-    if ctx.quiet {
-        return Ok(());
-    }
-
-    let color = Palette::new(ctx.no_color);
-    match &run.manifest_outcome {
-        SelfUpdateOutcome::AlreadyLatest { version } => {
-            println!(
-                "{} anolisa {} is already the latest version",
-                color.ok("✓"),
-                version
-            );
-        }
-        SelfUpdateOutcome::UpdateAvailable { from, to } if ctx.dry_run => {
-            println!("{} update available: {} → {}", color.warn("⬆"), from, to);
-            println!("  run without --dry-run to apply");
-        }
-        SelfUpdateOutcome::UpdateAvailable { from, to } => match &run.apply_mode {
-            SelfUpdateApplyMode::Binary => {
-                println!("{} anolisa updated: {} → {}", color.ok("✓"), from, to);
-                println!("  view the changelog at {}", color.path(CLI_CHANGELOG_URL));
-                eprintln!(
-                    "  {} signature verification not yet implemented; \
-                     update trust relies on HTTPS only",
-                    color.warn("⚠")
-                );
-            }
-            SelfUpdateApplyMode::RpmPackage {
-                package,
-                before_version,
-                after_version,
-            } => {
-                println!(
-                    "{} delegated anolisa self-update to dnf package {}",
-                    color.ok("✓"),
-                    color.path(package)
-                );
-                println!("  release manifest advertises {to} (running binary was {from})");
-                render_rpm_version_observation(before_version.as_deref(), after_version.as_deref());
-            }
-            SelfUpdateApplyMode::None => {}
-        },
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct SelfUpdateRun {
-    manifest_outcome: SelfUpdateOutcome,
-    apply_mode: SelfUpdateApplyMode,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SelfUpdateApplyMode {
-    None,
-    Binary,
-    RpmPackage {
-        package: String,
-        before_version: Option<String>,
-        after_version: Option<String>,
-    },
-}
-
-/// Host operations used by `update self`, split out so tests can prove the RPM
-/// branch delegates to the package manager instead of overwriting the binary.
-trait SelfUpdateOps {
-    fn check_update(
-        &self,
-        endpoint_url: &str,
-        current_version: &str,
-    ) -> Result<Option<self_update::ReleaseManifest>, self_update::SelfUpdateError>;
-
-    fn resolve_current_exe(&self) -> Result<PathBuf, self_update::SelfUpdateError>;
-
-    fn perform_binary_update(
-        &self,
-        artifact: &self_update::ReleaseArtifact,
-        current_exe: &Path,
-        on_progress: Option<&ProgressFn>,
-    ) -> Result<(), self_update::SelfUpdateError>;
-}
-
-struct SystemSelfUpdateOps;
-
-impl SelfUpdateOps for SystemSelfUpdateOps {
-    fn check_update(
-        &self,
-        endpoint_url: &str,
-        current_version: &str,
-    ) -> Result<Option<self_update::ReleaseManifest>, self_update::SelfUpdateError> {
-        self_update::check_update(endpoint_url, current_version)
-    }
-
-    fn resolve_current_exe(&self) -> Result<PathBuf, self_update::SelfUpdateError> {
-        self_update::resolve_current_exe()
-    }
-
-    fn perform_binary_update(
-        &self,
-        artifact: &self_update::ReleaseArtifact,
-        current_exe: &Path,
-        on_progress: Option<&ProgressFn>,
-    ) -> Result<(), self_update::SelfUpdateError> {
-        self_update::perform_update(artifact, current_exe, on_progress)
-    }
-}
-
-/// Check for a CLI self-update and apply it through the correct owner.
-///
-/// Raw/binary installs keep the existing verified archive replacement. If the
-/// running executable is owned by an installed RPM, the RPM database owns that
-/// path, so the update is delegated to `dnf update <package>` instead.
-#[allow(clippy::too_many_arguments)]
-fn run_self_update_with_deps(
-    endpoint_url: &str,
-    current_version: &str,
-    ctx: &CliContext,
-    ops: &dyn SelfUpdateOps,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-    on_progress: Option<&ProgressFn>,
-) -> Result<SelfUpdateRun, CliError> {
-    let manifest = match ops
-        .check_update(endpoint_url, current_version)
-        .map_err(self_update_cli_err)?
-    {
-        None => {
-            return Ok(SelfUpdateRun {
-                manifest_outcome: SelfUpdateOutcome::AlreadyLatest {
-                    version: current_version.to_string(),
-                },
-                apply_mode: SelfUpdateApplyMode::None,
-            });
-        }
-        Some(manifest) => manifest,
-    };
-
-    let os = self_update::current_os();
-    let arch = self_update::current_arch();
-    let artifact = manifest
-        .artifact_for(os, arch)
-        .ok_or_else(|| self_update::SelfUpdateError::NoArtifact {
-            os: os.to_string(),
-            arch: arch.to_string(),
-        })
-        .map_err(self_update_cli_err)?;
-
-    if ctx.dry_run {
-        return Ok(SelfUpdateRun {
-            manifest_outcome: SelfUpdateOutcome::UpdateAvailable {
-                from: current_version.to_string(),
-                to: manifest.version,
-            },
-            apply_mode: SelfUpdateApplyMode::None,
-        });
-    }
-
-    let current_exe = ops.resolve_current_exe().map_err(self_update_cli_err)?;
-    let apply_mode = if let Some(package) = rpm_owner_for_current_exe(query, &current_exe)? {
-        if !is_root {
-            return Err(CliError::Runtime {
-                command: "update self".to_string(),
-                reason: format!(
-                    "updating RPM-owned anolisa package '{package}' requires root privileges; re-run with sudo: `sudo anolisa update self`"
-                ),
-            });
-        }
-        let before_version = installed_package_version_best_effort(query, &package);
-        txn.update(&[package.as_str()])
-            .map_err(|err| txn_err(err, "update self"))?;
-        let after_version = installed_package_version_best_effort(query, &package);
-        SelfUpdateApplyMode::RpmPackage {
-            package,
-            before_version,
-            after_version,
-        }
-    } else {
-        ops.perform_binary_update(artifact, &current_exe, on_progress)
-            .map_err(self_update_cli_err)?;
-        SelfUpdateApplyMode::Binary
-    };
-
-    Ok(SelfUpdateRun {
-        manifest_outcome: SelfUpdateOutcome::UpdateAvailable {
-            from: current_version.to_string(),
-            to: manifest.version,
-        },
-        apply_mode,
-    })
-}
-
-/// Map a [`PackageTransactionError`] onto a CLI runtime error with an
-/// actionable hint (self-update's dnf delegation).
-fn txn_err(err: PackageTransactionError, command: &str) -> CliError {
-    match err {
-        PackageTransactionError::CommandMissing { .. } => CliError::Runtime {
-            command: command.to_string(),
-            reason: "rpm/dnf not found: cannot update an RPM-owned package without the package manager. Install rpm/dnf and retry".to_string(),
-        },
-        PackageTransactionError::PermissionDenied { command: bin } => {
-            common::package_permission_error(command, &bin, "update")
-        }
-        PackageTransactionError::TransactionFailed { code, stderr, .. } => {
-            common::package_transaction_failed_error(command, "update", code, &stderr)
-        }
-    }
-}
-
-fn render_rpm_version_observation(before_version: Option<&str>, after_version: Option<&str>) {
-    match (before_version, after_version) {
-        (Some(before), Some(after)) if before != after => {
-            println!("  installed RPM version changed: {before} → {after}");
-        }
-        (Some(version), Some(_)) => {
-            println!("  installed RPM version remains {version}");
-        }
-        (Some(before), None) => {
-            println!(
-                "  installed RPM version before dnf was {before}; after dnf was not confirmed"
-            );
-        }
-        (None, Some(after)) => {
-            println!("  installed RPM version after dnf: {after}");
-        }
-        (None, None) => {
-            println!("  installed RPM version was not confirmed after dnf");
-        }
-    }
-}
-
-fn installed_package_version_best_effort(
-    query: &dyn PackageQuery,
-    package: &str,
-) -> Option<String> {
-    query
-        .query_installed(package)
-        .ok()
-        .flatten()
-        .map(|info| info.version.to_string())
-}
-
-fn self_update_cli_err(err: self_update::SelfUpdateError) -> CliError {
-    CliError::Runtime {
-        command: "update self".to_string(),
-        reason: err.to_string(),
-    }
-}
-
-fn rpm_owner_for_current_exe(
-    query: &dyn PackageQuery,
-    current_exe: &Path,
-) -> Result<Option<String>, CliError> {
-    let capability = current_exe.to_str().ok_or_else(|| CliError::Runtime {
-        command: "update self".to_string(),
-        reason: format!(
-            "current executable path is not valid UTF-8: {}",
-            current_exe.display()
-        ),
-    })?;
-
-    match query.what_provides_installed(capability) {
-        Ok(packages) => match packages.as_slice() {
-            [] => Ok(None),
-            [package] => Ok(Some(package.clone())),
-            _ => Err(CliError::Runtime {
-                command: "update self".to_string(),
-                reason: format!(
-                    "current executable '{}' is provided by multiple RPM packages ({}); refusing to choose one for self-update",
-                    current_exe.display(),
-                    packages.join(", ")
-                ),
-            }),
-        },
-        Err(PackageQueryError::CommandMissing { .. }) => Ok(None),
-        Err(err) => Err(CliError::Runtime {
-            command: "update self".to_string(),
-            reason: format!(
-                "cannot determine whether current executable '{}' is RPM-owned: {err}",
-                current_exe.display()
-            ),
-        }),
-    }
-}
-
-fn render_progress(downloaded: u64, total: Option<u64>) {
-    match total {
-        Some(t) if t > 0 => {
-            let pct = (downloaded as f64 / t as f64 * 100.0).min(100.0);
-            eprint!(
-                "\r  downloading ... {:.1} / {:.1} MiB ({:.0}%)",
-                downloaded as f64 / 1_048_576.0,
-                t as f64 / 1_048_576.0,
-                pct,
-            );
-        }
-        _ => {
-            eprint!(
-                "\r  downloading ... {:.1} MiB",
-                downloaded as f64 / 1_048_576.0,
-            );
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct SelfUpdateData {
-    current_version: String,
-    latest_version: String,
-    update_available: bool,
-    updated: bool,
-    apply_mode: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    package: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rpm_version_before: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rpm_version_after: Option<String>,
-}
-
-fn build_json_data(run: &SelfUpdateRun, dry_run: bool) -> SelfUpdateData {
-    let (current_version, latest_version, update_available) = match &run.manifest_outcome {
-        SelfUpdateOutcome::AlreadyLatest { version } => (version.clone(), version.clone(), false),
-        SelfUpdateOutcome::UpdateAvailable { from, to } => (from.clone(), to.clone(), true),
-    };
-    let (apply_mode, package, rpm_version_before, rpm_version_after) = match &run.apply_mode {
-        SelfUpdateApplyMode::None => ("none", None, None, None),
-        SelfUpdateApplyMode::Binary => ("binary", None, None, None),
-        SelfUpdateApplyMode::RpmPackage {
-            package,
-            before_version,
-            after_version,
-        } => (
-            "rpm_package",
-            Some(package.clone()),
-            before_version.clone(),
-            after_version.clone(),
-        ),
-    };
-    let updated = match &run.apply_mode {
-        SelfUpdateApplyMode::Binary => update_available && !dry_run,
-        SelfUpdateApplyMode::RpmPackage {
-            before_version,
-            after_version,
-            ..
-        } => {
-            update_available
-                && !dry_run
-                && before_version
-                    .as_ref()
-                    .zip(after_version.as_ref())
-                    .is_some_and(|(before, after)| before != after)
-        }
-        SelfUpdateApplyMode::None => false,
-    };
-
-    SelfUpdateData {
-        current_version,
-        latest_version,
-        update_available,
-        updated,
-        apply_mode,
-        package,
-        rpm_version_before,
-        rpm_version_after,
-    }
-}
-
-fn render_json_outcome(run: &SelfUpdateRun, dry_run: bool) -> Result<(), CliError> {
-    response::render_json("update self", build_json_data(run, dry_run))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2134,126 +1306,140 @@ pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
 
+    use anolisa_core::execution::{CommandOutcomeStatus, ExecutionIntent};
+    use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
     use anolisa_platform::pkg_query::PackageVersion;
+    use anolisa_platform::pkg_transaction::PackageTransactionError;
 
-    /// Reproduce the persisted receipt digest without exposing the core
-    /// implementation as public API solely for cross-crate test fixtures.
-    pub(crate) fn receipt_digest(root: &Path) -> Option<String> {
-        use sha2::{Digest, Sha256};
+    use super::self_update::application::{
+        SelfUpdateApplicationOutcome, SelfUpdateApplied, SelfUpdateChange, SelfUpdateExecution,
+        SelfUpdateFailure, SelfUpdateFailureContext, SelfUpdateOps, SelfUpdateRequest,
+        append_self_update_log as append_self_update_log_with_intent, redact_known_urls,
+        run_application_with_deps, run_self_update_with_deps as run_self_update_with_intent,
+    };
 
-        fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-            for entry in std::fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if entry.file_type()?.is_dir() {
-                    collect_files(&path, files)?;
-                } else {
-                    files.push(path);
-                }
-            }
-            Ok(())
-        }
-
-        let mut files = Vec::new();
-        collect_files(root, &mut files).ok()?;
-        files.sort();
-        let mut hasher = Sha256::new();
-        for path in files {
-            let relative = path.strip_prefix(root).unwrap_or(&path);
-            let bytes = std::fs::read(&path).ok()?;
-            hasher.update(relative.to_string_lossy().as_bytes());
-            hasher.update([0]);
-            hasher.update((bytes.len() as u64).to_le_bytes());
-            hasher.update([0]);
-            hasher.update(bytes);
-        }
-        Some(format!("sha256:{:x}", hasher.finalize()))
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum SelfUpdateApplyMode {
+        None,
+        Binary,
+        RpmPackage {
+            package: String,
+            before_version: Option<String>,
+            after_version: Option<String>,
+        },
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn trusted_bundle_digest_tracks_bounded_symlink_contents() {
-        use std::os::unix::fs::symlink;
-
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let trusted_root = tmp.path().join("datadir");
-        let component_root = trusted_root.join("adapters/tokenless");
-        let bundle = component_root.join("claude-code");
-        let shared_hook = component_root.join("common/hooks/run-hook.sh");
-        std::fs::create_dir_all(bundle.join("hooks")).expect("bundle");
-        std::fs::create_dir_all(shared_hook.parent().expect("shared hook parent"))
-            .expect("shared hooks");
-        std::fs::write(&shared_hook, b"v1").expect("shared hook");
-        symlink(
-            "../../common/hooks/run-hook.sh",
-            bundle.join("hooks/run-hook.sh"),
+    #[allow(clippy::too_many_arguments)]
+    fn run_self_update_with_deps(
+        endpoint_url: &str,
+        current_version: &str,
+        ctx: &CliContext,
+        ops: &dyn SelfUpdateOps,
+        query: &dyn PackageQuery,
+        txn: &dyn PackageTransaction,
+        is_root: bool,
+        on_progress: Option<&ProgressFn>,
+    ) -> Result<SelfUpdateExecution, Box<SelfUpdateFailure>> {
+        let intent = if ctx.dry_run {
+            ExecutionIntent::Plan
+        } else {
+            ExecutionIntent::Apply
+        };
+        run_self_update_with_intent(
+            endpoint_url,
+            current_version,
+            intent,
+            ops,
+            query,
+            txn,
+            is_root,
+            on_progress,
         )
-        .expect("symlink");
-
-        let first = digest_bundle_tree(&bundle, std::slice::from_ref(&trusted_root))
-            .expect("trusted symlink target is digestible");
-        std::fs::write(&shared_hook, b"v2").expect("updated shared hook");
-        let second = digest_bundle_tree(&bundle, std::slice::from_ref(&trusted_root))
-            .expect("updated trusted symlink target is digestible");
-
-        assert_ne!(first, second);
     }
 
-    #[cfg(unix)]
+    fn append_self_update_log(
+        ctx: &CliContext,
+        started_at: &str,
+        outcome: Result<&SelfUpdateExecution, &SelfUpdateFailure>,
+    ) {
+        let intent = if ctx.dry_run {
+            ExecutionIntent::Plan
+        } else {
+            ExecutionIntent::Apply
+        };
+        let _ = append_self_update_log_with_intent(ctx, started_at, intent, outcome);
+    }
+
+    /// Read the single central-log record `append_self_update_log` wrote,
+    /// asserting the log holds exactly one line.
+    fn only_self_update_record(ctx: &CliContext) -> serde_json::Value {
+        let raw = std::fs::read_to_string(&common::resolve_layout(ctx).central_log)
+            .expect("read central log");
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one record, got {lines:?}");
+        serde_json::from_str(lines[0]).expect("parse record")
+    }
+
+    fn central_log_is_absent(ctx: &CliContext) -> bool {
+        !common::resolve_layout(ctx).central_log.exists()
+    }
+
+    /// Issue #2992: an applied binary self-update must be auditable, and the
+    /// record must carry the version transition it applied.
     #[test]
-    fn trusted_bundle_digest_rejects_symlink_escape() {
-        use std::os::unix::fs::symlink;
-
+    fn binary_self_update_records_the_version_transition() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let trusted_root = tmp.path().join("datadir");
-        let bundle = trusted_root.join("adapters/tokenless/claude-code");
-        std::fs::create_dir_all(&bundle).expect("bundle");
-        let outside = tmp.path().join("outside.sh");
-        std::fs::write(&outside, b"sensitive").expect("outside file");
-        symlink(&outside, bundle.join("run-hook.sh")).expect("symlink");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let run = self_run(
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::Binary,
+        );
 
-        assert_eq!(
-            digest_bundle_tree(&bundle, std::slice::from_ref(&trusted_root)),
-            None,
-            "a privileged digest must not read a symlink target outside trusted roots"
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["kind"], "operation");
+        assert_eq!(record["command"], "update self");
+        assert_eq!(record["source"], "anolisa-cli");
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["severity"], "info");
+        assert_eq!(record["started_at"], "2026-06-01T10:00:00Z");
+        assert!(record["finished_at"].is_string());
+        assert!(
+            record["operation_id"]
+                .as_str()
+                .expect("operation id")
+                .starts_with("op-update-self-"),
+            "operation id must self-classify: {}",
+            record["operation_id"]
+        );
+        // The versions are the point of the record: they must be recoverable
+        // without re-parsing the human message.
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert_eq!(record["details"]["latest_version"], "0.2.0");
+        assert_eq!(record["details"]["apply_mode"], "binary");
+        assert_eq!(record["details"]["updated"], true);
+        let message = record["message"].as_str().expect("message");
+        assert!(
+            message.contains("0.1.0") && message.contains("0.2.0"),
+            "message must state the transition: {message}"
         );
     }
 
+    /// The RPM path delegates to dnf, so the package it moved and the versions
+    /// rpm actually reports must both be recorded.
     #[test]
-    fn json_dry_run_reports_available_but_not_updated() {
-        let outcome = SelfUpdateOutcome::UpdateAvailable {
-            from: "0.1.0".into(),
-            to: "0.2.0".into(),
-        };
-        let run = self_run(outcome, SelfUpdateApplyMode::None);
-        let data = build_json_data(&run, true);
-        assert!(data.update_available);
-        assert!(!data.updated);
-        assert_eq!(data.apply_mode, "none");
-    }
-
-    #[test]
-    fn json_binary_update_reports_both_true() {
-        let outcome = SelfUpdateOutcome::UpdateAvailable {
-            from: "0.1.0".into(),
-            to: "0.2.0".into(),
-        };
-        let run = self_run(outcome, SelfUpdateApplyMode::Binary);
-        let data = build_json_data(&run, false);
-        assert!(data.update_available);
-        assert!(data.updated);
-        assert_eq!(data.apply_mode, "binary");
-        assert_eq!(data.package, None);
-    }
-
-    #[test]
-    fn json_rpm_delegation_reports_package_and_version_change() {
-        let outcome = SelfUpdateOutcome::UpdateAvailable {
-            from: "0.1.0".into(),
-            to: "0.2.0".into(),
-        };
+    fn rpm_self_update_records_package_and_observed_versions() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
         let run = self_run(
-            outcome,
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
             SelfUpdateApplyMode::RpmPackage {
                 package: "anolisa".to_string(),
                 before_version: Some("0.1.0".to_string()),
@@ -2261,24 +1447,32 @@ pub(crate) mod tests {
             },
         );
 
-        let data = build_json_data(&run, false);
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
 
-        assert!(data.update_available);
-        assert!(data.updated);
-        assert_eq!(data.apply_mode, "rpm_package");
-        assert_eq!(data.package.as_deref(), Some("anolisa"));
-        assert_eq!(data.rpm_version_before.as_deref(), Some("0.1.0"));
-        assert_eq!(data.rpm_version_after.as_deref(), Some("0.2.0"));
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["severity"], "info");
+        // `objects` carries the RPM package exactly like `anolisa upgrade`
+        // records a CLI package update, so `logs anolisa` finds it.
+        assert_eq!(record["objects"][0], "anolisa");
+        assert_eq!(record["details"]["apply_mode"], "rpm_package");
+        assert_eq!(record["details"]["package"], "anolisa");
+        assert_eq!(record["details"]["rpm_version_before"], "0.1.0");
+        assert_eq!(record["details"]["rpm_version_after"], "0.2.0");
     }
 
+    /// dnf treats a package already at the latest version as a successful
+    /// no-op, and one object cannot be partly applied — so this is `ok`, and
+    /// must not reach the warn/error set `anolisa bug` collects.
     #[test]
-    fn json_rpm_delegation_noops_are_not_reported_as_updated() {
-        let outcome = SelfUpdateOutcome::UpdateAvailable {
-            from: "0.1.0".into(),
-            to: "0.2.0".into(),
-        };
+    fn rpm_self_update_that_did_not_move_the_version_is_ok_not_a_warning() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
         let run = self_run(
-            outcome,
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
             SelfUpdateApplyMode::RpmPackage {
                 package: "anolisa".to_string(),
                 before_version: Some("0.1.0".to_string()),
@@ -2286,24 +1480,425 @@ pub(crate) mod tests {
             },
         );
 
-        let data = build_json_data(&run, false);
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
 
-        assert!(data.update_available);
-        assert!(!data.updated);
-        assert_eq!(data.apply_mode, "rpm_package");
-        assert_eq!(data.package.as_deref(), Some("anolisa"));
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "ok");
+        assert_eq!(record["severity"], "info");
+        // The record still states plainly that nothing moved.
+        assert_eq!(record["details"]["updated"], false);
+        assert_eq!(record["details"]["rpm_version_after"], "0.1.0");
+
+        // `anolisa bug` collects `warn` and above; a successful no-op is not a
+        // diagnostic finding and must stay out of that set.
+        let diagnostics = CentralLog::open(common::resolve_layout(&ctx).central_log)
+            .query(&anolisa_core::LogFilter {
+                severity_at_least: Some(Severity::Warn),
+                ..Default::default()
+            })
+            .expect("query central log");
+        assert!(
+            diagnostics.is_empty(),
+            "a successful dnf no-op must not surface as a diagnostic: {diagnostics:?}"
+        );
     }
 
+    /// A failed dnf delegation is the case with the most context to lose, so
+    /// it is driven through the real run: the record must keep the package,
+    /// the target version, and the version rpm reports after the failure.
     #[test]
-    fn json_already_latest_reports_both_false() {
-        let outcome = SelfUpdateOutcome::AlreadyLatest {
-            version: "0.1.0".into(),
+    fn failed_dnf_self_update_records_package_and_observed_versions() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"])
+            .with_installed_versions("anolisa", vec![Some("0.1.0"), Some("0.1.0")]);
+        let txn = FakeSelfTxn::new("anolisa").failing();
+
+        let failure = run_self_update_with_deps(
+            "https://example.invalid/release-manifest.toml",
+            "0.1.0",
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+        )
+        .expect_err("a failed dnf transaction must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        assert_eq!(
+            query.installed_queries.get(),
+            2,
+            "the installed version must be re-observed after dnf failed"
+        );
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["severity"], "error");
+        // Everything the run had learned survives into the record.
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert_eq!(record["details"]["latest_version"], "0.2.0");
+        assert_eq!(record["details"]["apply_mode"], "rpm_package");
+        assert_eq!(record["details"]["package"], "anolisa");
+        assert_eq!(record["details"]["rpm_version_before"], "0.1.0");
+        assert_eq!(record["details"]["rpm_version_after"], "0.1.0");
+        // Observed on both sides and unchanged, so `updated` is a reading, not
+        // an assumption.
+        assert_eq!(record["details"]["updated"], false);
+        // `logs anolisa` must reach the failure, not just the applied record.
+        assert_eq!(record["objects"][0], "anolisa");
+        let message = record["message"].as_str().expect("message");
+        assert!(
+            message.contains("dnf"),
+            "message must carry the failure reason: {message}"
+        );
+    }
+
+    /// A non-zero dnf exit does not mean the rpmdb stayed put. When the
+    /// re-observation shows the version did move, the record must say so
+    /// instead of contradicting the versions printed beside it.
+    #[test]
+    fn failed_dnf_that_still_moved_the_version_records_it_as_updated() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        // dnf fails, but rpm reports a different version afterwards.
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"])
+            .with_installed_versions("anolisa", vec![Some("0.1.0"), Some("0.2.0")]);
+        let txn = FakeSelfTxn::new("anolisa").failing();
+
+        let failure = run_self_update_with_deps(
+            "https://example.invalid/release-manifest.toml",
+            "0.1.0",
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+        )
+        .expect_err("a failed dnf transaction must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["details"]["rpm_version_before"], "0.1.0");
+        assert_eq!(record["details"]["rpm_version_after"], "0.2.0");
+        assert_eq!(
+            record["details"]["updated"], true,
+            "a moved rpmdb must not be recorded as `updated: false`"
+        );
+    }
+
+    /// A failed binary swap knows its target version even though nothing was
+    /// applied; the record must not throw that away.
+    #[test]
+    fn failed_binary_self_update_records_the_target_version() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_binary_update();
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure = run_self_update_with_deps(
+            "https://example.invalid/release-manifest.toml",
+            "0.1.0",
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            false,
+            None,
+        )
+        .expect_err("a failed binary swap must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["severity"], "error");
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert_eq!(record["details"]["latest_version"], "0.2.0");
+        assert_eq!(record["details"]["apply_mode"], "binary");
+        // Nothing was observed on this path — a binary swap can fail with the
+        // executable in an uncertain state — so `updated` is absent rather
+        // than a definitive claim.
+        assert!(record["details"].get("updated").is_none());
+        // No RPM package is involved, so those fields stay absent rather than
+        // being recorded as unknown.
+        assert!(record["details"].get("package").is_none());
+        assert!(record["objects"].as_array().expect("objects").is_empty());
+        let message = record["message"].as_str().expect("message");
+        assert!(
+            message.contains("sha256 mismatch"),
+            "message must carry the failure reason: {message}"
+        );
+    }
+
+    /// A manifest that never resolved leaves only the running version, and the
+    /// record must say exactly that much rather than inventing a target.
+    #[test]
+    fn failed_self_update_before_the_manifest_records_only_what_is_known() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let failure = SelfUpdateFailure {
+            error: CliError::Runtime {
+                command: "update self".to_string(),
+                reason: "failed to fetch release manifest".to_string(),
+            },
+            context: SelfUpdateFailureContext::new("0.1.0", "https://example.invalid/m.toml"),
         };
-        let run = self_run(outcome, SelfUpdateApplyMode::None);
-        let data = build_json_data(&run, false);
-        assert!(!data.update_available);
-        assert!(!data.updated);
-        assert_eq!(data.apply_mode, "none");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["status"], "failed");
+        assert_eq!(record["details"]["current_version"], "0.1.0");
+        assert!(record["details"].get("updated").is_none());
+        assert!(record["details"].get("latest_version").is_none());
+        assert!(record["details"].get("apply_mode").is_none());
+    }
+
+    /// `ANOLISA_UPDATE_URL` is operator-supplied and the fetch error quotes it
+    /// verbatim, so a mirror carrying credentials must not reach the log the
+    /// `anolisa bug` bundle is built from.
+    ///
+    /// Driven through the real run path. The endpoints deliberately hold
+    /// characters that break a scan of the message — quotes, a newline,
+    /// non-ASCII — and delimiters inside the password that end the authority
+    /// early, which is the case that must fail closed rather than pass through.
+    ///
+    /// Assertions run on the *decoded* record, not the raw JSONL: serialisation
+    /// escapes `"` and a newline, so a check against the raw bytes would pass
+    /// while the credential is sitting in the file.
+    #[test]
+    fn failed_self_update_does_not_persist_endpoint_credentials() {
+        let secrets = [
+            "s3cr3t-token",
+            "s3'cr3t",
+            "s3\"cr3t",
+            "s3\ncr3t",
+            "s3\u{4e2d}cr3t",
+            "s3/cr3t",
+            "s3?cr3t",
+            "s3#cr3t",
+            "p@ss!w$rd",
+            "deadbeef",
+            "dead'beef",
+            "a(b)c*d",
+        ];
+        for endpoint in [
+            "https://ci:s3cr3t-token@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3'cr3t@mirror.invalid/release.toml?X-Amz-Signature=dead'beef",
+            "https://ci:s3\"cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3\ncr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3\u{4e2d}cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            // Delimiters inside the userinfo end the authority early: these
+            // must fail closed, not slip through unredacted.
+            "https://ci:s3/cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            "https://ci:s3?cr3t@mirror.invalid/release.toml",
+            "https://ci:s3#cr3t@mirror.invalid/release.toml",
+            "https://ci:p@ss!w$rd&x=1@mirror.invalid/release.toml?sig=a(b)c*d,e;f=g",
+            "https://ci:s3%27cr3t@mirror.invalid/release.toml?X-Amz-Signature=deadbeef",
+            // Not a URL at all: unparseable input must not leak either.
+            "\u{4e2d}https://ci:s3cr3t-token@mirror.invalid/release.toml",
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let ctx = self_ctx(tmp.path().to_path_buf(), false);
+            let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+            let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+            let txn = FakeSelfTxn::new("anolisa");
+
+            let failure =
+                run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                    .expect_err("an unreachable manifest endpoint must not report success");
+
+            append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+            // Decode first: escaping would hide a leaked `"` or newline.
+            let record = only_self_update_record(&ctx);
+            let decoded = serde_json::to_string(&record).expect("re-encode");
+            let message = record["message"].as_str().expect("message");
+            for secret in secrets {
+                assert!(
+                    !message.contains(secret),
+                    "credential leaked into the message for {endpoint}: {secret}"
+                );
+                assert!(
+                    !record["details"].to_string().contains(secret),
+                    "credential leaked into details for {endpoint}: {secret}"
+                );
+                assert!(
+                    !decoded.contains(secret),
+                    "credential leaked into the record for {endpoint}: {secret}"
+                );
+            }
+        }
+    }
+
+    /// The endpoint stays recorded in a form that carries no credentials, so a
+    /// withheld failure text still leaves the operator knowing what was
+    /// contacted. Scheme and host only: a path segment can hold a bearer token
+    /// as readily as userinfo can.
+    #[test]
+    fn failed_self_update_records_the_endpoint_without_credentials() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let endpoint = "https://ci:s3cr3t-token@mirror.invalid/release.toml?sig=deadbeef";
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure =
+            run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                .expect_err("an unreachable manifest endpoint must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        assert_eq!(record["details"]["endpoint"], "https://mirror.invalid");
+    }
+
+    /// A transport error is free to quote the URL in a form this run never
+    /// handled — percent-encoded, normalised, or a redirect target — which a
+    /// literal replacement cannot catch. Such a message must be withheld.
+    #[test]
+    fn a_message_with_an_unrecognised_credential_url_is_withheld() {
+        let known = "https://mirror.invalid/release.toml";
+        // The transport re-encoded the password, so the known value no longer
+        // matches what the text carries.
+        let text = "failed: https://ci:s3%22cr3t@mirror.invalid/release.toml: Dns Failed";
+
+        let out = redact_known_urls(text, &[known.to_string()]);
+
+        assert!(
+            !out.contains("s3%22cr3t"),
+            "a re-encoded credential must not survive: {out}"
+        );
+        assert!(
+            out.contains("withheld"),
+            "the text must be withheld rather than partly redacted: {out}"
+        );
+    }
+
+    /// Withholding is the fallback, not the rule: an ordinary failure keeps its
+    /// transport detail so the record stays useful.
+    #[test]
+    fn a_message_without_credentials_keeps_its_transport_detail() {
+        let known = "https://ci:tok@mirror.invalid/release.toml?sig=abc";
+        let text = "failed to fetch release manifest from \
+                    https://ci:tok@mirror.invalid/release.toml?sig=abc: Dns Failed: not known";
+
+        let out = redact_known_urls(text, &[known.to_string()]);
+
+        assert!(!out.contains("tok"), "userinfo must go: {out}");
+        assert!(!out.contains("abc"), "query must go: {out}");
+        assert!(
+            !out.contains("release.toml"),
+            "the path leaves with the rest of the URL: {out}"
+        );
+        assert!(
+            out.contains("Dns Failed: not known"),
+            "the transport reason must survive: {out}"
+        );
+    }
+
+    /// Replacement matches a literal value, so a query the transport extended
+    /// leaves behind whatever the known value did not cover. Redacting the run
+    /// out to the next whitespace takes the remainder with it.
+    #[test]
+    fn a_query_extended_past_the_known_value_is_swallowed() {
+        let known = "https://mirror.invalid/release.toml?sig=abc";
+        let text = "failed to fetch release manifest from \
+                    https://mirror.invalid/release.toml?sig=abcSECRET: Dns Failed";
+
+        let out = redact_known_urls(text, &[known.to_string()]);
+
+        assert!(
+            !out.contains("SECRET"),
+            "the appended parameter must not survive: {out}"
+        );
+        assert!(
+            out.contains("Dns Failed"),
+            "swallowing the run must not cost the transport reason: {out}"
+        );
+    }
+
+    /// A path segment carries a bearer token as readily as userinfo does, and
+    /// nothing about the string says which segment is which. Neither the text
+    /// nor the recorded endpoint may keep it.
+    #[test]
+    fn a_credential_in_the_url_path_is_not_persisted() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let endpoint = "https://mirror.invalid/download/bearer-PATHTOKEN/release.toml";
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure =
+            run_self_update_with_deps(endpoint, "0.1.0", &ctx, &ops, &query, &txn, false, None)
+                .expect_err("an unreachable manifest endpoint must not report success");
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        let record = only_self_update_record(&ctx);
+        let rendered = record.to_string();
+        assert!(
+            !rendered.contains("PATHTOKEN"),
+            "a path credential must not reach the record: {rendered}"
+        );
+        assert_eq!(record["details"]["endpoint"], "https://mirror.invalid");
+    }
+
+    /// An up-to-date run changed nothing, so it is not an operation to audit.
+    #[test]
+    fn already_latest_self_update_writes_no_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let run = self_run(
+            SelfUpdateOutcome::AlreadyLatest {
+                version: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::None,
+        );
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+
+        assert!(central_log_is_absent(&ctx), "a no-op must not be audited");
+    }
+
+    /// `--dry-run` must leave the log exactly as it found it — including when
+    /// the preview itself failed.
+    #[test]
+    fn dry_run_self_update_writes_no_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), true);
+        let run = self_run(
+            SelfUpdateOutcome::UpdateAvailable {
+                from: "0.1.0".into(),
+                to: "0.2.0".into(),
+            },
+            SelfUpdateApplyMode::None,
+        );
+        let failure = SelfUpdateFailure {
+            error: CliError::Runtime {
+                command: "update self".to_string(),
+                reason: "release manifest unreachable".to_string(),
+            },
+            context: SelfUpdateFailureContext::new("0.1.0", "https://example.invalid/m.toml"),
+        };
+
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Ok(&run));
+        append_self_update_log(&ctx, "2026-06-01T10:00:00Z", Err(&failure));
+
+        assert!(
+            central_log_is_absent(&ctx),
+            "a dry-run preview must never write"
+        );
     }
 
     fn self_manifest(version: &str) -> self_update::ReleaseManifest {
@@ -2320,10 +1915,37 @@ pub(crate) mod tests {
         }
     }
 
-    fn self_run(outcome: SelfUpdateOutcome, apply_mode: SelfUpdateApplyMode) -> SelfUpdateRun {
-        SelfUpdateRun {
-            manifest_outcome: outcome,
-            apply_mode,
+    fn self_run(
+        outcome: SelfUpdateOutcome,
+        apply_mode: SelfUpdateApplyMode,
+    ) -> SelfUpdateExecution {
+        match (outcome, apply_mode) {
+            (SelfUpdateOutcome::AlreadyLatest { version }, SelfUpdateApplyMode::None) => {
+                SelfUpdateExecution::AlreadyLatest { version }
+            }
+            (SelfUpdateOutcome::UpdateAvailable { from, to }, SelfUpdateApplyMode::None) => {
+                SelfUpdateExecution::Preview { from, to }
+            }
+            (SelfUpdateOutcome::UpdateAvailable { from, to }, SelfUpdateApplyMode::Binary) => {
+                SelfUpdateExecution::Applied(SelfUpdateApplied::Binary { from, to })
+            }
+            (
+                SelfUpdateOutcome::UpdateAvailable { from, to },
+                SelfUpdateApplyMode::RpmPackage {
+                    package,
+                    before_version,
+                    after_version,
+                },
+            ) => SelfUpdateExecution::Applied(SelfUpdateApplied::RpmPackage {
+                from,
+                to,
+                package,
+                before_version,
+                after_version,
+            }),
+            (SelfUpdateOutcome::AlreadyLatest { .. }, _) => {
+                panic!("already-latest test fixture cannot carry an apply mode")
+            }
         }
     }
 
@@ -2355,7 +1977,10 @@ pub(crate) mod tests {
     struct FakeSelfUpdateOps {
         manifest: Option<self_update::ReleaseManifest>,
         current_exe: PathBuf,
+        resolved_executables: Cell<usize>,
         binary_updates: Cell<usize>,
+        binary_update_fails: bool,
+        check_update_error: Option<self_update::SelfUpdateError>,
     }
 
     impl FakeSelfUpdateOps {
@@ -2363,8 +1988,29 @@ pub(crate) mod tests {
             Self {
                 manifest: Some(self_manifest("0.2.0")),
                 current_exe: PathBuf::from(current_exe),
+                resolved_executables: Cell::new(0),
                 binary_updates: Cell::new(0),
+                binary_update_fails: false,
+                check_update_error: None,
             }
+        }
+
+        /// The manifest request fails against `endpoint`, reproducing the real
+        /// `FetchManifest` text: it quotes the endpoint, and so does the
+        /// transport error nested in it.
+        fn failing_check_update(mut self, endpoint: &str) -> Self {
+            self.check_update_error = Some(self_update::SelfUpdateError::FetchManifest {
+                url: endpoint.to_string(),
+                reason: format!("{endpoint}: Dns Failed: resolve dns name"),
+            });
+            self
+        }
+
+        /// The binary swap fails after the manifest resolved, so the run knows
+        /// its target version but never applies it.
+        fn failing_binary_update(mut self) -> Self {
+            self.binary_update_fails = true;
+            self
         }
     }
 
@@ -2374,10 +2020,23 @@ pub(crate) mod tests {
             _endpoint_url: &str,
             _current_version: &str,
         ) -> Result<Option<self_update::ReleaseManifest>, self_update::SelfUpdateError> {
+            if let Some(err) = &self.check_update_error {
+                return Err(match err {
+                    self_update::SelfUpdateError::FetchManifest { url, reason } => {
+                        self_update::SelfUpdateError::FetchManifest {
+                            url: url.clone(),
+                            reason: reason.clone(),
+                        }
+                    }
+                    other => self_update::SelfUpdateError::ParseManifest(other.to_string()),
+                });
+            }
             Ok(self.manifest.clone())
         }
 
         fn resolve_current_exe(&self) -> Result<PathBuf, self_update::SelfUpdateError> {
+            self.resolved_executables
+                .set(self.resolved_executables.get() + 1);
             Ok(self.current_exe.clone())
         }
 
@@ -2389,6 +2048,12 @@ pub(crate) mod tests {
         ) -> Result<(), self_update::SelfUpdateError> {
             assert_eq!(current_exe, self.current_exe.as_path());
             self.binary_updates.set(self.binary_updates.get() + 1);
+            if self.binary_update_fails {
+                return Err(self_update::SelfUpdateError::ChecksumMismatch {
+                    expected: "aaaa".to_string(),
+                    actual: "bbbb".to_string(),
+                });
+            }
             Ok(())
         }
     }
@@ -2484,6 +2149,7 @@ pub(crate) mod tests {
     struct FakeSelfTxn {
         expected_package: String,
         update_calls: Cell<usize>,
+        update_fails: bool,
     }
 
     impl FakeSelfTxn {
@@ -2491,7 +2157,15 @@ pub(crate) mod tests {
             Self {
                 expected_package: expected_package.to_string(),
                 update_calls: Cell::new(0),
+                update_fails: false,
             }
+        }
+
+        /// dnf refuses the transaction, leaving the installed version to be
+        /// re-observed rather than assumed.
+        fn failing(mut self) -> Self {
+            self.update_fails = true;
+            self
         }
     }
 
@@ -2506,6 +2180,14 @@ pub(crate) mod tests {
             };
             self.update_calls.set(self.update_calls.get() + 1);
             assert_eq!(package, self.expected_package);
+            if self.update_fails {
+                return Err(PackageTransactionError::TransactionFailed {
+                    command: "dnf".to_string(),
+                    operation: "update".to_string(),
+                    code: Some(1),
+                    stderr: "Error: Transaction test error".to_string(),
+                });
+            }
             Ok(())
         }
 
@@ -2516,6 +2198,271 @@ pub(crate) mod tests {
         fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("self-update must not run dnf remove");
         }
+    }
+
+    #[test]
+    fn self_update_preview_stops_before_every_apply_dependency() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // Keep the context in apply mode to prove the typed request, not the
+        // legacy context flag, controls the application branch.
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"]);
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let outcome = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: "https://example.invalid/release-manifest.toml",
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Plan,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect("preview should succeed");
+
+        assert!(matches!(
+            outcome,
+            SelfUpdateApplicationOutcome::Preview { from, to }
+                if from == "0.1.0" && to == "0.2.0"
+        ));
+        assert_eq!(ops.resolved_executables.get(), 0);
+        assert_eq!(ops.binary_updates.get(), 0);
+        assert_eq!(query.queries.get(), 0);
+        assert_eq!(query.installed_queries.get(), 0);
+        assert_eq!(txn.update_calls.get(), 0);
+        assert!(central_log_is_absent(&ctx));
+    }
+
+    #[test]
+    fn already_latest_application_outcome_has_no_effect_or_audit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let mut ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        ops.manifest = None;
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"]);
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let outcome = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: "https://example.invalid/release-manifest.toml",
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect("already-latest should succeed");
+
+        assert!(matches!(
+            outcome,
+            SelfUpdateApplicationOutcome::AlreadyLatest { version } if version == "0.1.0"
+        ));
+        assert_eq!(ops.resolved_executables.get(), 0);
+        assert_eq!(query.queries.get(), 0);
+        assert_eq!(txn.update_calls.get(), 0);
+        assert!(central_log_is_absent(&ctx));
+    }
+
+    #[test]
+    fn preview_failure_does_not_write_a_failure_audit() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let endpoint = "https://token@example.invalid/secret/release.toml?sig=abc";
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa").failing_check_update(endpoint);
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"]);
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: endpoint,
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Plan,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect_err("manifest failure must remain terminal");
+
+        assert_eq!(failure.error.code(), "EXECUTION_FAILED");
+        assert!(failure.warnings.is_empty());
+        assert_eq!(ops.resolved_executables.get(), 0);
+        assert_eq!(query.queries.get(), 0);
+        assert_eq!(txn.update_calls.get(), 0);
+        assert!(central_log_is_absent(&ctx));
+    }
+
+    #[test]
+    fn binary_apply_returns_completed_change_and_durable_audit_id() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/opt/anolisa/bin/anolisa");
+        let query = FakeSelfQuery::new("/opt/anolisa/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let application_outcome = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: "https://example.invalid/release-manifest.toml",
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            false,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect("binary apply should succeed");
+
+        let SelfUpdateApplicationOutcome::Applied { result, outcome } = application_outcome else {
+            panic!("expected applied outcome");
+        };
+        assert_eq!(
+            result,
+            SelfUpdateApplied::Binary {
+                from: "0.1.0".to_string(),
+                to: "0.2.0".to_string(),
+            }
+        );
+        assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+        assert_eq!(
+            outcome.changes(),
+            &[SelfUpdateChange::BinaryReplaced {
+                from: "0.1.0".to_string(),
+                to: "0.2.0".to_string(),
+            }]
+        );
+        assert!(outcome.warnings().is_empty());
+        let operation_id = outcome.operation_id().expect("durable audit id");
+        let record = only_self_update_record(&ctx);
+        assert_eq!(
+            record
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str),
+            Some(operation_id)
+        );
+    }
+
+    #[test]
+    fn rpm_noop_is_completed_with_a_typed_delegation_change() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let ops = FakeSelfUpdateOps::new("/usr/bin/anolisa");
+        let query = FakeSelfQuery::new("/usr/bin/anolisa", vec!["anolisa"])
+            .with_installed_versions("anolisa", vec![Some("0.1.0"), Some("0.1.0")]);
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let application_outcome = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: "https://example.invalid/release-manifest.toml",
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            true,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect("rpm no-op should remain successful");
+
+        let SelfUpdateApplicationOutcome::Applied { result, outcome } = application_outcome else {
+            panic!("expected applied outcome");
+        };
+        assert!(matches!(result, SelfUpdateApplied::RpmPackage { .. }));
+        assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+        assert_eq!(
+            outcome.changes(),
+            &[SelfUpdateChange::RpmUpdateDelegated {
+                package: "anolisa".to_string(),
+                before_version: Some("0.1.0".to_string()),
+                after_version: Some("0.1.0".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn applied_audit_failure_is_a_warning_without_an_operation_id() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let log_path = common::resolve_layout(&ctx).central_log;
+        std::fs::create_dir_all(&log_path).expect("replace central-log file with a directory");
+        let ops = FakeSelfUpdateOps::new("/opt/anolisa/bin/anolisa");
+        let query = FakeSelfQuery::new("/opt/anolisa/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let application_outcome = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: "https://example.invalid/release-manifest.toml",
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            false,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect("audit failure must not fail an applied update");
+
+        let SelfUpdateApplicationOutcome::Applied { outcome, .. } = application_outcome else {
+            panic!("expected applied outcome");
+        };
+        assert_eq!(outcome.operation_id(), None);
+        assert_eq!(outcome.warnings().len(), 1);
+        assert!(outcome.warnings()[0].starts_with("failed to write central log:"));
+    }
+
+    #[test]
+    fn terminal_failure_carries_a_non_terminal_audit_warning() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = self_ctx(tmp.path().to_path_buf(), false);
+        let log_path = common::resolve_layout(&ctx).central_log;
+        std::fs::create_dir_all(&log_path).expect("replace central-log file with a directory");
+        let ops = FakeSelfUpdateOps::new("/opt/anolisa/bin/anolisa").failing_binary_update();
+        let query = FakeSelfQuery::new("/opt/anolisa/bin/anolisa", Vec::new());
+        let txn = FakeSelfTxn::new("anolisa");
+
+        let failure = run_application_with_deps(
+            SelfUpdateRequest {
+                endpoint_url: "https://example.invalid/release-manifest.toml",
+                current_version: "0.1.0",
+                intent: ExecutionIntent::Apply,
+            },
+            &ctx,
+            &ops,
+            &query,
+            &txn,
+            false,
+            None,
+            "2026-06-01T10:00:00Z",
+        )
+        .expect_err("binary failure must remain terminal");
+
+        assert_eq!(failure.error.code(), "EXECUTION_FAILED");
+        assert_eq!(failure.warnings.len(), 1);
+        assert!(failure.warnings[0].starts_with("failed to write central log:"));
     }
 
     #[test]
@@ -2539,18 +2486,15 @@ pub(crate) mod tests {
         )
         .expect("rpm-owned self update should succeed through dnf");
 
-        assert!(matches!(
-            run.manifest_outcome,
-            SelfUpdateOutcome::UpdateAvailable { from, to }
-                if from == "0.1.0" && to == "0.2.0"
-        ));
         assert_eq!(
-            run.apply_mode,
-            SelfUpdateApplyMode::RpmPackage {
+            run,
+            SelfUpdateExecution::Applied(SelfUpdateApplied::RpmPackage {
+                from: "0.1.0".to_string(),
+                to: "0.2.0".to_string(),
                 package: "anolisa".to_string(),
                 before_version: Some("0.1.0".to_string()),
                 after_version: Some("0.2.0".to_string())
-            }
+            })
         );
         assert_eq!(query.queries.get(), 1, "rpm ownership must be probed");
         assert_eq!(
@@ -2587,12 +2531,16 @@ pub(crate) mod tests {
         )
         .expect("dnf no-op is still a successful delegation");
 
-        let data = build_json_data(&run, false);
-
-        assert!(data.update_available);
-        assert!(!data.updated);
-        assert_eq!(data.apply_mode, "rpm_package");
-        assert_eq!(data.package.as_deref(), Some("anolisa"));
+        assert_eq!(
+            run,
+            SelfUpdateExecution::Applied(SelfUpdateApplied::RpmPackage {
+                from: "0.1.0".to_string(),
+                to: "0.2.0".to_string(),
+                package: "anolisa".to_string(),
+                before_version: Some("0.1.0".to_string()),
+                after_version: Some("0.1.0".to_string()),
+            })
+        );
     }
 
     #[test]
@@ -2615,7 +2563,13 @@ pub(crate) mod tests {
         )
         .expect("non-rpm self update should use binary replacement");
 
-        assert_eq!(run.apply_mode, SelfUpdateApplyMode::Binary);
+        assert_eq!(
+            run,
+            SelfUpdateExecution::Applied(SelfUpdateApplied::Binary {
+                from: "0.1.0".to_string(),
+                to: "0.2.0".to_string(),
+            })
+        );
         assert_eq!(query.queries.get(), 1);
         assert_eq!(txn.update_calls.get(), 0, "dnf must not run");
         assert_eq!(ops.binary_updates.get(), 1, "binary replacement must run");
@@ -2641,7 +2595,13 @@ pub(crate) mod tests {
         )
         .expect("missing rpm must not block raw self-update");
 
-        assert_eq!(run.apply_mode, SelfUpdateApplyMode::Binary);
+        assert_eq!(
+            run,
+            SelfUpdateExecution::Applied(SelfUpdateApplied::Binary {
+                from: "0.1.0".to_string(),
+                to: "0.2.0".to_string(),
+            })
+        );
         assert_eq!(query.queries.get(), 1);
         assert_eq!(txn.update_calls.get(), 0, "dnf must not run");
         assert_eq!(ops.binary_updates.get(), 1, "binary replacement must run");
@@ -2667,12 +2627,16 @@ pub(crate) mod tests {
         )
         .expect_err("rpm-owned self update needs root");
 
-        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(err.error.code(), "EXECUTION_FAILED");
         assert!(
-            err.reason().contains("root") && err.reason().contains("sudo"),
+            err.error.reason().contains("root") && err.error.reason().contains("sudo"),
             "reason must point at sudo: {}",
-            err.reason()
+            err.error.reason()
         );
+        // The refusal happens before dnf, so there is no observed version to
+        // record — but the package it would have moved is already known.
+        assert_eq!(err.context.package.as_deref(), Some("anolisa"));
+        assert_eq!(err.context.rpm_version_before, None);
         assert_eq!(txn.update_calls.get(), 0, "dnf must not run");
         assert_eq!(
             ops.binary_updates.get(),
@@ -2698,7 +2662,7 @@ pub(crate) mod tests {
     /// `installed` mutates: a successful [`update`](PackageTransaction::update)
     /// applies `upgrade_to`, modelling rpmdb advancing after dnf runs — so the
     /// pre-update query and the post-update refresh return different EVRs.
-    struct FakeRpm {
+    pub(super) struct FakeRpm {
         package: String,
         installed: RefCell<Option<PackageInfo>>,
         /// PackageInfo the rpmdb holds after a successful update; `None` keeps
@@ -2715,11 +2679,12 @@ pub(crate) mod tests {
         /// replacing package-owned files (e.g. an adapter resource bundle
         /// under the datadir).
         on_update: Option<Box<dyn Fn()>>,
+        query_calls: Cell<usize>,
         update_calls: Cell<usize>,
     }
 
     impl FakeRpm {
-        fn new(package: &str, installed: Option<PackageInfo>) -> Self {
+        pub(super) fn new(package: &str, installed: Option<PackageInfo>) -> Self {
             Self {
                 package: package.to_string(),
                 installed: RefCell::new(installed),
@@ -2728,6 +2693,7 @@ pub(crate) mod tests {
                 multi_version: false,
                 post_update_missing: false,
                 on_update: None,
+                query_calls: Cell::new(0),
                 update_calls: Cell::new(0),
             }
         }
@@ -2743,9 +2709,13 @@ pub(crate) mod tests {
             self.multi_version = true;
             self
         }
-        fn post_update_missing(mut self) -> Self {
+        pub(super) fn post_update_missing(mut self) -> Self {
             self.post_update_missing = true;
             self
+        }
+
+        pub(super) fn update_call_count(&self) -> usize {
+            self.update_calls.get()
         }
         fn with_on_update(mut self, hook: Box<dyn Fn()>) -> Self {
             self.on_update = Some(hook);
@@ -2758,6 +2728,7 @@ pub(crate) mod tests {
             if package != self.package {
                 return Ok(None);
             }
+            self.query_calls.set(self.query_calls.get() + 1);
             // Simulate a failed post-update re-read: the package "vanishes" only
             // after dnf update has run, so the pre-update query still succeeds.
             if self.post_update_missing && self.update_calls.get() > 0 {
@@ -2837,6 +2808,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,
@@ -3055,6 +3034,12 @@ pub(crate) mod tests {
         .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"));
 
         update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
+
+        assert_eq!(
+            rpm.query_calls.get(),
+            3,
+            "update must observe before planning, under the lock, and after the transaction"
+        );
 
         let record = find_component(&c, "copilot-shell");
         assert_eq!(observed_evr(&record).as_deref(), Some("1.1.0-1.al8"));
@@ -3409,7 +3394,14 @@ pub(crate) mod tests {
     #[test]
     fn bare_update_errors_before_repo_config_provisioning() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        // Deliberately not the shared ctx helper: this test asserts that the
+        // invalid invocation writes no repo.toml, so nothing may pre-seed one.
+        let c = crate::test_support::context_for_root(
+            tmp.path(),
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+            Default::default(),
+        );
         let repo_toml = common::resolve_layout(&c).etc_dir.join("repo.toml");
 
         let err = handle(
@@ -4528,7 +4520,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         let mut stale = owned_artifact(&find_component(&c, "foo"));
         stale.version = "0.1.0".to_string();
 
-        let err = update_owned(
+        let err = application::apply_owned(
             "foo",
             &c,
             &layout,
@@ -4536,13 +4528,14 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &journal_dir,
             InstallationScope::System,
             "2026-07-16T00:00:00Z",
-            &[],
-            &[],
+            Vec::new(),
             resolution,
             stale,
             "update foo",
         )
-        .expect_err("a drifted snapshot must abort under the lock");
+        .err()
+        .expect("a drifted snapshot must abort under the lock")
+        .into_cli_error();
         assert_eq!(err.code(), "EXECUTION_FAILED");
         assert!(
             err.reason().contains("while this update was resolving"),
@@ -4679,17 +4672,15 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
     // ── adapter receipts left stale by an update (issue #1885) ──
 
     use anolisa_core::adapter::claim::{
-        AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimStatus, CoshClaim, DRIVER_SCHEMA_VERSION,
-        DriverPayload,
+        AdapterClaim, AdapterSourceRevision, CLAIM_SCHEMA_VERSION, ClaimStatus, CoshClaim,
+        DRIVER_SCHEMA_VERSION, DriverPayload, ManagedFileKind, ManagedSourceFile,
     };
 
-    /// An enabled receipt for `(component, framework)` pointing at
-    /// `resource_root`, carrying `bundle_digest` as its enable-time digest.
+    /// An enabled receipt carrying the managed source revision at enable time.
     pub(crate) fn enabled_claim(
         component: &str,
         framework: &str,
         resource_root: &Path,
-        bundle_digest: Option<&str>,
     ) -> AdapterClaim {
         AdapterClaim {
             claim_schema: CLAIM_SCHEMA_VERSION,
@@ -4699,7 +4690,9 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             adapter_type: Some("extension".to_string()),
             enabled_at: "2026-07-01T00:00:00Z".to_string(),
             resource_root: resource_root.to_path_buf(),
-            bundle_digest: bundle_digest.map(str::to_string),
+            bundle_digest: None,
+            source_revision: recorded_source_revision(resource_root),
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -4708,6 +4701,46 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
                 extension_dir_resource: "cosh_extension_dir".to_string(),
             }),
         }
+    }
+
+    fn recorded_source_revision(root: &Path) -> Option<AdapterSourceRevision> {
+        use sha2::{Digest, Sha256};
+
+        fn collect(root: &Path, dir: &Path, files: &mut Vec<ManagedSourceFile>) -> Option<()> {
+            for entry in std::fs::read_dir(dir).ok()? {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                let file_type = entry.file_type().ok()?;
+                if file_type.is_dir() {
+                    collect(root, &path, files)?;
+                } else if file_type.is_symlink() {
+                    files.push(ManagedSourceFile {
+                        relative_path: path.strip_prefix(root).ok()?.to_path_buf(),
+                        kind: ManagedFileKind::Symlink,
+                        sha256: None,
+                        symlink_target: Some(std::fs::read_link(path).ok()?),
+                    });
+                } else if file_type.is_file() {
+                    files.push(ManagedSourceFile {
+                        relative_path: path.strip_prefix(root).ok()?.to_path_buf(),
+                        kind: ManagedFileKind::File,
+                        sha256: Some(format!("{:x}", Sha256::digest(std::fs::read(path).ok()?))),
+                        symlink_target: None,
+                    });
+                }
+            }
+            Some(())
+        }
+
+        let source_root = std::fs::canonicalize(root).ok()?;
+        let mut files = Vec::new();
+        collect(root, root, &mut files)?;
+        files.sort();
+        (!files.is_empty()).then_some(AdapterSourceRevision {
+            source_root,
+            files,
+            materialized_sources: Vec::new(),
+        })
     }
 
     /// Upsert a receipt into `ctx`'s seeded state.
@@ -4724,7 +4757,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         AdapterAction {
             component: component.to_string(),
             framework: framework.to_string(),
-            reason: "resource bundle changed since enable".to_string(),
+            reason: claim::SOURCE_REVISION_CHANGED_REASON.to_string(),
             command: format!("anolisa adapter enable {component} {framework}"),
         }
     }
@@ -4733,7 +4766,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         AdapterAction {
             component: component.to_string(),
             framework: framework.to_string(),
-            reason: SYSTEM_BUNDLE_CHANGED_REASON.to_string(),
+            reason: SYSTEM_REVISION_CHANGED_REASON.to_string(),
             command: format!("anolisa adapter status {component}"),
         }
     }
@@ -4780,7 +4813,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
     }
 
     /// Seed the adapter bundle an earlier version shipped plus an enabled
-    /// receipt whose enable-time digest matches it; returns the bundle root.
+    /// receipt whose managed source revision matches it; returns the root.
     fn seed_bundle_and_claim(ctx: &CliContext, component: &str, content: &[u8]) -> PathBuf {
         let layout = common::resolve_layout(ctx);
         let manifest_path =
@@ -4799,18 +4832,14 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             .join("openclaw");
         std::fs::create_dir_all(&bundle_root).expect("bundle root");
         std::fs::write(bundle_root.join("plugin.json"), content).expect("bundle file");
-        let digest = receipt_digest(&bundle_root).expect("enable-time digest");
-        seed_claim(
-            ctx,
-            enabled_claim(component, "openclaw", &bundle_root, Some(&digest)),
-        );
+        seed_claim(ctx, enabled_claim(component, "openclaw", &bundle_root));
         bundle_root
     }
 
     /// Seed a raw-installed component that ships an adapter bundle: the
     /// record owns the bundle file (as a real install with `[[adapters]]`
-    /// would), and an enabled receipt carries the enable-time digest of the
-    /// bundle root. Returns the bundle root.
+    /// would), and an enabled receipt carries its managed source revision.
+    /// Returns the bundle root.
     fn seed_raw_component_with_bundle(
         ctx: &CliContext,
         component: &str,
@@ -4856,11 +4885,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         });
         state.save(&state_path).expect("save state");
 
-        let digest = receipt_digest(&bundle_root).expect("enable-time digest");
-        seed_claim(
-            ctx,
-            enabled_claim(component, "openclaw", &bundle_root, Some(&digest)),
-        );
+        seed_claim(ctx, enabled_claim(component, "openclaw", &bundle_root));
         bundle_root
     }
 
@@ -4872,19 +4897,12 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         let bundle_root = tmp.path().join("receipt-controlled");
         std::fs::create_dir_all(&bundle_root).expect("bundle root");
         std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("bundle file");
-        let digest = receipt_digest(&bundle_root).expect("enable-time digest");
-
         let mut store = StateStore::empty();
-        store.upsert_adapter_claim(enabled_claim(
-            "tokenless",
-            "openclaw",
-            &bundle_root,
-            Some(&digest),
-        ));
+        store.upsert_adapter_claim(enabled_claim("tokenless", "openclaw", &bundle_root));
         std::fs::write(bundle_root.join("plugin.json"), b"v2").expect("updated bundle");
 
         assert!(
-            adapter_actions_after_update(&c, &store, "tokenless", &AdapterBundleSnapshot::new())
+            adapter_actions_after_update(&c, &store, "tokenless", &AdapterRevisionSnapshot::new())
                 .is_empty(),
             "system mode must ignore receipt-controlled bundle paths"
         );
@@ -4893,7 +4911,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
     /// A privileged source snapshot must not honor the caller-controlled
     /// packaged-data override.
     #[test]
-    fn system_bundle_snapshot_ignores_packaged_data_override() {
+    fn system_revision_snapshot_ignores_packaged_data_override() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let untrusted = tmp.path().join("caller-data");
         let contract = FsLayout::component_contract_path(&untrusted, "tokenless");
@@ -4909,7 +4927,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         let layout = common::resolve_layout(&c);
 
         assert!(
-            adapter_bundle_snapshot(&c, &layout, "tokenless").is_empty(),
+            adapter_revision_snapshot(&c, &layout, "tokenless").is_empty(),
             "system snapshots must ignore environment-selected data roots"
         );
     }
@@ -4917,11 +4935,15 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
     /// A trusted source revision change yields a generic status action without
     /// loading any user's receipt.
     #[test]
-    fn system_bundle_change_reports_status_action() {
-        let before =
-            AdapterBundleSnapshot::from([("openclaw".to_string(), Some("sha256:old".to_string()))]);
-        let after =
-            AdapterBundleSnapshot::from([("openclaw".to_string(), Some("sha256:new".to_string()))]);
+    fn system_revision_change_reports_status_action() {
+        let before = AdapterRevisionSnapshot::from([(
+            "openclaw".to_string(),
+            Some(test_source_revision("0")),
+        )]);
+        let after = AdapterRevisionSnapshot::from([(
+            "openclaw".to_string(),
+            Some(test_source_revision("1")),
+        )]);
 
         assert_eq!(
             system_adapter_actions("tokenless", &before, &after),
@@ -4930,15 +4952,30 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
     }
 
     #[test]
-    fn system_bundle_becoming_unavailable_reports_status_action() {
-        let before =
-            AdapterBundleSnapshot::from([("openclaw".to_string(), Some("sha256:old".to_string()))]);
-        let after = AdapterBundleSnapshot::from([("openclaw".to_string(), None)]);
+    fn system_revision_becoming_unavailable_reports_status_action() {
+        let before = AdapterRevisionSnapshot::from([(
+            "openclaw".to_string(),
+            Some(test_source_revision("0")),
+        )]);
+        let after = AdapterRevisionSnapshot::from([("openclaw".to_string(), None)]);
 
         assert_eq!(
             system_adapter_actions("tokenless", &before, &after),
             vec![expected_system_action("tokenless", "openclaw")]
         );
+    }
+
+    fn test_source_revision(digest_digit: &str) -> AdapterSourceRevision {
+        AdapterSourceRevision {
+            source_root: PathBuf::from("/usr/share/anolisa/adapters/tokenless/openclaw"),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin.json"),
+                kind: ManagedFileKind::File,
+                sha256: Some(digest_digit.repeat(64)),
+                symlink_target: None,
+            }],
+            materialized_sources: Vec::new(),
+        }
     }
 
     /// A system raw update reports a trusted adapter source change without
@@ -4988,11 +5025,15 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             &raw_artifact_with_adapter("foo", "0.2.0", b"new\n", &[("plugin.json", b"v1")]),
         );
         let rpm = FakeRpm::new("unused", None);
+        let layout = common::resolve_layout(&c);
+        let before = adapter_revision_snapshot(&c, &layout, "foo");
 
         let (outcome, actions) =
             update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("update ok");
+        let after = adapter_revision_snapshot(&c, &layout, "foo");
 
         assert_eq!(outcome, UpdateOutcome::Updated);
+        assert_eq!(before, after, "unchanged managed adapter revision");
         assert!(
             actions.is_empty(),
             "an unchanged bundle must not report an action: {actions:?}"
@@ -5012,15 +5053,9 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         std::fs::create_dir_all(&bundle_root).expect("bundle root");
         std::fs::write(bundle_root.join("plugin.json"), b"v2").expect("bundle file");
         // A receipt stale from an earlier drift — not from this update.
-        seed_claim(
-            &c,
-            enabled_claim(
-                "foo",
-                "openclaw",
-                &bundle_root,
-                Some("sha256:stale-enable-time"),
-            ),
-        );
+        seed_claim(&c, enabled_claim("foo", "openclaw", &bundle_root));
+        std::fs::write(bundle_root.join("plugin.json"), b"already stale")
+            .expect("drift bundle file");
         publish_raw_repo(
             &tmp.path().join("repo"),
             &layout,
@@ -5051,12 +5086,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         let bundle_root = layout.datadir.join("adapters/foo/openclaw");
         std::fs::create_dir_all(&bundle_root).expect("bundle root");
         std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("bundle file");
-        let receipt = enabled_claim(
-            "foo",
-            "openclaw",
-            &bundle_root,
-            Some("sha256:stale-enable-time"),
-        );
+        let receipt = enabled_claim("foo", "openclaw", &bundle_root);
         seed_claim(&c, receipt.clone());
         publish_raw_repo(
             &tmp.path().join("repo"),
@@ -5079,19 +5109,16 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         );
     }
 
-    /// A successful update never rewrites the enable-time digest: the
-    /// framework side was not reapplied, so the receipt must stay stale
-    /// until an explicit `adapter enable`.
+    /// A successful update never rewrites the enable-time source revision:
+    /// the framework side was not reapplied, so the receipt stays stale until
+    /// an explicit `adapter enable`.
     #[test]
     fn successful_update_leaves_the_receipt_untouched() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
         let bundle_root =
             seed_raw_component_with_bundle(&c, "foo", "0.1.0", b"old v1 binary\n", b"v1");
-        let receipt = {
-            let digest = receipt_digest(&bundle_root).expect("enable-time digest");
-            enabled_claim("foo", "openclaw", &bundle_root, Some(&digest))
-        };
+        let receipt = enabled_claim("foo", "openclaw", &bundle_root);
         publish_raw_repo(
             &tmp.path().join("repo"),
             &common::resolve_layout(&c),
@@ -5113,11 +5140,10 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         );
     }
 
-    /// A committed delegated (RPM) update whose package replaces the
-    /// adapter resources propagates the adapter action through the shared
-    /// completion.
+    /// A delegated update cannot infer adapter drift from directory bytes
+    /// when its test-only native backend supplies no rpmdb file inventory.
     #[test]
-    fn delegated_update_completion_propagates_adapter_actions() {
+    fn delegated_update_requires_authoritative_inventory_for_adapter_actions() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(
@@ -5148,10 +5174,9 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
 
         assert_eq!(outcome, UpdateOutcome::Updated);
         assert_eq!(rpm.update_calls.get(), 1);
-        assert_eq!(
-            actions,
-            vec![expected_system_action("copilot-shell", "openclaw")],
-            "the delegated completion must surface the changed source bundle"
+        assert!(
+            actions.is_empty(),
+            "unmanaged directory bytes must not stand in for rpmdb metadata: {actions:?}"
         );
         assert_eq!(update_operation_status(&c, "copilot-shell"), "ok");
     }
@@ -5176,15 +5201,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         let bundle_root = layout.datadir.join("adapters/copilot-shell/openclaw");
         std::fs::create_dir_all(&bundle_root).expect("bundle root");
         std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("bundle file");
-        seed_claim(
-            &c,
-            enabled_claim(
-                "copilot-shell",
-                "openclaw",
-                &bundle_root,
-                Some("sha256:stale-enable-time"),
-            ),
-        );
+        seed_claim(&c, enabled_claim("copilot-shell", "openclaw", &bundle_root));
         // upgrade_to is None => dnf update is a no-op; EVR stays the same.
         let rpm = FakeRpm::new(
             "copilot-shell",
@@ -5223,7 +5240,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             serde_json::json!([{
                 "component": "foo",
                 "framework": "openclaw",
-                "reason": "resource bundle changed since enable",
+                "reason": "adapter source revision changed since enable",
                 "command": "anolisa adapter enable foo openclaw",
             }]),
             "{json}"

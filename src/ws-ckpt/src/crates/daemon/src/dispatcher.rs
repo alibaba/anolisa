@@ -9,7 +9,31 @@ use ws_ckpt_common::{
     DEFAULT_IMG_MAX_PERCENT, DEFAULT_IMG_SIZE_GB,
 };
 
+/// Kernel-derived connection identity available to guarded requests.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DispatchContext {
+    peer_uid: Option<u32>,
+}
+
+impl DispatchContext {
+    pub(crate) fn new(peer_uid: Option<u32>) -> Self {
+        Self { peer_uid }
+    }
+
+    pub(crate) fn peer_uid(self) -> Option<u32> {
+        self.peer_uid
+    }
+}
+
 pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Response {
+    dispatch_with_context(state, request, DispatchContext::default()).await
+}
+
+pub(crate) async fn dispatch_with_context(
+    state: &Arc<DaemonState>,
+    request: Request,
+    context: DispatchContext,
+) -> Response {
     let result = match request {
         Request::Init { workspace } => match state.ensure_bootstrapped().await {
             Err(e) => Err(e),
@@ -159,6 +183,47 @@ pub async fn dispatch(state: &Arc<DaemonState>, request: Request) -> Response {
             Ok(()) => crate::workspace_mgr::recover_workspace(state, &workspace).await,
         },
         Request::HealthAdvisory => Ok(handle_health_advisory(state).await),
+        Request::WorkspaceIdentityV2 { registration_path } => {
+            return crate::guarded_checkpoint::workspace_identity(state, &registration_path).await;
+        }
+        Request::GuardedCheckpointV2 {
+            ws_id,
+            expected_generation,
+            checkpoint_id,
+            operation_digest,
+            message,
+            metadata,
+            pin,
+        } => {
+            return crate::guarded_checkpoint::checkpoint(
+                state,
+                context.peer_uid(),
+                &ws_id,
+                expected_generation,
+                &checkpoint_id,
+                operation_digest,
+                message,
+                metadata,
+                pin,
+            )
+            .await;
+        }
+        Request::CheckpointEvidenceV2 {
+            ws_id,
+            expected_generation,
+            checkpoint_id,
+            operation_digest,
+        } => {
+            return crate::guarded_checkpoint::checkpoint_evidence(
+                state,
+                context.peer_uid(),
+                &ws_id,
+                expected_generation,
+                &checkpoint_id,
+                operation_digest,
+            )
+            .await;
+        }
     };
 
     match result {
@@ -315,6 +380,7 @@ async fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             state.config_notify.notify_waiters();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
+                file: Some(file_config),
             }
         }
         Err(e) => Response::Error {
@@ -334,6 +400,8 @@ async fn handle_reload_workspace_policy(state: &Arc<DaemonState>, workspace: &st
     state.config_notify.notify_waiters();
     Response::ReloadConfigOk {
         config: build_config_report(state),
+        // Global file untouched by a per-workspace reload.
+        file: None,
     }
 }
 
@@ -345,6 +413,7 @@ fn handle_reload_global_config(state: &Arc<DaemonState>) -> Response {
             state.config_notify.notify_waiters();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
+                file: Some(file_config),
             }
         }
         Err(e) => Response::Error {
@@ -438,6 +507,7 @@ struct PolicyCtx {
 /// `WorkspaceNotFound` Response. One tiny read lock snapshots ws_id +
 /// `policy_io_mu` Arc, so all 4 policy handlers (Get / Reset / Patch /
 /// ReloadWorkspacePolicy) share the same boilerplate.
+#[allow(clippy::result_large_err)]
 async fn resolve_ws_for_policy(
     state: &Arc<DaemonState>,
     workspace: &str,

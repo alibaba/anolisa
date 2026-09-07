@@ -67,6 +67,23 @@ pub fn wal_checkpoint(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Execute a truncating WAL checkpoint and report whether it actually completed.
+///
+/// `PRAGMA wal_checkpoint(TRUNCATE)` succeeds as a statement even when another
+/// connection holds a read snapshot — it then returns `busy = 1` and leaves the
+/// WAL intact, without raising an SQL error. Size-based purge loops must treat
+/// that as a failed reclaim: the WAL stays in the size measurement while every
+/// `DELETE` appends more frames, so continuing to delete never converges.
+///
+/// Returns `Ok(true)` when the checkpoint was blocked (busy), `Ok(false)` when
+/// the WAL was fully checkpointed and truncated.
+pub fn wal_checkpoint_busy(conn: &Connection) -> Result<bool> {
+    let busy: i32 = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+        .context("Failed to execute WAL checkpoint")?;
+    Ok(busy != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

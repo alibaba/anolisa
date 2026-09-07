@@ -13,6 +13,7 @@ pub(crate) fn render_mode_command<W: Write>(
         None => render_mode_summary(state, output),
         Some("approval") => render_approval_mode_command(sub, confirm, state, output),
         Some("analysis") => render_analysis_mode_command(sub, state, output),
+        Some("routing") => render_routing_mode_command(sub, state, output),
         Some("recommend" | "auto" | "trust") => render_notice_panel(
             output,
             state.i18n().t(MessageId::ModeRemovedTitle),
@@ -58,10 +59,96 @@ fn render_mode_summary<W: Write>(state: &InlineState, output: &mut W) -> std::io
                 MessageId::ModeAnalysisLine,
                 &[("mode", state.analysis_mode.label())],
             ),
+            state.i18n().format(
+                MessageId::ModeRoutingLine,
+                &[("mode", routing_mode_label(state))],
+            ),
         ],
         Some(state.i18n().t(MessageId::ModeSummaryFooter)),
     )?;
     Ok(true)
+}
+
+fn render_routing_mode_command<W: Write>(
+    arg: Option<&str>,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    let Some(control) = state.assistance_control.clone() else {
+        render_notice_panel(
+            output,
+            state.i18n().t(MessageId::RoutingModeTitle),
+            vec![state
+                .i18n()
+                .t(MessageId::RoutingModeUnavailableBody)
+                .to_string()],
+            Some(state.i18n().t(MessageId::RoutingModeUsageFooter)),
+        )?;
+        return Ok(true);
+    };
+
+    match arg {
+        None => render_notice_panel(
+            output,
+            state.i18n().t(MessageId::RoutingModeTitle),
+            vec![state.i18n().format(
+                MessageId::RoutingModeCurrentBody,
+                &[("mode", routing_mode_label(state))],
+            )],
+            Some(routing_mode_footer(state)),
+        )
+        .map(|_| true),
+        Some("assisted") => set_routing_mode(true, &control, state, output),
+        Some("shell-only") => set_routing_mode(false, &control, state, output),
+        Some(other) => render_notice_panel(
+            output,
+            state.i18n().t(MessageId::RoutingModeTitle),
+            vec![state
+                .i18n()
+                .format(MessageId::RoutingModeUnknownBody, &[("mode", other)])],
+            Some(state.i18n().t(MessageId::RoutingModeUsageFooter)),
+        )
+        .map(|_| true),
+    }
+}
+
+fn set_routing_mode<W: Write>(
+    enabled: bool,
+    control: &crate::input::AssistanceControl,
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<bool> {
+    control.set_enabled(enabled)?;
+    let mode = routing_mode_label(state);
+    render_notice_panel(
+        output,
+        state.i18n().t(MessageId::RoutingModeTitle),
+        vec![state
+            .i18n()
+            .format(MessageId::RoutingModeSetBody, &[("mode", mode)])],
+        Some(routing_mode_footer(state)),
+    )?;
+    Ok(true)
+}
+
+fn routing_mode_label(state: &InlineState) -> &'static str {
+    match state.assistance_control.as_ref() {
+        Some(control) if control.is_enabled() => "assisted",
+        Some(_) => "shell-only",
+        None => "native",
+    }
+}
+
+fn routing_mode_footer(state: &InlineState) -> &'static str {
+    if state
+        .assistance_control
+        .as_ref()
+        .is_some_and(crate::input::AssistanceControl::is_enabled)
+    {
+        state.i18n().t(MessageId::RoutingModeAssistedFooter)
+    } else {
+        state.i18n().t(MessageId::RoutingModeShellOnlyFooter)
+    }
 }
 
 fn render_approval_mode_command<W: Write>(
@@ -531,7 +618,7 @@ fn approval_mode_from_index(index: usize) -> CoshApprovalMode {
         0 => CoshApprovalMode::Recommend,
         1 => CoshApprovalMode::Auto,
         2 => CoshApprovalMode::Trust,
-        _ => CoshApprovalMode::Auto,
+        _ => CoshApprovalMode::Recommend,
     }
 }
 

@@ -1,11 +1,22 @@
 //! Configuration for tokenless.
 //!
 //! Stored at `~/.tokenless/config.json`. Controls global feature flags.
-//! Environment variables `TOKENLESS_STATS_ENABLED` and
-//! `TOKENLESS_SLS_ENABLED` override file config independently.
+//! Environment variables `TOKENLESS_STATS_ENABLED`, `TOKENLESS_SLS_ENABLED`,
+//! and `TOKENLESS_COMPRESSION_ENABLED` override file config at runtime.
+//! `tokenless stats enable` / `disable` persist from the file snapshot so
+//! those session overrides are not written back.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::path::PathBuf;
+
+thread_local! {
+    /// Test-only redirect for [`TokenlessConfig::config_path`].
+    ///
+    /// This is a thread-local API call, not an environment variable, so it
+    /// does not weaken the passwd-rooted `$HOME` refusal below.
+    static CONFIG_PATH_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
 /// Global tokenless configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +60,9 @@ fn parse_env_bool(val: &str) -> bool {
 
 impl TokenlessConfig {
     fn config_path() -> PathBuf {
+        if let Some(path) = CONFIG_PATH_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return path;
+        }
         // Resolve home via the shared passwd-rooted helper so an attacker
         // cannot redirect the config path by setting $HOME before invoking
         // any tokenless binary. When no trusted home is available, return
@@ -62,41 +76,79 @@ impl TokenlessConfig {
         PathBuf::from(home).join(".tokenless/config.json")
     }
 
+    /// Redirect [`Self::config_path`] for the current thread.
+    ///
+    /// Production CLI never calls this. Tests use it so [`Self::load`],
+    /// [`Self::load_from_file`], and [`Self::save`] can run against an
+    /// isolated file without writing the passwd-backed
+    /// `~/.tokenless/config.json`.
+    #[doc(hidden)]
+    pub fn override_config_path_for_tests(path: Option<PathBuf>) {
+        CONFIG_PATH_OVERRIDE.with(|slot| *slot.borrow_mut() = path);
+    }
+
     /// Whether a config file exists on disk.
     pub fn config_file_exists() -> bool {
         Self::config_path().exists()
     }
 
     /// Load config with explicit env overrides for all toggles and optional custom path.
-    /// Priority (per toggle): env > config.json file > default
+    ///
+    /// Priority (per toggle): env > config.json file > default.
     /// Empty env var values are normalized to None (treated as unset).
-    /// When stats and sls envs are both set, skips the config file read entirely
-    /// (compression still defaults to true unless its own env is set).
+    ///
+    /// All env combinations that leave at least one toggle unset will attempt to
+    /// read the config file so the file value can fill the gap. IO failures
+    /// (missing file, unreadable path, corrupt NFS mount, etc.) are silently
+    /// ignored and the built-in defaults take over — `env > default` priority is
+    /// preserved even when the file cannot be read.
+    ///
+    /// Fast path: when all three env vars are present (none is None after
+    /// normalization), the file read is skipped entirely — every toggle is already
+    /// determined by the env values, so opening the config file would have no
+    /// effect. This avoids latency on slow or broken mounts in env-only
+    /// deployments.
     pub fn load_with_envs_and_path(
         stats_env: Option<&str>,
         sls_env: Option<&str>,
         compression_env: Option<&str>,
         path: Option<&PathBuf>,
     ) -> Self {
+        Self::load_with_envs_and_file_reader(stats_env, sls_env, compression_env, path, |p| {
+            std::fs::read_to_string(p)
+        })
+    }
+
+    /// Core logic of [`TokenlessConfig::load_with_envs_and_path`] with an
+    /// injectable file reader. Production always reads via
+    /// [`std::fs::read_to_string`]; tests inject a recording reader so they can
+    /// assert whether the config file read was attempted at all — the returned
+    /// config alone cannot distinguish the fast path from a failed read when
+    /// every toggle is already determined by env.
+    fn load_with_envs_and_file_reader(
+        stats_env: Option<&str>,
+        sls_env: Option<&str>,
+        compression_env: Option<&str>,
+        path: Option<&PathBuf>,
+        read_file: impl FnOnce(&std::path::Path) -> std::io::Result<String>,
+    ) -> Self {
         // Normalize empty strings to None — an empty env var means "unset".
         let stats_env = stats_env.filter(|v| !v.is_empty());
         let sls_env = sls_env.filter(|v| !v.is_empty());
         let compression_env = compression_env.filter(|v| !v.is_empty());
 
-        // When both stats and sls env vars are set, skip the file read entirely.
-        // This avoids unnecessary I/O when the config file is on a slow
-        // or unavailable filesystem (e.g. broken NFS mount).
-        if let (Some(stats_val), Some(sls_val)) = (stats_env, sls_env) {
+        // Fast path: all three toggles are determined by env — no file read needed.
+        if let (Some(s), Some(sl), Some(c)) = (stats_env, sls_env, compression_env) {
             return Self {
-                stats_enabled: parse_env_bool(stats_val),
-                sls_enabled: parse_env_bool(sls_val),
-                compression_enabled: compression_env.map(parse_env_bool).unwrap_or(true),
+                stats_enabled: parse_env_bool(s),
+                sls_enabled: parse_env_bool(sl),
+                compression_enabled: parse_env_bool(c),
             };
         }
 
         let default_path = Self::config_path();
         let config_path = path.unwrap_or(&default_path);
-        let base = std::fs::read_to_string(config_path)
+        let base = read_file(config_path)
             .ok()
             .and_then(|s| serde_json::from_str::<TokenlessConfig>(&s).ok())
             .unwrap_or_default();
@@ -162,6 +214,16 @@ impl TokenlessConfig {
             compression_env.as_deref(),
             None,
         )
+    }
+
+    /// Load on-disk config without applying process environment overrides.
+    ///
+    /// `tokenless stats enable` / `disable` persist only the stats toggle.
+    /// Loading via [`Self::load`] would copy session env overrides such as
+    /// `TOKENLESS_COMPRESSION_ENABLED` into `config.json`, turning a
+    /// temporary A/B dry-run into a durable setting.
+    pub fn load_from_file() -> Self {
+        Self::load_with_envs_and_path(None, None, None, None)
     }
 
     /// Save config to disk.

@@ -300,7 +300,12 @@ def test_warn_policy_warns_and_continues(monkeypatch, capsys):
     )
 
     assert set(output) == {"systemMessage"}
-    assert "Execution will continue" in output["systemMessage"]
+    message = output["systemMessage"]
+    assert "1 high-risk sensitive data finding" in message
+    assert "warning only" in message
+    assert "token=[REDACTED]" not in message
+    assert "credential" not in message
+    assert "severity" not in message
 
 
 def test_ask_policy_requests_pre_tool_approval(monkeypatch, capsys):
@@ -321,7 +326,9 @@ def test_ask_policy_requests_pre_tool_approval(monkeypatch, capsys):
         _base("PreToolUse", tool_input={"token": "raw-secret-value"}),
     )
 
-    assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+    hook_output = output["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "ask"
+    assert "Confirmation is required" in hook_output["permissionDecisionReason"]
 
 
 def test_ask_policy_falls_back_to_warning_without_confirmation(monkeypatch, capsys):
@@ -343,9 +350,53 @@ def test_ask_policy_falls_back_to_warning_without_confirmation(monkeypatch, caps
     )
 
     assert set(output) == {"systemMessage"}
-    assert (
-        "Approval is unavailable here; execution continues" in output["systemMessage"]
+    assert "This stage cannot confirm or block" in output["systemMessage"]
+    assert "warning only" in output["systemMessage"]
+
+
+@pytest.mark.parametrize(
+    ("event_name", "fields", "continuation"),
+    [
+        (
+            "PostToolUse",
+            {"tool_response": {"stdout": "raw-secret-value"}},
+            "raw output will enter model context",
+        ),
+        (
+            "Stop",
+            {"last_assistant_message": "raw-secret-value"},
+            "response will continue",
+        ),
+    ],
+)
+def test_ask_policy_unsupported_stages_report_actual_warning_result(
+    monkeypatch, capsys, event_name, fields, continuation
+):
+    monkeypatch.setenv("PII_CHECKER_MODE", "ask")
+    monkeypatch.setattr(
+        pii_checker_hook.subprocess,
+        "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_scan_result("deny", "token=[REDACTED]")),
+            stderr="",
+        ),
     )
+
+    output, _stderr = _run_main(
+        monkeypatch,
+        capsys,
+        _base(event_name, **fields),
+    )
+
+    assert set(output) == {"systemMessage"}
+    message = output["systemMessage"]
+    assert "This stage cannot confirm or block" in message
+    assert "warning only" in message
+    assert continuation in message
+    if event_name == "PostToolUse":
+        assert "tool has already run" in message
+        assert "external side effects were not undone" in message
 
 
 def test_observe_deny_uses_only_redacted_evidence(monkeypatch, capsys):
@@ -387,6 +438,8 @@ def test_warn_never_blocks_in_block_mode(monkeypatch, capsys):
     )
 
     assert set(output) == {"systemMessage"}
+    assert "1 general-risk sensitive data finding" in output["systemMessage"]
+    assert "a***@example.com" not in output["systemMessage"]
 
 
 @pytest.mark.parametrize(
@@ -442,7 +495,19 @@ def test_block_mode_maps_deny_to_qwen_decision(
     else:
         assert output["decision"] == expected["decision"]
         reason = output["reason"]
-    assert "token=[REDACTED]" in reason
+    assert "1 high-risk sensitive data finding" in reason
+    assert "token=[REDACTED]" not in reason
+    if event_name == "UserPromptSubmit":
+        assert "blocked this request" in reason
+    elif event_name == "PreToolUse":
+        assert "blocked this tool call" in reason
+    elif event_name == "PostToolUse":
+        assert "tool has already run" in reason
+        assert "raw output will not enter model context" in reason
+        assert "external side effects were not undone" in reason
+    else:
+        assert "final response was blocked" in reason
+        assert "Rewrite it without sensitive data" in reason
     assert "raw-secret-value" not in json.dumps(output)
 
 
@@ -475,6 +540,9 @@ def test_post_tool_use_warn_or_observe_does_not_stop(
     else:
         assert set(output) == {"systemMessage"}
         assert "continue" not in output
+        assert "tool has already run" in output["systemMessage"]
+        assert "raw output will enter model context" in output["systemMessage"]
+        assert "external side effects were not undone" in output["systemMessage"]
 
 
 @pytest.mark.parametrize("mode", ["observe", "block"])
@@ -541,7 +609,9 @@ def test_stop_hook_active_warns_without_retrying(monkeypatch, capsys):
     )
 
     assert set(output) == {"systemMessage"}
+    assert "warning-only" in output["systemMessage"]
     assert "retry loop" in output["systemMessage"]
+    assert "a***@example.com" not in output["systemMessage"]
 
 
 def test_stop_failure_is_audit_only(monkeypatch, capsys):
@@ -574,6 +644,7 @@ def test_stop_failure_is_audit_only(monkeypatch, capsys):
         {"verdict": "error", "findings": []},
         {"verdict": "unknown", "findings": [{}]},
         {"verdict": "deny", "findings": []},
+        {"verdict": "deny", "findings": ["not-an-object"]},
         {"verdict": "deny", "findings": [{"raw_evidence": "secret"}]},
         {"verdict": "warn", "findings": "not-a-list"},
         [],
@@ -688,27 +759,42 @@ def test_unexpected_error_is_silent_and_fail_open(monkeypatch, capsys):
     assert stderr == ""
 
 
-def test_redacted_evidence_is_deduplicated_bounded_and_shortened():
+def test_validated_result_keeps_only_sanitized_finding_severity():
     findings = [
-        {"evidence_redacted": "a" * 100},
-        {"evidence_redacted": "a" * 100},
-        {"evidence_redacted": "second"},
-        {"evidence_redacted": "third"},
-        {"evidence_redacted": "fourth"},
+        {
+            "type": "credential",
+            "severity": "deny",
+            "evidence_redacted": "token=[REDACTED]",
+            "raw_evidence": "raw-secret-value",
+        },
+        {"type": "email", "severity": "warn", "evidence_redacted": "a***"},
+        {"type": "custom", "severity": "custom"},
     ]
 
-    verdict, evidence = pii_checker_hook._validated_result(
+    verdict, sanitized = pii_checker_hook._validated_result(
         {"verdict": "deny", "findings": findings}
     )
 
     assert verdict == "deny"
-    assert len(evidence) == 3
-    assert len(evidence[0]) == 80
-    assert evidence[0].endswith("...")
+    assert sanitized == [
+        {"severity": "deny"},
+        {"severity": "warn"},
+        {"severity": "custom"},
+    ]
+    assert pii_checker_hook._risk_summary(verdict, sanitized) == (
+        "Detected 3 sensitive data findings (2 high risk, 1 general risk)"
+    )
+    assert pii_checker_hook._risk_summary("warn", sanitized) == (
+        "Detected 3 sensitive data findings (1 high risk, 2 general risk)"
+    )
 
 
 def test_invalid_mode_reports_observe_fallback(monkeypatch, capsys):
     monkeypatch.setenv("PII_CHECKER_MODE", "banana")
 
     assert pii_checker_hook._policy() == "observe"
-    assert "invalid PII_CHECKER_MODE; using observe" in capsys.readouterr().err
+    message = capsys.readouterr().err
+    assert "PII Checker configuration is invalid" in message
+    assert "banana" not in message
+    assert "observe" not in message
+    assert "fallback" not in message.lower()

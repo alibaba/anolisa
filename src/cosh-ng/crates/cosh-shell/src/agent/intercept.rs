@@ -99,6 +99,23 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
             ),
         };
         if let Some(mut request) = request {
+            if let Some(submission) = state.pending_agent_composer_submission.take() {
+                if request.user_input.as_deref() == Some(submission.text.trim()) {
+                    if let Some(cwd) = submission.workspace_cwd.as_deref() {
+                        request.command_block.cwd = cwd.to_string();
+                        request.command_block.end_cwd = cwd.to_string();
+                    }
+                    let feedback = crate::agent::composer::attach_submission(
+                        &mut request,
+                        submission.workspace_cwd.as_deref(),
+                    );
+                    crate::runtime::prompt_draft::render_agent_composer_rejections(
+                        state,
+                        output,
+                        &feedback.rejected_references,
+                    )?;
+                }
+            }
             let user_input = request.user_input.clone();
             if let Some(input) = user_input.as_deref() {
                 bind_pending_input_ghost_context(&mut request, state, event);
@@ -107,6 +124,7 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
                 }
             }
             state.agent_run.needs_prompt_after_run = event.cwd.is_none();
+            render_path_prompt_notice(event, &request, state, output)?;
             // Natural-language input and user-chosen prompt ghosts are both
             // explicit user requests: they always go through the central gate,
             // which queues them (FIFO) while a compaction is pending/active
@@ -120,6 +138,32 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
     }
 
     Ok(())
+}
+
+fn render_path_prompt_notice<W: Write>(
+    event: &ShellEvent,
+    request: &AgentRequest,
+    state: &InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if event.component.as_deref() != Some("path_prompt") {
+        return Ok(());
+    }
+    let input = if crate::types::request_has_sensitive_input(request) {
+        "<redacted>"
+    } else {
+        request.user_input.as_deref().unwrap_or_default()
+    };
+    RatatuiInlineRenderer::for_terminal().write_notice_panel(
+        output,
+        NoticePanelModel {
+            title: state.i18n().t(MessageId::InterceptNoticeTitle),
+            body: vec![state
+                .i18n()
+                .format(MessageId::InterceptNoticeBody, &[("input", input)])],
+            footer: Some(state.i18n().t(MessageId::InterceptNoticeFooter)),
+        },
+    )
 }
 
 fn is_prompt_ghost_feedback_event(event: &ShellEvent) -> bool {
@@ -497,7 +541,7 @@ fn is_standalone_agent_intercept(event: &ShellEvent) -> bool {
     event.kind == ShellEventKind::UserInputIntercepted
         && (matches!(
             event.component.as_deref(),
-            Some("natural_language") | Some("agent_marker")
+            Some("natural_language") | Some("path_prompt") | Some("agent_marker")
         ) || prompt_ghost_suggestion_id(event).is_some())
 }
 

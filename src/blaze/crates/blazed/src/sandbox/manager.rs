@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Recoverable sandbox create, warm activation, destroy, and startup cleanup.
+//! Recoverable sandbox create, destroy, and startup cleanup.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use blaze_core::BlazeError;
-use blaze_core::backend::{BackendKind, SpawnRequest};
-use blaze_core::lifecycle::{
-    BackendOwnership, OperationKind, SandboxInstance, SandboxState, StartPath,
-};
+use blaze_core::backend::{BackendKind, RestoreRequest, SpawnRequest};
+use blaze_core::lifecycle::{BackendOwnership, OperationKind, SandboxInstance, SandboxState};
 use blaze_core::policy::RuntimeDecision;
-use blaze_core::pool::{PoolKey, PoolManager};
 use blaze_core::storage::{AcquireOpts, StorageProvider, StorageSlot};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::checkpoint_store::CheckpointStore;
 use crate::error::{BlazeDaemonError, Result};
 use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
-use crate::sandbox::template::TemplateCatalog;
-use crate::spawner::{DynBackendInstance, SpawnerRegistry};
+use crate::sandbox::template::{ResolvedTemplate, TemplateCatalog};
+use crate::spawner::{
+    BackendRestoreRequest, BackendSpawnRequest, DynBackendInstance, DynSpawner, PinnedExecutable,
+    SpawnerRegistry, restore_with_runtime_directory, spawn_with_runtime_directory,
+};
+use crate::state_store::{OwnedRunDir, StateStore};
 
 const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -31,12 +33,36 @@ const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct CreateSandbox {
     /// Policy decision for this request.
     pub decision: RuntimeDecision,
-    /// Image identity used by storage and warm-pool matching.
+    /// Image identity used by storage allocation.
     pub image_digest: String,
     /// Concrete backend selected from the policy and daemon availability.
     pub runtime_backend: BackendKind,
     /// Executable selected during daemon startup.
     pub binary_path: PathBuf,
+    /// Published template to restore from, when the request named one.
+    pub template: Option<String>,
+}
+
+/// Prepared inputs for one template-backed create, validated before allocation.
+struct TemplateCreate {
+    resolved: ResolvedTemplate,
+    spawner: DynSpawner,
+    executable: Option<Arc<PinnedExecutable>>,
+    /// Console-recording shape the matched policy would launch.
+    ///
+    /// A restore derives its effective backend config from the request, so this
+    /// must carry the policy's setting instead of silently disabling recording.
+    record_console_log: bool,
+}
+
+/// Restore inputs derived from a materialized template slot.
+struct TemplateRestore {
+    payload_dir: PathBuf,
+    expected_version: Option<String>,
+    snapshot_kind: blaze_core::backend::SnapshotKind,
+    expose_guest_socket: bool,
+    preserve_network: bool,
+    record_console_log: bool,
 }
 
 /// Result of one managed create request.
@@ -71,7 +97,7 @@ pub struct ReconcileReport {
 /// Owns durable lifecycle metadata and non-serializable runtime handles.
 ///
 /// The maps are shared with read-only and non-lifecycle API paths. All
-/// create, warm activation, destroy, and restart cleanup mutations enter
+/// Create, destroy, and restart cleanup mutations enter
 /// through this type and are serialized by a per-sandbox async lock.
 pub struct SandboxManager {
     instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
@@ -79,11 +105,11 @@ pub struct SandboxManager {
     operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
     pub(super) storage_sync_inflight: Arc<Mutex<HashSet<Uuid>>>,
     pub(super) storage_sync_permits: Arc<Semaphore>,
-    pool: Arc<Mutex<PoolManager>>,
     spawners: Arc<SpawnerRegistry>,
     active_backend: BackendKind,
-    storage: Arc<dyn StorageProvider>,
-    state_dir: PathBuf,
+    pub(super) storage: Arc<dyn StorageProvider>,
+    state_store: StateStore,
+    pub(super) checkpoints: CheckpointStore,
     rootfs_size: u64,
     mem_size: u64,
     metrics: Arc<Metrics>,
@@ -93,34 +119,36 @@ pub struct SandboxManager {
 /// Construction inputs grouped to keep daemon wiring explicit.
 pub struct SandboxManagerInit {
     pub instances: HashMap<Uuid, SandboxInstance>,
-    pub pool: PoolManager,
     pub spawners: SpawnerRegistry,
     pub active_backend: BackendKind,
     pub storage: Arc<dyn StorageProvider>,
-    pub state_dir: PathBuf,
+    pub state_store: StateStore,
     pub rootfs_size: u64,
     pub mem_size: u64,
     pub template_catalog: TemplateCatalog,
 }
 
-/// Shared resources exposed to API paths that do not change runtime
-/// ownership, such as checkpoint and reset.
+/// Shared resources returned to the daemon wiring and test harness.
 pub struct SandboxManagerResources {
+    #[cfg(test)]
     pub instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
-    pub pool: Arc<Mutex<PoolManager>>,
     pub metrics: Arc<Metrics>,
 }
 
 impl SandboxManager {
+    /// Return the retained runtime-directory owner for one sandbox.
+    pub(super) fn run_directory(&self, id: Uuid) -> Result<OwnedRunDir> {
+        self.state_store.run_dir(id)
+    }
+
     /// Build a manager around state loaded from the durable state directory.
     pub fn new(init: SandboxManagerInit) -> (Self, SandboxManagerResources) {
         let SandboxManagerInit {
             instances,
-            pool,
             spawners,
             active_backend,
             storage,
-            state_dir,
+            state_store,
             rootfs_size,
             mem_size,
             template_catalog,
@@ -132,11 +160,11 @@ impl SandboxManager {
             .collect();
         let instances = Arc::new(Mutex::new(instances));
         let backend_instances = Arc::new(Mutex::new(HashMap::new()));
-        let pool = Arc::new(Mutex::new(pool));
         let metrics = Arc::new(Metrics::new());
+        let checkpoints = CheckpointStore::new(state_store.clone());
         let resources = SandboxManagerResources {
+            #[cfg(test)]
             instances: instances.clone(),
-            pool: pool.clone(),
             metrics: metrics.clone(),
         };
         (
@@ -148,11 +176,11 @@ impl SandboxManager {
                 // The periodic worker is sequential. Retain that bound when a
                 // timed-out provider operation has to finish in the background.
                 storage_sync_permits: Arc::new(Semaphore::new(1)),
-                pool,
                 spawners: Arc::new(spawners),
                 active_backend,
                 storage,
-                state_dir,
+                state_store,
+                checkpoints,
                 rootfs_size,
                 mem_size,
                 metrics,
@@ -181,6 +209,17 @@ impl SandboxManager {
         match self.backend_instances.lock() {
             Ok(instances) => instances.get(&id).cloned(),
             Err(poisoned) => poisoned.into_inner().get(&id).cloned(),
+        }
+    }
+
+    pub(super) fn spawner(&self, backend: BackendKind) -> Option<DynSpawner> {
+        self.spawners.get(backend)
+    }
+
+    pub(super) fn remove_backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
+        match self.backend_instances.lock() {
+            Ok(mut instances) => instances.remove(&id),
+            Err(poisoned) => poisoned.into_inner().remove(&id),
         }
     }
 
@@ -225,6 +264,29 @@ impl SandboxManager {
             .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {id}")))
     }
 
+    /// Return every sandbox for which lifecycle cleanup still owns resources.
+    ///
+    /// Shutdown uses this snapshot to start cleanup concurrently while all
+    /// mutations remain serialized by the manager's per-sandbox locks.
+    pub(crate) fn owned_instance_ids(&self) -> Result<BTreeSet<Uuid>> {
+        let mut ids = self
+            .instances
+            .lock()
+            .map_err(|_| poisoned("instances"))?
+            .values()
+            .filter(|instance| requires_automatic_cleanup(instance))
+            .map(|instance| instance.id)
+            .collect::<BTreeSet<_>>();
+        ids.extend(
+            self.backend_instances
+                .lock()
+                .map_err(|_| poisoned("backend_instances"))?
+                .keys()
+                .copied(),
+        );
+        Ok(ids)
+    }
+
     /// Execute one command through the running sandbox guest.
     pub async fn exec(
         &self,
@@ -259,35 +321,184 @@ impl SandboxManager {
             .map_err(BlazeDaemonError::from)
     }
 
-    /// Create a cold sandbox or activate a compatible warm runtime.
-    pub async fn create(&self, request: CreateSandbox) -> Result<CreateSandboxResult> {
-        let pool_key = PoolKey::new(
-            request.runtime_backend,
-            request.decision.workload_class,
-            request.image_digest.clone(),
-        );
-        if request.decision.pool_eligible {
-            if let Some(result) = self.activate_warm(&pool_key).await? {
-                self.metrics.inc(&self.metrics.pool_hits);
-                return Ok(result);
-            }
-            self.metrics.inc(&self.metrics.pool_misses);
+    /// Validate a template-backed create before any lifecycle state is written.
+    ///
+    /// Returns `None` for an ordinary create. For a template request it checks
+    /// the policy allow-list, storage support, and catalog metadata, then
+    /// confirms the published snapshot's image, backend, version, kernel
+    /// command line, VM shape, and guest transport all match what the current
+    /// policy would launch. The pinned executable and resolved artifacts are
+    /// carried forward so the create path restores exactly what was validated.
+    async fn prepare_template_create(
+        &self,
+        request: &CreateSandbox,
+    ) -> Result<Option<TemplateCreate>> {
+        let Some(name) = request.template.as_ref() else {
+            return Ok(None);
+        };
+        if !request
+            .decision
+            .templates
+            .iter()
+            .any(|allowed| allowed == name)
+        {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "template {name} is not allowed by policy {}",
+                request.decision.policy_name
+            )));
+        }
+        if !self.storage.supports_templates() {
+            return Err(BlazeDaemonError::UnsupportedOperation(
+                "configured storage does not support templates".to_string(),
+            ));
         }
 
+        let resolved = self.resolve_template_for_create(name.clone()).await?;
+        if resolved.image_digest != request.image_digest {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "template {name} image identity does not match the create request"
+            )));
+        }
+        if resolved.backend != request.runtime_backend {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "template {name} requires backend {}, but the request selected {}",
+                resolved.backend, request.runtime_backend
+            )));
+        }
+
+        if resolved.backend == BackendKind::Firecracker {
+            let config = request
+                .decision
+                .backend
+                .firecracker
+                .as_ref()
+                .cloned()
+                .unwrap_or_default();
+            if config.enable_vsock != resolved.expose_guest_socket
+                || config.enable_network != resolved.network
+            {
+                return Err(BlazeDaemonError::Conflict(format!(
+                    "template {name} guest transport shape does not match policy {}",
+                    request.decision.policy_name
+                )));
+            }
+            let effective_boot_args =
+                crate::spawner::firecracker::effective_boot_args(&config, config.enable_network)?;
+            validate_template_boot_args(
+                name,
+                resolved.boot_args.as_deref(),
+                &effective_boot_args,
+                &request.decision.policy_name,
+            )?;
+            let (vcpus, memory_mib) = crate::spawner::firecracker::effective_vm_shape(
+                &config,
+                request.decision.vm.as_ref(),
+            )?;
+            if resolved.vcpus != Some(vcpus) || resolved.memory_mib != Some(memory_mib) {
+                return Err(BlazeDaemonError::Conflict(format!(
+                    "template {name} VM shape does not match policy {}",
+                    request.decision.policy_name
+                )));
+            }
+        } else {
+            if resolved.expose_guest_socket {
+                return Err(BlazeDaemonError::UnsupportedOperation(format!(
+                    "template {name} requests guest transport for unsupported backend {}",
+                    resolved.backend
+                )));
+            }
+            if resolved.network {
+                return Err(BlazeDaemonError::UnsupportedOperation(format!(
+                    "template {name} requests networking for unsupported backend {}",
+                    resolved.backend
+                )));
+            }
+        }
+
+        let spawner = self.spawner(resolved.backend).ok_or_else(|| {
+            BlazeDaemonError::UnsupportedOperation(format!(
+                "template {name} has no restore adapter for {}",
+                resolved.backend
+            ))
+        })?;
+        // A backend that runs no separate program of its own carries no
+        // configured path; pin one only when a real executable is configured.
+        let executable = if request.binary_path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(Arc::new(PinnedExecutable::open(&request.binary_path)?))
+        };
+        let capability = spawner
+            .restore_capability(executable.as_deref())
+            .await?
+            .ok_or_else(|| {
+                BlazeDaemonError::UnsupportedOperation(format!(
+                    "template {name} backend {} does not support restore",
+                    resolved.backend
+                ))
+            })?;
+        if capability.backend != resolved.backend
+            || capability.version != resolved.backend_version
+            || capability.snapshot_kind != resolved.snapshot_kind
+        {
+            return Err(BlazeDaemonError::UnsupportedOperation(format!(
+                "template {name} is incompatible with the current restore adapter"
+            )));
+        }
+
+        Ok(Some(TemplateCreate {
+            resolved,
+            spawner,
+            executable,
+            record_console_log: request
+                .decision
+                .backend
+                .firecracker
+                .as_ref()
+                .is_some_and(|config| config.serial_log),
+        }))
+    }
+
+    /// Create a sandbox from a fresh runtime allocation or a published template.
+    pub async fn create(&self, request: CreateSandbox) -> Result<CreateSandboxResult> {
+        let template = self.prepare_template_create(&request).await?;
         let mut instance = SandboxInstance::new(
             request.runtime_backend,
             request.decision.workload_class,
-            request.image_digest,
-            StartPath::Cold,
+            request.image_digest.clone(),
             request.decision.policy_name.clone(),
         );
+        instance.template = template
+            .as_ref()
+            .map(|template| template.resolved.name.clone());
         let operation_lock = self.operation_lock(instance.id);
         let _operation = operation_lock.lock().await;
         instance.transition(SandboxState::Creating)?;
         instance.begin_operation(OperationKind::Create);
 
         // Publish the stable identity and create intent before allocation.
-        instance.persist(&self.state_dir)?;
+        if let Err(error) = self.state_store.persist(&instance) {
+            match self.state_store.has_run_dir_residual(instance.id) {
+                Ok(true) => {}
+                Ok(false) => return Err(error),
+                Err(residual_error) => {
+                    return Err(BlazeDaemonError::RecoveryRequired(format!(
+                        "create {}: initial state publication failed: {error}; could not inspect \
+                         publication residual: {residual_error}",
+                        instance.id
+                    )));
+                }
+            }
+            let rollback_errors = self.commit_create_rollback(&mut instance);
+            if rollback_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "create {}: initial state publication failed: {error}; {}",
+                instance.id,
+                rollback_errors.join("; ")
+            )));
+        }
         if let Some(error) = self.retain_instance(instance.clone()) {
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "create {}: {error}",
@@ -295,25 +506,98 @@ impl SandboxManager {
             )));
         }
 
-        let storage = match self
-            .storage
-            .acquire(&AcquireOpts {
-                instance_id: instance.id.to_string(),
-                rootfs_size: self.rootfs_size,
-                mem_size: self.mem_size,
-            })
-            .await
-        {
-            Ok(storage) => storage,
-            Err(error) => {
-                let (source, residual) = error.into_parts();
-                return Err(self.retain_failed_acquire(&mut instance, residual, source.into()));
+        let (storage, template_restore, template) = match template {
+            Some(TemplateCreate {
+                resolved,
+                spawner,
+                executable,
+                record_console_log,
+            }) => {
+                let ResolvedTemplate {
+                    backend_version,
+                    snapshot_kind,
+                    expose_guest_socket,
+                    network,
+                    rootfs_size,
+                    memory_size,
+                    storage: source,
+                    ..
+                } = resolved;
+                let materialized = match self
+                    .storage
+                    .acquire_template(
+                        &AcquireOpts {
+                            instance_id: instance.id.to_string(),
+                            rootfs_size,
+                            mem_size: memory_size,
+                        },
+                        source,
+                    )
+                    .await
+                {
+                    Ok(materialized) => materialized,
+                    Err(error) => {
+                        let (source, residual) = error.into_parts();
+                        return Err(self.retain_failed_acquire(
+                            &mut instance,
+                            residual,
+                            source.into(),
+                        ));
+                    }
+                };
+                (
+                    materialized.storage,
+                    Some(TemplateRestore {
+                        payload_dir: materialized.payload_dir,
+                        expected_version: backend_version,
+                        snapshot_kind,
+                        expose_guest_socket,
+                        // A new sandbox never inherits the source's network
+                        // slot, so a networked template requests a fresh one.
+                        preserve_network: network,
+                        record_console_log,
+                    }),
+                    Some((spawner, executable)),
+                )
+            }
+            None => {
+                let storage = match self
+                    .storage
+                    .acquire(&AcquireOpts {
+                        instance_id: instance.id.to_string(),
+                        rootfs_size: self.rootfs_size,
+                        mem_size: self.mem_size,
+                    })
+                    .await
+                {
+                    Ok(storage) => storage,
+                    Err(error) => {
+                        let (source, residual) = error.into_parts();
+                        return Err(self.retain_failed_acquire(
+                            &mut instance,
+                            residual,
+                            source.into(),
+                        ));
+                    }
+                };
+                (storage, None, None)
             }
         };
         crate::failpoint::pause("create-after-storage-acquire").await;
 
-        let work_dir = self.state_dir.join(instance.id.to_string());
-        let spawner = match self.spawners.get(self.active_backend) {
+        let work_dir = match self.state_store.run_dir(instance.id) {
+            Ok(work_dir) => work_dir,
+            Err(error) => {
+                return Err(self
+                    .cleanup_failed_create(&mut instance, storage, None, false, error)
+                    .await);
+            }
+        };
+        let (spawner, template_executable) = match template {
+            Some((spawner, executable)) => (Some(spawner), executable),
+            None => (self.spawners.get(self.active_backend), None),
+        };
+        let spawner = match spawner {
             Some(spawner) => spawner,
             None => {
                 return Err(self
@@ -337,10 +621,10 @@ impl SandboxManager {
         }
 
         instance.backend_ownership = BackendOwnership::Starting;
-        if let Err(error) = instance.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(&instance) {
             instance.backend_ownership = BackendOwnership::NotStarted;
             return Err(self
-                .cleanup_failed_create(&mut instance, storage, None, false, error.into())
+                .cleanup_failed_create(&mut instance, storage, None, false, error)
                 .await);
         }
         if let Some(error) = self.retain_instance(instance.clone()) {
@@ -356,24 +640,84 @@ impl SandboxManager {
                 .await);
         }
 
-        let spawn = match crate::failpoint::backend("create-spawn") {
-            Ok(()) => {
-                spawner
-                    .spawn(SpawnRequest {
-                        instance_id: instance.id,
-                        run_dir: work_dir,
-                        binary_path: request.binary_path,
-                        storage: storage.clone(),
-                        backend: request.decision.backend,
-                        vm: request.decision.vm,
-                    })
-                    .await
+        let template_backed = template_restore.is_some();
+        let spawn = if let Some(template) = template_restore {
+            let restore_request = match BackendRestoreRequest::new(
+                RestoreRequest {
+                    instance_id: instance.id,
+                    binary_path: request.binary_path,
+                    storage: storage.clone(),
+                    payload_dir: template.payload_dir,
+                    checkpoint_backend: instance.backend,
+                    expected_version: template.expected_version,
+                    snapshot_kind: template.snapshot_kind,
+                    expose_guest_socket: template.expose_guest_socket,
+                    preserve_network: template.preserve_network,
+                    record_console_log: template.record_console_log,
+                    // One published capture restores into many new sandboxes.
+                    snapshot_from_other_sandbox: true,
+                },
+                work_dir.clone(),
+                template_executable,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    instance.backend_ownership = BackendOwnership::NotStarted;
+                    return Err(self
+                        .cleanup_failed_create(&mut instance, storage, None, false, error.into())
+                        .await);
+                }
+            };
+            match crate::failpoint::backend("create-spawn") {
+                Ok(()) => restore_with_runtime_directory(spawner.as_ref(), restore_request).await,
+                Err(error) => Err(crate::spawner::SpawnFailure::clean(error)),
             }
-            Err(error) => Err(crate::spawner::SpawnFailure::clean(error)),
+        } else {
+            let backend_request = match BackendSpawnRequest::new(
+                SpawnRequest {
+                    instance_id: instance.id,
+                    binary_path: request.binary_path,
+                    storage: storage.clone(),
+                    backend: request.decision.backend,
+                    vm: request.decision.vm,
+                },
+                work_dir.clone(),
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    instance.backend_ownership = BackendOwnership::NotStarted;
+                    return Err(self
+                        .cleanup_failed_create(&mut instance, storage, None, false, error.into())
+                        .await);
+                }
+            };
+            match crate::failpoint::backend("create-spawn") {
+                Ok(()) => spawn_with_runtime_directory(spawner.as_ref(), backend_request).await,
+                Err(error) => Err(crate::spawner::SpawnFailure::clean(error)),
+            }
         };
         let actual_backend = match spawn {
             Ok(backend_instance) => {
                 instance.backend_ownership = BackendOwnership::Running;
+                // A restore reloads a captured identity; refuse to adopt a
+                // backend owner whose identity diverges from durable state.
+                if template_backed
+                    && (backend_instance.instance_id() != instance.id
+                        || backend_instance.backend() != instance.backend)
+                {
+                    return Err(self
+                        .cleanup_failed_create(
+                            &mut instance,
+                            storage,
+                            Some(backend_instance),
+                            false,
+                            BlazeDaemonError::Internal(
+                                "restored backend owner identity does not match durable state"
+                                    .to_string(),
+                            ),
+                        )
+                        .await);
+                }
                 let actual_backend = backend_instance.backend();
                 if let Err(error) = self
                     .wait_for_guest_ready(&backend_instance, "create-guest-ready")
@@ -437,7 +781,7 @@ impl SandboxManager {
         }
         instance.finish_operation();
         if let Err(error) = crate::failpoint::state("create-state-commit")
-            .and_then(|_| instance.persist(&self.state_dir).map_err(Into::into))
+            .and_then(|_| self.state_store.persist(&instance))
         {
             return Err(self
                 .cleanup_failed_create(&mut instance, storage, None, true, error)
@@ -461,271 +805,22 @@ impl SandboxManager {
         })
     }
 
-    async fn activate_warm(&self, key: &PoolKey) -> Result<Option<CreateSandboxResult>> {
-        let candidate = self.pool.lock().map_err(|_| poisoned("pool"))?.lookup(key);
-        let Some(id) = candidate else {
-            return Ok(None);
-        };
-        let operation_lock = self.operation_lock(id);
-        let _operation = operation_lock.lock().await;
-
-        let instance = self
-            .instances
-            .lock()
-            .map_err(|_| poisoned("instances"))?
-            .get(&id)
-            .cloned();
-        let backend = self
-            .backend_instances
-            .lock()
-            .map_err(|_| poisoned("backend_instances"))?
-            .get(&id)
-            .cloned();
-
-        let invalid_reason = match (&instance, &backend) {
-            (None, _) => Some("lifecycle metadata is missing".to_string()),
-            (_, None) => Some("backend owner is missing".to_string()),
-            (Some(instance), Some(_))
-                if instance.state != SandboxState::Warm || instance.operation.is_some() =>
-            {
-                Some(format!("lifecycle state is {}", instance.state))
-            }
-            (Some(instance), Some(backend)) if backend.backend() != instance.backend => {
-                Some(format!(
-                    "backend owner is {}, metadata is {}",
-                    backend.backend(),
-                    instance.backend
-                ))
-            }
-            (_, Some(backend)) => match backend.try_wait().await {
-                Ok(None) => None,
-                Ok(Some(status)) => Some(format!("backend exited: {status:?}")),
-                Err(error) => Some(format!("backend liveness check failed: {error}")),
-            },
-        };
-        if let Some(reason) = invalid_reason {
-            self.quarantine_warm(key, id, instance, backend, &reason)
-                .await;
-            return Ok(None);
-        }
-
-        let original = instance.expect("validated warm metadata");
-        match self.storage.reconstruct(&id.to_string()).await {
-            Ok(_) => {}
-            Err(error @ BlazeError::StorageIncomplete { .. }) => {
-                self.quarantine_warm(
-                    key,
-                    id,
-                    Some(original),
-                    backend,
-                    &format!("storage validation failed: {error}"),
-                )
-                .await;
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(self.restore_warm_claim(key, original, error.into()));
-            }
-        }
-
-        let mut activating = original.clone();
-        activating.begin_operation(OperationKind::Create);
-        if let Err(error) = crate::failpoint::state("warm-intent-state-commit").and_then(|_| {
-            activating
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
-            return Err(self.restore_warm_claim(key, original, error));
-        }
-        if let Some(error) = self.retain_instance(activating.clone()) {
-            return Err(self.restore_warm_claim(key, original, BlazeDaemonError::Internal(error)));
-        }
-
-        crate::failpoint::pause("warm-before-state-commit").await;
-        let selected_backend = backend.expect("validated warm backend").backend();
-        if let Err(error) = activating
-            .transition(SandboxState::Creating)
-            .and_then(|_| activating.transition(SandboxState::Running))
-        {
-            return Err(self.restore_warm_claim(key, original, error.into()));
-        }
-        activating.finish_operation();
-        if let Err(error) = crate::failpoint::state("warm-final-state-commit").and_then(|_| {
-            activating
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
-            return Err(self.restore_warm_claim(key, original, error));
-        }
-        if let Some(error) = self.retain_instance(activating.clone()) {
-            return Err(self.restore_warm_claim(key, original, BlazeDaemonError::Internal(error)));
-        }
-        Ok(Some(CreateSandboxResult {
-            instance: activating,
-            selected_backend,
-        }))
-    }
-
-    fn restore_warm_claim(
-        &self,
-        key: &PoolKey,
-        instance: SandboxInstance,
-        cause: BlazeDaemonError,
-    ) -> BlazeDaemonError {
-        let id = instance.id;
-        let mut errors = Vec::new();
-        if let Err(error) = instance.persist(&self.state_dir) {
-            errors.push(format!("restore warm state persistence failed: {error}"));
-        }
-        if let Some(error) = self.retain_instance(instance) {
-            errors.push(error);
-        }
-        match self.pool.lock() {
-            Ok(mut pool) => pool.restore_lookup(key.clone(), id),
-            Err(poisoned) => {
-                poisoned.into_inner().restore_lookup(key.clone(), id);
-                errors.push("pool lock poisoned while restoring warm claim".to_string());
-            }
-        }
-        let details = if errors.is_empty() {
-            "warm claim restored for retry".to_string()
-        } else {
-            format!("warm claim restored with errors: {}", errors.join("; "))
-        };
-        BlazeDaemonError::RecoveryRequired(format!("{cause}; instance {id}: {details}"))
-    }
-
-    async fn quarantine_warm(
-        &self,
-        key: &PoolKey,
-        id: Uuid,
-        mut instance: Option<SandboxInstance>,
-        backend: Option<DynBackendInstance>,
-        reason: &str,
-    ) {
-        match self.pool.lock() {
-            Ok(mut pool) => pool.quarantine(key, id),
-            Err(poisoned) => poisoned.into_inner().quarantine(key, id),
-        }
-        tracing::warn!(instance = %id, reason, "warm instance validation failed");
-
-        let Some(metadata) = instance.as_mut() else {
-            if let Some(backend) = backend.as_ref()
-                && let Err(error) = backend.kill().await
-            {
-                tracing::error!(
-                    instance = %id,
-                    %error,
-                    "quarantined backend cleanup failed"
-                );
-            }
-            tracing::error!(
-                instance = %id,
-                "quarantined lifecycle metadata missing; retaining storage"
-            );
-            return;
-        };
-        metadata.begin_operation(OperationKind::Destroy);
-        if let Err(error) = metadata.persist(&self.state_dir) {
-            tracing::error!(instance = %id, %error, "quarantine intent commit failed");
-            return;
-        }
-        if let Some(error) = self.retain_instance(metadata.clone()) {
-            tracing::error!(instance = %id, %error, "quarantine intent retention failed");
-            return;
-        }
-
-        let backend_stopped = match backend.as_ref() {
-            Some(backend) => match backend.kill().await {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::error!(instance = %id, %error, "quarantined backend cleanup failed");
-                    false
-                }
-            },
-            None if matches!(
-                metadata.backend_ownership,
-                BackendOwnership::NotStarted | BackendOwnership::Stopped
-            ) =>
-            {
-                true
-            }
-            None => match self.spawners.get(metadata.backend) {
-                Some(spawner) => match spawner
-                    .cleanup_orphan(id, &self.state_dir.join(id.to_string()))
-                    .await
-                {
-                    Ok(()) => true,
-                    Err(error) => {
-                        tracing::error!(
-                            instance = %id,
-                            %error,
-                            "quarantined orphan cleanup failed"
-                        );
-                        false
-                    }
-                },
-                None => {
-                    tracing::error!(
-                        instance = %id,
-                        backend = %metadata.backend,
-                        "quarantined backend has no recovery spawner"
-                    );
-                    false
-                }
-            },
-        };
-        if !backend_stopped {
-            let _ = self.mark_recovery(id);
-            return;
-        }
-
-        metadata.backend_ownership = BackendOwnership::Stopped;
-        if let Err(error) = metadata.persist(&self.state_dir) {
-            tracing::error!(instance = %id, %error, "quarantined stop state commit failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        if let Some(error) = self.retain_instance(metadata.clone()) {
-            tracing::error!(instance = %id, %error, "quarantined stop state retention failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        if let Err(error) = self.storage.release_by_id(&id.to_string()).await {
-            tracing::error!(instance = %id, %error, "quarantined storage cleanup failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-
-        if metadata.state != SandboxState::Destroyed
-            && let Err(error) = metadata.transition(SandboxState::Destroyed)
-        {
-            tracing::error!(instance = %id, %error, "quarantined lifecycle cleanup failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        metadata.finish_operation();
-        if let Err(error) = metadata.persist(&self.state_dir) {
-            tracing::error!(instance = %id, %error, "quarantined state commit failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        let _ = self.retain_instance(metadata.clone());
-        match self.backend_instances.lock() {
-            Ok(mut instances) => {
-                instances.remove(&id);
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().remove(&id);
-            }
-        }
-    }
-
     /// Idempotently destroy one sandbox and its owned runtime resources.
-    pub async fn destroy(&self, id: Uuid) -> Result<bool> {
-        let operation_lock = self.operation_lock(id);
-        let _operation = operation_lock.lock().await;
-        self.destroy_locked(id).await
+    ///
+    /// The supervised task retains per-sandbox serialization after a caller
+    /// disconnects, so blocking filesystem cleanup cannot race a retry.
+    pub async fn destroy(self: &Arc<Self>, id: Uuid) -> Result<bool> {
+        let manager = Arc::clone(self);
+        crate::failpoint::spawn(async move {
+            let operation = manager.operation_lock(id).lock_owned().await;
+            let result = manager.destroy_locked(id).await;
+            drop(operation);
+            result
+        })
+        .await
+        .map_err(|error| {
+            BlazeDaemonError::Internal(format!("destroy supervisor failed: {error}"))
+        })?
     }
 
     async fn destroy_locked(&self, id: Uuid) -> Result<bool> {
@@ -739,11 +834,9 @@ impl SandboxManager {
         {
             original.begin_operation(OperationKind::Destroy);
         }
-        if let Err(error) = crate::failpoint::state("destroy-intent-state-commit").and_then(|_| {
-            original
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("destroy-intent-state-commit")
+            .and_then(|_| self.state_store.persist(&original))
+        {
             let _ = self.mark_recovery(id);
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: intent persistence failed: {error}; resources retained"
@@ -773,11 +866,14 @@ impl SandboxManager {
                     Ok(())
                 } else {
                     match self.spawners.get(original.backend) {
-                        Some(spawner) => {
-                            spawner
-                                .cleanup_orphan(id, &self.state_dir.join(id.to_string()))
-                                .await
-                        }
+                        Some(spawner) => match self.state_store.run_dir(id) {
+                            Ok(run_dir) => spawner.cleanup_orphan(id, &run_dir).await,
+                            Err(error) => Err(BlazeError::BackendError {
+                                msg: format!(
+                                    "open owned run directory for persisted instance {id}: {error}"
+                                ),
+                            }),
+                        },
                         None => Err(BlazeError::BackendError {
                             msg: format!(
                                 "no recovery spawner registered for persisted backend {}",
@@ -800,11 +896,9 @@ impl SandboxManager {
         }
 
         original.backend_ownership = BackendOwnership::Stopped;
-        if let Err(error) = crate::failpoint::state("destroy-stop-state-commit").and_then(|_| {
-            original
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("destroy-stop-state-commit")
+            .and_then(|_| self.state_store.persist(&original))
+        {
             let recovery = self.mark_instance_recovery(original.clone()).err();
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: backend stopped but stop state persistence failed: {error}; \
@@ -819,6 +913,39 @@ impl SandboxManager {
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: backend stopped but lifecycle retention failed: {error}; \
                  storage retained"
+            )));
+        }
+
+        let checkpoints = self.checkpoints.clone();
+        let checkpoint_cleanup = crate::failpoint::spawn_blocking(move || {
+            crate::failpoint::pause_blocking("checkpoint-before-store-remove");
+            checkpoints.remove_sandbox(id)
+        })
+        .await;
+        let checkpoint_cleanup_error = match checkpoint_cleanup {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(format!("blocking task failed: {error}")),
+        };
+        if let Some(error) = checkpoint_cleanup_error {
+            let recovery = self.mark_recovery(id).err();
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: backend stopped but checkpoint cleanup failed: {error}; \
+                 storage retained{}",
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
+            )));
+        }
+
+        if let Err(error) = self.cleanup_hibernate_artifacts(id).await {
+            let recovery = self.mark_recovery(id).err();
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: backend stopped but hibernation cleanup failed: {error}; \
+                 storage retained{}",
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
             )));
         }
 
@@ -838,11 +965,9 @@ impl SandboxManager {
             destroyed.transition(SandboxState::Destroyed)?;
         }
         destroyed.finish_operation();
-        if let Err(error) = crate::failpoint::state("destroy-final-state-commit").and_then(|_| {
-            destroyed
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("destroy-final-state-commit")
+            .and_then(|_| self.state_store.persist(&destroyed))
+        {
             let recovery = self.mark_recovery(id).err();
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: resources released but final state persistence failed: {error}{}",
@@ -851,11 +976,7 @@ impl SandboxManager {
                     .unwrap_or_default()
             )));
         }
-        if let Some(error) = self.retain_instance(destroyed) {
-            return Err(BlazeDaemonError::RecoveryRequired(format!(
-                "destroy {id}: resources released but {error}"
-            )));
-        }
+        let retention_error = self.retain_instance(destroyed);
         match self.backend_instances.lock() {
             Ok(mut instances) => {
                 instances.remove(&id);
@@ -864,48 +985,20 @@ impl SandboxManager {
                 poisoned.into_inner().remove(&id);
             }
         }
+        if let Some(error) = retention_error {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: resources released but {error}"
+            )));
+        }
         self.metrics.inc(&self.metrics.instances_destroyed);
         Ok(true)
     }
 
     /// Reconcile every non-terminal record without aborting on one failure.
     pub async fn reconcile_startup(&self) -> ReconcileReport {
-        let ids = match self.instances.lock() {
-            Ok(instances) => instances
-                .values()
-                .filter(|instance| instance.state != SandboxState::Destroyed)
-                .map(|instance| instance.id)
-                .collect::<Vec<_>>(),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .values()
-                .filter(|instance| instance.state != SandboxState::Destroyed)
-                .map(|instance| instance.id)
-                .collect::<Vec<_>>(),
-        };
-        let mut report = ReconcileReport {
-            attempted: ids.len(),
-            ..ReconcileReport::default()
-        };
-        for id in ids {
-            let operation_lock = self.operation_lock(id);
-            let _operation = operation_lock.lock().await;
-            match self.destroy_locked(id).await {
-                Ok(_) => report.completed += 1,
-                Err(error) => {
-                    let recovery = self.mark_recovery(id).err();
-                    report.failures.push(ReconcileFailure {
-                        instance_id: id,
-                        error: match recovery {
-                            Some(recovery) => {
-                                format!("{error}; recovery state persistence failed: {recovery}")
-                            }
-                            None => error.to_string(),
-                        },
-                    });
-                }
-            }
-        }
+        let mut classification_failures = self.classify_interrupted_hibernation();
+        let mut report = self.cleanup_owned_instances().await;
+        report.failures.append(&mut classification_failures);
         report
     }
 
@@ -918,6 +1011,50 @@ impl SandboxManager {
             )));
         }
         Ok(operation)
+    }
+
+    fn classify_interrupted_hibernation(&self) -> Vec<ReconcileFailure> {
+        let interrupted = match self.instances.lock() {
+            Ok(instances) => instances
+                .values()
+                .filter(|instance| {
+                    matches!(
+                        instance.state,
+                        SandboxState::Hibernating | SandboxState::Resuming
+                    ) || matches!(
+                        instance.operation.as_ref().map(|operation| operation.kind),
+                        Some(OperationKind::Hibernate | OperationKind::Resume)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .values()
+                .filter(|instance| {
+                    matches!(
+                        instance.state,
+                        SandboxState::Hibernating | SandboxState::Resuming
+                    ) || matches!(
+                        instance.operation.as_ref().map(|operation| operation.kind),
+                        Some(OperationKind::Hibernate | OperationKind::Resume)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+        };
+        interrupted
+            .into_iter()
+            .filter_map(|instance| {
+                let id = instance.id;
+                self.mark_instance_recovery(instance)
+                    .err()
+                    .map(|error| ReconcileFailure {
+                        instance_id: id,
+                        error: format!("interrupted hibernation classification failed: {error}"),
+                    })
+            })
+            .collect()
     }
 
     fn guest_client(&self, id: Uuid) -> Result<GuestClient> {
@@ -943,7 +1080,7 @@ impl SandboxManager {
         ))
     }
 
-    async fn wait_for_guest_ready(
+    pub(super) async fn wait_for_guest_ready(
         &self,
         backend: &DynBackendInstance,
         failpoint: &str,
@@ -960,6 +1097,50 @@ impl SandboxManager {
         )
         .wait_ready(GUEST_REQUEST_TIMEOUT, &CancellationToken::new())
         .await
+    }
+
+    /// Release every instance that lifecycle cleanup still owns.
+    ///
+    /// Startup reconciliation has no external deadline, so each record gets the
+    /// full per-sandbox operation lock without a timeout.
+    pub async fn cleanup_owned_instances(&self) -> ReconcileReport {
+        let ids = match self.owned_instance_ids() {
+            Ok(ids) => ids,
+            Err(error) => {
+                return ReconcileReport {
+                    attempted: 0,
+                    completed: 0,
+                    failures: vec![ReconcileFailure {
+                        instance_id: Uuid::nil(),
+                        error: format!("owned instance inventory unavailable: {error}"),
+                    }],
+                };
+            }
+        };
+        let mut report = ReconcileReport {
+            attempted: ids.len(),
+            ..ReconcileReport::default()
+        };
+        for id in ids {
+            let operation_lock = self.operation_lock(id);
+            let _operation = operation_lock.lock().await;
+            match self.destroy_locked(id).await {
+                Ok(_) => report.completed += 1,
+                Err(error) => {
+                    let recovery = self.mark_recovery(id).err();
+                    report.failures.push(ReconcileFailure {
+                        instance_id: id,
+                        error: match recovery {
+                            Some(recovery) => {
+                                format!("{error}; recovery state persistence failed: {recovery}")
+                            }
+                            None => error.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+        report
     }
 
     async fn cleanup_failed_create(
@@ -1014,18 +1195,7 @@ impl SandboxManager {
         }
 
         if backend_stopped && storage_released {
-            instance.backend_ownership = BackendOwnership::Stopped;
-            if let Err(error) = instance.transition(SandboxState::Destroyed) {
-                cleanup_errors.push(format!("lifecycle update failed: {error}"));
-            } else {
-                instance.finish_operation();
-            }
-            if let Err(error) = instance.persist(&self.state_dir) {
-                cleanup_errors.push(format!("state persistence failed: {error}"));
-            }
-            if let Some(error) = self.retain_instance(instance.clone()) {
-                cleanup_errors.push(error);
-            }
+            cleanup_errors.extend(self.commit_create_rollback(instance));
             if cleanup_errors.is_empty() {
                 self.metrics.inc(&self.metrics.instances_destroyed);
                 return original;
@@ -1046,7 +1216,7 @@ impl SandboxManager {
         {
             cleanup_errors.push(format!("recovery state update failed: {error}"));
         }
-        if let Err(error) = instance.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(instance) {
             cleanup_errors.push(format!("state persistence failed: {error}"));
         }
         if let Some(error) = self.retain_instance(instance.clone()) {
@@ -1071,7 +1241,7 @@ impl SandboxManager {
             {
                 errors.push(format!("recovery state update failed: {error}"));
             }
-            if let Err(error) = instance.persist(&self.state_dir) {
+            if let Err(error) = self.state_store.persist(instance) {
                 errors.push(format!("state persistence failed: {error}"));
             }
             if let Some(error) = self.retain_instance(instance.clone()) {
@@ -1091,19 +1261,7 @@ impl SandboxManager {
             ));
         }
 
-        let mut errors = Vec::new();
-        instance.backend_ownership = BackendOwnership::Stopped;
-        if let Err(error) = instance.transition(SandboxState::Destroyed) {
-            errors.push(format!("lifecycle update failed: {error}"));
-        } else {
-            instance.finish_operation();
-        }
-        if let Err(error) = instance.persist(&self.state_dir) {
-            errors.push(format!("state persistence failed: {error}"));
-        }
-        if let Some(error) = self.retain_instance(instance.clone()) {
-            errors.push(error);
-        }
+        let errors = self.commit_create_rollback(instance);
         if errors.is_empty() {
             original
         } else {
@@ -1114,19 +1272,68 @@ impl SandboxManager {
         }
     }
 
-    fn mark_recovery(&self, id: Uuid) -> Result<()> {
+    /// Commit a fully compensated create as terminal without losing the
+    /// operation record when that terminal commit itself fails.
+    fn commit_create_rollback(&self, instance: &mut SandboxInstance) -> Vec<String> {
+        let recoverable = instance.clone();
+        let mut terminal = recoverable.clone();
+        terminal.backend_ownership = BackendOwnership::Stopped;
+        let terminal_result = (|| -> Result<()> {
+            if terminal.state != SandboxState::Destroyed {
+                terminal.transition(SandboxState::Destroyed)?;
+            }
+            terminal.finish_operation();
+            crate::failpoint::state("create-rollback-final-state-commit")?;
+            self.state_store.persist(&terminal)
+        })();
+
+        match terminal_result {
+            Ok(()) => {
+                *instance = terminal.clone();
+                self.retain_instance(terminal).into_iter().collect()
+            }
+            Err(error) => {
+                let mut errors = vec![format!("final state persistence failed: {error}")];
+                let mut recovery = recoverable;
+                recovery.backend_ownership = BackendOwnership::Stopped;
+                if recovery.state != SandboxState::RecoveryRequired
+                    && let Err(error) = recovery.transition(SandboxState::RecoveryRequired)
+                {
+                    errors.push(format!("recovery state update failed: {error}"));
+                }
+                if let Err(error) = self.state_store.persist(&recovery) {
+                    errors.push(format!("recovery state persistence failed: {error}"));
+                }
+                if let Some(error) = self.retain_instance(recovery.clone()) {
+                    errors.push(error);
+                }
+                *instance = recovery;
+                errors
+            }
+        }
+    }
+
+    pub(super) fn mark_recovery(&self, id: Uuid) -> Result<()> {
         self.mark_instance_recovery(self.get(id)?)
     }
 
-    fn mark_instance_recovery(&self, mut instance: SandboxInstance) -> Result<()> {
+    pub(super) fn persist_and_retain(&self, instance: SandboxInstance) -> Result<()> {
+        self.state_store.persist(&instance)?;
+        if let Some(error) = self.retain_instance(instance) {
+            return Err(BlazeDaemonError::RecoveryRequired(error));
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_instance_recovery(&self, mut instance: SandboxInstance) -> Result<()> {
         if instance.state != SandboxState::RecoveryRequired {
             instance.transition(SandboxState::RecoveryRequired)?;
         }
-        let persist = instance.persist(&self.state_dir);
+        let persist = self.state_store.persist(&instance);
         let retained = self.retain_instance(instance);
         match (persist, retained) {
             (Ok(()), None) => Ok(()),
-            (Err(error), None) => Err(error.into()),
+            (Err(error), None) => Err(error),
             (Ok(()), Some(error)) => Err(BlazeDaemonError::Internal(error)),
             (Err(persist), Some(retain)) => Err(BlazeDaemonError::RecoveryRequired(format!(
                 "recovery state persistence failed: {persist}; {retain}"
@@ -1134,7 +1341,7 @@ impl SandboxManager {
         }
     }
 
-    fn retain_backend(&self, id: Uuid, backend: DynBackendInstance) -> Option<String> {
+    pub(super) fn retain_backend(&self, id: Uuid, backend: DynBackendInstance) -> Option<String> {
         match self.backend_instances.lock() {
             Ok(mut instances) => {
                 instances.insert(id, backend);
@@ -1147,7 +1354,7 @@ impl SandboxManager {
         }
     }
 
-    fn retain_instance(&self, instance: SandboxInstance) -> Option<String> {
+    pub(super) fn retain_instance(&self, instance: SandboxInstance) -> Option<String> {
         match self.instances.lock() {
             Ok(mut instances) => {
                 instances.insert(instance.id, instance);
@@ -1163,4 +1370,72 @@ impl SandboxManager {
 
 fn poisoned(name: &str) -> BlazeDaemonError {
     BlazeDaemonError::Internal(format!("{name} lock poisoned"))
+}
+
+fn is_clean_terminal(instance: &SandboxInstance) -> bool {
+    instance.state == SandboxState::Destroyed
+        && instance.operation.is_none()
+        && matches!(
+            instance.backend_ownership,
+            BackendOwnership::NotStarted | BackendOwnership::Stopped
+        )
+}
+
+fn requires_automatic_cleanup(instance: &SandboxInstance) -> bool {
+    !(is_clean_terminal(instance)
+        || (instance.state == SandboxState::Hibernated
+            && instance.operation.is_none()
+            && instance.backend_ownership == BackendOwnership::Stopped)
+        || (instance.state == SandboxState::RecoveryRequired
+            && matches!(
+                instance.operation.as_ref().map(|operation| operation.kind),
+                Some(OperationKind::Hibernate | OperationKind::Resume)
+            )))
+}
+
+/// Require the command line captured in a Firecracker snapshot to equal the
+/// command line the matched policy would use for a cold start.
+///
+/// Restore loads the captured machine configuration and does not call
+/// `write_vm_config`, so accepting a mismatch would silently bypass current
+/// policy controls.
+fn validate_template_boot_args(
+    template_name: &str,
+    captured: Option<&str>,
+    expected: &str,
+    policy_name: &str,
+) -> Result<()> {
+    if captured == Some(expected) {
+        return Ok(());
+    }
+    Err(BlazeDaemonError::Conflict(format!(
+        "template {template_name} kernel boot arguments do not match policy {policy_name}"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firecracker_template_boot_arguments_must_match_the_policy_exactly() {
+        validate_template_boot_args(
+            "runtime-base",
+            Some("console=ttyS0 panic=1"),
+            "console=ttyS0 panic=1",
+            "agent-tool",
+        )
+        .expect("identical command lines");
+
+        for captured in [None, Some("console=ttyS0 panic=2")] {
+            let error = validate_template_boot_args(
+                "runtime-base",
+                captured,
+                "console=ttyS0 panic=1",
+                "agent-tool",
+            )
+            .expect_err("missing or different command lines must be rejected");
+            assert!(matches!(error, BlazeDaemonError::Conflict(_)));
+        }
+    }
 }

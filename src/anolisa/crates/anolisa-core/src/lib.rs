@@ -10,11 +10,13 @@ pub mod capability;
 pub mod catalog;
 pub mod central_log;
 pub mod component;
+pub mod component_snapshot;
 pub mod daemon_server;
 pub mod dependency;
 pub mod distribution;
 pub mod domain;
 pub mod download;
+pub mod execution;
 pub mod executor;
 pub mod facts;
 pub mod feature_flags;
@@ -56,7 +58,7 @@ pub use adapter::manager::{
 pub use adapter::registry::DriverRegistry;
 pub use adapter::{
     AdapterError, DetectResult, detect_framework, expand_layout_placeholders,
-    expand_layout_placeholders_str,
+    expand_layout_placeholders_content,
 };
 pub use backup::{BackupEntry, BackupSet};
 pub use capability::{
@@ -69,11 +71,20 @@ pub use central_log::{
     CentralLog, CentralLogError, LogFilter, LogKind, LogRecord, LogStatus, Severity,
 };
 pub use component::{Component, ComponentMeta, ComponentStatus};
+pub use component_snapshot::{
+    AdapterObservation, AdapterProvenance, AdapterSourceSnapshot, ComponentSnapshot,
+    ComponentSnapshotObservations, ComponentSnapshotRequest, JournalProvenance,
+    ManifestHealthProvenance, ManifestHealthSnapshot, NativePackageProvenance,
+    NativePackageSnapshot, OwnedFileObservation, OwnedFilesProvenance, OwnedFilesSnapshot,
+    OwnedFilesVerdict, PendingJournalSnapshot, ProbeEvidence, SnapshotContractError, SnapshotProbe,
+    StateProvenance, StateRootScope, StateSnapshot, StateVisibilitySnapshot,
+};
 pub use distribution::{
     ArtifactType, DistributionEntry, DistributionError, DistributionIndex, ResolveError,
     ResolveQuery,
 };
 pub use download::{DownloadCache, DownloadError, DownloadedArtifact};
+pub use execution::{CommandOutcome, CommandOutcomeStatus, ExecutionIntent, PreparedExecution};
 pub use feature_flags::FeatureStore;
 pub use health::{
     CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, ServiceProbes, run_check,

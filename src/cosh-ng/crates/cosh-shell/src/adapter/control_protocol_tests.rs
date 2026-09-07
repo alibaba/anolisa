@@ -303,10 +303,16 @@ fn parse_non_control_request_returns_none() {
 }
 
 #[test]
-fn parse_initialize_capabilities_from_success_response() {
-    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true,"can_handle_approval_receipt":true}}}}"#;
-    let capabilities = parse_initialize_capabilities(line).expect("capabilities");
+fn parse_versioned_initialize_response() {
+    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","protocol_version":1,"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true,"can_handle_approval_receipt":true}}}}"#;
+    let capabilities = parse_initialize_response(line, "init-1")
+        .expect("initialize response")
+        .expect("compatible version");
     assert!(capabilities.provider_initialize_seen);
+    assert_eq!(
+        capabilities.protocol_version,
+        Some(CONTROL_PROTOCOL_VERSION)
+    );
     assert!(capabilities.can_handle_can_use_tool);
     assert!(capabilities.can_handle_host_executed_shell_tool_result);
     assert!(capabilities.can_handle_shell_evidence_tool);
@@ -314,10 +320,13 @@ fn parse_initialize_capabilities_from_success_response() {
 }
 
 #[test]
-fn parse_initialize_capabilities_defaults_missing_flags_to_false() {
+fn parse_legacy_initialize_response_defaults_capabilities() {
     let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}"#;
-    let capabilities = parse_initialize_capabilities(line).expect("capabilities");
+    let capabilities = parse_initialize_response(line, "init-1")
+        .expect("initialize response")
+        .expect("legacy compatibility");
     assert!(capabilities.provider_initialize_seen);
+    assert_eq!(capabilities.protocol_version, None);
     assert!(!capabilities.can_handle_can_use_tool);
     assert!(!capabilities.can_handle_host_executed_shell_tool_result);
     assert!(!capabilities.can_handle_shell_evidence_tool);
@@ -334,12 +343,33 @@ fn receipt_capable_requires_the_announced_capability() {
 }
 
 #[test]
-fn parse_initialize_capabilities_ignores_other_responses() {
-    assert!(parse_initialize_capabilities(
-        r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow"}}}"#
+fn parse_initialize_response_rejects_incompatible_version() {
+    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","protocol_version":9,"capabilities":{}}}}"#;
+    let error = parse_initialize_response(line, "init-1")
+        .expect("initialize response")
+        .expect_err("unsupported version");
+    assert!(error.contains("unsupported control protocol version 9"));
+}
+
+#[test]
+fn parse_initialize_response_rejects_mismatched_request_id() {
+    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"wrong","response":{"subtype":"initialize","protocol_version":1,"capabilities":{}}}}"#;
+    let error = parse_initialize_response(line, "init-1")
+        .expect("initialize response")
+        .expect_err("mismatched request id");
+    assert!(error.contains("does not match"));
+}
+
+#[test]
+fn parse_initialize_response_ignores_other_responses() {
+    assert!(parse_initialize_response(
+        r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow"}}}"#,
+        "init-1"
     )
     .is_none());
-    assert!(parse_initialize_capabilities(r#"{"type":"assistant","message":"hi"}"#).is_none());
+    assert!(
+        parse_initialize_response(r#"{"type":"assistant","message":"hi"}"#, "init-1").is_none()
+    );
 }
 
 #[test]
@@ -674,6 +704,31 @@ fn pending_control_tool_call_drops_matching_shell_snapshot() {
 }
 
 #[test]
+fn control_staging_uses_the_canonical_provider_catalog() {
+    for name in [
+        "Bash",
+        "shell",
+        "run_shell_command",
+        "tool Bash",
+        "cosh_shell_evidence",
+    ] {
+        assert!(is_control_backed_tool_name(name), "{name}");
+    }
+
+    for name in [
+        "grep",
+        "edit",
+        "web_fetch",
+        "save_memory",
+        "todo",
+        "skill",
+        "CustomTool",
+    ] {
+        assert!(!is_control_backed_tool_name(name), "{name}");
+    }
+}
+
+#[test]
 fn pending_control_tool_call_drops_matching_shell_evidence_snapshot_and_result() {
     let mut pending = PendingControlProtocolToolCall::default();
 
@@ -882,6 +937,17 @@ fn serialize_initialize_format() {
     assert_eq!(v["type"], "control_request");
     assert_eq!(v["request_id"], "init-7");
     assert_eq!(v["request"]["subtype"], "initialize");
+    assert!(v["request"].get("protocol_version").is_none());
+}
+
+#[test]
+fn serialize_cosh_core_initialize_format() {
+    let s = serialize_cosh_core_initialize("init-7");
+    let v: Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(v["request_id"], "init-7");
+    assert_eq!(v["request"]["subtype"], "initialize");
+    assert_eq!(v["request"]["protocol_version"], CONTROL_PROTOCOL_VERSION);
 }
 
 #[test]
@@ -890,6 +956,7 @@ fn serialize_one_shot_initialize_disables_session_start() {
     let v: Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["request"]["subtype"], "initialize");
     assert_eq!(v["request"]["fire_session_start"], false);
+    assert_eq!(v["request"]["protocol_version"], CONTROL_PROTOCOL_VERSION);
 }
 
 #[test]

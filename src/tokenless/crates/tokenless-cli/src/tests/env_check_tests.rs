@@ -6,8 +6,7 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl EnvGuard {
@@ -15,23 +14,53 @@ impl EnvGuard {
         let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
-        EnvGuard { _lock: lock, key, prev }
+        EnvGuard {
+            _lock: lock,
+            previous: vec![(key, prev)],
+        }
     }
 
     fn set_spec(path: &str) -> Self {
-        Self::set("TOKENLESS_TOOL_READY_SPEC", path)
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let spec_prev = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
+        let legacy_prev = std::env::var_os("TOKENLESS_TOOL_READY_TEST_LEGACY");
+        unsafe {
+            std::env::set_var("TOKENLESS_TOOL_READY_SPEC", path);
+            std::env::set_var("TOKENLESS_TOOL_READY_TEST_LEGACY", "1");
+        }
+        EnvGuard {
+            _lock: lock,
+            previous: vec![
+                ("TOKENLESS_TOOL_READY_SPEC", spec_prev),
+                ("TOKENLESS_TOOL_READY_TEST_LEGACY", legacy_prev),
+            ],
+        }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            for (key, prev) in self.previous.iter().rev() {
+                match prev {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
+}
+
+#[test]
+fn tool_ready_is_hard_bypassed_by_default() {
+    let _guard = EnvGuard::set("TOKENLESS_TOOL_READY_ENABLED", "1");
+    assert!(tool_ready_hard_bypassed());
+}
+
+#[test]
+fn tool_ready_legacy_path_has_a_test_only_override() {
+    let _guard = EnvGuard::set("TOKENLESS_TOOL_READY_TEST_LEGACY", "1");
+    assert!(!tool_ready_hard_bypassed());
 }
 
 #[test]
@@ -278,7 +307,7 @@ fn format_dep_status_all() {
 fn expand_path_home() {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let expanded = expand_path("~/.copilot-shell/settings.json");
-    assert_eq!(expanded, format!("{}/.copilot-shell/settings.json", home));
+    assert_eq!(expanded, format!("{home}/.copilot-shell/settings.json"));
 }
 
 #[test]
@@ -385,6 +414,31 @@ fn chmod_file(path: &std::path::Path, mode: u32) {
     let mut perm = std::fs::metadata(path).unwrap().permissions();
     perm.set_mode(mode);
     std::fs::set_permissions(path, perm).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rtk_resolution_skips_incompatible_path_candidate() {
+    let directory = tempfile::tempdir().unwrap();
+    let incompatible = directory.path().join("path-rtk");
+    std::fs::write(&incompatible, "#!/bin/sh\nprintf 'rtk 0.1.0'\n").unwrap();
+    chmod_file(&incompatible, 0o700);
+
+    let bundled_dir = directory
+        .path()
+        .join(".local/lib/anolisa/libexec/tokenless");
+    std::fs::create_dir_all(&bundled_dir).unwrap();
+    let bundled = bundled_dir.join("rtk");
+    std::fs::write(&bundled, "#!/bin/sh\nprintf 'rtk 0.43.0'\n").unwrap();
+    chmod_file(&bundled, 0o700);
+
+    assert_eq!(
+        select_rtk_path(
+            Some(incompatible),
+            directory.path().to_str().unwrap()
+        ),
+        Some(bundled.to_string_lossy().into_owned())
+    );
 }
 
 #[cfg(unix)]
@@ -695,6 +749,38 @@ fn check_tool_partial_missing_recommended() {
     };
     let result = check_tool("PartialTool", &spec);
     assert_eq!(result.status, ReadyStatus::Partial);
+}
+
+#[test]
+fn check_tool_partial_recommended_version_low() {
+    // bash>=999.0.0 is always VersionLow; the overall status must be PARTIAL, not READY.
+    let spec = ToolDepSpec {
+        aliases: vec![],
+        required: vec![make_dep("sh")],
+        recommended: vec![DepEntry {
+            binary: "bash".to_string(),
+            version: Some(">=999.0.0".to_string()),
+            package: "bash".to_string(),
+            apt_package: None,
+            apk_package: None,
+            manager: "rpm".to_string(),
+            pip_name: None,
+            uv_name: None,
+            npm_name: None,
+            use_npx: false,
+            fallback: vec![],
+        }],
+        config_files: vec![],
+        permissions: vec![],
+        network: vec![],
+    };
+    let result = check_tool("PartialVersionedTool", &spec);
+    assert_eq!(result.status, ReadyStatus::Partial);
+    // Confirm the dep itself is VersionLow, not Missing
+    assert!(
+        matches!(result.recommended_results[0].1, DepStatus::VersionLow { .. }),
+        "expected VersionLow for bash>=999.0.0"
+    );
 }
 
 #[test]
@@ -1050,7 +1136,7 @@ fn expand_path_tilde_subdir() {
         return;
     }
     let expanded = expand_path("~/.config");
-    assert_eq!(expanded, format!("{}/.config", home));
+    assert_eq!(expanded, format!("{home}/.config"));
 }
 
 #[test]
@@ -1132,8 +1218,13 @@ fn check_tool_versioned_available() {
     let spec_path = write_versioned_spec(dir.path());
     let specs = load_spec(&spec_path).unwrap();
     let result = check_tool("VersionedTool", specs.get("VersionedTool").unwrap());
-    // bash >= 1.0 should be available on any Linux
-    assert_eq!(result.status, ReadyStatus::Ready);
+    // bash >= 1.0 satisfies the required dep; cat>=0.1 may be VersionLow (no --version)
+    // and ~/.bashrc is likely absent — both conditions produce Partial, not Ready.
+    assert!(
+        result.status == ReadyStatus::Partial || result.status == ReadyStatus::Ready,
+        "expected Partial or Ready, got {:?}",
+        result.status
+    );
     assert!(!result.config_results.is_empty());
 }
 
@@ -1260,6 +1351,7 @@ fn run_fix_skips_recommended_only_missing_deps() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let prev_spec = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
     let prev_fix = std::env::var_os("TOKENLESS_ENV_FIX_SCRIPT");
+    let prev_legacy = std::env::var_os("TOKENLESS_TOOL_READY_TEST_LEGACY");
 
     let dir = tempfile::tempdir().unwrap();
     let spec_path = dir.path().join("recommended-only-spec.json");
@@ -1286,6 +1378,7 @@ fn run_fix_skips_recommended_only_missing_deps() {
     unsafe {
         std::env::set_var("TOKENLESS_TOOL_READY_SPEC", &spec_path);
         std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", &fix_script_path);
+        std::env::set_var("TOKENLESS_TOOL_READY_TEST_LEGACY", "1");
     }
 
     let result = run(Some("Shell"), false, true, false, true);
@@ -1298,6 +1391,10 @@ fn run_fix_skips_recommended_only_missing_deps() {
         match prev_fix {
             Some(v) => std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", v),
             None => std::env::remove_var("TOKENLESS_ENV_FIX_SCRIPT"),
+        }
+        match prev_legacy {
+            Some(v) => std::env::set_var("TOKENLESS_TOOL_READY_TEST_LEGACY", v),
+            None => std::env::remove_var("TOKENLESS_TOOL_READY_TEST_LEGACY"),
         }
     }
 
@@ -1578,4 +1675,94 @@ fn normalize_dep_with_fallback() {
     assert_eq!(dep.manager, "pip");
     assert_eq!(dep.fallback.len(), 1);
     assert_eq!(dep.fallback[0].binary.as_deref(), Some("rtk-fallback"));
+}
+
+fn synthetic_checklist_results() -> Vec<ToolReadyResult> {
+    vec![
+        ToolReadyResult {
+            tool_name: "Read".to_string(),
+            status: ReadyStatus::Ready,
+            required_results: vec![(normalize_dep(&json!("bash")), DepStatus::Available)],
+            recommended_results: vec![],
+            config_results: vec![("/etc/hostname".to_string(), true)],
+            permission_results: vec![("exec_shell".to_string(), true)],
+            network_results: vec![],
+        },
+        ToolReadyResult {
+            tool_name: "WebFetch".to_string(),
+            status: ReadyStatus::Partial,
+            required_results: vec![],
+            recommended_results: vec![(
+                normalize_dep(&json!("nonexistent_binary_xyz_99")),
+                DepStatus::Missing,
+            )],
+            config_results: vec![],
+            permission_results: vec![],
+            network_results: vec![("lan_probe".to_string(), true)],
+        },
+        ToolReadyResult {
+            tool_name: "Write".to_string(),
+            status: ReadyStatus::NotReady,
+            required_results: vec![(
+                normalize_dep(&json!("nonexistent_binary_xyz_99")),
+                DepStatus::Missing,
+            )],
+            recommended_results: vec![],
+            config_results: vec![("~/.nonexistent_config_xyz".to_string(), false)],
+            permission_results: vec![("file_write".to_string(), false)],
+            network_results: vec![],
+        },
+    ]
+}
+
+#[test]
+fn checklist_json_schema_covers_all_categories() {
+    let value = generate_checklist_json(&synthetic_checklist_results());
+
+    let tools = value["tools"].as_array().expect("tools must be an array");
+    assert_eq!(tools.len(), 3);
+
+    // Every tool entry carries the status label plus all five categories.
+    for tool in tools {
+        assert!(tool["status"].is_string());
+        for category in ["required", "recommended", "config", "permissions", "network"] {
+            assert!(
+                tool[category].is_array(),
+                "tool {} must serialize category {}",
+                tool["tool"],
+                category
+            );
+        }
+    }
+
+    let read = &tools[0];
+    assert_eq!(read["tool"], "Read");
+    assert_eq!(read["status"], "READY");
+    assert_eq!(read["required"][0]["binary"], "bash");
+    assert_eq!(read["required"][0]["status"], "INSTALLED");
+    assert_eq!(read["config"][0]["name"], "/etc/hostname");
+    assert_eq!(read["config"][0]["ok"], true);
+    assert_eq!(read["permissions"][0]["name"], "exec_shell");
+    assert_eq!(read["permissions"][0]["ok"], true);
+    assert_eq!(read["recommended"].as_array().unwrap().len(), 0);
+    assert_eq!(read["network"].as_array().unwrap().len(), 0);
+
+    let web_fetch = &tools[1];
+    assert_eq!(web_fetch["status"], "PARTIAL");
+    assert_eq!(web_fetch["recommended"][0]["status"], "MISSING");
+    assert_eq!(web_fetch["network"][0]["name"], "lan_probe");
+    assert_eq!(web_fetch["network"][0]["ok"], true);
+
+    let write = &tools[2];
+    assert_eq!(write["status"], "NOT_READY");
+    assert_eq!(write["required"][0]["status"], "MISSING");
+    assert_eq!(write["config"][0]["ok"], false);
+    assert_eq!(write["permissions"][0]["ok"], false);
+
+    // Summary counts are derived from the same results.
+    assert_eq!(value["summary"]["ready"], 1);
+    assert_eq!(value["summary"]["partial"], 1);
+    assert_eq!(value["summary"]["not_ready"], 1);
+    assert_eq!(value["summary"]["unknown"], 0);
+    assert_eq!(value["summary"]["total"], 3);
 }

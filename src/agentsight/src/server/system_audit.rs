@@ -24,6 +24,8 @@ pub(super) struct AuditQuery {
     agent_id: Option<String>,
     session_id: Option<String>,
     binding_id: Option<Uuid>,
+    status: Option<String>,
+    blocked: Option<bool>,
     limit: Option<usize>,
     offset: Option<i64>,
 }
@@ -155,11 +157,17 @@ pub(super) async fn cases(
 ) -> HttpResponse {
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = query.offset.unwrap_or(0).max(0);
-    let total = match data.audit_service.case_count() {
+    let agent_id = query.agent_id.as_deref();
+    let status = query.status.as_deref();
+    let blocked = query.blocked;
+    let total = match data.audit_service.case_count(agent_id, status, blocked) {
         Ok(total) => total,
         Err(error) => return store_error(error),
     };
-    match data.audit_service.cases(limit, offset) {
+    match data
+        .audit_service
+        .cases(limit, offset, agent_id, status, blocked)
+    {
         Ok(items) => response(
             StatusCode::OK,
             if items.is_empty() { "empty" } else { "ok" },
@@ -297,12 +305,40 @@ pub(super) fn response(status: StatusCode, state: &str, data: Value) -> HttpResp
     }))
 }
 
+/// Maps a store failure to a sanitized API error by failure class.
+///
+/// Data-corruption errors must not be reported as store unavailability:
+/// the store is reachable and retrying cannot succeed, so misclassifying
+/// them sends operators down the wrong troubleshooting path.
 pub(super) fn store_error(error: SecurityStoreError) -> HttpResponse {
     log::error!("system audit security store failed: {error}");
-    store_unavailable()
+    match error {
+        SecurityStoreError::Serialization(_) | SecurityStoreError::InvalidData(_) => {
+            invalid_stored_data()
+        }
+        SecurityStoreError::Open(_)
+        | SecurityStoreError::Sqlite(_)
+        | SecurityStoreError::InvalidFilter(_)
+        | SecurityStoreError::MissingCase(_)
+        | SecurityStoreError::TimestampOutOfRange(_)
+        | SecurityStoreError::Poisoned
+        | SecurityStoreError::PolicyRevisionConflict { .. } => store_unavailable(),
+    }
 }
 
-pub(super) fn store_unavailable() -> HttpResponse {
+// Details stay in the log above; the response must not leak paths or
+// raw serde output.
+fn invalid_stored_data() -> HttpResponse {
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid_stored_data",
+        "stored security event data is invalid",
+        false,
+    )
+}
+
+// Private so handlers cannot bypass the classification in store_error().
+fn store_unavailable() -> HttpResponse {
     error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "security_store_unavailable",
@@ -347,18 +383,42 @@ mod tests {
 
     use super::{session_page_view, store_error};
 
-    #[actix_web::test]
-    async fn store_errors_do_not_expose_internal_paths() {
-        let response = store_error(SecurityStoreError::InvalidData(
-            "database /private/db is corrupt".into(),
-        ));
+    async fn error_body(response: actix_web::HttpResponse) -> serde_json::Value {
         let body = to_bytes(response.into_body())
             .await
             .expect("error body should render");
-        let rendered = String::from_utf8_lossy(&body);
-        assert!(rendered.contains("security_store_unavailable"));
-        assert!(rendered.contains("security data store is unavailable"));
-        assert!(!rendered.contains("/private/db"));
+        serde_json::from_slice(&body).expect("error body should be JSON")
+    }
+
+    #[actix_web::test]
+    async fn store_errors_do_not_expose_internal_paths() {
+        let value = error_body(store_error(SecurityStoreError::InvalidData(
+            "database /private/db is corrupt".into(),
+        )))
+        .await;
+        assert_eq!(value["error"]["code"], "invalid_stored_data");
+        assert_eq!(
+            value["error"]["message"],
+            "stored security event data is invalid"
+        );
+        assert_eq!(value["error"]["retryable"], false);
+        assert!(!value.to_string().contains("/private/db"));
+    }
+
+    #[actix_web::test]
+    async fn persistence_errors_stay_store_unavailable() {
+        let value = error_body(store_error(SecurityStoreError::Poisoned)).await;
+        assert_eq!(value["error"]["code"], "security_store_unavailable");
+        assert_eq!(value["error"]["retryable"], true);
+    }
+
+    #[actix_web::test]
+    async fn serialization_errors_map_to_invalid_stored_data() {
+        let serde_error = serde_json::from_str::<serde_json::Value>("not json")
+            .expect_err("parsing garbage should fail");
+        let value = error_body(store_error(SecurityStoreError::Serialization(serde_error))).await;
+        assert_eq!(value["error"]["code"], "invalid_stored_data");
+        assert_eq!(value["error"]["retryable"], false);
     }
 
     #[test]

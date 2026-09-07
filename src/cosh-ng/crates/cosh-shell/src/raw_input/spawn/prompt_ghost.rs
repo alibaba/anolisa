@@ -1,8 +1,8 @@
 //! Pending prompt-ghost state shared by raw-input relay paths.
 
-use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use super::super::event_sender::RawInputEventSink;
 use super::super::mode::RawInputMode;
 use super::super::{PromptGhostRoute, RawInputEvent};
 
@@ -29,7 +29,7 @@ impl PendingPromptGhostEscape {
     }
 }
 
-pub(super) fn dismiss_replaced_prompt_ghost(input_events: &Sender<RawInputEvent>) {
+pub(super) fn dismiss_replaced_prompt_ghost(input_events: &dyn RawInputEventSink) {
     let _ = input_events.send(RawInputEvent::PromptGhostClear);
     let _ = input_events.send(RawInputEvent::PromptGhostDismissed);
 }

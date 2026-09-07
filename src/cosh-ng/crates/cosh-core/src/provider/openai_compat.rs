@@ -2505,4 +2505,40 @@ mod tests {
             .count();
         assert_eq!(terminals, 1, "exactly one MessageEnd expected: {events:?}");
     }
+
+    // Non-UTF-8 error bodies must be decoded using the charset declared in the
+    // Content-Type header. Without reqwest's charset feature, the body is read
+    // as UTF-8 and corrupts Chinese, Japanese, or legacy Windows-1252 text.
+    #[tokio::test]
+    async fn error_response_with_non_utf8_charset_is_decoded() {
+        // "中文错误" encoded in GBK.
+        let body: Vec<u8> = vec![0xD6, 0xD0, 0xCE, 0xC4, 0xB4, 0xED, 0xCE, 0xF3];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let header = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=gbk\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+
+        let provider =
+            OpenAICompatProvider::new_generic(&format!("http://{address}/v1"), "sk-test");
+        let config = GenerateConfig::default();
+        let err = match provider.generate(&[], &[], &config).await {
+            Ok(_) => panic!("expected generate() to fail on non-success response"),
+            Err(e) => e,
+        };
+        server.await.unwrap();
+
+        assert!(
+            err.contains("API error 400 Bad Request: 中文错误"),
+            "GBK error body must be decoded using the declared charset: {err}"
+        );
+    }
 }

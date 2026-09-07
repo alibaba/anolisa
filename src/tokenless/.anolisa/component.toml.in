@@ -50,19 +50,8 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "libexec/anolisa/tokenless/toon"
-target = "{libexecdir}/tokenless/toon"
-mode = "0755"
-type = "executable"
-
-[[component.layout.files]]
 source = "{libexecdir}/tokenless/rtk"
 target = "{bindir}/rtk"
-type = "symlink"
-
-[[component.layout.files]]
-source = "{libexecdir}/tokenless/toon"
-target = "{bindir}/toon"
 type = "symlink"
 
 # Shared hooks are interpreter-loaded resources, so the common tree stays
@@ -89,6 +78,20 @@ detect = { binary = "openclaw" }
 entry = "openclaw.plugin.json"
 
 [[adapters]]
+framework = "dsh"
+adapter_type = "plugin"
+plugin_id = "anolisa-tokenless"
+source = "adapters/dsh"
+dest = "{datadir}/adapters/{component}/dsh/"
+detect = { binary = "dsh" }
+
+[adapters.bundle]
+entry = "package.json"
+
+[adapters.compat]
+framework_version = ">=0.1.0-rc.2 <0.2.0"
+
+[[adapters]]
 framework = "hermes"
 adapter_type = "plugin"
 plugin_id = "tokenless"
@@ -98,6 +101,20 @@ detect = { binary = "hermes" }
 
 [adapters.bundle]
 entry = "plugin.yaml"
+
+[[adapters]]
+framework = "qwenpaw"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qwenpaw"
+dest = "{datadir}/adapters/{component}/qwenpaw/"
+detect = { binary = "qwenpaw" }
+
+[adapters.bundle]
+# QwenPaw plugin manifest. The built-in qwenpaw driver hands the bundle to
+# `qwenpaw plugin install`, which copies it, validates plugin.py and installs
+# requirements.txt into QwenPaw's own Python environment.
+entry = "plugin.json"
 
 [[adapters]]
 framework = "qoder"

@@ -39,7 +39,9 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
         }
         Ok(_) => decoded,
         Err(e) => {
-            log::warn!("{codec} decompression failed ({e:?}), using raw body");
+            // Truncated capture of large non-LLM downloads makes UnexpectedEof
+            // routine here, so log at debug to avoid journal noise.
+            log::debug!("{codec} decompression failed ({e:?}), using raw body");
             raw.to_vec()
         }
     }
@@ -102,7 +104,9 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
             match zstd::stream::read::Decoder::new(body) {
                 Ok(decoder) => read_capped(decoder, body, "zstd"),
                 Err(e) => {
-                    log::warn!("zstd decompression failed ({e:?}), using raw body");
+                    // Same routine-fallback rationale as read_capped: keep at
+                    // debug so partial captures don't flood the journal.
+                    log::debug!("zstd decompression failed ({e:?}), using raw body");
                     body.to_vec()
                 }
             }

@@ -1,6 +1,11 @@
 #[path = "display.rs"]
 mod display;
 
+#[path = "composer.rs"]
+// The library facade only renders metadata; the binary owns capture and validation.
+#[allow(dead_code)]
+pub(crate) mod composer;
+
 #[path = "governance.rs"]
 mod governance;
 

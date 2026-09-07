@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn raw_cli_cosh_core_approval_mode_argv_maps_to_cosh_core_modes() {
     for (label, mode_input, expected_mode) in [
-        ("recommend", "/mode approval recommend\n", "strict"),
+        ("recommend", "/mode approval recommend\n", "recommend"),
         ("auto", "/mode approval auto\n", "auto"),
         ("trust", "/mode approval trust confirm\n", "trust"),
     ] {

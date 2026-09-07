@@ -26,6 +26,7 @@ SECCORE_COMMON_FIELDS = {
 }
 SCAN_FIELDS = {"seccore.verdict", "seccore.elapsed_ms"}
 ASSET_FIELDS = {"seccore.asset_passed_count", "seccore.asset_failed_count"}
+ASSET_OUTCOME_FIELD = {"seccore.asset_outcome"}
 BASELINE_FIELDS = {
     "baseline.result",
     "baseline.timestamp",
@@ -131,7 +132,7 @@ def test_scan_actions_share_verdict_and_elapsed_fields(action: str) -> None:
     assert "CUSTOMER-CANARY" not in json.dumps(record)
 
 
-def test_asset_verify_has_only_approved_numeric_counts() -> None:
+def test_legacy_asset_verify_has_only_approved_numeric_counts() -> None:
     event = _event(
         event_type="verify",
         category="asset_verify",
@@ -149,6 +150,62 @@ def test_asset_verify_has_only_approved_numeric_counts() -> None:
     assert record["seccore.category"] == "asset_verify"
     assert record["seccore.asset_passed_count"] == 12
     assert record["seccore.asset_failed_count"] == 1
+
+
+@pytest.mark.parametrize("outcome", ["verified", "failed", "no_candidates"])
+def test_asset_verify_projects_approved_outcome(outcome: str) -> None:
+    event = _event(
+        event_type="verify",
+        category="asset_verify",
+        details={
+            "result": {
+                "outcome": outcome,
+                "passed": 0,
+                "failed": 0,
+            }
+        },
+    )
+
+    record = build_telemetry_security_event(event, _TelemetryCtx())
+
+    assert record is not None
+    assert set(record) == (
+        COMPONENT_FIELDS | SECCORE_COMMON_FIELDS | ASSET_FIELDS | ASSET_OUTCOME_FIELD
+    )
+    assert record["seccore.asset_outcome"] == outcome
+
+
+def test_asset_verify_omits_unapproved_outcome() -> None:
+    event = _event(
+        event_type="verify",
+        category="asset_verify",
+        details={"result": {"outcome": "CUSTOMER-CANARY"}},
+    )
+
+    record = build_telemetry_security_event(event, _TelemetryCtx())
+
+    assert record is not None
+    assert set(record) == COMPONENT_FIELDS | SECCORE_COMMON_FIELDS
+
+
+def test_asset_verify_operation_error_omits_outcome() -> None:
+    event = _event(
+        event_type="verify",
+        category="asset_verify",
+        result="failed",
+        details={
+            "result": {},
+            "error_type": "PermissionError",
+            "exit_code": 1,
+        },
+    )
+
+    record = build_telemetry_security_event(event, _TelemetryCtx())
+
+    assert record is not None
+    assert "seccore.asset_outcome" not in record
+    assert record["seccore.error_type"] == "PermissionError"
+    assert record["seccore.exit_code"] == 1
 
 
 def test_harden_has_exact_baseline_fields() -> None:

@@ -37,7 +37,11 @@ fn mock_provider_script(name: &str, body: &str) -> PathBuf {
         std::process::id()
     ));
     let persistent_handshake = if name.starts_with("cosh-core-") && !body.contains("read -r init") {
-        "IFS= read -r _\nIFS= read -r _\n"
+        concat!(
+            "IFS= read -r _\n",
+            "printf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"init-1\",\"response\":{\"subtype\":\"initialize\",\"capabilities\":{}}}}'\n",
+            "IFS= read -r _\n",
+        )
     } else {
         ""
     };
@@ -338,7 +342,11 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000
             .expect("send synchronous run result");
     });
 
-    let run_result = match result_rx.recv_timeout(Duration::from_secs(3)) {
+    // The 2 MB prompt and 256 KB tool-name output are intentionally larger
+    // than pipe buffers, so this test exercises drain-while-write behavior.
+    // Shell reads of multi-megabyte lines can take ~2 s even on fast hosts
+    // and longer under parallel test load, so give the transport ample headroom.
+    let run_result = match result_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(result) => result,
         Err(error) => {
             let pid = fs::read_to_string(&pid_file)
@@ -1795,6 +1803,72 @@ exec sleep 30"#,
 }
 
 #[test]
+fn cosh_core_rejects_unsupported_initialize_before_user_turn() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let pid_file = std::env::temp_dir().join(format!(
+        "cosh-core-version-error-{}-{nonce}.pid",
+        std::process::id()
+    ));
+    let user_file = std::env::temp_dir().join(format!(
+        "cosh-core-version-user-{}-{nonce}.txt",
+        std::process::id()
+    ));
+    let script = mock_provider_script(
+        "cosh-core-version-error",
+        &format!(
+            r#"printf '%s\n' "$$" > "{}"
+IFS= read -r init
+case "$init" in
+  *'"protocol_version":1'*) ;;
+  *) exit 3 ;;
+esac
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","protocol_version":9,"capabilities":{{}}}}}}}}'
+if IFS= read -r unexpected; then
+  printf '%s\n' "$unexpected" > "{}"
+fi
+exec sleep 30"#,
+            pid_file.display(),
+            user_file.display()
+        ),
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-version-error"),
+        CoshApprovalMode::Auto,
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "version failure did not finish");
+        match handle.poll_event_timeout(Duration::from_millis(100)) {
+            Ok(AgentRunPoll::Event(event)) => events.push(event),
+            Ok(AgentRunPoll::Timeout) => {}
+            Ok(AgentRunPoll::Finished) => break,
+            Err(error) => errors.push(error.message),
+        }
+    }
+
+    assert_eq!(errors.len(), 1, "unexpected errors: {errors:?}");
+    assert!(errors[0].contains("unsupported control protocol version 9"));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::AgentCompleted { .. }
+            | AgentEvent::AgentFailed { .. }
+            | AgentEvent::AgentCancelled { .. }
+    )));
+    assert_eq!(adapter.committed_session_id(), None);
+    assert_recorded_process_is_gone(&pid_file);
+    assert!(!user_file.exists(), "user turn was sent before version ack");
+    let _ = fs::remove_file(pid_file);
+    let _ = fs::remove_file(user_file);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
 fn cosh_core_sync_read_error_terminates_and_reaps_provider() {
     let pid_file =
         std::env::temp_dir().join(format!("cosh-core-read-child-{}.pid", std::process::id()));
@@ -1918,4 +1992,254 @@ exec sleep 30"#,
     assert_eq!(recovery.selected_session_id, None);
     assert_eq!(recovery.selected_workspace_scope, None);
     let _ = fs::remove_file(script);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SharedDriverProvider {
+    Claude,
+    Qwen,
+}
+
+impl SharedDriverProvider {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Qwen => "qwen",
+        }
+    }
+
+    fn start(self, program: &Path, mode: CoshApprovalMode, request_id: &str) -> AgentRunHandle {
+        match self {
+            Self::Claude => {
+                claude_adapter(program).start_cancellable(make_request(request_id), mode)
+            }
+            Self::Qwen => qwen_adapter(program, Arc::new(Mutex::new(None)))
+                .start_cancellable(make_request(request_id), mode),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExpectedTerminal {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+fn shared_driver_cases() -> impl Iterator<Item = (SharedDriverProvider, CoshApprovalMode)> {
+    [SharedDriverProvider::Claude, SharedDriverProvider::Qwen]
+        .into_iter()
+        .flat_map(|provider| {
+            [
+                CoshApprovalMode::Recommend,
+                CoshApprovalMode::Auto,
+                CoshApprovalMode::Trust,
+            ]
+            .into_iter()
+            .map(move |mode| (provider, mode))
+        })
+}
+
+fn approval_mode_label(mode: CoshApprovalMode) -> &'static str {
+    match mode {
+        CoshApprovalMode::Recommend => "recommend",
+        CoshApprovalMode::Auto => "auto",
+        CoshApprovalMode::Trust => "trust",
+    }
+}
+
+fn assert_single_terminal(events: &[AgentEvent], expected: ExpectedTerminal, context: &str) {
+    let terminal_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::AgentCompleted { .. }
+                    | AgentEvent::AgentFailed { .. }
+                    | AgentEvent::AgentCancelled { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_events.len(),
+        1,
+        "{context} emitted multiple terminal events: {events:?}"
+    );
+    let matches_expected = match expected {
+        ExpectedTerminal::Completed => {
+            matches!(terminal_events[0], AgentEvent::AgentCompleted { .. })
+        }
+        ExpectedTerminal::Failed => {
+            matches!(terminal_events[0], AgentEvent::AgentFailed { .. })
+        }
+        ExpectedTerminal::Cancelled => {
+            matches!(terminal_events[0], AgentEvent::AgentCancelled { .. })
+        }
+    };
+    assert!(
+        matches_expected,
+        "{context} emitted the wrong terminal event: {events:?}"
+    );
+}
+
+#[test]
+fn provider_drivers_emit_one_completed_terminal() {
+    for (provider, mode) in shared_driver_cases() {
+        let context = format!("{}-{}", provider.label(), approval_mode_label(mode));
+        let script = mock_provider_script(
+            &format!("shared-completed-{context}"),
+            r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-shared","model":"mock"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-shared","is_error":false,"result":"done"}'"#,
+        );
+        let handle = provider.start(&script, mode, &format!("shared-completed-{context}"));
+        let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+        assert_single_terminal(&events, ExpectedTerminal::Completed, &context);
+        let _ = fs::remove_file(script);
+    }
+}
+
+#[test]
+fn provider_drivers_emit_one_failed_terminal() {
+    for (provider, mode) in shared_driver_cases() {
+        let context = format!("{}-{}", provider.label(), approval_mode_label(mode));
+        let script = mock_provider_script(
+            &format!("shared-failed-{context}"),
+            r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-shared","model":"mock"}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-shared","is_error":true,"errors":["provider failed"]}'"#,
+        );
+        let handle = provider.start(&script, mode, &format!("shared-failed-{context}"));
+        let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+        assert_single_terminal(&events, ExpectedTerminal::Failed, &context);
+        let _ = fs::remove_file(script);
+    }
+}
+
+#[test]
+fn provider_drivers_nonzero_exit_emits_one_failed_terminal() {
+    for (provider, mode) in shared_driver_cases() {
+        let context = format!("{}-{}", provider.label(), approval_mode_label(mode));
+        let script = mock_provider_script(
+            &format!("shared-nonzero-{context}"),
+            r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-shared","model":"mock"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-shared","is_error":false,"result":"must be replaced"}'
+printf '%s\n' 'provider exited seven' >&2
+exit 7"#,
+        );
+        let handle = provider.start(&script, mode, &format!("shared-nonzero-{context}"));
+        let events = collect_events_until_finished(&handle, Duration::from_secs(3));
+
+        assert_single_terminal(&events, ExpectedTerminal::Failed, &context);
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::AgentFailed { error, .. }
+                    if error == "provider exited seven")
+            ),
+            "{context} did not preserve the nonzero exit failure: {events:?}"
+        );
+        let _ = fs::remove_file(script);
+    }
+}
+
+struct ProviderProcessCleanup {
+    script: PathBuf,
+    leader_pid_file: PathBuf,
+    descendant_pid_file: PathBuf,
+    armed: bool,
+}
+
+impl ProviderProcessCleanup {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProviderProcessCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(pid) = fs::read_to_string(&self.leader_pid_file) {
+                if let Ok(pid) = pid.trim().parse::<i32>() {
+                    unsafe {
+                        let _ = nix::libc::kill(-pid, nix::libc::SIGKILL);
+                        let _ = nix::libc::kill(pid, nix::libc::SIGKILL);
+                    }
+                }
+            }
+            if let Ok(pid) = fs::read_to_string(&self.descendant_pid_file) {
+                if let Ok(pid) = pid.trim().parse::<i32>() {
+                    unsafe {
+                        let _ = nix::libc::kill(pid, nix::libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_file(&self.script);
+        let _ = fs::remove_file(&self.leader_pid_file);
+        let _ = fs::remove_file(&self.descendant_pid_file);
+    }
+}
+
+fn wait_for_pid_files(paths: &[&Path]) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if paths.iter().all(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok())
+                .is_some_and(|pid| pid > 1)
+        }) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("provider did not record process ids: {paths:?}");
+}
+
+#[test]
+fn provider_drivers_cancel_emit_one_cancelled_terminal() {
+    for (provider, mode) in shared_driver_cases() {
+        let context = format!("{}-{}", provider.label(), approval_mode_label(mode));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let leader_pid_file = std::env::temp_dir().join(format!(
+            "cosh-shared-driver-leader-{}-{nonce}",
+            std::process::id()
+        ));
+        let descendant_pid_file = std::env::temp_dir().join(format!(
+            "cosh-shared-driver-descendant-{}-{nonce}",
+            std::process::id()
+        ));
+        let script = mock_provider_script(
+            &format!("shared-cancel-{context}"),
+            &format!(
+                r#"printf '%s\n' "$$" > "{}"
+trap '' TERM
+sh -c 'trap "" TERM; while :; do sleep 1; done' &
+printf '%s\n' "$!" > "{}"
+wait"#,
+                leader_pid_file.display(),
+                descendant_pid_file.display()
+            ),
+        );
+        let mut cleanup = ProviderProcessCleanup {
+            script: script.clone(),
+            leader_pid_file: leader_pid_file.clone(),
+            descendant_pid_file: descendant_pid_file.clone(),
+            armed: true,
+        };
+        let handle = provider.start(&script, mode, &format!("shared-cancel-{context}"));
+        wait_for_pid_files(&[&leader_pid_file, &descendant_pid_file]);
+
+        handle.cancel();
+        let events = collect_events_until_finished(&handle, Duration::from_secs(5));
+
+        assert_single_terminal(&events, ExpectedTerminal::Cancelled, &context);
+        assert_recorded_process_is_gone(&leader_pid_file);
+        assert_recorded_process_is_not_running(&descendant_pid_file);
+        cleanup.disarm();
+        drop(cleanup);
+    }
 }

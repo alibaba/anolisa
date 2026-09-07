@@ -96,10 +96,15 @@ pub(super) fn relay_input_chunk(
     card_state: &mut CardInputState,
     capture_owned_input: &mut CaptureOwnedInput,
     deferred_input: &mut Option<InputRead>,
-    read_ahead: Option<&Receiver<InputRead>>,
-    expected_capture_generation: Option<u64>,
+    read_context: RelayReadContext<'_>,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<()> {
+    let RelayReadContext {
+        read_ahead,
+        expected_capture_generation,
+        pending_shell_submits,
+        ..
+    } = read_context;
     loop {
         match mode {
             RawInputMode::Capture {
@@ -176,7 +181,7 @@ pub(super) fn relay_input_chunk(
             }
             RawInputMode::Passthrough | RawInputMode::Terminal { .. } => {
                 card_state.reset();
-                relay_passthrough_input(bytes, relay)?;
+                relay_passthrough_input_after_shell_submits(bytes, pending_shell_submits, relay)?;
                 return Ok(());
             }
             RawInputMode::PromptGhost {
@@ -385,8 +390,7 @@ fn replay_or_reject_after_drain(
         card_state,
         capture_owned_input,
         &mut deferred_input,
-        None,
-        None,
+        RelayReadContext::default(),
         relay,
     )
 }
@@ -413,7 +417,7 @@ pub(in super::super) fn relay_late_capture_input(
     bytes: &[u8],
     generation: u64,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -428,6 +432,7 @@ pub(in super::super) fn relay_late_capture_input(
         line_submits,
         main_prompt_gate,
         slash_route_enabled,
+        zsh_path_prompt_buffering,
         ..
     } = state;
     let mut relay = InputRelayContext {
@@ -442,6 +447,7 @@ pub(in super::super) fn relay_late_capture_input(
         exit_tracker,
         main_prompt_gate,
         slash_route_enabled: *slash_route_enabled,
+        zsh_path_prompt_buffering: zsh_path_prompt_buffering.as_mut(),
     };
     relay_late_capture_bytes(
         bytes,
@@ -588,89 +594,6 @@ pub(super) fn drain_abandoned_capture(
         generation,
         relay,
     )
-}
-
-pub(in super::super) fn finish_input_relay(
-    master: &mut File,
-    input_events: &Sender<RawInputEvent>,
-    input_classifier: &InputClassifier,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-    state: &mut RawInputRelayState,
-) -> io::Result<()> {
-    // EOF is cancellation, not the timeout path. Pending escape/suffix bytes
-    // are Cosh-owned lookahead and must never become PTY input during
-    // shutdown.
-    let current_mode = current_raw_input_mode(input_mode);
-    let dismiss_prompt_ghost = state.pending_prompt_ghost_escape.take().is_some()
-        || state.pending_replaced_prompt_ghost_suffix.take().is_some()
-        || matches!(current_mode, RawInputMode::PromptGhost { .. });
-    state.pending_delay_escape.take();
-    if dismiss_prompt_ghost {
-        let _ = input_events.send(RawInputEvent::CandidateClearLine);
-        let _ = input_events.send(RawInputEvent::PromptGhostDismissed);
-        if matches!(current_mode, RawInputMode::PromptGhost { .. }) {
-            if let Ok(mut mode) = input_mode.lock() {
-                *mode = RawInputMode::Passthrough;
-            }
-        }
-    }
-    if let RawInputMode::Submitted { generation, .. } = current_raw_input_mode(input_mode) {
-        expire_capture_submission(input_mode, generation);
-    }
-    abandon_active_capture(input_mode);
-    if matches!(
-        current_raw_input_mode(input_mode),
-        RawInputMode::Draining { .. }
-    ) {
-        let RawInputRelayState {
-            card_state,
-            line_buffer,
-            native_line_state,
-            exit_tracker,
-            capture_owned_input,
-            input_generation,
-            line_submits,
-            main_prompt_gate,
-            ..
-        } = state;
-        let mut relay = InputRelayContext {
-            master,
-            input_classifier,
-            input_events,
-            input_mode,
-            input_generation,
-            line_submits,
-            line_buffer,
-            native_line_state,
-            exit_tracker,
-            main_prompt_gate,
-            slash_route_enabled: false,
-        };
-        drain_abandoned_capture(card_state, capture_owned_input, &mut relay)?;
-    }
-    // Candidate bytes were never submitted to the Shell. EOF cancels them;
-    // flushing a lone `?`, slash prefix, or partial paste delimiter before
-    // `exit` would turn display state into executable input.
-    if state.line_buffer.is_active() {
-        state.line_buffer.clear();
-        let _ = input_events.send(RawInputEvent::CandidateClearLine);
-    }
-    if state.exit_tracker.saw_explicit_exit() {
-        return Ok(());
-    }
-    if state.native_line_state.is_empty() {
-        write_user_bytes_to_pty(
-            master,
-            &state.input_generation,
-            &mut state.line_submits,
-            input_events,
-            &state.main_prompt_gate,
-            b"exit\n",
-        )?;
-    } else {
-        let _ = input_events.send(RawInputEvent::EofShutdownRequested);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

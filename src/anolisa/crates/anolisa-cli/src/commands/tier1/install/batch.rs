@@ -10,11 +10,10 @@
 //! Everything that is not a fresh delegated install keeps the per-item
 //! pipeline unchanged.
 
-use std::collections::{HashMap, HashSet};
-
 use serde::Serialize;
 
 use anolisa_core::domain::NativePm;
+use anolisa_core::execution::ExecutionIntent;
 use anolisa_core::executor::{
     DelegatedExecutionTarget, PHASE_NATIVE_TXN, delegated_recovery_context,
     execute_delegated_steps_resumed,
@@ -39,20 +38,28 @@ use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
-use crate::progress::{self, Activity};
+use crate::progress;
+use crate::repo_config::RepoConfig;
+use crate::resolution::ComponentIndex;
 use crate::response::{CliError, render_json, render_json_with_status};
 
-use super::types::InstallOutcome;
 use super::{COMMAND, InstallArgs};
 
-// Dispatch pieces re-exported from the parent module: the per-item pipeline
-// (`handle_one`), the read-only planning prefix (`plan_component`), and the
-// shared guards it mirrors.
+// Dispatch pieces re-exported from the parent module for merged transaction
+// effects and their shared guards.
 use super::io_util::now_iso8601;
 use super::{
-    PlannedComponent, PlannedRoute, RpmdbProbe, handle_one, handle_one_with_planned_components,
-    host_backends, plan_component, quarantined, require_configured_rpm_backend,
-    revalidate_native_absence, step_label,
+    PlannedComponent, PlannedRoute, host_backends, normalized_repo_override, quarantined,
+    require_configured_rpm_backend, revalidate_native_absence, step_label,
+};
+
+mod application;
+#[cfg(test)]
+use application::InstallBatchOutcome;
+use application::{
+    BatchApplicationOutcome, BatchEffectOutcome, BatchMemberOutcome, BatchMemberStatus,
+    BatchOutputEvent, MemberApplicationOutcome, failed_item, member_application_outcome,
+    partial_item, project_member_application,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -88,13 +95,24 @@ pub(crate) struct AllSummaryPayload {
 }
 
 pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let mut activity = Activity::start(
-        progress::feedback_for_stderr(ctx.json, ctx.quiet),
-        "Preparing batch installation...",
-    );
-    let names = resolve_all_components(ctx, args.backend.as_deref())?;
-    if names.is_empty() {
-        activity.finish();
+    let mut output = |event| render_batch_event(ctx, event);
+    let outcome = application::run(
+        application::BatchRequest {
+            args: &args,
+            intent: super::execution_intent(ctx),
+        },
+        ctx,
+        &mut output,
+    )?;
+    render_application_outcome(ctx, outcome)
+}
+
+fn render_application_outcome(
+    ctx: &CliContext,
+    outcome: BatchApplicationOutcome,
+) -> Result<(), CliError> {
+    let dry_run = outcome.is_preview();
+    if outcome.items.is_empty() {
         if !ctx.quiet && !ctx.json {
             let color = Palette::new(ctx.no_color);
             println!(
@@ -112,7 +130,7 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
                     already_installed: 0,
                     failed: 0,
                     skipped: 0,
-                    dry_run: ctx.dry_run,
+                    dry_run,
                     merged_transaction: None,
                     items: Vec::new(),
                 },
@@ -121,215 +139,59 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         return Ok(());
     }
 
-    // Suppress per-component rendering: handle_all owns the final output.
-    // Each handle_one call runs in quiet mode so it doesn't print individual
-    // JSON envelopes or human-mode messages — only the batch summary at the
-    // end goes to stdout.
-    let mut suppressed_ctx = ctx.clone();
-    suppressed_ctx.json = false;
-    suppressed_ctx.quiet = true;
-
-    // Peek phase: plan every component read-only and classify. Fresh
-    // delegated installs merge into one native transaction; everything else
-    // (owned plans, existing records, planning errors) re-plans through the
-    // per-item pipeline, which reproduces the same outcome — the extra probe
-    // is cheap next to a dnf run.
-    let mut merged: Vec<MergedItem> = Vec::new();
-    let mut per_item: Vec<String> = Vec::new();
-    for (index, name) in names.iter().enumerate() {
-        activity.set_message(&format!(
-            "Planning {name} ({}/{})...",
-            index + 1,
-            names.len()
-        ));
-        let per_args = per_component_args(name, &args);
-        let env = anolisa_env::EnvService::detect();
-        let rpmdb = RpmdbProbe::for_host(&env);
-        let candidate = host_backends(name, &per_args, &suppressed_ctx)
-            .and_then(|(query, txn)| {
-                plan_component(name, &per_args, &suppressed_ctx, &env, &rpmdb, &query, &txn)
-            })
-            .ok()
-            .and_then(|planned| {
-                merged_package(&planned).map(|package| MergedItem {
-                    name: name.clone(),
-                    package,
-                    planned,
-                })
-            });
-        match candidate {
-            Some(item) => merged.push(item),
-            None => per_item.push(name.clone()),
-        }
-    }
-
-    // A single fresh delegated install gains nothing from merging; keep it
-    // on the per-item pipeline.
-    if merged.len() < 2 {
-        per_item = names.clone();
-        merged.clear();
-    }
-    let merged_transaction: Option<Vec<String>> =
-        (!merged.is_empty()).then(|| merged.iter().map(|item| item.package.clone()).collect());
-
-    let mut results: HashMap<String, AllSummaryItem> = HashMap::with_capacity(names.len());
-    // Dry-run does not persist each successful member, so carry the batch's
-    // simulated state forward to keep later raw conflict checks aligned with
-    // the sequential real execution order.
-    let mut planned_components: HashSet<String> = HashSet::new();
-    let mut fail_fast_tripped = false;
-
-    if !merged.is_empty() {
-        let members = merged
-            .iter()
-            .map(|item| item.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if ctx.dry_run {
-            activity.set_message(&format!("Preparing install plan for {members}..."));
-        } else {
-            activity.set_message(&format!("Installing {members}..."));
-        }
-        if !ctx.quiet && !ctx.json {
-            let color = Palette::new(ctx.no_color);
-            progress::suspend_output(|| {
-                println!("{} {members} (one rpm transaction)", color.label("==>"))
-            });
-        }
-        if ctx.dry_run {
-            // Each member previews its own plan in the single-component
-            // format; the group header above already announced that the
-            // native transactions will merge into one dnf run.
-            for item in &merged {
-                let labels: Vec<String> =
-                    item.planned.route.steps().iter().map(step_label).collect();
-                if !ctx.quiet && !ctx.json {
-                    progress::suspend_output(|| {
-                        println!("install {} (dry-run):", item.name);
-                        for label in &labels {
-                            println!("  - {label}");
-                        }
-                    });
-                }
-                results.insert(
-                    item.name.clone(),
-                    AllSummaryItem {
-                        component: item.name.clone(),
-                        status: "planned",
-                        reason: None,
-                        plan: Some(labels),
-                    },
-                );
-                planned_components.insert(item.name.clone());
-            }
-        } else {
-            let statuses = execute_merged_group(merged, &args, ctx);
-            let any_failed = statuses.iter().any(|item| item.status == "failed");
-            for item in statuses {
-                results.insert(item.component.clone(), item);
-            }
-            if args.fail_fast && any_failed {
-                fail_fast_tripped = true;
-            }
-        }
-    }
-
-    for name in &per_item {
-        if fail_fast_tripped {
-            break;
-        }
-        if ctx.dry_run {
-            activity.set_message(&format!("Preparing install plan for {name}..."));
-        } else {
-            activity.set_message(&format!("Installing {name}..."));
-        }
-        if !ctx.quiet && !ctx.json {
-            let color = Palette::new(ctx.no_color);
-            progress::suspend_output(|| println!("{} {name}", color.label("==>")));
-        }
-        let per_args = per_component_args(name, &args);
-        match handle_one_with_planned_components(
-            name.clone(),
-            per_args,
-            &suppressed_ctx,
-            &planned_components,
-        ) {
-            // Map (outcome, dry-run) to a batch status string (§7.5).
-            // Dry-run successes are "planned": nothing was written.
-            Ok(outcome) => {
-                if ctx.dry_run && outcome == InstallOutcome::Installed {
-                    planned_components.insert(name.clone());
-                }
-                results.insert(
-                    name.clone(),
-                    AllSummaryItem {
-                        component: name.clone(),
-                        status: batch_status(outcome, ctx.dry_run),
-                        reason: None,
-                        plan: None,
-                    },
-                );
-            }
-            Err(err) => {
-                results.insert(
-                    name.clone(),
-                    AllSummaryItem {
-                        component: name.clone(),
-                        status: "failed",
-                        reason: Some(err.reason().to_string()),
-                        plan: None,
-                    },
-                );
-                if args.fail_fast {
-                    fail_fast_tripped = true;
-                }
-            }
-        }
-    }
-
-    // Rebuild the summary in the original component order; anything without
-    // a result was left unattempted by --fail-fast, so `total` always equals
-    // the full target set.
-    let items: Vec<AllSummaryItem> = names
+    let total = outcome.items.len();
+    let installed = outcome
+        .items
         .iter()
-        .map(|name| {
-            results.remove(name).unwrap_or_else(|| AllSummaryItem {
-                component: name.clone(),
-                status: "skipped",
-                reason: Some("--fail-fast: not attempted".to_string()),
-                plan: None,
-            })
-        })
-        .collect();
-
-    let installed = items.iter().filter(|i| i.status == "installed").count();
-    let planned = items.iter().filter(|i| i.status == "planned").count();
-    let already_installed = items
-        .iter()
-        .filter(|i| i.status == "already-installed")
+        .filter(|item| item.status == BatchMemberStatus::Installed)
         .count();
-    let failed = items.iter().filter(|i| i.status == "failed").count();
-    let skipped = items.iter().filter(|i| i.status == "skipped").count();
-
-    activity.finish();
+    let planned = outcome
+        .items
+        .iter()
+        .filter(|item| item.status == BatchMemberStatus::Planned)
+        .count();
+    let already_installed = outcome
+        .items
+        .iter()
+        .filter(|item| item.status == BatchMemberStatus::AlreadyInstalled)
+        .count();
+    let failed = outcome
+        .items
+        .iter()
+        .filter(|item| item.status.is_unsuccessful())
+        .count();
+    let skipped = outcome
+        .items
+        .iter()
+        .filter(|item| item.status == BatchMemberStatus::Skipped)
+        .count();
+    debug_assert_eq!(outcome.has_failures(), failed > 0);
+    let items = outcome
+        .items
+        .into_iter()
+        .map(|item| AllSummaryItem {
+            component: item.component,
+            status: item.status.as_str(),
+            reason: item.reason,
+            plan: item
+                .plan
+                .map(|steps| steps.iter().map(step_label).collect()),
+        })
+        .collect::<Vec<_>>();
 
     if ctx.json {
-        // The batch summary is the single, complete JSON response.  We
-        // return BatchPartial (not Ok) so that main's render_error still
-        // sets a non-zero exit code — but render_error recognises
-        // BatchPartial and skips the second JSON render.
         render_json_with_status(
             "install --all",
             failed == 0,
             AllSummaryPayload {
-                total: names.len(),
+                total,
                 installed,
                 planned,
                 already_installed,
                 failed,
                 skipped,
-                dry_run: ctx.dry_run,
-                merged_transaction,
+                dry_run,
+                merged_transaction: outcome.merged_transaction,
                 items,
             },
         )?;
@@ -350,10 +212,8 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
             .filter(|i| i.status == "failed")
             .map(|i| i.component.as_str())
             .collect();
-        let ok_word = if ctx.dry_run { "planned" } else { "installed" };
-        let ok_count = if ctx.dry_run { planned } else { installed };
-        // Idempotent NoOps read the same either way — dry-run or real,
-        // nothing would be written.
+        let ok_word = if dry_run { "planned" } else { "installed" };
+        let ok_count = if dry_run { planned } else { installed };
         let already_segment = if already_installed > 0 {
             format!("  already-installed={already_installed}")
         } else {
@@ -363,7 +223,7 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
             println!(
                 "{} total={}  {ok_word}={}{already_segment}  skipped={}",
                 color.label("summary:"),
-                names.len(),
+                total,
                 ok_count,
                 skipped,
             );
@@ -371,7 +231,7 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
             println!(
                 "{} total={}  {ok_word}={}{already_segment}  failed={} ({})  skipped={}",
                 color.label("summary:"),
-                names.len(),
+                total,
                 ok_count,
                 failed,
                 failed_names.join(", "),
@@ -385,13 +245,40 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         }
     }
 
-    // Human mode: preserve non-zero exit code on failure.
     if failed > 0 {
         Err(CliError::BatchPartial {
             command: "install --all".to_string(),
         })
     } else {
         Ok(())
+    }
+}
+
+fn render_batch_event(ctx: &CliContext, event: BatchOutputEvent) {
+    let color = Palette::new(ctx.no_color);
+    match event {
+        BatchOutputEvent::Warning(warning) => {
+            progress::suspend_output(|| eprintln!("warning: {warning}"));
+        }
+        BatchOutputEvent::MergedGroup { members } if !ctx.quiet && !ctx.json => {
+            progress::suspend_output(|| {
+                println!("{} {members} (one rpm transaction)", color.label("==>"));
+            });
+        }
+        BatchOutputEvent::PreviewPlan { component, steps } if !ctx.quiet && !ctx.json => {
+            progress::suspend_output(|| {
+                println!("install {component} (dry-run):");
+                for step in &steps {
+                    println!("  - {}", step_label(step));
+                }
+            });
+        }
+        BatchOutputEvent::Member { component } if !ctx.quiet && !ctx.json => {
+            progress::suspend_output(|| println!("{} {component}", color.label("==>")));
+        }
+        BatchOutputEvent::MergedGroup { .. }
+        | BatchOutputEvent::PreviewPlan { .. }
+        | BatchOutputEvent::Member { .. } => {}
     }
 }
 
@@ -442,12 +329,13 @@ fn merged_package(planned: &PlannedComponent) -> Option<String> {
 }
 
 /// Execute the merged group against the live host: real backends pointed at
-/// the configured ANOLISA repo, degrade re-plans through [`handle_one`].
+/// the configured ANOLISA repo, with clean failures re-planned per member.
 fn execute_merged_group(
     group: Vec<MergedItem>,
     args: &InstallArgs,
     ctx: &CliContext,
-) -> Vec<AllSummaryItem> {
+    output: &mut dyn FnMut(BatchOutputEvent),
+) -> BatchEffectOutcome {
     let per_args = per_component_args(&group[0].name, args);
     let mut suppressed_ctx = ctx.clone();
     suppressed_ctx.json = false;
@@ -456,18 +344,26 @@ fn execute_merged_group(
         Ok(backends) => backends,
         Err(err) => {
             let reason = err.reason().to_string();
-            return group
-                .iter()
-                .map(|item| failed_item(&item.name, reason.clone()))
-                .collect();
+            return BatchEffectOutcome {
+                items: group
+                    .iter()
+                    .map(|item| failed_item(&item.name, reason.clone()))
+                    .collect(),
+            };
         }
     };
     let mut degrade = |name: &str| {
-        handle_one(
-            name.to_string(),
-            per_component_args(name, args),
+        let per_args = per_component_args(name, args);
+        let outcome = super::application::run_with_planned_components(
+            super::application::InstallRequest {
+                component: name,
+                args: &per_args,
+                intent: ExecutionIntent::Apply,
+            },
             &suppressed_ctx,
-        )
+            &std::collections::HashSet::new(),
+        );
+        Ok(member_application_outcome(outcome))
     };
     execute_merged_group_with_deps(
         group,
@@ -477,6 +373,7 @@ fn execute_merged_group(
         &txn,
         privilege::is_root(),
         &mut degrade,
+        output,
     )
 }
 
@@ -491,6 +388,9 @@ fn execute_merged_group(
 /// members whose package is absent re-plan individually through `degrade`
 /// (no side effects for them — D9), members whose package landed anyway get
 /// a `Partial` journal and a repair hint (forward-only, never retried).
+// Keep host effects explicit so tests can independently script transaction,
+// privilege, fallback, and output ordering at this boundary.
+#[allow(clippy::too_many_arguments)]
 fn execute_merged_group_with_deps(
     group: Vec<MergedItem>,
     args: &InstallArgs,
@@ -498,14 +398,17 @@ fn execute_merged_group_with_deps(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-    degrade: &mut dyn FnMut(&str) -> Result<InstallOutcome, CliError>,
-) -> Vec<AllSummaryItem> {
+    degrade: &mut dyn FnMut(&str) -> Result<MemberApplicationOutcome, CliError>,
+    output: &mut dyn FnMut(BatchOutputEvent),
+) -> BatchEffectOutcome {
     const BATCH_COMMAND: &str = "install --all";
-    let all_failed = |group: &[MergedItem], reason: &str| -> Vec<AllSummaryItem> {
-        group
-            .iter()
-            .map(|item| failed_item(&item.name, reason.to_string()))
-            .collect()
+    let all_failed = |group: &[MergedItem], reason: &str| -> BatchEffectOutcome {
+        BatchEffectOutcome {
+            items: group
+                .iter()
+                .map(|item| failed_item(&item.name, reason.to_string()))
+                .collect(),
+        }
     };
 
     // Environment preflight, mirroring the single-component delegated path:
@@ -517,7 +420,13 @@ fn execute_merged_group_with_deps(
             Ok(config) => config,
             Err(err) => return all_failed(&group, &err.reason()),
         };
-    if let Err(err) = require_configured_rpm_backend(&repo_config, BATCH_COMMAND) {
+    let index_base_override = match normalized_repo_override(args) {
+        Ok(override_url) => override_url,
+        Err(err) => return all_failed(&group, &err.reason()),
+    };
+    if let Err(err) =
+        require_configured_rpm_backend(&repo_config, index_base_override.as_deref(), BATCH_COMMAND)
+    {
         return all_failed(&group, &err.reason());
     }
     if !is_root {
@@ -551,7 +460,7 @@ fn execute_merged_group_with_deps(
 
     // Re-validate each slot under the lock and open its journal, mirroring
     // the single-component race check.
-    let mut items: Vec<AllSummaryItem> = Vec::with_capacity(group.len());
+    let mut items: Vec<BatchMemberOutcome> = Vec::with_capacity(group.len());
     let mut active: Vec<(MergedItem, Transaction)> = Vec::with_capacity(group.len());
     for item in group {
         let target = &item.planned.component;
@@ -581,7 +490,7 @@ fn execute_merged_group_with_deps(
         }
     }
     if active.is_empty() {
-        return items;
+        return BatchEffectOutcome { items };
     }
 
     // Journal the shared transaction step in every member's journal before
@@ -623,7 +532,7 @@ fn execute_merged_group_with_deps(
                 let _ = journal.finish(TransactionOutcomeStatus::Failed);
                 items.push(failed_item(&member.name, reason.clone()));
             }
-            return items;
+            return BatchEffectOutcome { items };
         }
     }
 
@@ -639,7 +548,7 @@ fn execute_merged_group_with_deps(
             for (item, mut journal) in active {
                 let target = item.planned.component.clone();
                 if let Err(err) = journal.mark_done(0) {
-                    items.push(failed_item(
+                    items.push(partial_item(
                         &item.name,
                         format!(
                             "install of '{target}' failed: the merged native transaction committed but its journal could not be updated: {err}; run `anolisa repair {target}` to reconcile"
@@ -690,16 +599,16 @@ fn execute_merged_group_with_deps(
                             COMMAND,
                             ctx.packaged_data_probe(),
                         ) {
-                            progress::suspend_output(|| eprintln!("warning: {warning}"));
+                            output(BatchOutputEvent::Warning(warning));
                         }
-                        items.push(AllSummaryItem {
+                        items.push(BatchMemberOutcome {
                             component: item.name.clone(),
-                            status: "installed",
+                            status: BatchMemberStatus::Installed,
                             reason: None,
                             plan: None,
                         });
                     }
-                    Err(err) => items.push(failed_item(
+                    Err(err) => items.push(partial_item(
                         &item.name,
                         format!(
                             "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
@@ -712,7 +621,7 @@ fn execute_merged_group_with_deps(
             // reads the same as the members' journals.
             let any_member_failed = items[members_start..]
                 .iter()
-                .any(|item| item.status == "failed");
+                .any(|item| item.status.is_unsuccessful());
             store.operations.push(OperationRecord {
                 id: batch_operation_id,
                 command: BATCH_COMMAND.to_string(),
@@ -724,11 +633,11 @@ fn execute_merged_group_with_deps(
             // Operation history is best-effort bookkeeping on top of the
             // committed records, exactly like the single-component path.
             if let Err(err) = store.save(&state_path) {
-                progress::suspend_output(|| {
-                    eprintln!("warning: failed to record operation history: {err}")
-                });
+                output(BatchOutputEvent::Warning(format!(
+                    "failed to record operation history: {err}"
+                )));
             }
-            items
+            BatchEffectOutcome { items }
         }
         Err(source) => {
             // Forward-only classification: re-observe each member and let
@@ -746,7 +655,7 @@ fn execute_merged_group_with_deps(
                         TransactionOutcomeStatus::Failed
                     }
                     _ => {
-                        items.push(failed_item(
+                        items.push(partial_item(
                             &item.name,
                             format!(
                                 "merged native transaction failed after '{}' reached the rpmdb: {reason}; run `anolisa repair {target}` to reconcile",
@@ -760,44 +669,48 @@ fn execute_merged_group_with_deps(
                     .mark_failed(0, &reason)
                     .and_then(|()| journal.finish(journal_outcome))
                 {
-                    progress::suspend_output(|| {
-                        eprintln!(
-                            "warning: failed to journal the merged transaction outcome for '{}': {err}",
-                            item.name
-                        )
-                    });
+                    output(BatchOutputEvent::Warning(format!(
+                        "failed to journal the merged transaction outcome for '{}': {err}",
+                        item.name
+                    )));
                 }
             }
             drop(store);
             drop(_lock);
 
             if clean.is_empty() {
-                return items;
+                return BatchEffectOutcome { items };
             }
-            progress::suspend_output(|| {
-                eprintln!(
-                    "warning: merged rpm transaction failed ({reason}); retrying {} component(s) individually",
-                    clean.len()
-                )
-            });
+            output(BatchOutputEvent::Warning(format!(
+                "merged rpm transaction failed ({reason}); retrying {} component(s) individually",
+                clean.len()
+            )));
             let mut fail_fast_tripped = false;
             for name in clean {
                 if fail_fast_tripped {
-                    items.push(AllSummaryItem {
+                    items.push(BatchMemberOutcome {
                         component: name,
-                        status: "skipped",
+                        status: BatchMemberStatus::Skipped,
                         reason: Some("--fail-fast: not attempted".to_string()),
                         plan: None,
                     });
                     continue;
                 }
                 match degrade(&name) {
-                    Ok(outcome) => items.push(AllSummaryItem {
-                        component: name,
-                        status: batch_status(outcome, false),
-                        reason: None,
-                        plan: None,
-                    }),
+                    Ok(outcome) => {
+                        for warning in outcome.warnings {
+                            output(BatchOutputEvent::Warning(warning));
+                        }
+                        let item = project_member_application(
+                            &name,
+                            ExecutionIntent::Apply,
+                            outcome.outcome,
+                        );
+                        if args.fail_fast && item.status.is_unsuccessful() {
+                            fail_fast_tripped = true;
+                        }
+                        items.push(item);
+                    }
                     Err(err) => {
                         items.push(failed_item(&name, err.reason().to_string()));
                         if args.fail_fast {
@@ -806,65 +719,77 @@ fn execute_merged_group_with_deps(
                     }
                 }
             }
-            items
+            BatchEffectOutcome { items }
         }
     }
 }
 
-fn failed_item(name: &str, reason: String) -> AllSummaryItem {
-    AllSummaryItem {
-        component: name.to_string(),
-        status: "failed",
-        reason: Some(reason),
-        plan: None,
-    }
+fn component_names_for_target(
+    index: &ComponentIndex,
+    backend: &str,
+    os: &str,
+    arch: &str,
+) -> Vec<String> {
+    index
+        .components
+        .iter()
+        .filter(|entry| {
+            entry.backends.iter().any(|item| item.kind == backend)
+                && entry.supports_target(os, arch)
+        })
+        .map(|entry| entry.name.clone())
+        .collect()
 }
 
-/// Batch status string for a successful `handle_one`, combining the outcome
-/// with dry-run. Kept aligned with the `filter`-by-string counting in
-/// [`handle_all`] (§7.5): a new string here must be matched there too.
-pub(crate) fn batch_status(outcome: InstallOutcome, dry_run: bool) -> &'static str {
-    match (outcome, dry_run) {
-        (InstallOutcome::Installed, false) => "installed",
-        (InstallOutcome::Installed, true) => "planned",
-        // Idempotent either way: nothing would be written even for real.
-        (InstallOutcome::AlreadyInstalled, _) => "already-installed",
-    }
-}
-
-/// Load the component index and return names of components that support
-/// the given backend. When `backend` is `None`, the repo's default
-/// backend is used.
+/// Load the component index and return names of components that support the
+/// current target and selected backend. When `backend` is `None`, the repo's
+/// default backend is used.
 pub(crate) fn resolve_all_components(
     ctx: &CliContext,
     backend: Option<&str>,
+    index_base_override: Option<&str>,
 ) -> Result<Vec<String>, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config =
         common::load_repo_config(ctx, &layout, "install --all", RepoPersistPolicy::Require)?;
-    let index =
-        crate::resolution::load_component_index(&layout, &env, &repo_config).map_err(|err| {
-            CliError::Runtime {
+    // A `--repo` override's published index is the enumeration authority,
+    // matching identity and package resolution for each member install.
+    let index = match index_base_override {
+        Some(base_url) => crate::resolution::load_component_index_from_base(&layout, base_url),
+        None => crate::resolution::load_component_index(&layout, &env, &repo_config),
+    }
+    .map_err(|err| CliError::Runtime {
+        command: "install --all".to_string(),
+        reason: format!("failed to load component index: {err}"),
+    })?;
+    // An override enumerates its own published index and pins the DNF/raw
+    // source, so an explicitly named backend need not be configured in
+    // repo.toml — the name only filters index rows by backend kind. It must
+    // still be a known backend: a typo yields the same INVALID_ARGUMENT as
+    // the single-component path, never a successful empty batch.
+    let selected_backend = match (index_base_override, backend) {
+        (Some(_), Some(name)) => RepoConfig::known_backend_name(name)
+            .map_err(|err| CliError::InvalidArgument {
                 command: "install --all".to_string(),
-                reason: format!("failed to load component index: {err}"),
-            }
-        })?;
-    let (selected_backend, _) =
-        repo_config
+                reason: format!("{err}"),
+            })?
+            .to_string(),
+        _ => repo_config
             .select_backend(backend)
             .map_err(|err| CliError::InvalidArgument {
                 command: "install --all".to_string(),
                 reason: format!("{err}"),
-            })?;
-    let selected_backend = selected_backend.to_string();
-    let names: Vec<String> = index
-        .components
-        .iter()
-        .filter(|entry| entry.backends.iter().any(|b| b.kind == selected_backend))
-        .map(|entry| entry.name.clone())
-        .collect();
-    Ok(names)
+            })?
+            .0
+            .to_string(),
+    };
+    Ok(component_names_for_target(
+        &index,
+        &selected_backend,
+        &env.os,
+        &env.arch,
+    ))
 }
 
 #[cfg(test)]
@@ -876,26 +801,33 @@ mod tests {
 
     use anolisa_core::domain::{InstallationScope, ManagementRelation, ProviderBinding};
     use anolisa_core::facts::{JournalEvidence, pending_journal_for};
+    use anolisa_core::planner::{InstallRequest, Plan, ProviderTarget};
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
+    use super::super::RpmdbProbe;
     use super::super::tests::{
-        FakeInstaller, FakeQuery, load_store, pkg_info, system_ctx_with_configured_rpm_repo,
+        FakeInstaller, FakeQuery, args, linux_env, load_store, pkg_info,
+        system_ctx_with_configured_rpm_repo,
     };
+    use super::super::types::InstallOutcome;
+    use crate::progress::NoopReporter;
 
     const NOW: &str = "2026-07-17T00:00:00Z";
 
     #[test]
-    fn batch_status_maps_outcome_and_dry_run() {
-        assert_eq!(batch_status(InstallOutcome::Installed, false), "installed");
-        assert_eq!(batch_status(InstallOutcome::Installed, true), "planned");
+    fn batch_component_selection_uses_host_target() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
+        let index = ComponentIndex::load(index_path).expect("component index template must parse");
+
         assert_eq!(
-            batch_status(InstallOutcome::AlreadyInstalled, false),
-            "already-installed"
+            component_names_for_target(&index, "raw", "linux", "aarch64"),
+            ["cosh-ng", "tokenless"]
         );
         assert_eq!(
-            batch_status(InstallOutcome::AlreadyInstalled, true),
-            "already-installed"
+            component_names_for_target(&index, "raw", "macos", "aarch64"),
+            ["cosh-ng", "agentsight", "tokenless"]
         );
     }
 
@@ -1005,13 +937,24 @@ mod tests {
         PlannedComponent {
             command: format!("install {component}"),
             component: component.to_string(),
-            component_identity_pinned: false,
             family: "rpm".to_string(),
             native_package: Some(package.to_string()),
             delegated_pin: None,
             scope: InstallationScope::System,
             now: NOW.to_string(),
             store: StateStore::empty(),
+            request: InstallRequest {
+                target: ProviderTarget::Delegated {
+                    pm: NativePm::Rpm,
+                    package: package.to_string(),
+                    artifact: None,
+                },
+                requested_version: None,
+            },
+            plan: Plan::Execute {
+                steps: steps.clone(),
+                notes: Vec::new(),
+            },
             route: PlannedRoute::Delegated { steps },
         }
     }
@@ -1024,11 +967,61 @@ mod tests {
         }
     }
 
-    fn item_status<'a>(items: &'a [AllSummaryItem], name: &str) -> &'a AllSummaryItem {
+    fn item_status<'a>(items: &'a [BatchMemberOutcome], name: &str) -> &'a BatchMemberOutcome {
         items
             .iter()
             .find(|item| item.component == name)
             .unwrap_or_else(|| panic!("no summary item for {name}"))
+    }
+
+    fn applied_member() -> MemberApplicationOutcome {
+        MemberApplicationOutcome {
+            outcome: InstallBatchOutcome::Completed(InstallOutcome::Installed),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn single_member_batch_preserves_partial_application_failure() {
+        let (_tmp, c) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&c);
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .failing_state_save(layout.state_dir.join("installed.toml"));
+        let mut install_args = args("copilot-shell");
+        install_args.backend = Some("rpm".to_string());
+        let mut reporter = NoopReporter;
+
+        let result = super::super::application::run_with_dependencies_classified(
+            super::super::application::InstallRequest {
+                component: "copilot-shell",
+                args: &install_args,
+                intent: ExecutionIntent::Apply,
+            },
+            &c,
+            &linux_env(),
+            &RpmdbProbe::absent(),
+            &fake,
+            &fake,
+            true,
+            &std::collections::HashSet::new(),
+            &mut reporter,
+        );
+        let member = member_application_outcome(result);
+        let item =
+            project_member_application("copilot-shell", ExecutionIntent::Apply, member.outcome);
+
+        assert_eq!(item.status, BatchMemberStatus::Partial);
+        assert!(
+            item.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("repair")),
+            "post-transaction record failure must retain repair guidance: {:?}",
+            item.reason
+        );
+        assert_eq!(fake.install_calls.get(), 1, "the native transaction ran");
     }
 
     #[test]
@@ -1076,11 +1069,11 @@ mod tests {
                 pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
             ),
         ]);
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a committed merged transaction must not degrade ({name})");
         };
 
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
             &ctx,
@@ -1088,7 +1081,9 @@ mod tests {
             &txn,
             true,
             &mut degrade,
+            &mut |_| {},
         );
+        let items = effect.items;
 
         // One dnf invocation carried both packages — the whole point of D9.
         assert_eq!(
@@ -1099,7 +1094,9 @@ mod tests {
             )]
         );
         assert!(
-            items.iter().all(|item| item.status == "installed"),
+            items
+                .iter()
+                .all(|item| item.status == BatchMemberStatus::Installed),
             "expected both installed, got {:?}",
             items
                 .iter()
@@ -1181,11 +1178,11 @@ mod tests {
             .count();
         let query = FakeQuery::default();
         let txn = BatchTxn::new(false);
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a recovery-blocked member must not degrade ({name})");
         };
 
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a")],
             &batch_args(),
             &ctx,
@@ -1193,11 +1190,13 @@ mod tests {
             &txn,
             true,
             &mut degrade,
+            &mut |_| {},
         );
+        let items = effect.items;
 
         assert!(txn.calls.borrow().is_empty(), "dnf must not run");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].status, "failed");
+        assert_eq!(items[0].status, BatchMemberStatus::Failed);
         assert!(
             items[0]
                 .reason
@@ -1225,19 +1224,26 @@ mod tests {
         let query = FakeQuery::default();
         let txn = BatchTxn::new(true);
         let degraded = RefCell::new(Vec::new());
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let events = RefCell::new(Vec::new());
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             degraded.borrow_mut().push(name.to_string());
+            events.borrow_mut().push(format!("degrade:{name}"));
             if name == "a" {
                 Err(CliError::Runtime {
                     command: "install a".to_string(),
                     reason: "no match for pkg-a".to_string(),
                 })
             } else {
-                Ok(InstallOutcome::Installed)
+                Ok(applied_member())
+            }
+        };
+        let mut output = |event| {
+            if let BatchOutputEvent::Warning(warning) = event {
+                events.borrow_mut().push(format!("warning:{warning}"));
             }
         };
 
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
             &ctx,
@@ -1245,14 +1251,22 @@ mod tests {
             &txn,
             true,
             &mut degrade,
+            &mut output,
         );
+        let events = events.borrow();
+        assert!(events[0].contains("retrying 2 component(s) individually"));
+        assert_eq!(events[1..], ["degrade:a", "degrade:b"]);
+        let items = effect.items;
 
         // The offender fails with its own error; the innocent member lands.
         assert_eq!(degraded.borrow().as_slice(), ["a", "b"]);
         let a = item_status(&items, "a");
-        assert_eq!(a.status, "failed");
+        assert_eq!(a.status, BatchMemberStatus::Failed);
         assert!(a.reason.as_deref().unwrap().contains("no match for pkg-a"));
-        assert_eq!(item_status(&items, "b").status, "installed");
+        assert_eq!(
+            item_status(&items, "b").status,
+            BatchMemberStatus::Installed
+        );
 
         // Clean failure: no record was written and no pending journal blocks
         // the per-item retry or any later intent.
@@ -1281,12 +1295,12 @@ mod tests {
             pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
         )]);
         let degraded = RefCell::new(Vec::new());
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             degraded.borrow_mut().push(name.to_string());
-            Ok(InstallOutcome::Installed)
+            Ok(applied_member())
         };
 
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
             &ctx,
@@ -1294,16 +1308,21 @@ mod tests {
             &txn,
             true,
             &mut degrade,
+            &mut |_| {},
         );
+        let items = effect.items;
 
         // Forward-only for the landed member: no retry, repair reconciles.
         assert_eq!(degraded.borrow().as_slice(), ["b"]);
         let a = item_status(&items, "a");
-        assert_eq!(a.status, "failed");
+        assert_eq!(a.status, BatchMemberStatus::Partial);
         let reason = a.reason.as_deref().unwrap();
         assert!(reason.contains("reached the rpmdb"), "got: {reason}");
         assert!(reason.contains("anolisa repair a"), "got: {reason}");
-        assert_eq!(item_status(&items, "b").status, "installed");
+        assert_eq!(
+            item_status(&items, "b").status,
+            BatchMemberStatus::Installed
+        );
 
         // The landed member's journal stays pending (Partial) so the next
         // intent routes to repair; the clean member's does not.
@@ -1334,11 +1353,11 @@ mod tests {
         let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         let query = FakeQuery::default();
         let txn = BatchTxn::new(false);
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a refused merged group must not degrade ({name})");
         };
 
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
             &ctx,
@@ -1346,12 +1365,14 @@ mod tests {
             &txn,
             false,
             &mut degrade,
+            &mut |_| {},
         );
+        let items = effect.items;
 
         assert!(txn.calls.borrow().is_empty(), "dnf must not run");
         for component in ["a", "b"] {
             let item = item_status(&items, component);
-            assert_eq!(item.status, "failed");
+            assert_eq!(item.status, BatchMemberStatus::Failed);
             assert!(item.reason.as_deref().unwrap().contains("requires root"));
         }
     }
@@ -1370,12 +1391,12 @@ mod tests {
                 pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
             ),
         ]);
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("must not degrade ({name})");
         };
 
         // First merged run records both members.
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
             &ctx,
@@ -1383,14 +1404,20 @@ mod tests {
             &txn,
             true,
             &mut degrade,
+            &mut |_| {},
         );
-        assert!(items.iter().all(|item| item.status == "installed"));
+        let items = effect.items;
+        assert!(
+            items
+                .iter()
+                .all(|item| item.status == BatchMemberStatus::Installed)
+        );
 
         // A second merged run over the same members must notice the records
         // that appeared since its (stale) planning and refuse each slot —
         // without running dnf again.
         let txn = BatchTxn::new(false);
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
             &ctx,
@@ -1398,11 +1425,13 @@ mod tests {
             &txn,
             true,
             &mut degrade,
+            &mut |_| {},
         );
+        let items = effect.items;
         assert!(txn.calls.borrow().is_empty(), "dnf must not run twice");
         for component in ["a", "b"] {
             let item = item_status(&items, component);
-            assert_eq!(item.status, "failed");
+            assert_eq!(item.status, BatchMemberStatus::Failed);
             assert!(
                 item.reason
                     .as_deref()
@@ -1418,11 +1447,11 @@ mod tests {
         let layout = common::resolve_layout(&ctx);
         let fake = FakeInstaller::new("pkg-a", pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"))
             .package_appears_under_lock(layout.lock_file.clone());
-        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a stale merged plan must not degrade ({name})");
         };
 
-        let items = execute_merged_group_with_deps(
+        let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a")],
             &batch_args(),
             &ctx,
@@ -1430,11 +1459,13 @@ mod tests {
             &fake,
             true,
             &mut degrade,
+            &mut |_| {},
         );
+        let items = effect.items;
 
         assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
         let item = item_status(&items, "a");
-        assert_eq!(item.status, "failed");
+        assert_eq!(item.status, BatchMemberStatus::Failed);
         assert!(
             item.reason
                 .as_deref()

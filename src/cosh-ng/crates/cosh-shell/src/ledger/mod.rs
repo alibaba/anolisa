@@ -54,7 +54,28 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
                 let duration_ms = event
                     .duration_ms
                     .unwrap_or_else(|| ended_at_ms.saturating_sub(started_at_ms));
-                let exit_code = event.exit_code.unwrap_or(0);
+                // Exit-code narrowing contract (Option<i32> -> i32):
+                //   Some(c)                 -> c verbatim; the aggregator never
+                //                              rewrites explicit exit codes.
+                //   None + CommandFailed    -> -1 sentinel; a failed finish
+                //                              without an exit code (replayed
+                //                              journals from older or external
+                //                              producers) must fall toward
+                //                              failure, never toward success 0.
+                //                              -1 sits outside the shell's
+                //                              0..=255 exit domain and matches
+                //                              the missing-exit-code sentinel
+                //                              the agent host-executed chain
+                //                              already uses (#2105).
+                //   None + other kinds      -> 0; the finish is logically
+                //                              successful and only the actual
+                //                              exit code went unrecorded.
+                // Invariant: missing data never fabricates success for a
+                // failed command.
+                let exit_code = event.exit_code.unwrap_or(match &event.kind {
+                    ShellEventKind::CommandFailed => -1,
+                    _ => 0,
+                });
                 let status =
                     if matches!(&event.kind, ShellEventKind::CommandFailed) || exit_code != 0 {
                         CommandStatus::Failed
@@ -128,6 +149,77 @@ mod tests {
 
         assert!(output.errors.is_empty());
         assert_eq!(output.blocks[0].shell_environment_generation, Some(7));
+    }
+
+    #[test]
+    fn command_failed_no_exit_code_does_not_default_to_zero() {
+        let start = ShellEvent::command_started("session", "command", "sleep 60", "/tmp", 1);
+        let mut finish = ShellEvent::command_finished(
+            ShellEventKind::CommandFailed,
+            "session",
+            "command",
+            0,
+            2,
+            "/tmp/output",
+        );
+        finish.exit_code = None;
+
+        let output = build_command_blocks(&[start, finish]);
+
+        assert!(output.errors.is_empty());
+        assert_eq!(output.blocks.len(), 1);
+        let block = &output.blocks[0];
+        assert_eq!(block.status, crate::types::CommandStatus::Failed);
+        assert_eq!(
+            block.exit_code, -1,
+            "CommandFailed without an exit code must surface the missing-exit sentinel, not success 0"
+        );
+    }
+
+    #[test]
+    fn command_completed_no_exit_code_keeps_success_zero() {
+        let start = ShellEvent::command_started("session", "command", "echo ok", "/tmp", 1);
+        let mut finish = ShellEvent::command_finished(
+            ShellEventKind::CommandCompleted,
+            "session",
+            "command",
+            0,
+            2,
+            "/tmp/output",
+        );
+        finish.exit_code = None;
+
+        let output = build_command_blocks(&[start, finish]);
+
+        assert!(output.errors.is_empty());
+        assert_eq!(output.blocks.len(), 1);
+        let block = &output.blocks[0];
+        assert_eq!(block.status, crate::types::CommandStatus::Completed);
+        assert_eq!(block.exit_code, 0);
+    }
+
+    #[test]
+    fn explicit_exit_code_passes_through_verbatim() {
+        let start = ShellEvent::command_started("session", "command", "grep x y", "/tmp", 1);
+        let finish = ShellEvent::command_finished(
+            ShellEventKind::CommandFailed,
+            "session",
+            "command",
+            2,
+            2,
+            "/tmp/output",
+        );
+
+        let output = build_command_blocks(&[start, finish]);
+
+        assert!(output.errors.is_empty());
+        assert_eq!(output.blocks.len(), 1);
+        let block = &output.blocks[0];
+        assert_eq!(block.status, crate::types::CommandStatus::Failed);
+        assert_eq!(
+            block.exit_code, 2,
+            "the aggregator must never rewrite an explicit exit code"
+        );
     }
 
     #[test]

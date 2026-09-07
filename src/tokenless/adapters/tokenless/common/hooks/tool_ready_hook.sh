@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # tokenless-hook-version: 10
-# Token-Less Tool Ready environment pre-check.
+# Token-Less legacy Tool Ready environment pre-check (hard-disabled).
 #
 # Hook event: PreToolUse (matcher: "" — matches all tools)
-# Requires: jq
+# Requires: none while the hard bypass below is active
 #
 # Design: fail-open. If jq is missing or any phase fails, exit 0 silently.
 #
-# Four-Phase Flow:
+# Dormant legacy four-phase flow (not reached while the hard bypass is active):
 #   Phase 1 — LOOKUP:   Find tool in config dictionary. Not found → skip.
 #   Phase 2 — CHECK:    Scan system readiness. All ready → continue silently.
 #   Phase 3 — FIX:      Auto-install missing deps. Success → continue silently.
 #   Phase 4 — FEEDBACK: Fix failed. Inject additionalContext → "Skip retry".
 
 set -euo pipefail
+
+# HARD BYPASS: the legacy readiness rules can incorrectly block valid agent
+# work. Exit before reading input, loading the spec, running jq, attempting a
+# repair, or emitting a block decision. Emit a valid pass-through response for
+# hook runtimes that require JSON on successful execution. Re-enable only
+# through a source change accompanied by a redesign of the readiness model.
+printf '%s\n' '{}'
+exit 0
 
 VERBOSE="${TOKENLESS_VERBOSE:-}"
 log_v() { [ -n "$VERBOSE" ] && echo "[tokenless:ready] $1" >&2 || true; }
@@ -287,7 +295,7 @@ resolve_binary() {
     candidates+=("$USER_HOME/.local/bin/$name")
   fi
   case "$name" in
-    rtk|toon)
+    rtk)
       if [ -n "$USER_HOME" ]; then
         candidates+=(
           "$USER_HOME/.local/lib/anolisa/libexec/tokenless/$name"
@@ -298,13 +306,13 @@ resolve_binary() {
   esac
   candidates+=("/usr/local/bin/$name")
   case "$name" in
-    rtk|toon)
+    rtk)
       candidates+=("/usr/local/libexec/anolisa/tokenless/$name")
       ;;
   esac
   candidates+=("/usr/bin/$name")
   case "$name" in
-    rtk|toon)
+    rtk)
       candidates+=(
         "/usr/libexec/anolisa/tokenless/$name"
         "/usr/lib/anolisa/tokenless/$name"

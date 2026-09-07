@@ -87,74 +87,164 @@ pub(super) fn redact_sensitive_output_with_policy(text: &str) -> (String, bool, 
 /// never match while the terminal still shows an ordinary assignment.
 pub(crate) fn clean_terminal_control_sequences(text: &str) -> String {
     let mut output = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\x1b' => match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    consume_csi_body(&mut chars);
-                }
-                Some(']') => {
-                    chars.next();
-                    consume_string_sequence_body(&mut chars, true);
-                }
-                Some('P') | Some('X') | Some('^') | Some('_') => {
-                    chars.next();
-                    consume_string_sequence_body(&mut chars, false);
-                }
-                // Bare ESC (or a two-byte escape): drop the introducer; any
-                // remaining byte is either consumed by later rules or plain
-                // printable text.
-                _ => {}
-            },
-            // C1 forms of the same introducers.
-            '\u{9b}' => consume_csi_body(&mut chars),
-            '\u{9d}' => consume_string_sequence_body(&mut chars, true),
-            '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
-                consume_string_sequence_body(&mut chars, false)
-            }
-            '\r' => {}
-            _ if ch.is_control() && !matches!(ch, '\n' | '\t') => {}
-            _ if is_invisible_format_char(ch) => {}
-            _ => output.push(ch),
+    let mut scanner = ControlSequenceScanner::new();
+    for ch in text.chars() {
+        if let Some(visible) = scanner.push(ch) {
+            output.push(visible);
         }
     }
     output
 }
 
-/// Consumes a CSI body: everything up to and including the final byte in
-/// `@..=~`. An unterminated sequence consumes to the end (fail closed).
-fn consume_csi_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    for next in chars.by_ref() {
-        if ('@'..='~').contains(&next) {
-            break;
-        }
-    }
+/// Escape-sequence consumption state carried between characters, so the
+/// scan can resume across arbitrarily split input (#2196 review R7: the
+/// prompt-tail tracker feeds PTY chunks incrementally instead of
+/// re-cleaning the whole command output on every sample).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ScanState {
+    /// Plain text; the next character is a visibility decision.
+    #[default]
+    Ground,
+    /// Saw ESC; the next character selects the sequence kind.
+    Escape,
+    /// Inside a CSI body, consuming to the final byte in `@..=~`; an
+    /// unterminated sequence consumes to the end (fail closed).
+    Csi,
+    /// Inside an OSC/DCS/SOS/PM/APC payload. ST (`ESC \` or C1 U+009C)
+    /// always terminates; OSC additionally accepts BEL. A payload ESC that
+    /// is NOT part of ST stays inside the payload — releasing the string
+    /// early would let the rest of a malformed payload flow into the
+    /// output. Unterminated payloads consume to the end (fail closed).
+    StringBody {
+        bel_terminates: bool,
+        pending_st: bool,
+    },
+    /// Inside nF intermediates (0x20..=0x2F), consuming to the final byte.
+    NfIntermediates,
 }
 
-/// Consumes an OSC/DCS/SOS/PM/APC payload up to its terminator.
-///
-/// ST (`ESC \` or C1 `U+009C`) always terminates; OSC additionally accepts
-/// BEL. A bare ESC that is NOT part of ST stays inside the payload and
-/// consumption continues — releasing the string early would let the rest of
-/// a malformed payload flow into the output. Unterminated payloads consume
-/// to the end (fail closed) so they can never leak.
-fn consume_string_sequence_body(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    bel_terminates: bool,
-) {
-    while let Some(next) = chars.next() {
-        match next {
-            '\u{7}' if bel_terminates => break,
-            '\u{9c}' => break,
-            '\x1b' if chars.peek() == Some(&'\\') => {
-                chars.next();
-                break;
+/// Streaming form of [`clean_terminal_control_sequences`]: identical
+/// semantics, one character at a time, with the consumption state held
+/// between calls so input may be split anywhere (chunk boundaries included).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ControlSequenceScanner {
+    state: ScanState,
+}
+
+impl ControlSequenceScanner {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds one character; returns it when it is visible output.
+    pub(crate) fn push(&mut self, ch: char) -> Option<char> {
+        match self.state {
+            ScanState::Ground => match ch {
+                '\x1b' => {
+                    self.state = ScanState::Escape;
+                    None
+                }
+                // C1 forms of the introducers.
+                '\u{9b}' => {
+                    self.state = ScanState::Csi;
+                    None
+                }
+                '\u{9d}' => {
+                    self.state = ScanState::StringBody {
+                        bel_terminates: true,
+                        pending_st: false,
+                    };
+                    None
+                }
+                '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
+                    self.state = ScanState::StringBody {
+                        bel_terminates: false,
+                        pending_st: false,
+                    };
+                    None
+                }
+                '\r' => None,
+                _ if ch.is_control() && !matches!(ch, '\n' | '\t') => None,
+                _ if is_invisible_format_char(ch) => None,
+                _ => Some(ch),
+            },
+            ScanState::Escape => match ch {
+                '[' => {
+                    self.state = ScanState::Csi;
+                    None
+                }
+                ']' => {
+                    self.state = ScanState::StringBody {
+                        bel_terminates: true,
+                        pending_st: false,
+                    };
+                    None
+                }
+                'P' | 'X' | '^' | '_' => {
+                    self.state = ScanState::StringBody {
+                        bel_terminates: false,
+                        pending_st: false,
+                    };
+                    None
+                }
+                // nF sequences such as charset selection `ESC ( B`: consume
+                // the intermediates plus the final byte, so the final can
+                // never leak as visible text (#2196 review: single
+                // stripping authority).
+                '\u{20}'..='\u{2f}' => {
+                    self.state = ScanState::NfIntermediates;
+                    None
+                }
+                // ECMA-48 two-byte escapes (`ESC Fp`/`ESC Fe`/`ESC Fs`,
+                // e.g. the keypad-mode `ESC =` that terminfo smkx emits):
+                // consume the final byte so it cannot leak as visible text
+                // (#2196 review R6: a pager starting under an agent handoff
+                // put `=` into the input-wait hint card).
+                '\u{30}'..='\u{7e}' => {
+                    self.state = ScanState::Ground;
+                    None
+                }
+                // ESC ESC: the second ESC re-arms the escape state.
+                '\x1b' => None,
+                // Bare ESC followed by a control byte: drop the introducer;
+                // the byte takes its ground meaning.
+                _ => {
+                    self.state = ScanState::Ground;
+                    self.push(ch)
+                }
+            },
+            ScanState::Csi => {
+                if ('@'..='~').contains(&ch) {
+                    self.state = ScanState::Ground;
+                }
+                None
             }
-            // A bare ESC that is not ST belongs to the (malformed) payload;
-            // keep consuming until a real terminator or the end of input.
-            _ => {}
+            ScanState::StringBody {
+                bel_terminates,
+                pending_st,
+            } => {
+                if pending_st && ch == '\\' {
+                    self.state = ScanState::Ground;
+                    return None;
+                }
+                match ch {
+                    '\u{7}' if bel_terminates => self.state = ScanState::Ground,
+                    '\u{9c}' => self.state = ScanState::Ground,
+                    _ => {
+                        self.state = ScanState::StringBody {
+                            bel_terminates,
+                            pending_st: ch == '\x1b',
+                        }
+                    }
+                }
+                None
+            }
+            ScanState::NfIntermediates => {
+                if !('\u{20}'..='\u{2f}').contains(&ch) {
+                    self.state = ScanState::Ground;
+                }
+                None
+            }
         }
     }
 }

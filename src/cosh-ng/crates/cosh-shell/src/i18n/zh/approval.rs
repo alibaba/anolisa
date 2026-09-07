@@ -72,7 +72,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalShellHandoffBlockedFooter => "命令没有写入前台 shell。",
         MessageId::ApprovalShellHandoffValidationEmptyCommand => "Shell handoff 命令为空。",
         MessageId::ApprovalShellHandoffValidationMultilineCommand => {
-            "Shell handoff 命令包含换行；尚未启用多行 handoff。"
+            "Shell handoff 命令包含不受支持的换行；仅允许完整单引号参数内的换行。"
         }
         MessageId::ApprovalShellHandoffValidationControlCharacter => {
             "Shell handoff 命令包含被阻止的控制字符。"
@@ -165,6 +165,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalTurnExtensionUnavailableTitle => "无法继续",
         MessageId::ApprovalTurnExtensionUnavailableBody => {
             "批准扩容前，已持久化的 provider 会话发生了变化。"
+        }
+        MessageId::ApprovalTrustUnknownToolReason => {
+            "不在受信任工具目录中；Trust 模式下仍需显式审批"
         }
         _ => return None,
     })

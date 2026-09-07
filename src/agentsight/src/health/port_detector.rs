@@ -1,9 +1,10 @@
-//! TCP port detection for a given PID via /proc filesystem
+//! TCP port detection for a given PID via procfs
 //!
 //! Discovers which TCP ports a process is listening on by:
-//! 1. Enumerating socket inodes from `/proc/[pid]/fd/`
+//! 1. Enumerating socket inodes from `<procfs root>/[pid]/fd/`
 //! 2. Matching them against `/proc/net/tcp` and `/proc/net/tcp6` entries
-//!    that are in the LISTEN state.
+//!    that are in the LISTEN state (netns-scoped, deliberately the observer's
+//!    own procfs -- see `utils::procfs`).
 
 use std::collections::HashSet;
 use std::fs;
@@ -42,9 +43,9 @@ pub fn detect_listening_ports(pid: u32) -> Vec<u16> {
     ports
 }
 
-/// Collect all socket inodes owned by the given PID by reading `/proc/[pid]/fd/`.
+/// Collect all socket inodes owned by the given PID by reading `<procfs root>/[pid]/fd/`.
 fn collect_socket_inodes(pid: u32) -> std::io::Result<HashSet<u64>> {
-    let fd_dir = format!("/proc/{pid}/fd");
+    let fd_dir = crate::utils::procfs::proc_pid_entry(pid, "fd");
     let mut inodes = HashSet::new();
 
     for entry in fs::read_dir(&fd_dir)? {
@@ -138,5 +139,17 @@ mod tests {
         assert_eq!(parse_hex_port("0100007F:1CE4"), Some(0x1CE4)); // 7396
         assert_eq!(parse_hex_port("00000000:0050"), Some(80));
         assert_eq!(parse_hex_port("invalid"), None);
+    }
+
+    #[test]
+    fn test_collect_socket_inodes_with_live_socket() {
+        // A listener plus a connected stream guarantees at least one socket fd,
+        // so the enumeration over our fd table must find something.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let _stream = std::net::TcpStream::connect(addr).expect("connect");
+
+        let inodes = collect_socket_inodes(std::process::id()).expect("enumerate fds");
+        assert!(!inodes.is_empty());
     }
 }

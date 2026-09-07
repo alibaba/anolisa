@@ -1,31 +1,63 @@
-# Tokenless Framework Integration
+# Tokenless Agent Integration
 
 [中文版](../../../zh/token-saving/tokenless/framework-integration.md)
 
-Tokenless uses adapters to connect compression, command rewriting, and environment checks to an agent. Installing Tokenless provides the binaries and adapter resources; the target agent calls them automatically only after its adapter is enabled.
+Tokenless connects to Agent products through plugins, hooks, and extensions. This guide covers
+product adapters. The Python SDK and its AgentScope-specific child document live under
+[Python SDK](sdk.md).
 
-## Support matrix
+## Agent adapter support matrix
 
-| Framework | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
+| Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | ✅ | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell appends context | Attempted after response compression | ✅ |
-| OpenClaw | `openclaw` | ✅ | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
-| Hermes | `hermes` | ✅ | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
-| Qoder | `qoder` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
-| Claude Code | `claude-code` | ✅ | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
-| Codex | `codex` | ✅ | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
-| OpenCode | `opencode` | ✅ | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
-| Qwen Code | `qwencode` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
+| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces supported JSON results; legacy Copilot Shell passes through | Pipeline-selected for replaceable text | Lossless-only through the Common Hook |
+| OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
+| Hermes | `hermes` | Hard-disabled | Blocks the first call and suggests Core's rewrite | Replaces accepted results or adds error guidance; supports Marker command recovery | Core-selected for replaceable text | — |
+| Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Replaces output through `updatedToolOutput` | Pipeline-selected for replaceable text | — |
+| Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Pipeline-selected for replaceable text | — |
+| Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original; adds context only for classified environment failures | — | — |
+| DeepSeek Harness | `dsh` | — | — | Delegates accepted single-text results to Core; supports Marker command recovery | Core-selected for replaceable text | — |
+| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Pipeline-selected for replaceable text | ✅ |
+| Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Passes through because the host has no replacement field | — | — |
+| QwenPaw | `qwenpaw` | — | Replaces the `execute_shell_command` input | Replaces text blocks of the tool result inside the AgentScope middleware chain | Core-selected for replaceable text | ✅ |
 
-“—” means that the current adapter does not register that capability. The corresponding Tokenless CLI command may still be available.
+“—” means that the capability is not available: the current adapter does not register it, or current host releases do not run it. The corresponding Tokenless CLI command may still be available.
 
-`additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
+Schema compression reaches the model path differently per host: cosh and Cosh-NG fire the `BeforeModel` hook; OpenCode compresses each tool definition through its `tool.definition` plugin hook (MCP tools do not pass through that hook); Qwen Code's manifest declares a `BeforeModel` hook, but current Qwen Code releases skip that unknown event name at registration, so the schema hook does not run there and the matrix marks it unavailable. The entry stays registered, so a future Qwen Code release that implements the event picks it up automatically.
 
-OpenCode currently uses the bundled lifecycle scripts documented below. It is not registered with the `anolisa adapter enable` driver set in this release.
+Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
+
+`additionalContext` is an additive hook field. The shared hook does not place compressed copies
+there because the original would remain visible and total context would grow. It uses that field
+only for additive environment-error guidance. A statistics record proves that a candidate became
+smaller, not by itself that the host removed the original from its model request.
 
 ## Adapter processing rules
 
-The standalone `compress-response` defaults are not the defaults used by most adapters. Shared adapters classify tools as follows:
+The shared Cosh-NG, Qoder, Claude Code, and OpenCode PostTool hook sends one
+`post_tool` request to `tokenless compress`. When the host can replace the result and bare
+`tokenless` resolves on its shell `PATH`, a Marker can direct the model to recover omitted content
+with the existing shell tool. Otherwise Core accepts only lossless candidates. Every non-`applied`
+disposition keeps the original. The hook currently routes:
+
+| Content | Current shared-hook behavior |
+|---------|------------------------------|
+| JSON | Lossless structural cleanup; TOON may be selected for text-capable replacement slots |
+| JSON requiring record reduction or string, array, or depth truncation | Applied only when Marker command recovery is available; otherwise rejected with `recoverability_unavailable` |
+| Build/test/package logs, long plain text, diff, stack trace, HTML, search results, tables, source code, unknown | Passthrough until a matching domain compressor is connected |
+
+Content detection, the 200-character PostTool gate, tool-origin thresholds, diagnostics, TOON
+selection, and final acceptance are Core policy. The hook maps host objects to v2 fields and may
+skip obvious non-JSON skill files only to avoid an unnecessary subprocess.
+
+The Common BeforeModel hook likewise has no marker-authorized recovery path. Current schema
+transformations are lossy, so Core passes the tools through unchanged. OpenCode's separate per-tool
+definition path and the direct `compress-schema` command are unchanged.
+
+OpenClaw, Hermes, and DeepSeek Harness delegate their PostTool decisions to Core. The standalone
+`compress-response` command remains the explicit JSON cleanup interface.
+
+For JSON response cleanup, adapters map host tools to Core's content origins as follows:
 
 | Class | Default adapter behavior |
 |-------|--------------------------|
@@ -33,9 +65,92 @@ The standalone `compress-response` defaults are not the defaults used by most ad
 | Shell/exec | 65,536-character strings, 128 retained array items, depth 8 |
 | Other structured tools | 1,048,576-character strings, 65,536 retained array items, depth 32 |
 
-The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Codex skips inputs shorter than 500 characters; it includes compressed content only for inputs of at least 4,000 characters and otherwise adds diagnostics or a summary. Skill-like text with YAML frontmatter is also skipped by the shared paths.
+The PostTool size gate, tool-origin thresholds, and TOON selection belong to Core for Common Hooks,
+OpenClaw, and Hermes. TOON runs only when the selected host slot accepts text and Core finds a
+smaller valid representation. The standalone `compress-toon` CLI and SDK TOON path retain their
+documented default minimum, while the CLI can lower it per call with `--min-toon-chars`. Codex and
+Qwen Code do not run response compression or TOON because their current PostToolUse contracts
+cannot replace the original model-visible output.
+
+Common Hooks and OpenClaw carry RTK ownership into the matching PostTool call. Hermes supports older
+host releases by blocking and suggesting a retry; its final-result hook recognizes the attributed
+RTK wrapper from the command Hermes actually executed. All three therefore bypass a second
+compression pass over RTK output.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
+
+### DeepSeek Harness native processing
+
+The DSH bundle requires Node.js 22 or later and a compatible DSH profile. Pass
+all desired profile names in the same enable command, then start DSH with one
+of those names:
+
+```bash
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
+dsh --profile web
+```
+
+`--profile` is required and repeatable. Each enable or re-enable treats its
+arguments as the complete desired profile set. It removes the bundle from any
+profile recorded by the prior receipt but omitted from the new command, so
+always include every profile that should retain Tokenless. ANOLISA records the
+selected profiles and their resolved DSH home in the adapter receipt, so later
+status, disable, and re-enable operations continue to address the same profile
+tree.
+
+The plugin runs on DSH's `tools/post-execute` waterfall and sends replaceable
+root results containing one text block to `tokenless compress`. Core owns
+content detection, JSON and Build Log compression, TOON selection, size gates,
+tool-origin thresholds, and final acceptance. Unsupported content domains and
+file-content results pass through. When bare `tokenless` resolves on DSH's shell `PATH` to the same
+executable selected for the Core call, a Marker can ask the model to run a
+standalone `tokenless retrieve` command; its successful output bypasses
+compression. Multiple blocks, images, Code Mode child successes, and canonical
+values replaced by a later waterfall listener remain untouched. A missing,
+failing, or timed-out CLI also preserves the original content.
+
+DSH removes inherited `TOKENLESS_*` variables from model shell commands. The
+adapter publishes managed aliases for the selected data directory and optional
+statistics/Stash database overrides so Core and the shell recover from the same
+state. By default this state is stored in `.tokenless` under the session
+workspace. The adapter creates `.tokenless/.gitignore` with `*` so complete tool
+text and Stash payloads are not included by `git add -A`. Set
+`TOKENLESS_DATA_DIR`, `TOKENLESS_STATS_DB`, or `TOKENLESS_STASH_DB` before
+starting DSH to use another absolute path accessible to its shell sandbox;
+protect and exclude custom paths according to your repository policy.
+
+Add an override for the installed row to
+`$DSH_HOME/profiles/<profile>/cordis.patch.yml`, then restart that DSH profile:
+
+```yaml
+- id: anolisa-tokenless
+  config:
+    responseCompressionEnabled: true
+    timeoutMs: 5000
+    maxBuffer: 4194304
+```
+
+Later DSH patch layers replace the row's complete `config` value. The plugin
+supplies defaults for omitted keys, so the override may contain only the keys
+that need to differ.
+
+| Option | Default | Behavior |
+|--------|---------|----------|
+| `responseCompressionEnabled` | `true` | Enables response compression. Setting it to `false` does not disable environment-error attribution. |
+| `tokenlessBin` | `$TOKENLESS_BIN`, then `tokenless` | Selects the Tokenless CLI executable. A non-empty plugin value takes precedence over the environment variable. Marker recovery additionally requires bare `tokenless` on the shell `PATH` to resolve to this same executable. |
+| `timeoutMs` | `3000` | Bounds one Tokenless child process in milliseconds. Only a positive integer is accepted. |
+| `maxBuffer` | `2097152` | Bounds captured child-process output in bytes. Only a positive integer is accepted. |
+| `agentId` | `dsh` | Sets the Agent attribution recorded by Tokenless statistics. |
+
+The plugin maps DSH's built-in read/search tools to `file_content`, command
+tools to `command_output`, and unknown tools to `api_response`. These mappings
+only describe host facts; Core owns the resulting policy. Raw DSH failures and
+structured command failures are sent to Core for environment diagnosis even
+when compression is disabled. When a later waterfall listener replaces the
+canonical `value`, Tokenless examines only that replacement and never applies
+content compression to it.
 
 ## Manage adapters with anolisa (recommended)
 
@@ -54,7 +169,7 @@ Run the adapter commands below as the user who owns the target Agent
 configuration. A user-scoped adapter operation can discover the adopted system
 package while keeping the framework mutation in that user's configuration.
 
-### 1. Scan frameworks
+### 1. Scan Agent products
 
 ```bash
 anolisa adapter scan
@@ -77,12 +192,22 @@ anolisa adapter enable tokenless hermes
 anolisa adapter enable tokenless qoder
 anolisa adapter enable tokenless claude-code
 anolisa adapter enable tokenless codex
+anolisa adapter enable tokenless opencode
 anolisa adapter enable tokenless qwencode
+anolisa adapter enable tokenless qwenpaw
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
 ```
 
-Enable only frameworks that you use. When enabling more than one, run and verify each command separately.
+Enable only Agent products that you use. Run and verify each product's command
+separately. For DSH, include every desired profile in its single enable
+command.
 
-OpenCode is the exception to this section; use its bundled install script under [Manual integration after npm installation](#manual-integration-after-npm-installation).
+DeepSeek Harness is profile-scoped and therefore requires at least one
+`--profile`. Each name must match one passed to `dsh --profile <profile>`; the
+generic command without a profile is rejected. A later enable or re-enable
+must repeat every profile that should remain registered.
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
@@ -127,7 +252,7 @@ The npm postinstall script attempts to copy adapter resources under:
 
 Confirm that this directory exists. Adapter copying is supplementary and fails open with a warning; a successful binary install can therefore exist without this copy. If it is absent, review the npm postinstall warning and prefer an anolisa-managed installation.
 
-An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, and Qwen Code provide their own install scripts:
+An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, Qwen Code, and QwenPaw provide their own install scripts:
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
@@ -164,7 +289,7 @@ cp -R ~/.local/share/anolisa/adapters/tokenless/common/hooks \
 
 Restart cosh afterwards. Before removing it, exit cosh and confirm that the target directory is the Tokenless Extension created by this npm installation.
 
-## Framework activation notes
+## Agent adapter activation notes
 
 ### cosh
 
@@ -172,11 +297,14 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override as described above. Restart the gateway after accepting and installing the plugin. Response compression, Tool Ready, and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled.
+The install script uses OpenClaw's unsafe-install override as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
 
 ### Hermes
 
-The plugin takes effect in a new Hermes session. Restart Hermes and run a shell-tool task.
+The plugin takes effect in a new Hermes session. Restart Hermes, run a shell-tool task to verify the
+block-and-retry rewrite, then run a JSON-returning tool to verify result replacement. When bare
+`tokenless` resolves on the shell `PATH`, a Marker can ask Hermes to run `tokenless retrieve`; the
+successful recovery result is returned without another compression pass.
 
 ### Qoder
 
@@ -188,7 +316,15 @@ The marketplace plugin takes effect after restarting Claude Code. The install sc
 
 ### Codex
 
-The plugin loads in a new Codex session. Close the old session and start a new one before verifying statistics. Its PostToolUse hook is additive: use statistics as candidate-compression telemetry, not as proof that the original Codex tool output left the prompt.
+The plugin loads in a new Codex session. Close the old session and start a new one before verifying behavior. Codex PostToolUse cannot replace or suppress the original output, so the plugin does not append compressed content or record response-compression candidates. It adds context only for classified environment failures. Actual first-pass savings come from RTK rewriting supported shell commands before execution.
+
+### DeepSeek Harness
+
+The native bundle loads when the selected DSH profile starts. After enabling
+or changing its profile patch, restart `dsh --profile <profile>`, run a tool
+that returns compressible JSON, and inspect `tokenless stats list`. Disable the
+adapter with `anolisa adapter disable tokenless dsh`; the receipt already
+records the profile names, so disable does not accept another `--profile`.
 
 ### OpenCode
 
@@ -198,9 +334,23 @@ OpenCode discovers global local plugins at startup. Use the bundled Tokenless li
 
 The extension loads in a new Qwen Code session. Restart and run one tool call to verify it.
 
-## Verify the actual integration
+### QwenPaw
 
-Do not treat a zero install exit code as the only success criterion. At minimum, run:
+The adapter is a QwenPaw plugin: `anolisa adapter enable tokenless qwenpaw` and the bundled install script both run `qwenpaw plugin install <bundle> --force`, so QwenPaw copies the plugin into `<working dir>/plugins/tokenless/` and installs its `requirements.txt` into QwenPaw's own Python environment. That requirement is the `anolisa_tokenless` wheel from the matching GitHub Release, so the first install needs network access. QwenPaw only runs pip when `anolisa_tokenless` is missing from its interpreter's package metadata, so on an offline host `pip install` the wheel into QwenPaw's Python environment first; the same rule means an already installed older wheel is never upgraded by `plugin install`. The install script therefore checks, through the interpreter behind the `qwenpaw` command, that `anolisa_tokenless` imports and carries the SDK surface the plugin needs, and fails when no wheel matched the platform (`requirements.txt` lists Linux x86_64, Linux aarch64, and macOS arm64). The plugin itself refuses to register against an older wheel and logs the required release instead of failing at the first model call. The plugin requires the recovery entry points introduced in Tokenless 0.8.0. Install the SDK wheel matching the plugin release into QwenPaw's Python environment; the 0.7.14 wheel does not provide these APIs. The working directory is resolved like QwenPaw itself: `QWENPAW_WORKING_DIR`, else `COPAW_WORKING_DIR`, else an existing `~/.copaw`, else `~/.qwenpaw`. Without a `qwenpaw` command the install script prints a hint and exits 0 so `make setup` completes on hosts without QwenPaw.
+
+A running QwenPaw hot-loads the plugin; otherwise start QwenPaw. Schema compression and the `tokenless_retrieve` tool apply from the next model call, and command rewriting runs after QwenPaw's approval step, so an approved `execute_shell_command` executes the rewritten command. Only QwenPaw's built-in tools are classified: `execute_shell_command` is command output, `read_file`, `recall_history`, `view_image`, and `view_video` are file content, and the remaining built-ins are API responses; skills, MCP tools, and tools added by later QwenPaw releases pass through untouched. QwenPaw's own tool-result pruning runs after Tokenless and keeps the head of each result (50000 bytes for the two most recent tool results, 3000 bytes for older ones, overflow written to `tool_results/`), so a recovery instruction at the end of a compressed result survives only while the result fits that budget; the omitted content stays retrievable from the stash with `tokenless retrieve`. Records land under `<workspace>/.tokenless` for each QwenPaw workspace; point `tokenless stats list --data-dir` there.
+
+## AgentScope framework integration
+
+AgentScope is the second Python SDK layer, not a product adapter. Its complete build, version,
+attachment, configuration, and validation guidance now lives in
+[AgentScope SDK integration](sdk/agentscope.md). This heading remains as a compatibility pointer for
+existing links.
+
+## Verify an Agent adapter
+
+For an Agent adapter, do not treat a zero install exit code as the only success criterion. At
+minimum, run:
 
 ```bash
 tokenless --version
@@ -213,6 +363,8 @@ Then execute a tool task with visible output in the target agent. If `stats list
 ## Related documents
 
 - [Quick Start](QUICKSTART.md)
+- [Python SDK](sdk.md)
+- [AgentScope SDK integration](sdk/agentscope.md)
 - [Measuring savings](measuring-savings.md)
 - [Configuration and data privacy](configuration-and-privacy.md)
 - [Troubleshooting](troubleshooting.md)

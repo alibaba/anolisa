@@ -5,6 +5,7 @@
 //! to form complete HTTP/2 request/response pairs.
 
 use crate::aggregator::http::ConnectionId;
+use crate::aggregator::http::event_has_meaningful_output;
 use crate::aggregator::result::AggregatedResult;
 use crate::chrome_trace::{ChromeTraceEvent, ToChromeTraceEvent, ns_to_us};
 use crate::config::DEFAULT_CONNECTION_CAPACITY;
@@ -305,6 +306,42 @@ impl Http2Stream {
         }
     }
 
+    /// Return the capture timestamp of the first observable meaningful SSE output.
+    ///
+    /// HTTP/2 keeps response DATA frames (and their source-event timestamps), so
+    /// parse the uncompressed stream incrementally and attribute each completed
+    /// SSE event to the DATA frame that made it observable. Compressed response
+    /// bodies cannot be mapped back to plaintext event boundaries safely.
+    pub fn first_output_timestamp_ns(&self) -> Option<u64> {
+        if self
+            .content_encoding()
+            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+        {
+            return None;
+        }
+
+        let mut body = Vec::new();
+        let mut parsed_event_count = 0usize;
+        // Re-parsing the accumulated body is O(frames^2) worst-case, but meaningful output
+        // normally arrives early and returns; an algorithm redesign is out of scope here.
+        for frame in &self.response_data_frames {
+            body.extend_from_slice(frame.payload());
+            let Ok(body_str) = std::str::from_utf8(&body) else {
+                continue;
+            };
+            let parsed = SSEParser::parse_stream(body_str);
+
+            for event in parsed.events.iter().skip(parsed_event_count) {
+                let value = serde_json::from_str::<serde_json::Value>(&event.data).ok();
+                if event_has_meaningful_output(value.as_ref()) {
+                    return Some(frame.source_event.timestamp_ns);
+                }
+            }
+            parsed_event_count = parsed.events.len();
+        }
+        None
+    }
+
     /// Try to parse request body as JSON (concatenates all data frames first)
     pub fn request_json_body(&self) -> Option<serde_json::Value> {
         self.request_body_str()
@@ -352,9 +389,26 @@ impl Http2Stream {
             Some(serde_json::Value::Array(json_array))
         }
     }
+    /// Count complete SSE events in the response body.
+    ///
+    /// The count follows the HTTP/1 aggregator's event count semantics and
+    /// includes non-JSON events such as the [DONE] marker.
+    pub fn response_sse_event_count(&self) -> usize {
+        self.response_body_str()
+            .map(|body| SSEParser::parse_stream(&body).events.len())
+            .unwrap_or(0)
+    }
 
     /// Check if response content-type indicates SSE stream
     pub fn is_response_sse(&self) -> bool {
+        if let Some(headers) = self.decoded_response_headers.as_ref() {
+            if let Some((_, value)) = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            {
+                return value.contains("text/event-stream");
+            }
+        }
         self.response_headers
             .as_ref()
             .map(|h| {
@@ -1205,6 +1259,93 @@ mod tests {
     fn test_stream_direction_from_rw() {
         assert_eq!(StreamDirection::from_rw(1), StreamDirection::Request);
         assert_eq!(StreamDirection::from_rw(0), StreamDirection::Response);
+    }
+
+    #[test]
+    fn first_output_timestamp_uses_meaningful_data_frame_timestamp() {
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        let events = [
+            (100, br#"data: {"type":"response.created"}"#.to_vec()),
+            (
+                200,
+                br#"data: {"type":"response.output_text.delta","delta":""}"#.to_vec(),
+            ),
+            (
+                300,
+                br#"data: {"type":"response.output_text.delta","delta":"hello"}"#.to_vec(),
+            ),
+            (
+                400,
+                br#"data: {"type":"response.output_text.done","text":"hello"}"#.to_vec(),
+            ),
+        ];
+        for (timestamp_ns, mut payload) in events {
+            payload.extend_from_slice(&[10, 10]);
+            stream.response_data_frames.push(create_test_frame(
+                1,
+                0,
+                0,
+                payload,
+                create_test_event(1234, 0x1000, 0, timestamp_ns),
+            ));
+        }
+
+        assert_eq!(stream.first_output_timestamp_ns(), Some(300));
+    }
+
+    #[test]
+    fn first_output_timestamp_handles_meaningful_event_split_across_data_frames() {
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        let first_payload = b"data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hel".to_vec();
+        let second_payload = b"lo\"}\n\n".to_vec();
+
+        // The first DATA frame has a complete metadata event, but the
+        // meaningful event is still incomplete and must not be counted.
+        let first_body = std::str::from_utf8(&first_payload).unwrap();
+        let first_parse = SSEParser::parse_stream(first_body);
+        assert_eq!(first_parse.events.len(), 1);
+        assert!(first_parse.events.iter().all(|event| {
+            let value = serde_json::from_str::<serde_json::Value>(&event.data).ok();
+            !event_has_meaningful_output(value.as_ref())
+        }));
+
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            first_payload,
+            create_test_event(1234, 0x1000, 0, 200),
+        ));
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            second_payload,
+            create_test_event(1234, 0x1000, 0, 400),
+        ));
+
+        // Re-parsing the accumulated body after frame 2 must attribute the
+        // first complete meaningful event to frame 2, not the metadata frame.
+        assert_eq!(stream.first_output_timestamp_ns(), Some(400));
+    }
+
+    #[test]
+    fn first_output_timestamp_is_none_without_meaningful_data_frame() {
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        let mut payload = br#"data: {"type":"response.output_text.done","text":"final"}"#.to_vec();
+        payload.extend_from_slice(&[10, 10]);
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            payload,
+            create_test_event(1234, 0x1000, 0, 500),
+        ));
+
+        assert_eq!(stream.first_output_timestamp_ns(), None);
     }
 
     #[test]

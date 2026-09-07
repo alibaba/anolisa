@@ -11,6 +11,8 @@ import {
   type SecurityContainmentAction,
   type SecurityContainmentPlan,
 } from '../utils/apiClient';
+import { useI18n, useLocaleTag } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 type DurationMode = 'temporary' | 'persistent';
 
@@ -21,71 +23,75 @@ export interface ContainmentDialogProps {
   onContained: (action: SecurityContainmentAction) => void;
 }
 
-const containmentErrorMessages: Record<string, string> = {
-  source_policy_unavailable: '原始策略来源已不可用，无法安全生成拦截规则。',
-  root_process_stale: '目标进程已变化，请刷新后选择在线 Agent。',
-  ambiguous_candidate: '目标进程身份不唯一，请刷新 Agent 状态后重试。',
-  case_not_eligible: '当前案件状态不允许升级为拦截。',
-  case_eligibility_changed: '案件状态已变化，请关闭弹窗并刷新案件。',
-  invalid_duration: '拦截时长不在服务端允许的范围内。',
-  incompatible_action: '该案件已有不同的拦截动作，请先查看现有动作。',
-  action_in_progress: '拦截策略正在下发，请稍后刷新案件状态。',
-  action_expiring: '现有拦截策略正在解除，请稍后重试。',
-  cleanup_required: '旧策略仍需清理，请稍后重试或联系管理员。',
-  enforcer_unavailable: '内核执行服务暂不可用，请稍后重试。',
-  containment_disabled: '当前环境未启用风险拦截能力。',
-  recovery_failed: '现有拦截动作恢复失败，请先处理该动作。',
-  health_store_unavailable: '在线 Agent 状态暂不可用，请稍后重试。',
+const containmentErrorMessages: Record<string, MessageKey> = {
+  source_policy_unavailable: 'cont.error.sourcePolicyUnavailable',
+  root_process_stale: 'cont.error.rootProcessStale',
+  ambiguous_candidate: 'cont.error.ambiguousCandidate',
+  case_not_eligible: 'cont.error.caseNotEligible',
+  case_eligibility_changed: 'cont.error.caseEligibilityChanged',
+  invalid_duration: 'cont.error.invalidDuration',
+  incompatible_action: 'cont.error.incompatibleAction',
+  action_in_progress: 'cont.error.actionInProgress',
+  action_expiring: 'cont.error.actionExpiring',
+  cleanup_required: 'cont.error.cleanupRequired',
+  enforcer_unavailable: 'cont.error.enforcerUnavailable',
+  containment_disabled: 'cont.error.containmentDisabled',
+  recovery_failed: 'cont.error.recoveryFailed',
+  health_store_unavailable: 'cont.error.healthStoreUnavailable',
 };
 
-function safeErrorMessage(error: unknown): string {
+function safeErrorMessage(
+  error: unknown,
+  t: (key: MessageKey) => string,
+): string {
   if (error instanceof SecurityApiClientError) {
-    return containmentErrorMessages[error.code]
-      ?? (error.retryable ? '请求暂时失败，请稍后重试。' : '无法完成拦截，请刷新案件状态。');
+    const key = containmentErrorMessages[error.code];
+    if (key) return t(key);
+    return error.retryable ? t('cont.error.retryable') : t('cont.error.nonRetryable');
   }
-  return '请求失败，请稍后重试。';
+  return t('cont.error.generic');
 }
 
 function existingActionNotice(action: SecurityContainmentAction): {
-  title: string;
-  message: string;
+  titleKey: MessageKey;
+  messageKey: MessageKey;
   live: boolean;
 } {
   switch (action.lifecycle_state) {
     case 'pending':
       return {
-        title: '策略正在下发',
-        message: '系统正在等待内核执行器确认，请稍后在案件详情中查看。',
+        titleKey: 'cont.existing.pending.title',
+        messageKey: 'cont.existing.pending.message',
         live: true,
       };
     case 'active':
       return action.duration_secs === null
         ? {
-            title: '持续拦截已生效',
-            message: '该案件已有持续生效的内核策略，请在案件详情中查看或解除。',
+            titleKey: 'cont.existing.activePersistent.title',
+            messageKey: 'cont.existing.activePersistent.message',
             live: true,
           }
         : {
-            title: '临时拦截已生效',
-            message: '该案件已有临时内核策略，请在案件详情中查看到期时间。',
+            titleKey: 'cont.existing.activeTemporary.title',
+            messageKey: 'cont.existing.activeTemporary.message',
             live: true,
           };
     case 'expiring':
       return {
-        title: '策略正在解除',
-        message: '内核策略正在清理，完成前不能重复下发。',
+        titleKey: 'cont.existing.expiring.title',
+        messageKey: 'cont.existing.expiring.message',
         live: true,
       };
     case 'expired':
       return {
-        title: '上次临时拦截已到期，可重新下发',
-        message: '新动作仍会重新校验当前在线进程身份。',
+        titleKey: 'cont.existing.expired.title',
+        messageKey: 'cont.existing.expired.message',
         live: false,
       };
     case 'failed':
       return {
-        title: '上次拦截失败，可重新尝试',
-        message: '请确认 Agent 在线且内核执行服务已恢复。',
+        titleKey: 'cont.existing.failed.title',
+        messageKey: 'cont.existing.failed.message',
         live: false,
       };
   }
@@ -97,6 +103,10 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
   onClose,
   onContained,
 }) => {
+  const { t } = useI18n();
+  const localeTag = useLocaleTag();
+  void localeTag;
+
   const [plan, setPlan] = useState<SecurityContainmentPlan | null>(null);
   const [selectedPid, setSelectedPid] = useState<number | null>(null);
   const [enforcementHealth, setEnforcementHealth] = useState<EnforcementHealth | null>(null);
@@ -136,7 +146,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
         setSelectedPid(defaultContainmentTargetPid(nextPlan, health));
       })
       .catch((nextError) => {
-        if (requestVersion.current === version) setError(safeErrorMessage(nextError));
+        if (requestVersion.current === version) setError(safeErrorMessage(nextError, t));
       })
       .finally(() => {
         if (requestVersion.current === version) setLoading(false);
@@ -144,7 +154,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
     return () => {
       if (requestVersion.current === version) requestVersion.current += 1;
     };
-  }, [caseId, open]);
+  }, [caseId, open, t]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -163,10 +173,10 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
   const liveExistingAction = Boolean(existingNotice?.live);
   const containmentAvailable = enforcementSupportsContainment(enforcementHealth);
   const containmentUnavailableMessage = enforcementHealth === null
-    ? '正在读取执行器能力与就绪状态。'
+    ? t('cont.unavailable.loading')
     : !enforcementHealth.ready
-      ? '当前执行器尚未就绪，无法安全下发内核拦截。'
-      : '当前执行器未显式声明凭据拦截与策略交接能力，无法下发内核拦截。';
+      ? t('cont.unavailable.notReady')
+      : t('cont.unavailable.noCredentialEnforce');
 
   useEffect(() => {
     if (!open) return;
@@ -240,7 +250,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
       });
       if (requestVersion.current === version) onContained(response.data);
     } catch (nextError) {
-      if (requestVersion.current === version) setError(safeErrorMessage(nextError));
+      if (requestVersion.current === version) setError(safeErrorMessage(nextError, t));
     } finally {
       if (requestVersion.current === version) setSubmitting(false);
     }
@@ -266,16 +276,16 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
         <header className="flex items-start justify-between border-b border-gray-200 px-6 py-5">
           <div>
             <h2 id="containment-dialog-title" className="text-xl font-semibold text-gray-900">
-              {containmentAvailable ? '确认升级为内核拦截' : '内核拦截不可用'}
+              {t(containmentAvailable ? 'cont.dialog.title.available' : 'cont.dialog.title.unavailable')}
             </h2>
             <p className="mt-1 text-sm text-gray-500">
-              AgentSight 将从案件原始策略生成规则，Dashboard 不接收或展示策略 DSL。
+              {t('cont.dialog.subtitle')}
             </p>
           </div>
           <button
             ref={headerCloseRef}
             type="button"
-            aria-label="关闭"
+            aria-label={t('cont.dialog.closeAria')}
             onClick={onClose}
             disabled={submitting}
             className="rounded-lg px-2 py-1 text-xl text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
@@ -285,33 +295,39 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
         </header>
 
         <div className="space-y-5 px-6 py-5">
-          {loading && <p role="status" className="text-sm text-gray-500">正在加载拦截方案...</p>}
+          {loading && (
+            <p role="status" className="text-sm text-gray-500">
+              {t('cont.plan.loading')}
+            </p>
+          )}
 
           {plan && (
             <>
               <dl className="grid gap-3 rounded-xl border border-gray-200 bg-gray-50 p-4 sm:grid-cols-2">
                 <div>
-                  <dt className="text-xs font-medium text-gray-500">敏感文件</dt>
+                  <dt className="text-xs font-medium text-gray-500">{t('cont.plan.field.sourcePath')}</dt>
                   <dd className="mt-1 break-all font-mono text-xs font-medium text-gray-900">
                     {plan.source_path}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-xs font-medium text-gray-500">拦截范围</dt>
+                  <dt className="text-xs font-medium text-gray-500">{t('cont.plan.field.scope')}</dt>
                   <dd className="mt-1 text-sm font-medium text-gray-900">
-                    不受信任的公网 IPv4 目标
+                    {t('cont.plan.scope.untrustedIpv4')}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-xs font-medium text-gray-500">执行效果</dt>
-                  <dd className="mt-1 text-sm font-medium text-gray-900">ActPlane 内核拒绝（deny）</dd>
+                  <dt className="text-xs font-medium text-gray-500">{t('cont.plan.field.effect')}</dt>
+                  <dd className="mt-1 text-sm font-medium text-gray-900">
+                    {t('cont.plan.effect.kernelDeny')}
+                  </dd>
                 </div>
                 <div>
-                  <dt className="text-xs font-medium text-gray-500">原始 Agent</dt>
+                  <dt className="text-xs font-medium text-gray-500">{t('cont.plan.field.originalAgent')}</dt>
                   <dd className="mt-1 text-sm font-medium text-gray-900">
                     {originalTarget
                       ? `${originalTarget.display_name} · PID ${originalTarget.root_pid}`
-                      : '原始进程不可用'}
+                      : t('cont.plan.original.unavailable')}
                   </dd>
                 </div>
               </dl>
@@ -325,19 +341,19 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                       : 'border-amber-200 bg-amber-50 text-amber-800'
                   }`}
                 >
-                  <p className="text-sm font-semibold">{existingNotice.title}</p>
-                  <p className="mt-1 text-xs">{existingNotice.message}</p>
+                  <p className="text-sm font-semibold">{t(existingNotice.titleKey)}</p>
+                  <p className="mt-1 text-xs">{t(existingNotice.messageKey)}</p>
                 </div>
               )}
 
               {!liveExistingAction && (!targetStale && originalTarget ? (
                 <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                  进程身份有效：PID {originalTarget.root_pid}
+                  {t('cont.target.valid', { pid: originalTarget.root_pid })}
                 </p>
               ) : targetCandidates.length > 0 ? (
                 <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-4">
                   <label htmlFor="containment-target" className="block text-sm font-medium text-amber-900">
-                    选择同一 Agent 的在线进程
+                    {t('cont.target.selectLabel')}
                   </label>
                   <select
                     id="containment-target"
@@ -347,7 +363,7 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                     }}
                     className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-gray-900"
                   >
-                    <option value="">请选择在线 Agent</option>
+                    <option value="">{t('cont.target.placeholder')}</option>
                     {targetCandidates.map((candidate) => (
                       <option
                         key={`${candidate.root_pid}:${candidate.process_start_time}`}
@@ -358,12 +374,12 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                     ))}
                   </select>
                   <p className="text-xs text-amber-800">
-                    原始 PID 已失效；服务端会在下发前再次校验所选进程的启动时间与 Agent 身份。
+                    {t('cont.target.recheckHint')}
                   </p>
                 </div>
               ) : (
                 <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                  原始进程身份已失效，且当前未发现执行器允许的同一 Agent 在线进程。
+                  {t('cont.target.noneAvailable')}
                 </p>
               ))}
 
@@ -373,49 +389,60 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
                 </p>
               )}
 
-              {!liveExistingAction && <fieldset className="space-y-3">
-                <legend className="text-sm font-medium text-gray-800">拦截时长</legend>
-                <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 p-4">
-                  <input
-                    ref={(element) => { firstDecisionRef.current = element; }}
-                    type="radio"
-                    name="containment-duration"
-                    aria-label={`临时拦截 ${durationMinutes} 分钟`}
-                    checked={durationMode === 'temporary'}
-                    onChange={() => setDurationMode('temporary')}
-                    className="mt-1"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium text-gray-900">
-                      临时拦截 {durationMinutes} 分钟
+              {!liveExistingAction && (
+                <fieldset className="space-y-3">
+                  <legend className="text-sm font-medium text-gray-800">
+                    {t('cont.duration.legend')}
+                  </legend>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 p-4">
+                    <input
+                      ref={(element) => {
+                        firstDecisionRef.current = element;
+                      }}
+                      type="radio"
+                      name="containment-duration"
+                      aria-label={t('cont.duration.temporaryAria', { minutes: durationMinutes })}
+                      checked={durationMode === 'temporary'}
+                      onChange={() => setDurationMode('temporary')}
+                      className="mt-1"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-gray-900">
+                        {t('cont.duration.temporaryTitle', { minutes: durationMinutes })}
+                      </span>
+                      <span className="mt-1 block text-xs text-gray-500">
+                        {t('cont.duration.temporaryDesc')}
+                      </span>
                     </span>
-                    <span className="mt-1 block text-xs text-gray-500">到期后由 AgentSight 自动解除。</span>
-                  </span>
-                </label>
-                <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 p-4">
-                  <input
-                    type="radio"
-                    name="containment-duration"
-                    aria-label="持续拦截（需手动解除）"
-                    checked={durationMode === 'persistent'}
-                    onChange={() => setDurationMode('persistent')}
-                    className="mt-1"
-                  />
-                  <span>
-                    <span className="block text-sm font-medium text-gray-900">
-                      持续拦截（需手动解除）
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 p-4">
+                    <input
+                      type="radio"
+                      name="containment-duration"
+                      aria-label={t('cont.duration.persistentAria')}
+                      checked={durationMode === 'persistent'}
+                      onChange={() => setDurationMode('persistent')}
+                      className="mt-1"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-gray-900">
+                        {t('cont.duration.persistentTitle')}
+                      </span>
+                      <span className="mt-1 block text-xs text-gray-500">
+                        {t('cont.duration.persistentDesc')}
+                      </span>
                     </span>
-                    <span className="mt-1 block text-xs text-gray-500">
-                      仅在明确选择后启用，不会自动到期。
-                    </span>
-                  </span>
-                </label>
-              </fieldset>}
+                  </label>
+                </fieldset>
+              )}
             </>
           )}
 
           {error && (
-            <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <p
+              role="alert"
+              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+            >
               {error}
             </p>
           )}
@@ -428,16 +455,18 @@ export const ContainmentDialog: React.FC<ContainmentDialogProps> = ({
             disabled={submitting}
             className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 disabled:opacity-40"
           >
-            {liveExistingAction ? '关闭' : '取消'}
+            {liveExistingAction ? t('cont.footer.close') : t('cont.footer.cancel')}
           </button>
-          {!liveExistingAction && <button
-            type="button"
-            onClick={() => void submit()}
-            disabled={!canSubmit}
-            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-red-300"
-          >
-            {submitting ? '正在下发...' : '确认并下发'}
-          </button>}
+          {!liveExistingAction && (
+            <button
+              type="button"
+              onClick={() => void submit()}
+              disabled={!canSubmit}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-red-300"
+            >
+              {submitting ? t('cont.footer.submit.loading') : t('cont.footer.submit')}
+            </button>
+          )}
         </footer>
       </div>
     </div>

@@ -288,7 +288,13 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-claude-na
         "{output}"
     );
     assert!(!output.contains("host_executed_shell"), "{output}");
-    assert!(output.contains("cosh-osc$ echo CLAUDE_NATIVE"), "{output}");
+    assert!(output.contains("\rCLAUDE_NATIVE\r\n"), "{output}");
+    let visible = strip_ansi_escape(&output);
+    assert_eq!(
+        count_occurrences(&visible, "cosh-osc$ echo CLAUDE_NATIVE"),
+        1,
+        "{output}"
+    );
     assert!(
         !output.contains("missing claude allow response"),
         "{output}"

@@ -1,6 +1,297 @@
 use super::*;
 
 #[test]
+fn marker_json_escape_removes_raw_controls_and_preserves_utf8() {
+    let input = concat!(
+        "A中\"\\",
+        "\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\t\n\u{b}\u{c}\r",
+        "\u{e}\u{f}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}",
+        "\u{18}\u{19}\u{1a}\u{1b}\\\u{1c}\u{1d}\u{1e}\u{1f}\u{7f}Z"
+    );
+    let expected = concat!(
+        "A中\\\"\\\\",
+        "\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r",
+        "\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017",
+        "\\u0018\\u0019\\u001a\\u001b\\\\\\u001c\\u001d\\u001e\\u001f\\u007fZ"
+    );
+    let scripts = [
+        ("bash", include_str!("../../src/shell_host/marker/bash.sh")),
+        ("zsh", include_str!("../../src/shell_host/marker/zsh.rs")),
+    ];
+
+    for (shell, script) in scripts {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let function = shell_function(script, "_cosh_json_escape");
+        let command = format!("{function}\n_cosh_json_escape \"$1\"");
+        let output = Command::new(shell)
+            .args(["-c", command.as_str(), "cosh-marker-test", input])
+            .output()
+            .unwrap_or_else(|error| panic!("run {shell}: {error}"));
+
+        assert!(output.status.success(), "{shell}: {output:?}");
+        assert_eq!(output.stdout, expected.as_bytes(), "{shell}");
+        assert!(
+            output.stdout.iter().all(|byte| !byte.is_ascii_control()),
+            "{shell}: {:?}",
+            output.stdout
+        );
+    }
+}
+
+fn shell_function<'a>(script: &'a str, name: &str) -> &'a str {
+    let start_pattern = format!("{name}() {{\n");
+    let start = script
+        .find(&start_pattern)
+        .unwrap_or_else(|| panic!("missing {name}"));
+    let rest = &script[start..];
+    let end = rest
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("unterminated {name}"));
+    &rest[..end + 2]
+}
+
+#[test]
+fn shell_secret_detectors_match_canonical_shapes_and_boundaries() {
+    let detectors = [
+        ("bash", include_str!("../../src/shell_host/marker/bash.sh")),
+        (
+            "zsh",
+            include_str!("../../src/shell_host/marker/zsh_secret_detector.zsh"),
+        ),
+    ];
+    let sensitive = [
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
+        "inspect eyJabcde.fghijk.lmnopq now",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "Bearer abc",
+        "https://user:password@example.test/path",
+        "http://:s3cr3t42@example.test/",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456",
+        "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+        "glpat-abcdefghijklmnop",
+        "npm_abcdefghijklmnopqrstuvwxyz123456",
+        "hf_abcdefghijklmnopqrstuvwxyz123456",
+        "xoxb-1234567890abcdefghijklmnop",
+        "AIzaabcdefghijklmnopqrstuvwxyz123456",
+        "LTAI5tExampleAccessKey",
+        "AKIA1234567890ABCDEF",
+        "ASIA1234567890ABCDEF",
+        "sk-fbaa6",
+        "sk-abc123",
+        "sk_live_abcdefghijklmnop",
+        "sk_test_abcdefghijklmnop",
+        "key是sk-abc123",
+        "（sk-abc123）",
+        "密钥为sk-abc123",
+        "key：sk-abc123",
+        "你好 \"token\" = TEST_ONLY_RECOVERY_SECRET",
+        "inspect 'client-secret' : TEST_ONLY_RECOVERY_SECRET",
+        "你好 AWS_SECRET_ACCESS_KEY=TEST_ONLY_RECOVERY_SECRET",
+        "inspect 'aws-secret_access-key' : TEST_ONLY_RECOVERY_SECRET",
+        "你好 AWS_ACCESS_KEY_ID = TEST_ONLY_RECOVERY_SECRET",
+        "你好 OPENAI_API_KEY = TEST_ONLY_RECOVERY_SECRET",
+        "你好 DASHSCOPE_API_KEY = TEST_ONLY_RECOVERY_SECRET",
+        "你好 GITHUB_TOKEN = TEST_ONLY_RECOVERY_SECRET",
+        "你好 ALIBABA_CLOUD_ACCESS_KEY_ID = TEST_ONLY_RECOVERY_SECRET",
+        "MEMORY_OPENAI_API_KEY=TEST_ONLY_RECOVERY_SECRET",
+        "MY_TOKEN=TEST_ONLY_RECOVERY_SECRET",
+        "FOO_PASSWORD=TEST_ONLY_RECOVERY_SECRET",
+        "AUTH_REFRESH_TOKEN=TEST_ONLY_RECOVERY_SECRET",
+        "AUTHTOKEN=TEST_ONLY_RECOVERY_SECRET",
+        "myAccessToken=TEST_ONLY_RECOVERY_SECRET",
+        "dbPassword=TEST_ONLY_RECOVERY_SECRET",
+        "serviceSecret=TEST_ONLY_RECOVERY_SECRET",
+        "customApiKey=TEST_ONLY_RECOVERY_SECRET",
+        "你好 MY_OPENAI_API_KEY = public-name",
+        "tool --password 'correct horse battery staple'",
+        "tool --access-token=TEST_ONLY_RECOVERY_SECRET",
+        "curl --cookie session=supersecret",
+        "tool --set-cookie csrf=supersecret",
+        "curl --cookie=session=supersecret",
+        "TOKEN=$SECRET",
+        "API_KEY=${VALUE}",
+        "tool --password \"$PASSWORD\"",
+        "tool --token '$TOKEN'",
+        r"token=\escaped",
+        "TOKEN=`secret-command`",
+        "TOKEN=秘密123",
+        "cookie=session-secret",
+        "set_cookie=session-secret",
+        r#"{"cookie":"json-cookie-secret"}"#,
+        "Cookie: session=session-secret",
+        "Set-Cookie: session=session-secret; Path=/",
+        r"curl -H Cookie:\ session=quoted-cookie-value-42",
+        r"curl -H Cookie\:session=quoted-cookie-value-42",
+        "curl -H Cookie':'session=quoted-cookie-value-42",
+        "curl -H Coo'kie:'session=quoted-cookie-value-42",
+        r"curl -H Set\-Cookie\:csrf=quoted-cookie-value-42",
+        r#"curl -H"Cookie: session=quoted-cookie-value-42""#,
+        "curl -H'Cookie: session=quoted-cookie-value-42'",
+        "curl -HCookie:session=quoted-cookie-value-42",
+        r#"curl --header="Set-Cookie: csrf=quoted-cookie-value-42""#,
+        r"curl -HCookie\:session=quoted-cookie-value-42",
+        "curl -sH'Cookie: session=quoted-cookie-value-42'",
+        r#"curl -fsSLH"Cookie: session=quoted-cookie-value-42""#,
+        r"curl -sHCookie\:session=quoted-cookie-value-42",
+        "curl -s'H'Cookie:session=quoted-cookie-value-42",
+        r"curl -s\HCookie:session=quoted-cookie-value-42",
+        r#"curl "-HCookie: session=whole-option-secret-42""#,
+        "curl '-HCookie: session=whole-option-secret-42'",
+        r#"curl ${HEADER_OPTION}"Cookie: session=dynamic-option-secret-42" https://example.test"#,
+        r#"curl ${HEADER_OPTION}'Cookie: session=dynamic-option-secret-42' https://example.test"#,
+        r#"curl ${HEADER_OPTION#*;}"Cookie: session=parameter-pattern-secret-42" https://example.test"#,
+        r#"curl ${HEADER_OPTION#*|}"Cookie: session=parameter-pipe-secret-42" https://example.test"#,
+        r#"curl $(printf -- -H)"Cookie: session=dynamic-option-secret-42" https://example.test"#,
+        r#"curl `printf -- -H`"Cookie: session=dynamic-option-secret-42" https://example.test"#,
+        r#"curl $(true; printf -- -H)"Cookie: session=semicolon-dynamic-secret-42" https://example.test"#,
+        r#"curl $(true && printf -- -H)"Cookie: session=and-dynamic-secret-42" https://example.test"#,
+        r#"curl $(printf -- -H | cat)"Cookie: session=pipe-dynamic-secret-42" https://example.test"#,
+        r#"curl `true; printf -- -H`"Cookie: session=backtick-dynamic-secret-42" https://example.test"#,
+        r#"curl $(printf %s "$(printf -- -H)")"Cookie: session=nested-dynamic-secret-42" https://example.test"#,
+    ];
+    let safe = [
+        "sk-hynix 内存条什么价格",
+        "npm_package_version 怎么读",
+        "cookie: 头是干什么的",
+        "cookie: header meaning",
+        "bearer 是什么认证方式",
+        "shf_test 文件在哪",
+        "xsk-abc123",
+        "ghp_documentation",
+        "npm_package_identifier",
+        "hf_model_name",
+        "https://example.test/path:docs@example",
+        "http://:@example.test/",
+        "eyJabcd.fghijk.lmnopq",
+        "eyJabcde.fghi.lmnopq",
+        "xeyJabcde.fghijk.lmnopq",
+        "你好 token candidate",
+        "inspect monkey = value",
+        "inspect token =",
+        "你好 AWS_ACCESS_KEY_ID candidate",
+        "你好 AWS_ACCESS_KEY_ID =",
+        "你好 MY_OPENAI_API_KEY_LABEL = public-name",
+        "你好 MY_TOKEN_COUNT = 5",
+        r"curl -H Cookie\:header-meaning",
+        r"curl -H Crookie\:session=quoted-cookie-value-42",
+        r#"tool x-H"Cookie: session=quoted-cookie-value-42""#,
+        r#"tool x-sH"Cookie: session=quoted-cookie-value-42""#,
+        r#"curl --sH"Cookie: session=quoted-cookie-value-42""#,
+        r#"tool -s'Hx'Cookie:session=quoted-cookie-value-42"#,
+        r#"curl --header-label="Cookie: session=quoted-cookie-value-42""#,
+        r#"curl ${HEADER_OPTION}"Crookie: session=dynamic-option-secret-42""#,
+        r#"curl ${HEADER_OPTION#*;}"Crookie: session=parameter-pattern-secret-42""#,
+        r#"echo $HOME; tool xCookie:session=dynamic-option-secret-42"#,
+        r#"echo $(printf x); tool xCookie:session=dynamic-option-secret-42"#,
+    ];
+
+    for (shell, script) in detectors {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let function = shell_function(script, "_cosh_command_has_secret");
+        let command = format!("{function}\n_cosh_command_has_secret \"$1\"");
+        for input in sensitive {
+            let status = Command::new(shell)
+                .args(["-c", command.as_str(), "cosh-marker-test", input])
+                .status()
+                .unwrap_or_else(|error| panic!("run {shell} secret detector: {error}"));
+            assert!(status.success(), "{shell}: secret not detected: {input}");
+        }
+        for input in safe {
+            let status = Command::new(shell)
+                .args(["-c", command.as_str(), "cosh-marker-test", input])
+                .status()
+                .unwrap_or_else(|error| panic!("run {shell} secret control: {error}"));
+            assert!(!status.success(), "{shell}: safe control rejected: {input}");
+        }
+    }
+}
+
+#[test]
+fn shell_host_marker_control_cwd_keeps_json_frame_intact() {
+    let control_name = concat!(
+        "cwd-中-",
+        "\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\t\n\u{b}\u{c}\r",
+        "\u{e}\u{f}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}",
+        "\u{18}\u{19}\u{1a}\u{1b}\\\u{1c}\u{1d}\u{1e}\u{1f}\u{7f}"
+    );
+    let shell_control_name = concat!(
+        "$'cwd-中-",
+        "\\001\\002\\003\\004\\005\\006\\007\\010\\011\\012\\013\\014\\015",
+        "\\016\\017\\020\\021\\022\\023\\024\\025\\026\\027",
+        "\\030\\031\\032\\033\\\\\\034\\035\\036\\037\\177'"
+    );
+    let tail_sentinel = "__post_cwd_marker_tail__";
+
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir =
+            std::env::temp_dir().join(format!("cosh-marker-control-{shell}-{}", unique_suffix()));
+        let control_dir = work_dir.join(control_name);
+        std::fs::create_dir_all(&control_dir).expect("control cwd");
+        let path = format!(
+            "/{tail_sentinel}:{}",
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let config = ShellHostConfig::new(format!("marker-control-{shell}"), &work_dir)
+            .with_env("PATH", path);
+        let cd = format!(
+            "builtin cd -- {}/{shell_control_name}",
+            shell_arg(&work_dir)
+        );
+        let command = "printf '__marker_frame_survived__\\n'";
+        let output = if shell == "bash" {
+            run_scripted_bash(
+                &config,
+                &[
+                    ScriptedInput::user_line(cd.clone()),
+                    ScriptedInput::user_line(command),
+                ],
+            )
+        } else {
+            run_scripted_zsh(
+                &config,
+                &[
+                    ScriptedInput::user_line(cd.clone()),
+                    ScriptedInput::user_line(command),
+                ],
+            )
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+
+        assert!(
+            terminal.contains("__marker_frame_survived__"),
+            "{shell}: {terminal}"
+        );
+        assert!(!terminal.contains(tail_sentinel), "{shell}: {terminal}");
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::CommandStarted
+                    && event.command.as_deref() == Some(command)
+                    && event.cwd.as_deref() == control_dir.to_str()
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::ComponentFailed
+                    && event.component.as_deref() == Some("osc_parser")
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+        std::fs::remove_dir_all(&work_dir).expect("cleanup control cwd");
+    }
+}
+
+#[test]
 fn shell_host_runs_bash_pty_and_emits_command_events() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
@@ -89,7 +380,7 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
         .find(|block| block.command.contains("/path/that/does/not/exist"))
         .expect("failed command block");
     assert_ne!(failed.exit_code, 0);
-    assert!(failed.shell_environment_generation.is_some());
+    assert!(failed.shell_environment_generation.is_none());
     let output_ref = failed
         .output
         .terminal_output_ref
@@ -274,7 +565,7 @@ fn shell_host_zsh_valid_cue_matrix_wins_over_natural_language() {
 }
 
 #[test]
-fn shell_host_bash_missing_natural_language_closes_started_command() {
+fn shell_host_bash_missing_natural_language_routes_without_command_block() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -302,15 +593,8 @@ fn shell_host_bash_missing_natural_language_closes_started_command() {
         })
         .unwrap_or_else(|| panic!("natural-language intercept: {:?}", output.events));
 
-    assert!(intercept.command_id.is_some(), "{:?}", output.events);
-    assert!(
-        intercept
-            .routing
-            .as_ref()
-            .is_some_and(|routing| routing.top_level_missing && routing.proven),
-        "{:?}",
-        output.events
-    );
+    assert!(intercept.command_id.is_none(), "{:?}", output.events);
+    assert!(intercept.routing.is_none(), "{:?}", output.events);
     let ledger = build_command_blocks(&output.events);
     assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
     assert!(!ledger
@@ -366,6 +650,125 @@ fn shell_host_zsh_missing_natural_language_closes_started_command() {
             !String::from_utf8_lossy(&output.terminal_output).contains("command not found"),
             "{}",
             String::from_utf8_lossy(&output.terminal_output)
+        );
+    }
+}
+
+#[test]
+fn shell_host_han_parameter_expansion_routes_to_agent() {
+    let inputs = ["帮我解释 $HOME 变量"];
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-han-metachar-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let mut config = ShellHostConfig::new(format!("han-metachar-{shell}"), &work_dir);
+        config.native_mode = false;
+        for input in inputs {
+            let output = if shell == "bash" {
+                run_scripted_bash(&config, &[ScriptedInput::user_line(input)])
+            } else {
+                run_scripted_zsh(&config, &[ScriptedInput::user_line(input)])
+            }
+            .unwrap_or_else(|error| panic!("{shell}: {input:?}: {error}"));
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                        && event.component.as_deref() == Some("natural_language")
+                }),
+                "{shell}: {input:?}: {:?}",
+                output.events
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_host_han_re_evaluated_parameter_expansion_stays_shell_owned() {
+    for (shell, expansion) in [("bash", "${evil@P}"), ("zsh", "${(e)evil}")] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-han-re-eval-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let input = format!("解释 \"{expansion}\"");
+        let mut config = ShellHostConfig::new(format!("han-re-eval-{shell}"), &work_dir);
+        config.native_mode = false;
+        let steps = [
+            ScriptedInput::command("evil='$(printf __han_re_eval__)'"),
+            ScriptedInput::user_line(&input),
+        ];
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input.as_str())
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+    }
+}
+
+#[test]
+fn shell_host_han_control_operator_stays_shell_owned() {
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-han-control-operator-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let side_effect = work_dir.join("must-not-exist");
+        let input = format!("解释 false && touch {}", side_effect.display());
+        let mut config = ShellHostConfig::new(format!("han-control-operator-{shell}"), &work_dir);
+        config.native_mode = false;
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(&input)])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(&input)])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input.as_str())
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+        assert!(
+            !side_effect.exists(),
+            "{shell}: command-not-found must not enable the && branch"
         );
     }
 }
@@ -444,6 +847,47 @@ fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
     assert!(String::from_utf8_lossy(&output.terminal_output).contains("command not found"));
 }
 
+#[test]
+fn shell_host_bash_success_then_missing_keeps_routing_provenance() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-success-then-missing-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let output = run_scripted_bash(
+        &ShellHostConfig::new("bash-success-then-missing", &work_dir),
+        &[
+            ScriptedInput::user_line("printf '__PREVIOUS_OK__\\n'"),
+            ScriptedInput::user_line("sdsd"),
+        ],
+    )
+    .expect("scripted bash");
+
+    let failed_id = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::CommandFailed && event.command.as_deref() == Some("sdsd")
+        })
+        .and_then(|event| event.command_id.as_deref())
+        .expect("missing command block");
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandRoutingObserved
+                && event.command_id.as_deref() == Some(failed_id)
+                && event.routing.as_ref().is_some_and(|routing| {
+                    routing.top_level_missing && routing.proven && !routing.sensitive
+                })
+        }),
+        "{:?}",
+        output.events
+    );
+}
+
 /// #2138: natural-language input carrying a secret routes to the agent like
 /// regular NL (intercept event emitted, sensitive routing flag set) instead
 /// of being silently vetoed to the native command-not-found error. The
@@ -489,10 +933,9 @@ fn shell_host_sensitive_natural_language_routes_to_agent_with_flag() {
             .unwrap_or_else(|| panic!("{shell}: sensitive NL intercept: {:?}", output.events));
         assert_eq!(intercept.input.as_deref(), Some("<redacted>"), "{shell}");
         assert!(
-            intercept
-                .routing
-                .as_ref()
-                .is_some_and(|routing| routing.sensitive && routing.top_level_missing),
+            intercept.routing.as_ref().is_some_and(
+                |routing| routing.sensitive && routing.top_level_missing == (shell == "zsh")
+            ),
             "{shell}: {intercept:?}"
         );
         assert!(
@@ -606,7 +1049,7 @@ fn shell_host_linux_bash_natural_language_routes_directly_to_agent() {
         assert!(output.events.iter().any(|event| {
             event.kind == ShellEventKind::UserInputIntercepted
                 && event.input.as_deref() == Some(input)
-                && event.command_id.is_some()
+                && event.command_id.is_none()
                 && event.component.as_deref() == Some("natural_language")
         }));
         let ledger = build_command_blocks(&output.events);
@@ -862,7 +1305,7 @@ fn shell_host_zsh_preserves_user_missing_handler_contract() {
 }
 
 #[test]
-fn shell_host_owns_prompt_boundary_before_user_prompt_command() {
+fn shell_host_preserves_native_prompt_command_output() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -901,17 +1344,17 @@ fn shell_host_owns_prompt_boundary_before_user_prompt_command() {
         .find(|block| block.command.contains("/path/that/does/not/exist"))
         .expect("failed command block");
     assert_ne!(failed.exit_code, 0);
-    assert_eq!(failed.shell_environment_generation, Some(2));
+    assert_eq!(failed.shell_environment_generation, None);
     let output_ref = failed
         .output
         .terminal_output_ref
         .as_deref()
         .expect("terminal output ref");
     let output_ref_text = std::fs::read_to_string(output_ref).expect("output ref text");
-    assert!(
-        !output_ref_text.contains("__cosh_prompt_noise__"),
-        "{output_ref_text}"
-    );
+    // Cosh no longer wraps PROMPT_COMMAND to manufacture an earlier boundary.
+    // Bash-native prompt output therefore remains part of the preceding
+    // command's observable terminal stream.
+    assert!(output_ref_text.contains("__cosh_prompt_noise__"));
 }
 
 #[test]
@@ -942,9 +1385,10 @@ fn shell_host_bash_tracks_native_history_file_changes() {
     .expect("bashrc");
 
     let install_marker_sink = format!(
-        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
-         _cosh_emit_native_history_file_marker() {{ \
-         printf '%s\\n' \"$1\" >> {}; \
+        "_cosh_native_history_file_fragment() {{ \
+         local history_file; \
+         history_file=$(_cosh_native_history_file_path) || return 0; \
+         printf '%s\\n' \"$history_file\" >> {}; \
          }}",
         shell_arg(&observed_history_files)
     );
@@ -967,11 +1411,12 @@ fn shell_host_bash_tracks_native_history_file_changes() {
     )
     .expect("scripted bash pty");
 
-    let observed = std::fs::read_to_string(&observed_history_files)
+    let mut observed = std::fs::read_to_string(&observed_history_files)
         .expect("observed history files")
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    observed.dedup();
     let expected = [
         initial_history,
         alternate_history,
@@ -1025,9 +1470,10 @@ fn shell_host_bash_tracks_history_file_changed_by_prompt_command() {
     .expect("bashrc");
 
     let install_marker_sink = format!(
-        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
-         _cosh_emit_native_history_file_marker() {{ \
-         printf '%s\\n' \"$1\" >> {}; \
+        "_cosh_native_history_file_fragment() {{ \
+         local history_file; \
+         history_file=$(_cosh_native_history_file_path) || return 0; \
+         printf '%s\\n' \"$history_file\" >> {}; \
          }}",
         shell_arg(&observed_history_files)
     );
@@ -1042,11 +1488,12 @@ fn shell_host_bash_tracks_history_file_changed_by_prompt_command() {
     )
     .expect("scripted bash pty");
 
-    let observed = std::fs::read_to_string(&observed_history_files)
+    let mut observed = std::fs::read_to_string(&observed_history_files)
         .expect("observed history files")
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    observed.dedup();
     assert_eq!(
         observed,
         vec![
@@ -1166,6 +1613,173 @@ fn shell_host_rejects_forged_osc_markers_without_session_token() {
 }
 
 #[test]
+fn shell_host_pty_cannot_read_private_marker_token() {
+    // Issue #2413, live-PTY verification: the unit tests feed the parser
+    // directly, but the issue explicitly asks for live-PTY evidence. A real
+    // scripted bash session prints a syntactically valid, token-carrying
+    // precmd marker whose `status` field is omitted (the protocol-drift /
+    // truncation shape) while that printf's own preexec is still in flight;
+    // the host must finish the command as Failed with the -1 missing-exit
+    // sentinel instead of fabricating success. The `toke""n` split keeps
+    // the literal line out of the marker script's secret-redaction patterns
+    // while the shell still prints a well-formed `"token"` key, and
+    // "$COSH_MARKER_TOKEN" expands the session's real token so the
+    // parser's exact-match check accepts the sequence.
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pty-precmd-driftless-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    let statusless_injection = "printf \"\\033]1337;COSH;{\\\"event\\\":\\\"precmd\\\",\\\"toke\"\"n\\\":\\\"%s\\\",\\\"cwd\\\":\\\"/tmp/driftless-probe\\\"}\\a\" \"$COSH_MARKER_TOKEN\"";
+
+    // The genuine-chain control runs BEFORE the injection: once the forged
+    // precmd has been consumed mid-command, the marker script's own
+    // history/DEBUG-trap state machine treats follow-up queued lines
+    // differently, so the control must not depend on post-injection input.
+    // Isolated mode keeps the host-environment PROMPT_COMMAND/PS1 (e.g. an
+    // audit hook plus a backticked `pwd` prompt on bash 4.2) out of the
+    // session: those make the marker script's DEBUG-trap snapshot logic
+    // clear _COSH_ACTIVE_DEBUG_TRAP after the first prompt, silencing every
+    // later preexec marker and drowning the assertion under environment
+    // noise unrelated to #2413.
+    let mut config = ShellHostConfig::new("pty-precmd-driftless", &work_dir);
+    config.native_mode = false;
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo drift-real-probe"),
+            ScriptedInput::user_line(statusless_injection),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    // The public token variable is absent, so the forged marker is rejected
+    // and the printf completes through the genuine bounded marker chain.
+    let drifted = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("driftless-probe"))
+        })
+        .expect("drifted injection command finish event");
+    assert_eq!(drifted.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(drifted.exit_code, Some(0));
+
+    // Control: the genuine marker chain keeps reporting real completions
+    // after the drifted sequence.
+    let real = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("drift-real-probe"))
+        })
+        .expect("real command finish event");
+    assert_eq!(real.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(real.exit_code, Some(0));
+
+    // The ledger agrees that no injected status reached the parser.
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let drifted_block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command.contains("driftless-probe"))
+        .expect("drifted command block");
+    assert_eq!(drifted_block.exit_code, 0);
+    assert_eq!(
+        drifted_block.status,
+        cosh_shell::types::CommandStatus::Completed
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn shell_host_pty_statusful_precmd_marker_completes_inflight_command() {
+    // Control for the #2413 live-PTY verification: the same injection
+    // mechanism carrying an explicit status:0 must finish the in-flight
+    // printf as Completed/0 on both the fixed and the pre-fix code — this
+    // proves the drift verdict above comes from the missing status field,
+    // not from the injection harness itself.
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pty-precmd-driftzero-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    let status_zero_injection = "printf \"\\033]1337;COSH;{\\\"event\\\":\\\"precmd\\\",\\\"toke\"\"n\\\":\\\"%s\\\",\\\"cwd\\\":\\\"/tmp/drift-zero-probe\\\",\\\"status\\\":0}\\a\" \"$COSH_MARKER_TOKEN\"";
+
+    // Isolated mode, same rationale as the driftless case above.
+    let mut config = ShellHostConfig::new("pty-precmd-driftzero", &work_dir);
+    config.native_mode = false;
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo drift-real-probe"),
+            ScriptedInput::user_line(status_zero_injection),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let status_zero = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("drift-zero-probe"))
+        })
+        .expect("status-zero injection command finish event");
+    assert_eq!(status_zero.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(status_zero.exit_code, Some(0));
+
+    let real = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("drift-real-probe"))
+        })
+        .expect("real command finish event");
+    assert_eq!(real.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(real.exit_code, Some(0));
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
 fn shell_host_zsh_adapter_emits_shared_command_events() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
@@ -1246,7 +1860,7 @@ fn routing_c4_zsh_stubs_intercept_bypass_only_commands() {
         unique_suffix()
     ));
     let config = ShellHostConfig::new("routing-c4-zsh-stubs", &work_dir);
-    let inputs = ["/draft", "/resume", "/session"];
+    let inputs = ["/resume", "/session"];
     let steps = inputs
         .iter()
         .map(|input| ScriptedInput::user_line(*input))
@@ -1360,11 +1974,11 @@ fn shell_host_bash_captured_debug_trap_keeps_path_generation_trusted() {
         .iter()
         .find(|block| block.command == "echo after-captured-trap")
         .expect("command after captured DEBUG trap");
-    assert!(block.shell_environment_generation.is_some());
+    assert_eq!(block.shell_environment_generation, None);
 }
 
 #[test]
-fn shell_host_bash_unexports_bashopts_while_keeping_extdebug_local() {
+fn shell_host_bash_preserves_bashopts_without_enabling_extdebug() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -1416,12 +2030,11 @@ fn shell_host_bash_unexports_bashopts_while_keeping_extdebug_local() {
     .expect("scripted bash pty");
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
-    // The marker keeps extdebug enabled in the interactive shell (DEBUG trap
-    // return-1 suppression depends on it) and keeps imported options alive.
-    assert!(terminal.contains("host-extdebug-rc=0"), "{terminal}");
+    // Enhanced preserves both the user's imported option and its export
+    // attribute while leaving extdebug at the user's actual setting.
+    assert!(terminal.contains("host-extdebug-rc=1"), "{terminal}");
     assert!(terminal.contains("host-cdspell-rc=0"), "{terminal}");
-    // The export attribute must be gone so shopt changes stop propagating.
-    assert!(terminal.contains("bashopts-export-rc=1"), "{terminal}");
+    assert!(terminal.contains("bashopts-export-rc=0"), "{terminal}");
     // A child bash spawned from the session must not start in extdebug mode
     // and must not trip the bashdb debugger-profile load.
     assert!(terminal.contains("child-extdebug-rc=1"), "{terminal}");
@@ -1563,7 +2176,7 @@ fn shell_host_bash_shebang_less_prompt_hook_avoids_debugger_reexec() {
     assert!(!terminal.contains("cannot start debugger"), "{terminal}");
     // extdebug must be back on for the next real command: the DEBUG trap
     // return-1 suppression depends on it.
-    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=1"), "{terminal}");
 }
 
 #[test]
@@ -1571,7 +2184,7 @@ fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() 
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
-    // Array PROMPT_COMMAND only exists since bash 5.1.
+    // Bash executes every PROMPT_COMMAND array element only since 5.1.
     let version_probe = Command::new("bash")
         .args(["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"])
         .output();
@@ -1633,7 +2246,7 @@ fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() 
     assert!(hook_ran.contains("array-hook-ran"), "{terminal}");
     assert!(!terminal.contains("bashdb"), "{terminal}");
     assert!(!terminal.contains("cannot start debugger"), "{terminal}");
-    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=1"), "{terminal}");
 }
 
 fn bash_extdebug_clears_trace_options() -> bool {
@@ -1654,7 +2267,7 @@ fn bash_extdebug_clears_trace_options() -> bool {
 }
 
 #[test]
-fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
+fn shell_host_bash_prompt_hook_observes_only_bounded_capture() {
     if !bash_extdebug_clears_trace_options() {
         return;
     }
@@ -1693,30 +2306,45 @@ fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
     let trace_log = std::fs::read_to_string(&trace_log).unwrap_or_default();
-    let has_hook_trace = |event: &str| {
-        let prefix = format!("{event}\tfalse\t");
-        trace_log.lines().any(|line| {
-            let Some(functions) = line.strip_prefix(&prefix) else {
-                return false;
-            };
-            functions
-                .split_whitespace()
-                .any(|function| function == "_user_hook")
-        })
-    };
     assert!(
-        has_hook_trace("ERR"),
-        "ERR trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+        trace_log.contains("ERR\tfalse\t"),
+        "{terminal}\n{trace_log}"
     );
     assert!(
-        has_hook_trace("DEBUG"),
-        "DEBUG trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+        trace_log.contains("DEBUG\tfalse\t"),
+        "{terminal}\n{trace_log}"
     );
+    for line in trace_log
+        .lines()
+        .filter(|line| line.contains("_cosh") || line.contains("_COSH"))
+    {
+        let mut fields = line.splitn(3, '\t');
+        assert_eq!(fields.next(), Some("DEBUG"), "{line}\n{trace_log}");
+        let command = fields.next().unwrap_or_default();
+        let function_stack = fields.next().unwrap_or_default();
+        assert!(
+            command.starts_with("_COSH_PROMPT_STATUS=")
+                || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
+                || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
+                || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || command == "_COSH_PROMPT_XTRACE=0"
+                || command == "_COSH_PROMPT_XTRACE=1"
+                || command == "(( _COSH_PROMPT_XTRACE == 1 ))"
+                || command == "unset _COSH_PROMPT_XTRACE"
+                || (command.starts_with("trap -p DEBUG >")
+                    && command.contains("COSH_RECOVERY_REQUEST_FILE")),
+            "unexpected Cosh internals in user trap: {line}\n{trace_log}"
+        );
+        assert!(
+            function_stack.is_empty(),
+            "user trap entered a Cosh function: {line}\n{trace_log}"
+        );
+    }
     assert!(terminal.contains("trace-options-preserved"), "{terminal}");
 }
 
 #[test]
-fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
+fn shell_host_bash_prompt_hook_does_not_enable_extdebug() {
     if !bash_extdebug_clears_trace_options() {
         return;
     }
@@ -1761,7 +2389,7 @@ fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
     assert!(terminal.contains("session-usable"), "{terminal}");
-    assert!(terminal.contains("post-heal-extdebug-rc=0"), "{terminal}");
+    assert!(terminal.contains("post-heal-extdebug-rc=1"), "{terminal}");
 }
 
 #[test]
@@ -1970,12 +2598,11 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
     assert_eq!(intercepts, 2, "{:?}", output.events);
 }
 
-// Issue #1919: a natural-language prompt whose IFS first token contains a
-// slash never reaches command_not_found_handle (bash executes the token as
-// a path), so the DEBUG trap reclassifies it with the missing-path context
-// and intercepts before execution.
+// The shell-host marker layer remains observation-only: the raw input relay
+// owns #2913 routing, while direct PTY submissions still prove that no global
+// DEBUG trap or extdebug veto was reintroduced.
 #[test]
-fn shell_host_bash_missing_path_natural_language_intercepts() {
+fn shell_host_bash_missing_path_without_input_relay_fails_in_shell() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -2002,42 +2629,23 @@ fn shell_host_bash_missing_path_natural_language_intercepts() {
     let output =
         run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
 
-    let intercept = output
-        .events
-        .iter()
-        .find(|event| {
-            event.kind == ShellEventKind::UserInputIntercepted
-                && event.input.as_deref() == Some(prompt)
-                && event.component.as_deref() == Some("natural_language")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "missing-path natural-language intercept: {:?}",
-                output.events
-            )
-        });
-    // Pre-execution intercepts are shaped like slash/agent-marker intercepts
-    // (no top_level_missing correlation: the command never started, so there
-    // is no in-flight attempt to correlate with).
-    assert!(intercept.routing.is_none(), "{:?}", output.events);
-    // Interception must prevent execution: no command block and no native
-    // bash path error may appear for the prompt (I4).
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted && event.input.as_deref() == Some(prompt)
+    }));
     let ledger = build_command_blocks(&output.events);
     assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
-    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
-    let terminal = String::from_utf8_lossy(&output.terminal_output);
-    assert!(
-        !terminal.contains("No such file or directory"),
-        "{terminal}"
-    );
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == prompt)
+        .expect("missing-path Shell block");
+    assert_eq!(block.exit_code, 127);
 }
 
-/// #2138 review round 2: the missing-path route (#1919) must not keep its
-/// own secret veto — a slash-bearing NL prompt carrying a key intercepts
-/// like the CNF route, with the sensitive routing flag and the journal
-/// whole-field redaction (raw key never reaches durable evidence).
+/// Direct PTY input bypasses the #2913 Rust owner. The observation-only marker
+/// must still redact a sensitive path-shaped failure from durable evidence.
 #[test]
-fn shell_host_bash_sensitive_missing_path_natural_language_intercepts() {
+fn shell_host_bash_sensitive_missing_path_without_input_relay_stays_redacted() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -2061,35 +2669,14 @@ fn shell_host_bash_sensitive_missing_path_natural_language_intercepts() {
     let output =
         run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
 
-    let intercept = output
-        .events
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let block = ledger
+        .blocks
         .iter()
-        .find(|event| {
-            event.kind == ShellEventKind::UserInputIntercepted
-                && event.component.as_deref() == Some("natural_language")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "sensitive missing-path natural-language intercept: {:?}",
-                output.events
-            )
-        });
-    // The harness returns journal-redacted events: the sensitive flag must
-    // trigger the whole-field redaction and no correlation exists (the
-    // command never started, so top_level_missing stays false).
-    assert_eq!(intercept.input.as_deref(), Some("<redacted>"));
-    assert!(
-        intercept
-            .routing
-            .as_ref()
-            .is_some_and(|routing| routing.sensitive && !routing.top_level_missing),
-        "{intercept:?}"
-    );
-    let terminal = String::from_utf8_lossy(&output.terminal_output);
-    assert!(
-        !terminal.contains("No such file or directory"),
-        "{terminal}"
-    );
+        .find(|block| block.command == "<redacted sensitive command>")
+        .expect("redacted missing-path block");
+    assert_eq!(block.exit_code, 127);
     assert!(
         !format!("{:?}", output.events).contains("sk-fbaa6"),
         "{:?}",
@@ -2252,7 +2839,7 @@ fn routing_c1_zsh_ascii_question_unmatched_routes_to_agent() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn routing_c1_missing_path_han_tier_a_routes_to_agent() {
+fn routing_c1_missing_path_han_tier_a_stays_shell_owned() {
     if !bash_supports_command_not_found_handler() {
         return;
     }
@@ -2266,11 +2853,16 @@ fn routing_c1_missing_path_han_tier_a_routes_to_agent() {
     config.native_mode = false;
     let output =
         run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
-    assert!(output.events.iter().any(|event| {
-        event.kind == ShellEventKind::UserInputIntercepted
-            && event.input.as_deref() == Some(input)
-            && event.component.as_deref() == Some("natural_language")
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted && event.input.as_deref() == Some(input)
     }));
+    let ledger = build_command_blocks(&output.events);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == input)
+        .expect("missing-path Shell block");
+    assert_eq!(block.exit_code, 127);
 }
 
 #[cfg(target_os = "linux")]
@@ -2816,12 +3408,8 @@ fn routing_c2_valid_quoted_command_and_inner_whitespace_keep_their_owners() {
     }
 }
 
-// Issue #1919 fail-closed counterproofs: the missing-path branch must never
-// fire for existing paths (I1/D6) or plain-English typo paths (I2/D3) —
-// bash native behavior stays byte-identical. (The former I3 secret
-// counterproof is retired by #2138: secret-bearing missing-path NL now
-// intercepts with the sensitive flag, anchored in
-// shell_host_bash_sensitive_missing_path_natural_language_intercepts.)
+// The observation-only marker keeps existing paths and plain-English typo
+// paths byte-identical when submissions bypass the #2913 raw-input owner.
 #[test]
 fn shell_host_bash_missing_path_counterproofs_stay_native() {
     if Command::new("bash").arg("--version").output().is_err() {

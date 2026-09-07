@@ -173,3 +173,22 @@ macro_rules! multiline_entry_ids {
         );
     };
 }
+
+macro_rules! agent_composer_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            AgentComposerTitle,
+            PromptDraftRuntimeLabel,
+            AgentComposerFooterEditing,
+            AgentComposerRejectedTitle,
+            AgentComposerRejectedInvalidPathLine,
+            AgentComposerRejectedUnavailablePathLine,
+            AgentComposerRejectedOutsideWorkspaceLine,
+            AgentComposerRejectedWorkspaceUnavailableLine,
+            AgentComposerRejectedLimitLine,
+            AgentComposerRejectedFooter,
+        );
+    };
+}

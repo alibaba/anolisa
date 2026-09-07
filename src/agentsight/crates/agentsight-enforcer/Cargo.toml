@@ -19,3 +19,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 actplane-ifc-compiler = { workspace = true, optional = true }
 ebpf-ifc-engine = { workspace = true, optional = true }
+
+# Live file-delete enforcement demo; only builds with the actplane backend.
+[[example]]
+name = "enforce_unlink_demo"
+required-features = ["actplane"]

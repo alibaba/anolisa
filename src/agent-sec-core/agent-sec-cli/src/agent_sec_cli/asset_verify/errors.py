@@ -63,6 +63,13 @@ class ErrConfigMissing(SkillVerifyError):
         super().__init__(f"ERR_CONFIG_MISSING: Config file not found: {path}")
 
 
+class ErrConfigInvalid(SkillVerifyError):
+    code = 22
+
+    def __init__(self, path: str, detail: str) -> None:
+        super().__init__(f"ERR_CONFIG_INVALID: Invalid config file '{path}': {detail}")
+
+
 class ErrNoTrustedKeys(SkillVerifyError):
     code = 21
 

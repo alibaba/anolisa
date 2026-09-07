@@ -114,6 +114,10 @@ jobs:
 
       - name: Verify Python dependencies match requirements.txt
         run: |
+          # `packaging` is a CI-only parser, not a runtime dep, so it never ships
+          # in the RPM site-packages. Install it explicitly to avoid relying on
+          # transitive deps that may disappear (broke when ML deps were dropped).
+          uv pip install --system --break-system-packages --python python3.11 packaging
           echo "Checking installed Python packages against requirements.txt ..."
           export PYTHONPATH=/opt/agent-sec/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}
           python3.11 << 'PYEOF'

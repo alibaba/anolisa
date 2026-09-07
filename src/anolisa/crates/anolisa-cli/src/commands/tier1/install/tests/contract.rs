@@ -158,6 +158,7 @@ fn adopt_snapshots_fhs_package_datadir_contract() {
     let prefix = tmp.path().join("sys");
     let ctx = ctx_with_prefix(false, Some(prefix));
     let layout = common::resolve_layout(&ctx);
+    seed_repo_config_with_index(&layout, TEST_INDEX_COMPONENTS);
 
     let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
     let package_datadir = layout.package_datadir().expect("package datadir");

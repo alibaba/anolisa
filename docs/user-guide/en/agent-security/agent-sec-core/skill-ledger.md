@@ -21,6 +21,11 @@ Skill Ledger is the security subsystem of agent-sec-core that maintains a versio
 agent-sec-cli skill-ledger init
 ```
 
+The baseline is a batch write operation. Host-backed, read-only packaged system
+Skills follow the skip contract described under
+[Packaged read-only system Skills](#packaged-read-only-system-skills); key
+initialization still completes.
+
 Key locations:
 
 | File | Path | Permissions |
@@ -120,6 +125,39 @@ child.on("close", (code) => {
 future packaging change may extract the shared scanners into a scanner-only
 wheel or RPM subpackage; the scanner rules must remain single-source.
 
+#### Packaged read-only system Skills
+
+`scan` is a stateful certification command: successful work persists scanner
+results, a signed manifest, and a snapshot under `.skill-meta`. It is not a
+read-only alias for `analyze`.
+
+For host-backed packaged Skills that are immediate children of
+`/usr/share/anolisa/skills/` or `/usr/local/share/anolisa/skills/`, batch write
+paths skip an item when its ledger state is not writable. Both `scan --all` and
+the default `init` baseline emit this per-Skill result:
+
+```json
+{
+  "canonicalSkillDir": "/usr/share/anolisa/skills/example",
+  "skillName": "example",
+  "status": "skipped",
+  "reasonCode": "readonly_system_skill",
+  "persisted": false
+}
+```
+
+`skipped` is an operational batch status, not one of the six integrity states.
+It does not mean `pass`, does not attest the Skill, and does not fail the batch
+by itself; the command exits `0` unless another item returns `status=error`.
+No per-Skill scanner result, manifest, snapshot, or `.skill-meta` state is
+written for the skipped item, while global key initialization keeps its normal
+behavior. An explicit `scan <dir>` remains strict: it exits `1` and points the
+caller to `analyze` for read-only findings.
+
+`check` and `status` are unchanged. A skipped Skill with no prior ledger
+artifacts returns `none`, and aggregate health can remain `unscanned`. These
+values do not turn the batch skip into an attestation or a safety verdict.
+
 The default certification path uses the built-in quick scanner and does not depend on an LLM. For a single Skill:
 
 ```bash
@@ -181,6 +219,13 @@ agent-sec-cli skill-ledger status --verbose
 
 `health` label meanings: `healthy` (no critical/attention statuses and not all none; may mix pass/none), `unscanned` (all none), `attention` (drifted/warn present), `critical` (deny/tampered/error present), `empty` (no registered Skills).
 
+`none` means that no attested scanner verdict is available; it covers both a
+missing ledger artifact and a verified manifest whose `scanStatus` is `none`.
+`unscanned` means that every discovered Skill currently checks as `none`.
+Neither value may be interpreted as `pass`. A read-only packaged system Skill
+skipped by a batch write remains in those existing states when it has no prior
+ledger artifacts.
+
 With `--verbose`, an additional `results` array contains detailed check results for each Skill.
 
 ### 5. Audit the Full Version Chain
@@ -217,7 +262,7 @@ Skill workflow:
 
 ### Architecture Overview
 
-Skill Ledger is recommended in combination with SkillFS: SkillFS captures Skill changes and notifies the Skill Ledger daemon to scan and refresh `.skill-meta/activation.json`/xattr. Host hooks/capabilities can still be mounted by default with `policy = "ask"`; the user is prompted when the unified exposure summary carries a `message`, and stays silent when there is no `message` or the user has already made a decision.
+Skill Ledger is recommended in combination with SkillFS: SkillFS captures Skill changes and notifies the Skill Ledger daemon to scan and refresh `.skill-meta/activation.json`/xattr. Host hooks/capabilities remain available as compatibility paths. Hosts with native approval or notice support default to `policy = "ask"`; Hermes defaults to `policy = "observe"` because its Python plugin API exposes neither mechanism.
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -248,7 +293,7 @@ Skill Ledger is recommended in combination with SkillFS: SkillFS captures Skill 
 ```
 
 - **Recommended path — SkillFS + daemon activation**: SkillFS discovers Skill file changes; the daemon refreshes the executable activation target based on the latest signed manifest, user decisions, and the activation policy. The Agent runtime reads activation metadata instead of relying on host hook pre-checks by default.
-- **Compatibility path — host hook/capability policy**: OpenClaw, Hermes, copilot-shell, and Qwen Code call `agent-sec-cli skill-ledger show` before a Skill loads; Codex and Qoder CLI run a read-only `agent-sec-cli skill-ledger check` at their respective local Skill trigger boundaries. The default is `ask`; `observe` / `warn` / `block` can be configured explicitly, and legacy `debug` remains an alias for `observe`.
+- **Compatibility path — host hook/capability policy**: OpenClaw, Hermes, copilot-shell, and Qwen Code call `agent-sec-cli skill-ledger show` before a Skill loads; Codex and Qoder CLI run a read-only `agent-sec-cli skill-ledger check` at their respective local Skill trigger boundaries. Hermes supports `observe` / `block` and defaults to `observe`; the other hosts retain their native `observe` / `warn` / `ask` / `block` behavior and defaults.
 - **Agent-driven scanning**: `scan` runs the built-in quick scan and signs the result; the `skill-ledger` Skill drives the full four-phase security review when the user requests a deep scan, importing results via `certify --findings`. **Triggered on demand**, initiated by user request.
 
 ### Recommended Path: SkillFS + Daemon Activation
@@ -286,12 +331,84 @@ from conflating them:
 | Socket | Listener | Default path | Purpose |
 |---|---|---|---|
 | daemon socket | agent-sec-core daemon | `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` (override with `AGENT_SEC_DAEMON_SOCKET`) | SkillFS points `--notify-socket` here to send change notifications |
-| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` | The daemon queries `skill.resolveLiveSource` back through it and writes activation metadata |
+| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` (override on the Ledger side with `AGENT_SEC_SKILLFS_CONTROL_SOCKET`) | The daemon queries `skill.resolveLiveSource` back through it and writes activation metadata |
 
-Do **not** customize the control socket path. The Ledger resolver client only
-probes the default path above; no configuration key makes it follow a path given
-to `--control-socket`, and changing it makes Ledger silently fall back to host
-mode. SkillFS and the daemon must also run under the same effective UID.
+The resolver chooses the control endpoint in this order: an explicit
+`socket_path` supplied by an embedding caller, `AGENT_SEC_SKILLFS_CONTROL_SOCKET`,
+then the per-effective-UID default above. The selected path must match the
+SkillFS control socket. A complete ACS deployment should run SkillFS and the
+daemon with the same numeric UID so the default endpoint and key ownership
+checks agree across containers.
+
+#### HMAC-Authenticated Joint Deployment
+
+The HMAC integration is optional for legacy deployments but should be enabled
+in both directions for a complete ACS deployment:
+
+| Variable | Reader | Purpose |
+|---|---|---|
+| `AGENT_SEC_SKILLFS_CONTROL_SOCKET` | Ledger resolver | Select the SkillFS control socket |
+| `AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE` | Ledger resolver | Authenticate control requests and responses |
+| `AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE` | agent-sec-core daemon | Authenticate incoming SkillFS notifications |
+
+For example, provide these variables to the agent-sec-core daemon and any CLI
+process that resolves SkillFS paths, and configure SkillFS with the matching
+socket and key material:
+
+```bash
+export AGENT_SEC_SKILLFS_CONTROL_SOCKET="/run/user/$(id -u)/skillfs/control.sock"
+export AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE="/run/agent-sec-keys/skillfs-control.key"
+export AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE="/run/agent-sec-keys/skillfs-notify.key"
+
+skillfs mount /path/to/skills /mnt/skillfs \
+  --security --activation-mode file \
+  --notify-socket "$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock" \
+  --notify-auth-key-file "$AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE" \
+  --control-socket "$AGENT_SEC_SKILLFS_CONTROL_SOCKET" \
+  --trusted-peer-key-file "$AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE"
+```
+
+The control and notify variables may point to the same key file, but separate
+direction-specific keys are recommended. The control key is loaded on the first
+resolve and cached for that resolver client's lifetime; it is not hot-reloaded.
+The daemon loads the notify key before binding its socket, so an invalid notify
+key prevents daemon startup.
+
+Each key file must satisfy all of these checks:
+
+- the configured path is absolute;
+- the target is a regular file, not a symlink, directory, FIFO, or device;
+- the file owner is the reader's effective UID;
+- no group or other permission bits are set (mode `0600` is recommended);
+- the unmodified file content is between 32 and 4096 bytes.
+
+Control resolution deliberately distinguishes legacy availability from an
+authenticated deployment requirement:
+
+| Control key | Socket `ENOENT` | Other connection, authentication, or protocol failures |
+|---|---|---|
+| Not configured | Fall back to the canonical host path | Fail with `skill_root_resolve_failed` |
+| Configured | Fail with `skill_root_resolve_failed` | Fail with `skill_root_resolve_failed` |
+
+An authenticated `managed=false` response remains a trusted uncovered result
+and uses the canonical host path. After a control key is configured, Ledger
+never retries the request as plaintext.
+
+Notify handling follows the same downgrade boundary:
+
+| Notify key | Behavior |
+|---|---|
+| Not configured | Legacy plaintext notify remains available; an authentication handshake is rejected |
+| Configured | `skill_ledger.skillfs_notify_change` must use HMAC; plaintext notify is rejected, while other daemon methods keep their existing plaintext protocol |
+
+For containerized ACS deployments, share the two Unix socket directories and
+the required key material between the corresponding containers. Use the same
+numeric UID and ensure each mounted key is owned by that UID. Kubernetes Secret
+volumes use symlink-based projections, which the key loader intentionally
+rejects. Copy each Secret into a private shared volume such as `emptyDir`, set
+the owner and mode there, and point the environment variables at the resulting
+regular, non-symlink files. Do not point them directly at the projected Secret
+paths.
 
 Under the Hermes layout the activation flow carries nested identities
 (`category/skill`) rather than flat skill names, and `skillId` keeps both
@@ -306,15 +423,19 @@ boundaries, see
 
 Host adapters use `SKILL_LEDGER_HOOK_ENABLED` as the kill switch and
 `SKILL_LEDGER_MODE` as the behavior selector. The switch defaults to `true`; the policy
-defaults to `ask` and accepts `observe`, `warn`, `ask`, or `block`. `observe` runs the check and
-audit path without a user-visible message. Legacy `debug` maps to `observe`, while legacy `deny`
-maps to `block`. An environment policy overrides Hermes or OpenClaw capability configuration.
+defaults to `ask` on hosts with native approval/notice support. Hermes defaults to `observe` and
+accepts only `observe` or `block`; its legacy `warn` / `ask` values fall back to `observe` with a
+host diagnostic. `observe` runs the check and audit path without a user-visible message. Legacy
+`debug` maps to `observe`, while legacy `deny` maps to `block`. An environment policy overrides
+Hermes or OpenClaw capability configuration.
 
 The host Agent reads these variables when it loads the plugin. Restart the Agent process that
 hosts the hook after changing them; the hook and agent-sec-core are not separate policy services.
 
-When a hook cannot request approval, `ask` falls back to `warn`. When a hook cannot enforce a
-block at its current boundary, `block` also falls back to `warn` and must not claim enforcement.
+On hosts other than Hermes, a hook that cannot request approval may fall back from `ask` to
+`warn`. Hermes never simulates either action by rewriting the assistant's final response; its
+unsupported values fall back to `observe`. When another host cannot enforce a block at its
+current boundary, it must not claim enforcement.
 Set `SKILL_LEDGER_HOOK_ENABLED=false` to skip input processing, key initialization, and CLI calls.
 
 ### Compatibility Path: Hook / Capability Policy
@@ -328,11 +449,15 @@ When the Agent loads a Skill, the OpenClaw, Hermes, copilot-shell, and Qwen Code
 | `ask` | Default. `message == null` passes silently; `message != null` requests user confirmation or uses the host approval UI. |
 | `block` | `message != null` blocks directly, using the message as the reason or alert text. |
 
+Hermes implements only the `observe` and `block` rows. Its `warn` / `ask` compatibility values
+become `observe` with a diagnostic and never enter the assistant response through
+`transform_llm_output`.
+
 The trigger rules for `message` are decided uniformly by Skill Ledger: no prompt when the user already has an `allow` / `always_allow` / `rollback` / `block` decision; no prompt when latest is `pass` or `warn` and directly exposable; a prompt when there is no user decision and latest is `deny` / `none` / `drifted` / `tampered`, explaining whether the current active version is a fallback or a safe pending-review stub. `latestStatus=unmanaged` means the daemon cannot manage this root and cannot write `.skill-meta` or record user decisions, so it is returned as diagnostics only with `message=null`, and every hook policy including `block` passes silently.
 
 Codex and Qoder CLI are low-level integrity gates that run `skill-ledger check <skill_dir>` after canonical-path and root-boundary validation. Codex resolves `$skill-name` references at `UserPromptSubmit`; because that boundary cannot request approval, `ask` falls back to `warn`. Qoder CLI registers a dedicated `PreToolUse` hook for the `Skill` tool, builds user → project directory tables from the absolute `cwd` in the event, and parses the `SKILL.md` frontmatter `name` (falling back to the directory name when frontmatter is absent). When Qoder frontmatter exists but `name` is missing, ambiguous, or uses a YAML scalar the hook cannot safely parse, the call is not downgraded to a non-local Skill — it is handled per the current policy. `pass` passes silently; `none` / `drifted` / `warn` / `deny` / `tampered` and `error` are audited silently, warned and passed, sent for confirmation where supported, or blocked per the `observe` / `warn` / `ask` / `block` policy. Qoder CLI unavailability, execution failure, timeout, or unparseable output is also handled by this four-level policy rather than a fixed fail-open; legacy `debug` is only an alias for `observe`.
 
-All six adapters enable Skill Ledger by default with policy `ask`; copilot-shell, Codex, Qoder CLI, and Qwen Code register their corresponding hook boundaries in their default manifests. OpenClaw and Hermes can also take capability configuration, while `SKILL_LEDGER_MODE` remains the deployment-level override. Apart from the explicitly documented Qoder CLI low-level gate above, the other compatibility hooks remain fail-open when the CLI infrastructure misbehaves, avoiding blocked Skill loads.
+All six adapters enable Skill Ledger by default. Hermes uses policy `observe`; the other adapters retain policy `ask`. copilot-shell, Codex, Qoder CLI, and Qwen Code register their corresponding hook boundaries in their default manifests. OpenClaw and Hermes can also take capability configuration, while `SKILL_LEDGER_MODE` remains the deployment-level override. Apart from the explicitly documented Qoder CLI low-level gate above, the other compatibility hooks remain fail-open when the CLI infrastructure misbehaves, avoiding blocked Skill loads.
 
 The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, and the RPM and raw-install system roots `/usr/share/anolisa/skills/` and `/usr/local/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
 
@@ -357,9 +482,14 @@ For batch certification or post-install certification, complete directory resolu
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-policy = "ask"
-enable_block = false
+policy = "observe"
 ```
+
+Hermes supports `observe` and native `block` only. Existing `warn` / `ask` values map to
+`observe` with a host diagnostic; `enable_block=false` also maps to `observe` for legacy config.
+In Hermes `observe` mode, a non-empty exposure summary is logged at `INFO`, while `deny` and
+`tampered` statuses or a `reasonCode=tampered` activation result are elevated to `WARNING`.
+These log levels do not block the Skill or write content into the assistant response.
 
 **Configuring copilot-shell**: the default Cosh manifest already registers the `skill-ledger` hook. The default policy is `ask`; for observe-only, warning-only, or hard denial, set `SKILL_LEDGER_MODE=observe` / `warn` / `block`. The `debug` value remains an alias for `observe`. This environment variable should be set by a trusted host or deployment environment — not by Skills, project scripts, or untrusted shell startup logic; to prevent policy downgrades via a tampered local shell profile, it should eventually move to a trusted host configuration source.
 
@@ -437,7 +567,7 @@ Non-existent directories are silently ignored. Additionally, running `scan` or `
 
 #### Scheduled Default Quick Scans
 
-To periodically refresh default quick-scan results, put `scan --all` into cron. `scan --all` automatically skips Skills whose files are unchanged and already have complete scan results, re-scanning only new, changed, scan-result-missing, or manifest-anomalous Skills.
+To periodically refresh default quick-scan results, put `scan --all` into cron. `scan --all` automatically skips Skills whose files are unchanged and already have complete scan results, re-scanning only new, changed, scan-result-missing, or manifest-anomalous Skills. It also returns `status=skipped` with `reasonCode=readonly_system_skill` for host-backed, read-only packaged system Skills; inspect the JSON results because this run does not create or refresh an attestation for those items.
 
 Without a key passphrase:
 
@@ -530,18 +660,26 @@ Per-version verification: schema → hash integrity → signature validity → s
 |---------|---------|
 | `agent-sec-cli skill-ledger init` | Initialize keys and build a quick-scan baseline for covered Skills |
 | `agent-sec-cli skill-ledger init --no-baseline` | Initialize keys only, without scanning Skills |
+| `agent-sec-cli skill-ledger analyze <dir> --format json` | Analyze current content without creating ledger state or an attestation |
 | `agent-sec-cli skill-ledger check <dir>` | Check integrity status (JSON output) |
 | `agent-sec-cli skill-ledger show <dir>` | Show latest, active, user decision, activation target, findings, and alerts |
 | `agent-sec-cli skill-ledger export <dir> --version latest --output <path>` | Export a snapshot, manifest, and findings for full review |
 | `agent-sec-cli skill-ledger decide <dir> --action allow|always_allow|block|rollback` | Record a user decision and refresh activation |
 | `agent-sec-cli skill-ledger decide <dir> --clear` | Clear the user decision on the latest manifest |
-| `agent-sec-cli skill-ledger scan <dir>` | Run a quick scan and sign it into the manifest |
-| `agent-sec-cli skill-ledger scan --all` | Gap-filling quick scan across all discovered Skills |
+| `agent-sec-cli skill-ledger scan <dir>` | Run a quick scan and sign it into the manifest; a host-backed, read-only packaged system Skill is an error |
+| `agent-sec-cli skill-ledger scan --all` | Gap-filling quick scan; host-backed, read-only packaged system Skills return operational `skipped` results |
 | `agent-sec-cli skill-ledger certify <dir> --findings <file>` | Sign deep-scan findings into the manifest |
 | `agent-sec-cli skill-ledger status` | Overall security posture (keys, config, Skill health) |
 | `agent-sec-cli skill-ledger status --verbose` | Overall posture including per-Skill detailed results |
 | `agent-sec-cli skill-ledger audit <dir>` | Deep-verify the version chain |
 | `agent-sec-cli skill-ledger list-scanners` | List registered scanners |
+
+`decide` is the only supported command for recording a per-Skill user decision.
+The former hidden `set-policy` placeholder was never implemented and has been
+removed; invoking it is now an unknown-command usage error with exit code 2.
+`rotate-keys` remains a hidden, reserved interface: invoking it reports
+`not implemented` on stderr, exits non-zero, and does not change `key.enc`,
+`key.pub`, or the keyring.
 
 ## Key Paths
 

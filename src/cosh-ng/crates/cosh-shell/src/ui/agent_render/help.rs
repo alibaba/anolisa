@@ -8,6 +8,7 @@ use super::reference_style::{
 };
 use super::wrap::{display_width, wrap_plain_line, wrap_plain_line_with_prefix};
 use super::RatatuiInlineRenderer;
+use crate::types::CardKind;
 
 /// Command reference panel (`/help`) model.
 ///
@@ -43,12 +44,17 @@ impl RatatuiInlineRenderer {
     ) -> io::Result<()> {
         if self.plain {
             let body = plain_help_lines(&model, self.content_width());
-            return self.write_block(output, model.title, body, None);
+            return self.write_block(
+                output,
+                &CardKind::SlashCommand.title(model.title),
+                body,
+                None,
+            );
         }
         let inner = usize::from(self.panel_standard_width().saturating_sub(4)).max(1);
-        let title = model.title;
+        let title = CardKind::SlashCommand.title(model.title);
         let body = styled_help_lines(&model, inner);
-        self.write_styled_block(output, title, body)
+        self.write_styled_block(output, &title, body)
     }
 }
 

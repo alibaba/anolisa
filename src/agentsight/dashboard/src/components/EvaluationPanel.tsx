@@ -4,10 +4,11 @@ import {
   EvaluationNotReadyError,
   EvaluationRef,
   EvaluationResult,
-  INTERRUPTION_TYPE_CN,
   evaluateConversation,
 } from '../utils/apiClient';
 import { EvaluationBadge } from './EvaluationBadge';
+import { useI18n, interruptionTypeKey } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 interface EvaluationPanelProps {
   conversationId: string;
@@ -21,6 +22,7 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
   onResult,
 }) => {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const [result, setResult] = useState<EvaluationResult | null>(initialResult);
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -43,7 +45,7 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
       if (err instanceof EvaluationNotReadyError) {
         setPendingCount(err.pendingCallCount);
       } else {
-        setError(err instanceof Error ? err.message : '质量评估失败');
+        setError(err instanceof Error ? err.message : t('comp.eval.evaluationFailed'));
       }
     } finally {
       setLoading(false);
@@ -65,7 +67,7 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
               className="rounded border border-blue-200 bg-white px-1.5 py-0.5 text-[11px] text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
               title={ref.id}
             >
-              {evidenceLabel(ref.label)}
+              {evidenceLabel(ref.label, t)}
             </button>
           );
         })}
@@ -79,19 +81,19 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-gray-500">质量评估</span>
+            <span className="text-xs font-semibold text-gray-500">{t('comp.eval.qualityEvaluation')}</span>
             <EvaluationBadge result={result} />
           </div>
           {result ? (
             <div className="mt-2 space-y-1">
-              <p className="text-sm text-gray-800">{summaryText(result)}</p>
+              <p className="text-sm text-gray-800">{summaryText(result, t)}</p>
               <p className="text-xs text-gray-500">
-                根因：<span>{rootCauseLabel(result.root_cause)}</span>
+                {t('comp.eval.rootCausePrefix')} <span>{rootCauseLabel(result.root_cause, t)}</span>
               </p>
-              <p className="text-xs text-gray-600">{recommendedActionText(result)}</p>
+              <p className="text-xs text-gray-600">{recommendedActionText(result, t)}</p>
             </div>
           ) : (
-            <p className="mt-2 text-xs text-gray-500">暂无质量评估结果。</p>
+            <p className="mt-2 text-xs text-gray-500">{t('comp.eval.noResult')}</p>
           )}
         </div>
         <button
@@ -99,26 +101,26 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
           disabled={loading}
           className="px-3 py-1 rounded border border-blue-300 bg-blue-50 text-blue-700 text-xs font-medium hover:bg-blue-100 disabled:opacity-50"
         >
-          {loading ? '评估中...' : '开始评估'}
+          {loading ? t('comp.eval.evaluating') : t('comp.eval.startEval')}
         </button>
       </div>
 
       {pendingCount !== null && (
         <div className="mt-3 flex items-center justify-between gap-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          <span>{pendingCount} 个 LLM 调用仍未完成。</span>
+          <span>{t('comp.eval.pendingCalls', { n: pendingCount })}</span>
           <button
             onClick={() => runEvaluation(true)}
             disabled={loading}
             className="rounded border border-amber-300 bg-white px-2 py-0.5 font-medium hover:bg-amber-100 disabled:opacity-50"
           >
-            强制评估
+            {t('comp.eval.forceEval')}
           </button>
         </div>
       )}
 
       {result?.metadata.evaluated_with_pending && (
         <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          评估时仍有 {result.metadata.pending_call_count} 个 LLM 调用未完成。
+          {t('comp.eval.pendingWhenRan', { n: result.metadata.pending_call_count })}
         </div>
       )}
 
@@ -134,17 +136,17 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
             onClick={() => setExpanded((value) => !value)}
             className="text-xs font-medium text-blue-700 hover:text-blue-900"
           >
-            {expanded ? '收起详情' : '查看详情'}
+            {expanded ? t('comp.eval.collapseDetails') : t('comp.eval.viewDetails')}
           </button>
           {expanded && (
             <div className="mt-2 grid gap-3 lg:grid-cols-2">
               <div>
-                <h4 className="text-xs font-semibold text-gray-500">评估维度</h4>
+                <h4 className="text-xs font-semibold text-gray-500">{t('comp.eval.dimensions')}</h4>
                 <div className="mt-1 space-y-1">
                   {result.dimensions.map((dimension) => (
                     <div key={dimension.name} className="rounded bg-gray-50 px-2 py-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs text-gray-700">{dimensionLabel(dimension.name)}</span>
+                        <span className="text-xs text-gray-700">{dimensionLabel(dimension.name, t)}</span>
                         <span className="text-xs text-gray-500">
                           {Math.round(dimension.score * 100)}
                         </span>
@@ -156,18 +158,18 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
                 </div>
               </div>
               <div>
-                <h4 className="text-xs font-semibold text-gray-500">问题发现</h4>
+                <h4 className="text-xs font-semibold text-gray-500">{t('comp.eval.findings')}</h4>
                 <div className="mt-1 space-y-1">
                   {result.findings.length === 0 ? (
-                    <p className="text-xs text-gray-400">未发现问题。</p>
+                    <p className="text-xs text-gray-400">{t('comp.eval.noFindings')}</p>
                   ) : (
                     result.findings.map((finding, index) => (
                       <div key={`${finding.code}-${finding.message}-${index}`} className="rounded bg-gray-50 px-2 py-1">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs text-gray-700" title={finding.code}>
-                            {findingLabel(finding.code)}
+                            {findingLabel(finding.code, t)}
                           </span>
-                          <span className="text-xs text-gray-500">{severityLabel(finding.severity)}</span>
+                          <span className="text-xs text-gray-500">{severityLabel(finding.severity, t)}</span>
                         </div>
                         <p className="mt-0.5 text-xs text-gray-500">{findingMessageText(finding.message)}</p>
                         {renderEvidenceLinks(finding.evidence_refs)}
@@ -184,6 +186,8 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
   );
 };
 
+type TFunc = (key: MessageKey, params?: Record<string, string | number>) => string;
+
 function evidencePath(ref: EvaluationRef): string | null {
   if (!ref.deeplink) return null;
 
@@ -197,145 +201,111 @@ function evidencePath(ref: EvaluationRef): string | null {
   return query ? `${ref.deeplink.route}?${query}` : ref.deeplink.route;
 }
 
-function summaryText(result: EvaluationResult): string {
+function summaryText(result: EvaluationResult, t: TFunc): string {
   if (result.verdict === 'pass') {
-    return '会话已完成，未发现确定性的质量问题。';
+    return t('comp.eval.summary.pass');
   }
   if (result.verdict === 'warn') {
-    return `当前会话可用，但需要复核：${rootCauseLabel(result.root_cause)}。`;
+    return t('comp.eval.summary.warn', { cause: rootCauseLabel(result.root_cause, t) });
   }
-  return `质量评估未通过，主要原因：${rootCauseLabel(result.root_cause)}。`;
+  return t('comp.eval.summary.fail', { cause: rootCauseLabel(result.root_cause, t) });
 }
 
-function recommendedActionText(result: EvaluationResult): string {
+const ACTION_KEY: Record<string, MessageKey> = {
+  none: 'comp.eval.action.none',
+  no_final_answer: 'comp.eval.action.no_final_answer',
+  interrupted_main_call: 'comp.eval.action.interrupted_main_call',
+  agent_crash: 'comp.eval.action.agent_crash',
+  runtime_error: 'comp.eval.action.runtime_error',
+  tool_failure: 'comp.eval.action.tool_failure',
+  safety_risk: 'comp.eval.action.safety_risk',
+  loop_detected: 'comp.eval.action.loop_detected',
+  excessive_cost: 'comp.eval.action.excessive_cost',
+  partial_snapshot: 'comp.eval.action.partial_snapshot',
+};
+
+function recommendedActionText(result: EvaluationResult, t: TFunc): string {
   if (result.verdict === 'pass') {
-    return '暂无需要立即处理的动作。';
+    return t('comp.eval.action.noActionRequired');
   }
 
-  const actions: Record<string, string> = {
-    none: '复核告警项和支撑证据。',
-    no_final_answer: '检查最后一次 LLM 调用和服务端响应解析。',
-    interrupted_main_call: '检查中断证据，修复运行稳定性后再重试会话。',
-    agent_crash: '重试前先检查 Agent 健康状态和崩溃诊断。',
-    runtime_error: '检查模型服务错误、网络稳定性和重试行为。',
-    tool_failure: '检查失败的工具调用和工具响应解析。',
-    safety_risk: '重新运行 Agent 前先复核安全相关发现。',
-    loop_detected: '检查重复调用并收紧停止条件。',
-    excessive_cost: '复核提示词、工具输出和 Token 节省空间。',
-    partial_snapshot: '等待 pending 调用完成，或保留强制评估标记。',
-  };
-
-  return actions[result.root_cause] ?? result.recommended_action ?? result.root_cause;
+  const actionKey = ACTION_KEY[result.root_cause];
+  return actionKey ? t(actionKey) : (result.recommended_action ?? result.root_cause);
 }
 
-function rootCauseLabel(value: string): string {
-  const labels: Record<string, string> = {
-    none: '未发现明确根因',
-    no_final_answer: '未生成最终回答',
-    interrupted_main_call: '主调用被中断',
-    agent_crash: 'Agent 崩溃',
-    runtime_error: '运行时错误',
-    tool_failure: '工具调用失败',
-    safety_risk: '安全风险',
-    loop_detected: '疑似循环调用',
-    excessive_cost: '成本过高',
-    partial_snapshot: '快照未完成',
-  };
+const ROOT_CAUSE_KEY: Record<string, MessageKey> = {
+  none: 'comp.eval.cause.none',
+  no_final_answer: 'comp.eval.cause.no_final_answer',
+  interrupted_main_call: 'comp.eval.cause.interrupted_main_call',
+  agent_crash: 'comp.eval.cause.agent_crash',
+  runtime_error: 'comp.eval.cause.runtime_error',
+  tool_failure: 'comp.eval.cause.tool_failure',
+  safety_risk: 'comp.eval.cause.safety_risk',
+  loop_detected: 'comp.eval.cause.loop_detected',
+  excessive_cost: 'comp.eval.cause.excessive_cost',
+  partial_snapshot: 'comp.eval.cause.partial_snapshot',
+};
 
-  return labels[value] ?? value;
+function rootCauseLabel(value: string, t: TFunc): string {
+  const key = ROOT_CAUSE_KEY[value];
+  return key ? t(key) : value;
 }
 
-function dimensionLabel(value: string): string {
-  const labels: Record<string, string> = {
-    completion: '完成度',
-    runtime_health: '运行健康',
-    tool_use: '工具使用',
-    efficiency: '效率',
-    safety: '安全',
-  };
+const DIMENSION_KEY: Record<string, MessageKey> = {
+  completion: 'comp.eval.dim.completion',
+  runtime_health: 'comp.eval.dim.runtime_health',
+  tool_use: 'comp.eval.dim.tool_use',
+  efficiency: 'comp.eval.dim.efficiency',
+  safety: 'comp.eval.dim.safety',
+};
 
-  return labels[value] ?? value;
+function dimensionLabel(value: string, t: TFunc): string {
+  const key = DIMENSION_KEY[value];
+  return key ? t(key) : value;
 }
 
+// reasonText and findingMessageText are identity-mapping pass-throughs for
+// backend-provided English reason/message strings.
 function reasonText(value: string): string {
-  const labels: Record<string, string> = {
-    'No usable assistant output was captured.': '未捕获到可用的助手输出。',
-    'A usable output exists.': '已捕获可用输出。',
-    'A usable output exists, but the snapshot still has pending calls.': '已捕获可用输出，但快照仍有未完成调用。',
-    'A usable assistant output was captured.': '已捕获可用的助手输出。',
-    'One or more LLM calls were interrupted.': '一个或多个 LLM 调用被中断。',
-    'Unresolved interruption signals were captured for this conversation.': '当前会话存在未解决的中断信号。',
-    'The snapshot contains pending calls and may still change.': '快照包含未完成调用，结果仍可能变化。',
-    'No runtime interruption was detected.': '未检测到运行时中断。',
-    'Tool output contains deterministic error signals.': '工具输出包含确定性错误信号。',
-    'The conversation required an unusually large number of LLM calls.': '当前会话的 LLM 调用次数异常偏高。',
-    'No deterministic tool failure was detected.': '未检测到确定性工具故障。',
-    'Token usage or call count is unusually high for a single conversation.': '单个会话的 Token 用量或调用次数异常偏高。',
-    'Token usage or call count is elevated for a single conversation.': '单个会话的 Token 用量或调用次数偏高。',
-    'Token usage and call count are within normal bounds.': 'Token 用量和调用次数处于正常范围。',
-    'Safety-related interruption signal was captured.': '捕获到安全相关中断信号。',
-    'No safety-specific signal was available or triggered.': '未发现安全专项信号触发。',
-  };
-
-  return labels[value] ?? value;
+  return value;
 }
 
-function findingLabel(value: string): string {
-  const labels: Record<string, string> = {
-    no_final_answer: '未生成最终回答',
-    interrupted_main_call: '主调用被中断',
-    partial_snapshot: '快照未完成',
-    tool_failure: '工具调用失败',
-    loop_detected: '疑似循环调用',
-    llm_error: 'LLM 错误',
-    sse_truncated: 'SSE 流截断',
-    network_timeout: '网络超时',
-    service_unavailable: '服务不可用',
-    agent_crash: 'Agent 崩溃',
-  };
+const FINDING_KEY: Record<string, MessageKey> = {
+  no_final_answer: 'comp.eval.finding.no_final_answer',
+  interrupted_main_call: 'comp.eval.finding.interrupted_main_call',
+  partial_snapshot: 'comp.eval.finding.partial_snapshot',
+  tool_failure: 'comp.eval.finding.tool_failure',
+  loop_detected: 'comp.eval.finding.loop_detected',
+  llm_error: 'comp.eval.finding.llm_error',
+  sse_truncated: 'comp.eval.finding.sse_truncated',
+  network_timeout: 'comp.eval.finding.network_timeout',
+  service_unavailable: 'comp.eval.finding.service_unavailable',
+  agent_crash: 'comp.eval.finding.agent_crash',
+};
 
-  return labels[value] ?? INTERRUPTION_TYPE_CN[value] ?? value;
+function findingLabel(value: string, t: TFunc): string {
+  const key = FINDING_KEY[value];
+  if (key) return t(key);
+  const typeKey = interruptionTypeKey(value);
+  return typeKey ? t(typeKey) : value;
 }
 
 function findingMessageText(value: string): string {
-  const labels: Record<string, string> = {
-    'The conversation has no usable assistant output.': '会话没有可用的助手输出。',
-    'An LLM call was interrupted before normal completion.': 'LLM 调用在正常完成前被中断。',
-    'Evaluation was forced while LLM calls were still pending.': '仍有 LLM 调用未完成时执行了强制评估。',
-    'Evaluation was forced while calls were pending.': '仍有调用未完成时执行了强制评估。',
-    'An unresolved interruption was recorded for this conversation.': '当前会话存在未解决的中断记录。',
-    'Tool output contains an error-like signal.': '工具输出包含疑似错误信号。',
-    'The conversation used many LLM calls and may need loop inspection.': '会话使用了较多 LLM 调用，可能需要检查循环行为。',
-  };
-
-  return labels[value] ?? value;
+  return value;
 }
 
-function severityLabel(value: string): string {
-  const labels: Record<string, string> = {
-    critical: '严重',
-    high: '高',
-    medium: '中',
-    low: '低',
-  };
+const SEVERITY_KEY: Record<string, MessageKey> = {
+  critical: 'common.critical',
+  high: 'common.high',
+  medium: 'common.medium',
+  low: 'common.low',
+};
 
-  return labels[value] ?? value;
+function severityLabel(value: string, t: TFunc): string {
+  const key = SEVERITY_KEY[value];
+  return key ? t(key) : value;
 }
 
-function evidenceLabel(value: string): string {
-  const labels: Record<string, string> = {
-    'Assistant output': '助手输出',
-    'No output': '无输出',
-    'Interrupted LLM call': '中断的 LLM 调用',
-    'Interrupted call': '中断调用',
-    'Pending call': '未完成调用',
-    'Tool failure signal': '工具故障信号',
-    'Repeated calls': '重复调用',
-    'High cost': '高成本',
-    'Elevated cost': '成本偏高',
-    'Pending snapshot': '未完成快照',
-    'Tool failure': '工具故障',
-  };
-
-  return labels[value] ?? findingLabel(value);
+function evidenceLabel(value: string, t: TFunc): string {
+  return findingLabel(value, t);
 }

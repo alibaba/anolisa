@@ -9,6 +9,62 @@ use crate::input::InputClassifier;
 use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
 
 use super::raw_relay::interactive_sentinel::InputWaitStatus;
+use super::transcript::TranscriptRetention;
+
+pub(super) const INTERACTIVE_TRANSCRIPT_WINDOW_BYTES: usize = 256 * 1024;
+pub(super) const INTERACTIVE_EVENT_WINDOW_EVENTS: usize = 1024;
+
+/// Selects whether Cosh participates in shell command routing.
+///
+/// Native sessions leave command ownership entirely with the child shell.
+/// Enhanced sessions use the marker hooks needed for implicit Agent routing
+/// and command-boundary events, and remain the default for compatibility.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShellIntegration {
+    /// Leaves all input, startup files, options, and traps under Shell ownership.
+    Native,
+    /// Enables the marker hooks required for implicit Agent routing and command events.
+    #[default]
+    Enhanced,
+}
+
+impl ShellIntegration {
+    pub(crate) fn parse_config(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "native" => Some(Self::Native),
+            "enhanced" => Some(Self::Enhanced),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn uses_markers(self) -> bool {
+        matches!(self, Self::Enhanced)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShellEventView<'a> {
+    base: usize,
+    events: &'a [ShellEvent],
+}
+
+impl<'a> ShellEventView<'a> {
+    pub(crate) fn new(base: usize, events: &'a [ShellEvent]) -> Self {
+        Self { base, events }
+    }
+
+    pub(crate) fn base(self) -> usize {
+        self.base
+    }
+
+    pub(crate) fn events(self) -> &'a [ShellEvent] {
+        self.events
+    }
+
+    pub(crate) fn position(self) -> usize {
+        self.base.saturating_add(self.events.len())
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ShellEnvironmentObserver(
@@ -27,6 +83,35 @@ pub(super) struct ShellHistoryFileObserver(Arc<dyn Fn(PathBuf) + Send + Sync + '
 impl std::fmt::Debug for ShellHistoryFileObserver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ShellHistoryFileObserver")
+    }
+}
+
+/// #2179: renders the input-wait hint card body into panel-family framed
+/// lines. Injected by the runtime bootstrap (which owns the UI renderer)
+/// so the relay-side sentinel emits the exact NoticePanel framing — width
+/// contract, closed borders, plain fallback — without the shell host
+/// depending on the UI layer.
+type HintCardRenderFn = dyn Fn(&str, Vec<String>) -> Vec<String> + Send + Sync + 'static;
+
+#[derive(Clone)]
+pub(crate) struct HintCardRenderer(Arc<HintCardRenderFn>);
+
+impl std::fmt::Debug for HintCardRenderer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HintCardRenderer")
+    }
+}
+
+impl HintCardRenderer {
+    pub(crate) fn new<F>(render: F) -> Self
+    where
+        F: Fn(&str, Vec<String>) -> Vec<String> + Send + Sync + 'static,
+    {
+        Self(Arc::new(render))
+    }
+
+    pub(crate) fn render(&self, title: &str, body: Vec<String>) -> Vec<String> {
+        (self.0)(title, body)
     }
 }
 
@@ -65,13 +150,17 @@ pub struct ShellHostConfig {
     pub prompt: String,
     pub winsize: Winsize,
     pub input_classifier: InputClassifier,
+    /// Chooses transparent Shell ownership or marker integration.
+    pub integration: ShellIntegration,
+    /// Controls whether user startup files are loaded. This remains
+    /// orthogonal to `integration`: isolated sessions can run with or without
+    /// Cosh marker hooks.
     pub native_mode: bool,
     pub login_shell: bool,
-    /// Routes exact slash-control submissions through bash so they enter
-    /// native history (issue #1718). Defaults from `COSH_SLASH_VIA_SHELL`
-    /// (on unless "0"); disabling restores the pre-#1718 Rust intercept
-    /// path end to end. Only bash runners consult it; zsh has no extdebug
-    /// return-suppression equivalent and always keeps the Rust path.
+    /// Routes exact slash-control submissions through Bash Readline so they
+    /// enter native history without reaching shell parsing (issue #2912).
+    /// Defaults from `COSH_SLASH_VIA_SHELL` (on unless "0"); disabling keeps
+    /// the Rust intercept path. Zsh never enables this Bash-only route.
     pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
     pub raw_action_watchdog: Duration,
@@ -82,11 +171,16 @@ pub struct ShellHostConfig {
     pub(crate) input_wait_status: InputWaitStatus,
     /// #2025/#2161: language for the relay-rendered input-wait hint card.
     pub(crate) hint_language: crate::config::Language,
+    /// #2179: panel-family renderer for the hint card; when absent the
+    /// sentinel stays fail-quiet and emits no card.
+    pub(crate) hint_card_renderer: Option<HintCardRenderer>,
     /// #2161: mirrors `shell.input_wait_timeout_secs` so the hint card can
     /// forecast the auto-interrupt (0 = disabled, no forecast line).
     pub(crate) input_wait_timeout_secs: u64,
+    pub(crate) assistance_control: Option<crate::input::AssistanceControl>,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
+    pub(super) transcript_retention: TranscriptRetention,
 }
 
 impl ShellHostConfig {
@@ -100,6 +194,7 @@ impl ShellHostConfig {
             prompt: "cosh-osc$ ".to_string(),
             winsize,
             input_classifier: InputClassifier::default(),
+            integration: ShellIntegration::Enhanced,
             native_mode: true,
             login_shell: false,
             slash_via_shell: slash_via_shell_default(),
@@ -107,9 +202,12 @@ impl ShellHostConfig {
             raw_action_watchdog: Duration::from_secs(120),
             input_wait_status: InputWaitStatus::default(),
             hint_language: crate::config::Language::default(),
+            hint_card_renderer: None,
             input_wait_timeout_secs: 120,
+            assistance_control: None,
             shell_environment_observer: None,
             shell_history_file_observer: None,
+            transcript_retention: TranscriptRetention::Full,
         }
     }
 
@@ -121,6 +219,29 @@ impl ShellHostConfig {
     pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
         self.input_classifier = self.input_classifier.with_ai_enabled(enabled);
         self
+    }
+
+    /// Selects the Shell integration policy for this host session.
+    pub fn with_integration(mut self, integration: ShellIntegration) -> Self {
+        self.integration = integration;
+        self
+    }
+
+    pub(crate) fn set_assistance_control(&mut self, control: crate::input::AssistanceControl) {
+        self.assistance_control = Some(control);
+    }
+
+    /// Installs the input-wait hint card frame renderer (#2196 review):
+    /// `new()` leaves it unset and the sentinel then stays fail-quiet, so
+    /// crate-external callers of the public raw relay entry points need
+    /// this to opt back into the card. The closure receives the card
+    /// title and body lines and returns the framed lines to emit; the
+    /// in-process runtime injects the NoticePanel framing here.
+    pub fn set_hint_card_renderer<F>(&mut self, render: F)
+    where
+        F: Fn(&str, Vec<String>) -> Vec<String> + Send + Sync + 'static,
+    {
+        self.hint_card_renderer = Some(HintCardRenderer::new(render));
     }
 
     pub(crate) fn set_shell_environment_observer<F>(&mut self, observer: F)
@@ -144,9 +265,17 @@ impl ShellHostConfig {
     pub(crate) fn clear_shell_history_file_observer(&mut self) {
         self.shell_history_file_observer = None;
     }
+
+    /// Bounds byte-transcript memory for the real interactive runtime. Public
+    /// and scripted callers keep full retention unless they enter this path.
+    pub(crate) fn bound_interactive_transcript(&mut self) {
+        self.transcript_retention = TranscriptRetention::Bounded {
+            window_bytes: INTERACTIVE_TRANSCRIPT_WINDOW_BYTES,
+        };
+    }
 }
 
-/// `COSH_SLASH_VIA_SHELL` gates the shell routing of exact slash
+/// `COSH_SLASH_VIA_SHELL` gates native Bash history for exact slash
 /// submissions; any value other than "0" (including unset) keeps it on.
 fn slash_via_shell_default() -> bool {
     std::env::var("COSH_SLASH_VIA_SHELL")

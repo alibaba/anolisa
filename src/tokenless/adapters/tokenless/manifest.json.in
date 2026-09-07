@@ -29,6 +29,20 @@
         "uninstall": "openclaw/scripts/uninstall.sh"
       }
     },
+    "dsh": {
+      "compatibleVersions": ">=0.1.0-rc.2 <0.2.0",
+      "method": "plugin",
+      "pluginId": "@anolisa/dsh-tokenless",
+      "capabilities": {
+        "seams": ["tools/post-execute"],
+        "features": ["compress-response", "error-attribution", "stats"]
+      },
+      "bundle": {
+        "entry": "package.json",
+        "patch": "cordis.patch.yml",
+        "pluginEntry": "dist/index.js"
+      }
+    },
     "hermes": {
       "compatibleVersions": ">=1.0.0",
       "capabilities": {
@@ -85,8 +99,7 @@
         "hooks": [
           "tool-ready",
           "rewrite",
-          "compress-response",
-          "compress-toon"
+          "response-diagnostics"
         ]
       },
       "actions": {
@@ -127,6 +140,22 @@
         "detect":    "qwencode/scripts/detect.sh",
         "install":   "qwencode/scripts/install.sh",
         "uninstall": "qwencode/scripts/uninstall.sh"
+      }
+    },
+    "qwenpaw": {
+      "compatibleVersions": ">=2.0.0 <3.0.0",
+      "capabilities": {
+        "hooks": [
+          "compress-schema",
+          "rewrite",
+          "compress-response",
+          "compress-toon"
+        ]
+      },
+      "actions": {
+        "detect":    "qwenpaw/scripts/detect.sh",
+        "install":   "qwenpaw/scripts/install.sh",
+        "uninstall": "qwenpaw/scripts/uninstall.sh"
       }
     }
   }

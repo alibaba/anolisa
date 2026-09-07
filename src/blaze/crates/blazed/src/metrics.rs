@@ -10,9 +10,6 @@ pub struct Metrics {
     pub requests_total: AtomicU64,
     pub instances_created: AtomicU64,
     pub instances_destroyed: AtomicU64,
-    pub instances_resets: AtomicU64,
-    pub pool_hits: AtomicU64,
-    pub pool_misses: AtomicU64,
     pub policy_eval_failures: AtomicU64,
 }
 
@@ -45,21 +42,6 @@ impl Metrics {
                 self.instances_destroyed.load(Ordering::Relaxed),
             ),
             (
-                "blaze_instances_resets_total",
-                "Total sandbox instances reset",
-                self.instances_resets.load(Ordering::Relaxed),
-            ),
-            (
-                "blaze_pool_hits_total",
-                "Warm pool hits (instance reused)",
-                self.pool_hits.load(Ordering::Relaxed),
-            ),
-            (
-                "blaze_pool_misses_total",
-                "Warm pool misses (cold boot)",
-                self.pool_misses.load(Ordering::Relaxed),
-            ),
-            (
                 "blaze_policy_eval_failures_total",
                 "Number of failed policy evaluations",
                 self.policy_eval_failures.load(Ordering::Relaxed),
@@ -72,5 +54,31 @@ impl Metrics {
             let _ = writeln!(&mut out, "{name} {value}");
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_keeps_active_counters_and_omits_removed_pool_counters() {
+        let metrics = Metrics::new();
+        metrics.inc(&metrics.requests_total);
+        metrics.inc(&metrics.instances_created);
+
+        let rendered = metrics.render();
+
+        assert!(rendered.contains("blaze_requests_total 1"));
+        assert!(rendered.contains("blaze_instances_created_total 1"));
+        assert!(rendered.contains("blaze_instances_destroyed_total 0"));
+        assert!(rendered.contains("blaze_policy_eval_failures_total 0"));
+        for removed in [
+            "blaze_instances_resets_total",
+            "blaze_pool_hits_total",
+            "blaze_pool_misses_total",
+        ] {
+            assert!(!rendered.contains(removed));
+        }
     }
 }

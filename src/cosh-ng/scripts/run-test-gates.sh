@@ -106,10 +106,35 @@ run_heavy() {
     -- --exact --ignored --test-threads=1
 }
 
+run_raw_packaging() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "shellcheck is required by the raw packaging gate" >&2
+    return 1
+  fi
+  shellcheck \
+    packaging/raw/package.sh \
+    packaging/raw/assets/bin/cosh \
+    packaging/raw/assets/bin/cosh-switch \
+    tests/test-package-raw.sh
+  bash tests/test-package-raw.sh
+}
+
+run_rpm_packaging() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "shellcheck is required by the rpm packaging gate" >&2
+    return 1
+  fi
+  shellcheck tests/test-package-rpm.sh
+  bash tests/test-package-rpm.sh
+}
+
 case "${1:-all}" in
   fast)
     scripts/check-test-inventory.sh
+    scripts/check-source-layout.sh
     crates/cosh-shell/scripts/check-layout.sh
+    run_raw_packaging
+    run_rpm_packaging
     cargo test --locked --workspace --exclude cosh-core --exclude cosh-shell
     run_canonical_units cosh-core cosh-core
     run_canonical_units cosh-shell cosh-shell 1
@@ -125,7 +150,10 @@ case "${1:-all}" in
     ;;
   all)
     scripts/check-test-inventory.sh
+    scripts/check-source-layout.sh
     crates/cosh-shell/scripts/check-layout.sh
+    run_raw_packaging
+    run_rpm_packaging
     cargo test --locked --workspace --exclude cosh-core --exclude cosh-shell
     run_canonical_units cosh-core cosh-core
     run_core_integrations

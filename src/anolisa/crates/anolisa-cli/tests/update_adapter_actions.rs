@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use anolisa_core::adapter::claim::{
-    AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimStatus, CoshClaim, DRIVER_SCHEMA_VERSION,
-    DriverPayload,
+    AdapterClaim, AdapterSourceRevision, CLAIM_SCHEMA_VERSION, ClaimStatus, CoshClaim,
+    DRIVER_SCHEMA_VERSION, DriverPayload, ManagedFileKind, ManagedSourceFile,
 };
 use anolisa_core::state_store::StateStore;
 use anolisa_core::{
@@ -24,38 +24,6 @@ use anolisa_platform::privilege;
 mod common;
 
 const COMPONENT: &str = "stale-demo";
-
-fn receipt_digest(root: &Path) -> Option<String> {
-    use sha2::{Digest, Sha256};
-
-    fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                collect_files(&path, files)?;
-            } else {
-                files.push(path);
-            }
-        }
-        Ok(())
-    }
-
-    let mut files = Vec::new();
-    collect_files(root, &mut files).ok()?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for path in files {
-        let relative = path.strip_prefix(root).unwrap_or(&path);
-        let bytes = std::fs::read(&path).ok()?;
-        hasher.update(relative.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update([0]);
-        hasher.update(bytes);
-    }
-    Some(format!("sha256:{:x}", hasher.finalize()))
-}
 
 fn manifest(version: &str, with_adapter: bool) -> String {
     let adapter = if with_adapter {
@@ -119,7 +87,7 @@ struct UpdateFixture {
     runtime_dir: PathBuf,
     user_layout: FsLayout,
     bundle_root: PathBuf,
-    enable_digest: String,
+    enable_revision: AdapterSourceRevision,
 }
 
 impl UpdateFixture {
@@ -151,7 +119,19 @@ impl UpdateFixture {
             .join("openclaw");
         std::fs::create_dir_all(&bundle_root).expect("bundle root");
         std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("v1 bundle");
-        let enable_digest = receipt_digest(&bundle_root).expect("enable-time digest");
+        let enable_revision = AdapterSourceRevision {
+            source_root: std::fs::canonicalize(&bundle_root).expect("canonical bundle root"),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin.json"),
+                kind: ManagedFileKind::File,
+                sha256: Some({
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(b"v1"))
+                }),
+                symlink_target: None,
+            }],
+            materialized_sources: Vec::new(),
+        };
 
         // The installed binary and its manifest snapshot.
         std::fs::create_dir_all(&user_layout.bin_dir).expect("bin dir");
@@ -163,7 +143,7 @@ impl UpdateFixture {
         std::fs::write(&snapshot, manifest("0.1.0", false)).expect("write snapshot");
 
         // State: the component owns the binary, the snapshot, and the
-        // bundle file; the receipt carries the enable-time bundle digest.
+        // bundle file; the receipt carries the enable-time managed revision.
         let sha = |path: &Path| {
             use sha2::{Digest, Sha256};
             format!(
@@ -231,7 +211,9 @@ impl UpdateFixture {
             adapter_type: Some("plugin".to_string()),
             enabled_at: "2026-07-01T00:00:00Z".to_string(),
             resource_root: bundle_root.clone(),
-            bundle_digest: Some(enable_digest.clone()),
+            bundle_digest: None,
+            source_revision: Some(enable_revision.clone()),
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -277,7 +259,7 @@ impl UpdateFixture {
             runtime_dir,
             user_layout,
             bundle_root,
-            enable_digest,
+            enable_revision,
         }
     }
 
@@ -314,12 +296,12 @@ impl UpdateFixture {
         .expect("load state")
     }
 
-    /// The persisted receipt's enable-time digest.
-    fn persisted_bundle_digest(&self) -> Option<String> {
+    /// The persisted receipt's enable-time managed revision.
+    fn persisted_source_revision(&self) -> Option<AdapterSourceRevision> {
         self.load_store()
             .find_adapter_claim(COMPONENT, "openclaw")
             .expect("receipt must survive")
-            .bundle_digest
+            .source_revision
             .clone()
     }
 }
@@ -399,7 +381,7 @@ fn update_human_lists_stale_adapter_with_recovery_command() {
     let out = stdout(&output);
     assert!(out.contains("stale-demo/openclaw"), "{out}");
     assert!(
-        out.contains("resource bundle changed since enable"),
+        out.contains("adapter source revision changed since enable"),
         "{out}"
     );
     assert!(
@@ -411,11 +393,11 @@ fn update_human_lists_stale_adapter_with_recovery_command() {
         std::fs::read(fixture.bundle_root.join("plugin.json")).expect("read bundle"),
         b"v2"
     );
-    // ... but the receipt keeps its enable-time digest: only an explicit
+    // ... but the receipt keeps its enable-time revision: only an explicit
     // `adapter enable` may clear the drift.
     assert_eq!(
-        fixture.persisted_bundle_digest().as_deref(),
-        Some(fixture.enable_digest.as_str()),
+        fixture.persisted_source_revision().as_ref(),
+        Some(&fixture.enable_revision),
         "update must report the drift, not erase it"
     );
 }
@@ -427,7 +409,7 @@ fn update_quiet_suppresses_adapter_notices() {
     assert_success(&output);
     let out = stdout(&output);
     assert!(
-        !out.contains("resource bundle changed") && !out.contains("adapter enable"),
+        !out.contains("source revision changed") && !out.contains("adapter enable"),
         "--quiet must not print adapter notices: {out}"
     );
 }
@@ -445,14 +427,14 @@ fn update_json_carries_adapter_actions() {
         serde_json::json!([{
             "component": "stale-demo",
             "framework": "openclaw",
-            "reason": "resource bundle changed since enable",
+            "reason": "adapter source revision changed since enable",
             "command": "anolisa adapter enable stale-demo openclaw",
         }]),
         "{envelope}"
     );
     assert_eq!(
-        fixture.persisted_bundle_digest().as_deref(),
-        Some(fixture.enable_digest.as_str()),
+        fixture.persisted_source_revision().as_ref(),
+        Some(&fixture.enable_revision),
         "the receipt must survive the update unchanged"
     );
 }
@@ -476,7 +458,7 @@ fn update_dry_run_reports_no_adapter_actions_and_changes_nothing() {
         "dry-run must not touch the bundle"
     );
     assert_eq!(
-        fixture.persisted_bundle_digest().as_deref(),
-        Some(fixture.enable_digest.as_str())
+        fixture.persisted_source_revision().as_ref(),
+        Some(&fixture.enable_revision)
     );
 }

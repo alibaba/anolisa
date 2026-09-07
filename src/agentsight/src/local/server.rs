@@ -1,7 +1,7 @@
 //! HTTP API server + embedded frontend for local agent trajectory viewing.
 //!
-//! Simplified server: no AppState, no HealthChecker, no SQLite. Serves the
-//! local-session discovery/conversion API and an embedded frontend dashboard.
+//! Simplified server: no Linux AppState or HealthChecker. Serves trajectory
+//! SQLite summaries, local-session APIs, and an embedded frontend dashboard.
 
 mod agents;
 mod local_sessions;
@@ -73,7 +73,6 @@ static FRONTEND: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/frontend-dist"
 
 // ─── Static file handler ─────────────────────────────────────────────────────
 
-// ─── Stub endpoints for macOS ───────────────────────────────────────────────
 //
 // The main dashboard frontend calls many Linux-only endpoints (sessions,
 // auth, interruptions, etc.) that have no data on macOS. These stubs return
@@ -167,9 +166,50 @@ async fn skill_metrics() -> impl Responder {
     HttpResponse::Ok().json(Vec::<serde_json::Value>::new())
 }
 
-/// GET /api/agent-health — process-derived health response on macOS
 #[get("/api/agent-health")]
-async fn agent_health() -> impl Responder {
+async fn agent_health(data: web::Data<LocalState>) -> impl Responder {
+    let loaded = web::block(move || match data.trajectory_store() {
+        Some(store) => store
+            .list_agent_activity_summaries()
+            .map_err(|error| error.to_string()),
+        None => Ok(Vec::new()),
+    })
+    .await;
+    let summaries = match loaded {
+        Ok(Ok(summaries)) => summaries,
+        Ok(Err(error)) => {
+            log::warn!("Failed to query local Agent activity: {error}");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Trajectory Agent activity is unavailable"
+            }));
+        }
+        Err(error) => {
+            log::warn!("Local Agent activity query worker failed: {error}");
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Agent activity query worker failed"
+            }));
+        }
+    };
+    let agents = summaries
+        .into_iter()
+        .map(|summary| {
+            serde_json::json!({
+                "agent_name": summary.agent_name,
+                "last_seen_ns": summary.last_seen_ns,
+                "genai_calls": 0,
+                "genai_tokens": 0,
+                "trajectory_steps": summary.total_steps,
+                "trajectory_tokens": summary.total_tokens,
+                "source": "trajectories"
+            })
+        })
+        .collect::<Vec<_>>();
+
+    HttpResponse::Ok().json(serde_json::json!({ "agents": agents }))
+}
+
+#[get("/api/agent-process-health")]
+async fn agent_process_health() -> impl Responder {
     let result = web::block(agents::discover_agents_summary).await;
     match result {
         Ok(summary) => {
@@ -193,7 +233,8 @@ async fn agent_health() -> impl Responder {
             }
             HttpResponse::Ok().json(serde_json::json!({
                 "agents": rows,
-                "last_scan_time": summary.scanned_at * 1000
+                "last_scan_time": summary.scanned_at * 1000,
+                "filtered_count": 0
             }))
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
@@ -388,12 +429,14 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
             .service(security_summary)
             .service(skill_metrics)
             .service(agent_health)
+            .service(agent_process_health)
             // Local optimization analysis API
             .service(optimize::run_optimization)
             .service(optimize::get_optimization_results)
             .service(optimize::list_optimization_history)
             .service(optimize::get_optimize_config)
             .service(optimize::update_optimize_config)
+            .service(optimize::semantic_search_sessions)
             .service(export_atif_unavailable)
             // Catch-all for unregistered API endpoints (returns empty array)
             .service(api_fallback)
@@ -443,7 +486,16 @@ mod tests {
             InitError = (),
         >,
     > {
+        let local_state = web::Data::new(LocalState {
+            trajectory_store: Arc::new(RwLock::new(None)),
+            db_path: std::env::temp_dir().join(format!(
+                "agentsight-missing-trajectory-{}-{}.db",
+                std::process::id(),
+                std::thread::current().name().unwrap_or("test")
+            )),
+        });
         App::new()
+            .app_data(local_state)
             .service(auth_status)
             .service(auth_verify)
             .service(list_sessions)
@@ -459,6 +511,7 @@ mod tests {
             .service(security_summary)
             .service(skill_metrics)
             .service(agent_health)
+            .service(agent_process_health)
             .service(export_atif_unavailable)
             .service(api_fallback)
             .service(serve_frontend)
@@ -515,9 +568,16 @@ mod tests {
         let resp = actix_web::test::call_service(&app, req).await;
         assert!(resp.status().is_success());
 
-        // Agent health
         let req = actix_web::test::TestRequest::get()
             .uri("/api/agent-health")
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = actix_web::test::read_body_json(resp).await;
+        assert_eq!(body["agents"], serde_json::json!([]));
+
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/agent-process-health")
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert!(resp.status().is_success());

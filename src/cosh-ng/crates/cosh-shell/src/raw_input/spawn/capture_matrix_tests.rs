@@ -105,6 +105,7 @@ impl MatrixHarness {
             exit_tracker: &mut self.exit_tracker,
             main_prompt_gate: &self.main_prompt_gate,
             slash_route_enabled: false,
+            zsh_path_prompt_buffering: None,
         };
         relay_input_chunk(
             bytes,
@@ -112,8 +113,7 @@ impl MatrixHarness {
             &mut self.card_state,
             &mut self.quarantine,
             &mut deferred_input,
-            None,
-            None,
+            RelayReadContext::default(),
             &mut relay,
         )
         .expect("relay chunk");
@@ -132,6 +132,7 @@ impl MatrixHarness {
             exit_tracker: &mut self.exit_tracker,
             main_prompt_gate: &self.main_prompt_gate,
             slash_route_enabled: false,
+            zsh_path_prompt_buffering: None,
         };
         drain_abandoned_capture(&mut self.card_state, &mut self.quarantine, &mut relay)
             .expect("drain abandoned capture");
@@ -409,6 +410,7 @@ fn stale_generation_batch_keeps_live_chain_buffer() {
         exit_tracker: &mut harness.exit_tracker,
         main_prompt_gate: &harness.main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
     relay_late_capture_bytes(
         b"stale batch",
@@ -452,6 +454,7 @@ fn stale_generation_batch_rejects_orphan_buffer_visibly() {
         exit_tracker: &mut harness.exit_tracker,
         main_prompt_gate: &harness.main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
     relay_late_capture_bytes(
         b"stale batch",

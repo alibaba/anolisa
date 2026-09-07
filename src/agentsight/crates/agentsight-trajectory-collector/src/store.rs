@@ -70,6 +70,19 @@ pub struct TrajectoryFilters {
     pub agent_names: Vec<String>,
 }
 
+/// Per-agent activity aggregated from collected trajectories.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrajectoryAgentActivitySummary {
+    /// Canonical display name observed in stored trajectories.
+    pub agent_name: String,
+    /// Most recent source-file modification timestamp in nanoseconds.
+    pub last_seen_ns: i64,
+    /// Number of recorded trajectory steps.
+    pub total_steps: i64,
+    /// Prompt and completion tokens across all trajectories.
+    pub total_tokens: i64,
+}
+
 /// Thread-safe store over a dedicated `trajectories.db`.
 pub struct TrajectoryStore {
     conn: Mutex<Connection>,
@@ -433,6 +446,39 @@ impl TrajectoryStore {
             sources: distinct_column(&conn, "source")?,
             agent_names: distinct_column(&conn, "agent_name")?,
         })
+    }
+
+    /// Aggregates historical activity by agent name, case-insensitively.
+    ///
+    /// Trajectory steps are the closest available call-level activity measure;
+    /// `file_mtime_ns` reflects when the source session was last active.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn list_agent_activity_summaries(&self) -> Result<Vec<TrajectoryAgentActivitySummary>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT MIN(agent_name) AS display_name,
+                    MAX(CASE WHEN file_mtime_ns > 0
+                             THEN file_mtime_ns ELSE collected_at_ns END) AS last_seen_ns,
+                    COALESCE(SUM(num_steps), 0) AS total_steps,
+                    COALESCE(SUM(COALESCE(total_prompt_tokens, 0)
+                               + COALESCE(total_completion_tokens, 0)), 0) AS total_tokens
+             FROM collected_trajectories
+             WHERE TRIM(agent_name) != ''
+             GROUP BY agent_name COLLATE NOCASE
+             ORDER BY last_seen_ns DESC, display_name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TrajectoryAgentActivitySummary {
+                agent_name: row.get(0)?,
+                last_seen_ns: row.get(1)?,
+                total_steps: row.get(2)?,
+                total_tokens: row.get(3)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -834,5 +880,36 @@ mod tests {
             vec!["qoder".to_string(), "qoderwork".to_string()]
         );
         assert_eq!(f.agent_names, vec!["qoder".to_string()]);
+    }
+
+    #[test]
+    fn test_agent_activity_summaries_group_names_and_aggregate_steps() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("agent-activity")).unwrap();
+        let mut first = sample_record();
+        first.session_id = "first".into();
+        first.agent_name = "Qoder".into();
+        first.num_steps = 3;
+        first.total_prompt_tokens = Some(100);
+        first.total_completion_tokens = Some(20);
+        first.file_mtime_ns = 100;
+        store.upsert_trajectory(&first).unwrap();
+
+        let mut second = sample_record();
+        second.session_id = "second".into();
+        second.agent_name = "qoder".into();
+        second.num_steps = 5;
+        second.total_prompt_tokens = Some(200);
+        second.total_completion_tokens = None;
+        second.file_path = "/root/.qoder/projects/myapp/second.jsonl".into();
+        second.file_mtime_ns = 300;
+        store.upsert_trajectory(&second).unwrap();
+
+        let summaries = store.list_agent_activity_summaries().unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].agent_name, "Qoder");
+        assert_eq!(summaries[0].last_seen_ns, 300);
+        assert_eq!(summaries[0].total_steps, 8);
+        assert_eq!(summaries[0].total_tokens, 320);
     }
 }

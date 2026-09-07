@@ -452,6 +452,17 @@ fn mock_credential_request(
 }
 
 fn event_identity(binding: &Binding) -> EventIdentity {
+    // The real ActPlane path captures a genuine parent PID for the traced
+    // process (see `actplane::event_identity`). The mock enforcer has no live
+    // eBPF probe, so it models the common provenance where the traced Agent
+    // process was launched under a parent that it inherited the credential
+    // taint from. Emitting a synthetic parent PID (one below the tracked root)
+    // lets the dashboard's process tree still render an "entry -> child" chain
+    // on hosts without eBPF (e.g. macOS) instead of collapsing to a single
+    // node. The parent has no evidence of its own and therefore surfaces as
+    // the process-tree entry.
+    let pid = binding.request.root_pid;
+    let ppid = pid.checked_sub(1).filter(|value| *value > 0);
     EventIdentity {
         binding_id: binding.request.binding_id,
         agent_id: binding.request.agent_id.clone(),
@@ -459,9 +470,9 @@ fn event_identity(binding: &Binding) -> EventIdentity {
         session_id: binding.request.session_id.clone(),
         conversation_id: None,
         tool_call_id: None,
-        pid: binding.request.root_pid,
+        pid,
         process_start_time: binding.request.process_start_time,
-        ppid: None,
+        ppid,
         cgroup_id: None,
         protocol_version: agentsight_enforcement_protocol::PROTOCOL_VERSION,
         enforcer_version: env!("CARGO_PKG_VERSION").into(),

@@ -206,6 +206,20 @@ Rules:
   content fails the install. Rendering is opt-in per entry, so files that
   legitimately contain braces are unaffected unless they declare
   `render`.
+- A brace token immediately preceded by `$` is left verbatim. `${VAR}` is
+  a shell or systemd environment reference that the **consumer** resolves
+  at runtime — a unit fed by `EnvironmentFile=`, for example — so ANOLISA
+  neither expands nor rejects it. The exemption is purely lexical: write
+  `{bindir}` to get layout expansion, never `${bindir}`, which ships
+  verbatim and is then resolved at runtime as an unset variable. A layout
+  placeholder nested inside such a token still renders, so
+  `${SKILL_ROOT:-{datadir}/skills}` keeps the environment reference and
+  resolves `{datadir}`, and an unknown nested name still fails the
+  install.
+- The `$` exemption applies to file content only. `target` and every other
+  destination path is written by ANOLISA itself, with no shell or service
+  manager in the loop, so `${VAR}` there is rejected as an unknown
+  placeholder.
 - The value is versioned. An installer that does not implement the
   declared value refuses the install rather than copying the template
   verbatim; pair new `render` values with a matching

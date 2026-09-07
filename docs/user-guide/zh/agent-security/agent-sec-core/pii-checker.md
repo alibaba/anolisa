@@ -70,11 +70,28 @@ verdict 和 finding schema；宿主只观察 finding 还是阻断操作，由该
 ## 宿主 Hook Policy
 
 设置 `PII_CHECKER_HOOK_ENABLED=false` 可完全跳过宿主 PII hook。启用后，
-`PII_CHECKER_MODE` 支持 `observe`、`warn`、`ask`、`block`，默认 `observe`。
-当宿主或 hook 事件无法执行确认或阻断时，`ask`/`block` fallback 为 `warn`；后置 hook
-不会声称撤销已经发生的外部副作用。环境变量 policy 优先于 Hermes/OpenClaw capability
-配置。`debug` 映射为 `observe`，`deny` 映射为 `block`。仅 Qwen Code 在未设置
-`PII_CHECKER_HOOK_ENABLED` 时额外兼容旧开关 `PII_CHECKER_ENABLED`。
+有原生提示能力的宿主支持 `observe`、`warn`、`ask`、`block`，默认 `observe`。Hermes
+只支持 `observe` / `block`；旧 `warn` / `ask` 会降级为 `observe` 并写宿主诊断，绝不
+把 advisory 注入助手最终回复。Hermes 的 `block` 只能在 `pre_tool_call` 对 `deny` 生效；
+模型输出通过 `post_llm_call` 执行 audit-only 扫描，但由于 Hermes 没有插件可用的
+pre-stream output gate，不会修改或阻断模型输出。其它宿主或 hook 事件无法执行确认/阻断时
+可 fallback 为 `warn`；后置 hook 不会声称撤销已经发生的
+外部副作用。环境变量 policy 优先于 Hermes/OpenClaw capability 配置。`debug` 映射为
+`observe`，`deny` 映射为 `block`。仅 Qwen Code 在未设置 `PII_CHECKER_HOOK_ENABLED` 时
+额外兼容旧开关 `PII_CHECKER_ENABLED`。
+
+`PII_CHECKER_HOOK_ENABLED` 和 `PII_CHECKER_MODE` 被全部六个宿主读取。另有两个变量只被部分
+宿主读取：
+
+| 环境变量 | 默认值 | 读取该变量的宿主 |
+|----------|--------|------------------|
+| `PII_CHECKER_TIMEOUT` | `5` | Qoder、Codex、Qwen Code（Qwen Code 上限为 8 秒） |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder、Qwen Code |
+
+cosh、Hermes 和 OpenClaw 不读取这两个环境变量。Hermes 可通过 capability 配置同时支持
+这两项（`timeout` 和 `include_low_confidence`）。OpenClaw 只支持
+`piiIncludeLowConfidence`；PII scanner CLI 超时固定为 10 秒。cosh 使用固定超时，且从不
+请求低置信度 finding。
 
 宿主 Agent 在加载插件时读取这些变量。修改后需重启承载该 hook 的 Agent 进程；
 hook 和 agent-sec-core 并不是需要单独重启的 policy 服务。

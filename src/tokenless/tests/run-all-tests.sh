@@ -170,12 +170,29 @@ test_toon_compression() {
 
     # --- 5.0 Environment check ---
     log_info "Test 5.0: Environment check"
-    if command -v toon &> /dev/null; then
-        log_pass "TOON available: $(toon --version)"
-    else log_fail "TOON not found"; fi
     if command -v tokenless &> /dev/null; then
         log_pass "tokenless available: $(tokenless --version)"
     else log_fail "tokenless not found"; fi
+
+    # --- 5.0b Default minimum-length gate: short payloads pass through ---
+    # Like every case in this suite, 5.0b exercises the installed release
+    # binary on PATH on purpose (release-layout verification); it is
+    # intentionally decoupled from the cargo workspace. Binary-level
+    # coverage of the same gate that does not depend on the installed
+    # package lives in crates/tokenless-cli/tests/cli_integration.rs
+    # (compress_toon_short_payload_passes_through_by_default and
+    # compress_toon_min_chars_zero_encodes_short_payload).
+    log_info "Test 5.0b: TOON minimum-length gate (default 500 chars)"
+    local gate_json='{"a":"short"}'
+    local gate_out
+    gate_out=$(echo "$gate_json" | tokenless compress-toon 2>/dev/null)
+    if [ "$gate_out" = "$gate_json" ]; then
+        log_pass "Short payload passes through unchanged under default gate"
+    else log_fail "Short payload was encoded despite default gate: $gate_out"; fi
+    gate_out=$(echo "$gate_json" | tokenless compress-toon --min-toon-chars 0 2>/dev/null)
+    if [ "$gate_out" != "$gate_json" ]; then
+        log_pass "--min-toon-chars 0 encodes short payloads on demand"
+    else log_fail "--min-toon-chars 0 did not encode short payload"; fi
 
     # --- 5.1 Simple object: compress-response → stats + toon comparison ---
     log_info "Test 5.1: Simple object — compress-response stats + TOON encode"
@@ -188,8 +205,9 @@ test_toon_compression() {
     local after_resp_chars=${#resp_compressed}
     local after_resp_tokens=$(( (after_resp_chars + 3) / 4 ))
 
-    # TOON encode separately
-    local toon_encoded=$(echo "$simple_json" | tokenless compress-toon 2>/dev/null)
+    # TOON encode separately (--min-toon-chars 0: these fixtures are under
+    # the shared 500-character default gate; this test verifies TOON itself)
+    local toon_encoded=$(echo "$simple_json" | tokenless compress-toon --min-toon-chars 0 2>/dev/null)
     local after_toon_chars=${#toon_encoded}
     local after_toon_tokens=$(( (after_toon_chars + 3) / 4 ))
     local toon_savings=$(( (before_chars - after_toon_chars) * 100 / before_chars ))
@@ -201,7 +219,7 @@ test_toon_compression() {
     local table_before_chars=${#table_json}
 
     resp_compressed=$(echo "$table_json" | tokenless compress-response --agent-id toon-test --session-id toon-session 2>/dev/null)
-    toon_encoded=$(echo "$table_json" | tokenless compress-toon 2>/dev/null)
+    toon_encoded=$(echo "$table_json" | tokenless compress-toon --min-toon-chars 0 2>/dev/null)
     local table_savings=$(( (table_before_chars - ${#toon_encoded}) * 100 / table_before_chars ))
     log_pass "Tabular data: JSON=${table_before_chars} → RESP=${#resp_compressed} → TOON=${#toon_encoded} (TOON ${table_savings}% vs raw)"
 
@@ -216,7 +234,7 @@ test_toon_compression() {
     local schema_compressed=$(echo "$schema_json" | tokenless compress-schema --agent-id toon-test --session-id toon-session 2>/dev/null)
     local schema_after_chars=${#schema_compressed}
 
-    toon_encoded=$(echo "$schema_json" | tokenless compress-toon 2>/dev/null)
+    toon_encoded=$(echo "$schema_json" | tokenless compress-toon --min-toon-chars 0 2>/dev/null)
     local schema_toon_chars=${#toon_encoded}
     local schema_savings=$(( (schema_before_chars - schema_after_chars) * 100 / schema_before_chars ))
     local schema_toon_savings=$(( (schema_before_chars - schema_toon_chars) * 100 / schema_before_chars ))
@@ -225,7 +243,7 @@ test_toon_compression() {
     # --- 5.4 Decompress-toon round-trip ---
     log_info "Test 5.4: TOON round-trip (encode→decode→verify)"
     local roundtrip_json='{"name":"test","value":42,"flag":true,"tags":["a","b","c"]}'
-    toon_encoded=$(echo "$roundtrip_json" | tokenless compress-toon 2>/dev/null)
+    toon_encoded=$(echo "$roundtrip_json" | tokenless compress-toon --min-toon-chars 0 2>/dev/null)
     local decoded=$(echo "$toon_encoded" | tokenless decompress-toon 2>/dev/null)
     if echo "$decoded" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['name']=='test' and d['value']==42 and d['flag']==True" 2>/dev/null; then
         log_pass "Round-trip: data integrity verified"
@@ -278,7 +296,9 @@ test_toon_compression() {
         '{"data":{"results":[{"k":"v1"},{"k":"v2"}],"count":2,"ok":true}}'
     do
         local plen=${#payload}
-        local tlen=$(echo "$payload" | toon -e 2>/dev/null | wc -c)
+        # --min-toon-chars 0: payloads are under the shared 500-character
+        # default gate; this test measures TOON encoding effectiveness.
+        local tlen=$(echo "$payload" | tokenless compress-toon --min-toon-chars 0 2>/dev/null | wc -c)
         total_before=$((total_before + plen))
         total_after_toon=$((total_after_toon + tlen))
         total_records=$((total_records + 1))
@@ -361,116 +381,19 @@ test_tool_ready() {
         || log_fail "tool_ready_hook.sh missing/unreadable or bash parse failed"
 
     # ==========================================
-    # 6.2 All 4 spec categories produce valid status
+    # 6.2 Rust env-check: unconditional hard bypass
     # ==========================================
-    log_info "Test 6.2: All 4 categories return valid status"
-    for tool in Shell WebFetch Read Write; do
-        local out=$(tokenless env-check --tool "$tool" 2>&1)
-        if echo "$out" | grep -qE 'READY|PARTIAL|NOT_READY'; then
-            log_pass "env-check --tool $tool returns valid status"
-        else log_fail "env-check --tool $tool invalid: $out"; fi
-    done
+    log_info "Test 6.2: env-check hard bypass ignores legacy opt-in"
+    local json_out
+    json_out=$(TOKENLESS_TOOL_READY_ENABLED=1 \
+        TOKENLESS_TOOL_READY_SPEC=/path/that/must/not/be-read \
+        tokenless env-check --tool Shell --json 2>&1)
+    assert_contains "$json_out" '"status":"UNKNOWN"' "env-check hard bypass returns UNKNOWN"
+    assert_contains "$json_out" '"enabled":false' "env-check hard bypass reports disabled"
 
-    # ==========================================
-    # 6.3 Alias reverse lookup (exec→Shell, Bash→Shell)
-    # ==========================================
-    log_info "Test 6.3: Alias reverse lookup"
-    local exec_out=$(tokenless env-check --tool exec 2>&1)
-    echo "$exec_out" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Alias 'exec' resolves to Shell" || log_fail "Alias 'exec' not resolved"
-    local bash_out=$(tokenless env-check --tool Bash 2>&1)
-    echo "$bash_out" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Alias 'Bash' resolves to Shell" || log_fail "Alias 'Bash' not resolved"
-    # Docker/Git/Uv/Cargo are NOT aliases → UNKNOWN
-    local docker_unknown=$(tokenless env-check --tool Docker 2>&1)
-    assert_contains "$docker_unknown" "UNKNOWN" "Docker is not a spec key → UNKNOWN"
-
-    # ==========================================
-    # 6.4 Case-insensitive spec key lookup
-    # ==========================================
-    log_info "Test 6.4: Case-insensitive spec key"
-    local lower=$(tokenless env-check --tool shell 2>&1)
-    echo "$lower" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Lowercase 'shell' resolves to Shell" || log_fail "Lowercase 'shell' not resolved"
-    local webfetch=$(tokenless env-check --tool webfetch 2>&1)
-    echo "$webfetch" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Lowercase 'webfetch' resolves to WebFetch" || log_fail "Lowercase 'webfetch' not resolved"
-
-    # ==========================================
-    # 6.5 Unknown tool → UNKNOWN status
-    # ==========================================
-    log_info "Test 6.5: Unknown tool → UNKNOWN"
-    local unknown=$(tokenless env-check --tool NonExistentTool99 2>&1)
-    assert_contains "$unknown" "UNKNOWN" "Unknown tool returns UNKNOWN status"
-    local unknown_json=$(tokenless env-check --tool NonExistentTool99 --json 2>&1)
-    assert_contains "$unknown_json" '"UNKNOWN"' "Unknown tool --json returns UNKNOWN"
-    assert_contains "$unknown_json" '"NonExistentTool99"' "Unknown tool --json includes tool name"
-
-    # ==========================================
-    # 6.6 --checklist --all: only 4 categories present
-    # ==========================================
-    log_info "Test 6.6: --checklist --all lists only 4 categories"
-    local checklist=$(tokenless env-check --checklist --all 2>&1)
-    assert_contains "$checklist" "Shell" "--checklist includes Shell"
-    assert_contains "$checklist" "WebFetch" "--checklist includes WebFetch"
-    assert_contains "$checklist" "Read" "--checklist includes Read"
-    assert_contains "$checklist" "Write" "--checklist includes Write"
-    assert_contains "$checklist" "Summary:" "--checklist includes summary"
-    # Verify removed categories absent
-    ! echo "$checklist" | grep -q "^Docker" && log_pass "No Docker category (merged into Shell)" || log_fail "Docker still present"
-    ! echo "$checklist" | grep -q "^Bash" && log_pass "No Bash category (merged into Shell)" || log_fail "Bash still present"
-
-    # ==========================================
-    # 6.7 --all detailed output: correct manager labels
-    # ==========================================
-    log_info "Test 6.7: Manager labels show detected system manager (dnf)"
-    local all_out=$(tokenless env-check --all 2>&1)
-    echo "$all_out" | grep -q '\[dnf\]' && log_pass "Manager labels show [dnf] for rpm deps" || log_fail "Manager labels missing [dnf]"
-    echo "$all_out" | grep -q '\[pip\]' && log_pass "Manager labels show [pip] for pip deps" || log_fail "Manager labels missing [pip]"
-
-    # ==========================================
-    # 6.8 --json output schema validation
-    # ==========================================
-    log_info "Test 6.8: --json output schema"
-    local json_out=$(tokenless env-check --tool Shell --json 2>&1)
-    assert_contains "$json_out" '"tool"' "--json contains tool field"
-    assert_contains "$json_out" '"status"' "--json contains status field"
-    assert_contains "$json_out" '"Shell"' "--json uses exact spec key name"
-
-    # ==========================================
-    # 6.9 Shell: required (bash, jq) + recommended (git, docker, uv, cargo, rustc) + permissions
-    # ==========================================
-    log_info "Test 6.9: Shell required + recommended + permissions"
-    local shell_out=$(tokenless env-check --tool Shell 2>&1)
-    assert_contains "$shell_out" "bash" "Shell lists bash"
-    assert_contains "$shell_out" "jq" "Shell lists jq"
-    assert_contains "$shell_out" "git" "Shell lists git in recommended"
-    assert_contains "$shell_out" "docker" "Shell lists docker in recommended"
-    assert_contains "$shell_out" "uv" "Shell lists uv in recommended"
-    assert_contains "$shell_out" "cargo" "Shell lists cargo in recommended"
-    echo "$shell_out" | grep -q "exec_shell" && log_pass "Shell includes exec_shell permission" || log_fail "Shell missing exec_shell"
-
-    # ==========================================
-    # 6.10 Shell recommended: no rustup (removed from spec)
-    # ==========================================
-    log_info "Test 6.10: Shell recommended has no rustup"
-    ! echo "$shell_out" | grep -q "rustup" && log_pass "Shell does not list rustup (removed)" || log_fail "Shell still lists rustup"
-
-    # ==========================================
-    # 6.11 Shell recommended: no docker-compose (removed from spec)
-    # ==========================================
-    log_info "Test 6.11: Shell recommended has no docker-compose"
-    ! echo "$shell_out" | grep -q "docker-compose" && log_pass "Shell does not list docker-compose (removed)" || log_fail "Shell still lists docker-compose"
-
-    # ==========================================
-    # 6.12 --fix: Shell (rpm + pip deps)
-    # ==========================================
-    log_info "Test 6.12: --fix Shell (deps already available)"
-    local fix_shell=$(tokenless env-check --fix --tool Shell 2>&1)
-    echo "$fix_shell" | grep -qE "READY|already" && log_pass "--fix --tool Shell: available deps handled" || log_fail "--fix --tool Shell unexpected: $fix_shell"
-
-    # ==========================================
-    # 6.13 Alias lookup with --fix (exec → Shell)
-    # ==========================================
-    log_info "Test 6.13: Alias lookup with --fix (exec→Shell)"
-    local fix_exec=$(tokenless env-check --fix --tool exec 2>&1)
-    echo "$fix_exec" | grep -qE "READY|already" && log_pass "--fix --tool exec resolves to Shell" || log_fail "--fix --tool exec unexpected: $fix_exec"
+    local text_out
+    text_out=$(TOKENLESS_TOOL_READY_ENABLED=1 tokenless env-check --tool Shell 2>&1)
+    assert_contains "$text_out" "hard-disabled" "legacy opt-in cannot re-enable env-check"
 
     # ==========================================
     # 6.14 env-fix script: check command
@@ -533,74 +456,66 @@ test_tool_ready() {
     fi
 
     # ==========================================
-    # 6.21 tool-ready hook: READY (silent exit)
+    # 6.21 tool-ready hook: unconditional hard bypass
     # ==========================================
-    log_info "Test 6.21: tool-ready hook — READY silent exit"
-    local ready_out=$(echo '{"tool_name":"Shell","tool_input":{"command":"ls"}}' | bash "$READY_SCRIPT" 2>&1)
-    [ -z "$ready_out" ] && log_pass "tool-ready READY produces no output" || log_fail "tool-ready READY unexpected output: $ready_out"
-
-    # ==========================================
-    # 6.22 tool-ready hook: NOT_READY + Skip retry
-    # ==========================================
-    log_info "Test 6.22: tool-ready hook — NOT_READY"
-    local tmp_dir
-    local tmp_spec
-    local tmp_fixer
-    local fix_marker
-    if ! tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tokenless-tool-ready.XXXXXX"); then
-        log_fail "unable to create private temporary directory"
-        return
-    fi
-    chmod 0700 "$tmp_dir"
-    tmp_spec="$tmp_dir/tool-ready-spec.json"
-    tmp_fixer="$tmp_dir/tokenless-env-fix.sh"
-    fix_marker="$tmp_dir/fixer-called"
-    cat > "$tmp_spec" << 'EOF'
-{"TestMissing":{"required":[{"binary":"fakebin99","package":"fakebin99","manager":"rpm"}],"recommended":[],"permissions":[],"network":[]}}
+    log_info "Test 6.21: tool-ready hook — hard bypass"
+    local bypass_dir
+    bypass_dir=$(mktemp -d)
+    local bypass_spec="$bypass_dir/tool-ready-spec.json"
+    local bypass_fixer="$bypass_dir/tokenless-env-fix.sh"
+    local bypass_marker="$bypass_dir/fixer-called"
+    cat > "$bypass_spec" <<'EOF'
+{"TestMissing":{"required":[{"binary":"tokenless-missing-for-test","package":"tokenless-missing-for-test","manager":"rpm"}],"recommended":[],"permissions":[]}}
 EOF
-    cat > "$tmp_fixer" << 'EOF'
+    cat > "$bypass_fixer" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "fix-all" ]
+cat >/dev/null
 touch "$TOKENLESS_FIX_MARKER"
 EOF
-    chmod 0644 "$tmp_fixer"
-    local not_ready_out
-    not_ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \
-        | TOKENLESS_TOOL_READY_SPEC="$tmp_spec" \
-          TOKENLESS_ENV_FIX_SCRIPT="$tmp_fixer" \
-          TOKENLESS_FIX_MARKER="$fix_marker" \
+    chmod 0644 "$bypass_fixer"
+
+    local ready_out
+    ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \
+        | TOKENLESS_TOOL_READY_ENABLED=1 \
+          TOKENLESS_TOOL_READY_SPEC="$bypass_spec" \
+          TOKENLESS_ENV_FIX_SCRIPT="$bypass_fixer" \
+          TOKENLESS_FIX_MARKER="$bypass_marker" \
           bash "$READY_SCRIPT" 2>&1)
-    [ -f "$fix_marker" ] \
-        && log_pass "tool-ready invokes a non-executable fixer through bash" \
-        || log_fail "tool-ready skipped the readable 0644 fixer"
-    assert_contains "$not_ready_out" "NOT_READY" "hook outputs NOT_READY"
-    assert_contains "$not_ready_out" "Skip retry" "hook includes Skip retry guidance"
-    rm -rf "$tmp_dir"
+    if [ "$ready_out" != "{}" ]; then
+        log_fail "tool-ready hard bypass returned invalid pass-through output: $ready_out"
+    elif [ -e "$bypass_marker" ]; then
+        log_fail "tool-ready hard bypass invoked the legacy fixer"
+    else
+        log_pass "tool-ready hard bypass emits JSON pass-through and skips the fixer"
+    fi
+    rm -rf "$bypass_dir"
 
     # ==========================================
-    # 6.23 Attribution: ENV_DEPENDENCY_MISSING
+    # 6.23 Core attribution: ENV_DEPENDENCY_MISSING
     # ==========================================
     log_info "Test 6.23: Attribution — ENV_DEPENDENCY_MISSING"
     local attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
-    local attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
+    local attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     local attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_DEPENDENCY_MISSING" "Attribution detects command not found"
-    assert_contains "$attr_out" "Skip retry" "Attribution includes Skip retry"
 
     # ==========================================
-    # 6.24 Attribution: ENV_PERMISSION
+    # 6.24 Core attribution: ENV_PERMISSION
     # ==========================================
     log_info "Test 6.24: Attribution — ENV_PERMISSION"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
-    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
+    attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_PERMISSION" "Attribution detects Permission denied"
 
     # ==========================================
-    # 6.25 Attribution: ENV_FILE_MISSING
+    # 6.25 Core attribution: ENV_FILE_MISSING
     # ==========================================
     log_info "Test 6.25: Attribution — ENV_FILE_MISSING"
     attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
-    attr_input=$(jq -n --arg r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r}')
+    attr_input=$(jq -n --argjson r "$attr_resp" '{"tool_name":"CustomAction","tool_response":$r,"is_error":true}')
     attr_out=$(echo "$attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$attr_out" "ENV_FILE_MISSING" "Attribution detects No such file"
 
@@ -609,20 +524,19 @@ EOF
     # ==========================================
     log_info "Test 6.26a: Bash + ENV_DEPENDENCY_MISSING — attribution injected"
     local skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"command not found: fakebin99\nDetailed error info about missing dependency and resolution steps for the environment issue.\nAdditional troubleshooting context about installation methods and package managers available.\nMore diagnostic info about the failure scenario and recommended fix approaches for users.\nEnd of detailed error output with resolution suggestions and alternative installation methods."}'
-    local skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    local skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     local skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_DEPENDENCY_MISSING" "Bash attribution detects command not found"
-    assert_contains "$skip_attr_out" "Skip retry" "Bash attribution includes Skip retry"
 
     log_info "Test 6.26b: Bash + ENV_PERMISSION — attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret\nContext about permission error and what went wrong with the file access attempt.\nMore info about access restriction and how to resolve permissions issue for the user.\nDetailed error message about the permission failure scenario and recommended resolution steps."}'
-    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_PERMISSION" "Bash attribution detects Permission denied"
 
     log_info "Test 6.26c: Bash + ENV_FILE_MISSING — attribution injected"
     skip_attr_resp='{"exit_code":1,"stdout":"","stderr":"No such file or directory: /tmp/missing\nContext about missing file error and why it happened during tool execution.\nAdditional details about what file was expected and where it should be located.\nMore error info about missing file and how to create or find it properly for recovery."}'
-    skip_attr_input=$(jq -n --arg r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
+    skip_attr_input=$(jq -n --argjson r "$skip_attr_resp" '{"tool_name":"Bash","tool_response":$r}')
     skip_attr_out=$(echo "$skip_attr_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$skip_attr_out" "ENV_FILE_MISSING" "Bash attribution detects No such file"
 
@@ -640,10 +554,9 @@ EOF
     # ==========================================
     log_info "Test 6.26e: Write (non-skip) + ENV_PERMISSION small — attribution injected"
     local small_err_resp='{"exit_code":1,"stdout":"","stderr":"Permission denied: /root/secret"}'
-    local small_err_input=$(jq -n --arg r "$small_err_resp" '{"tool_name":"Write","tool_response":$r}')
+    local small_err_input=$(jq -n --argjson r "$small_err_resp" '{"tool_name":"Write","tool_response":$r,"is_error":true}')
     local small_err_out=$(echo "$small_err_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
     assert_contains "$small_err_out" "ENV_PERMISSION" "Write small error: attribution injected"
-    assert_contains "$small_err_out" "Skip retry" "Write small error: Skip retry included"
 
     log_info "Test 6.26f: Write (non-skip) + no env error small — skip entirely"
     local small_ok_resp='{"exit_code":0,"stdout":"ok"}'
@@ -684,8 +597,8 @@ print('CLASSIFY_OK')
 
     # ==========================================
     # 6.26h Behavioral dispatch: Read skips, Bash proceeds to compression
-    # Read must produce empty output (skip); Bash must attempt compression
-    # (produces non-empty hook output even if compression saves nothing).
+    # Use a replacement-capable host so this test isolates tool classification
+    # from the unified entry's fail-open behavior for unknown/additive hosts.
     # ==========================================
     log_info "Test 6.26h: Read skips entirely, Bash enters compression pipeline"
     local large_body
@@ -697,7 +610,7 @@ print('CLASSIFY_OK')
     local read_input
     read_input=$(jq -n --arg r "$dispatch_resp" '{"tool_name":"Read","tool_response":$r}')
     local read_out
-    read_out=$(echo "$read_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    read_out=$(echo "$read_input" | python3 "$COMPRESS_SCRIPT" --agent-id qoder-cli 2>&1)
     local read_trimmed
     read_trimmed=$(echo "$read_out" | tr -d '[:space:]')
     [ "$read_trimmed" = "{}" ] && log_pass "Read (layer 1) skips entirely" || log_fail "Read should skip with {}, got: $read_out"
@@ -706,7 +619,7 @@ print('CLASSIFY_OK')
     local bash_input
     bash_input=$(jq -n --arg r "$dispatch_resp" '{"tool_name":"Bash","tool_response":$r}')
     local bash_out
-    bash_out=$(echo "$bash_input" | python3 "$COMPRESS_SCRIPT" 2>&1)
+    bash_out=$(echo "$bash_input" | python3 "$COMPRESS_SCRIPT" --agent-id qoder-cli 2>&1)
     local bash_trimmed
     bash_trimmed=$(echo "$bash_out" | tr -d '[:space:]')
     [ -n "$bash_trimmed" ] && [ "$bash_trimmed" != "{}" ] && log_pass "Bash (layer 2) enters compression pipeline" || log_fail "Bash should attempt compression, got: $bash_out"

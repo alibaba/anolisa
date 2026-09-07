@@ -15,7 +15,7 @@ pub(super) fn slash_input(event: &ShellEvent) -> Option<&str> {
 pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
-    Draft,
+    Agent,
     Auth,
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -60,7 +60,7 @@ impl<'a> SlashCommand<'a> {
         }
         Ok(match token {
             "/help" => Some(Self::Help),
-            "/draft" => Some(Self::Draft),
+            "/agent" => Some(Self::Agent),
             "/auth" => Some(Self::Auth),
             "/hooks" => {
                 let sub = parts.next();
@@ -129,7 +129,7 @@ impl<'a> SlashCommand<'a> {
                 parts.next(),
                 parts.next(),
             )),
-            "/agent" | "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
+            "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
             | "/send-to-shell" | "/shell" => None,
             "/" => Some(Self::Noop),
             token if token.starts_with('/') => {
@@ -148,6 +148,7 @@ fn parser_owned_command(token: &str) -> bool {
     matches!(
         token,
         "/help"
+            | "/agent"
             | "/auth"
             | "/hooks"
             | "/mode"
@@ -198,14 +199,14 @@ mod tests {
     use super::{RemovedCommand, SlashCommand, SlashCommandSpec, SlashParseError};
 
     #[test]
-    fn routing_c4_draft_grammar_no_drift() {
+    fn removed_draft_alias_is_unknown() {
         assert!(matches!(
-            SlashCommand::parse("/draft extra"),
-            Ok(Some(SlashCommand::Draft))
+            SlashCommand::parse("/draft"),
+            Ok(Some(SlashCommand::Unknown("/draft")))
         ));
         assert!(matches!(
-            SlashCommand::parse("/draft 'extra'"),
-            Ok(Some(SlashCommand::Draft))
+            SlashCommand::parse("/agent"),
+            Ok(Some(SlashCommand::Agent))
         ));
     }
 
@@ -319,6 +320,11 @@ mod tests {
             Ok(Some(SlashCommand::Mode(Some("approval"), Some("trust"), Some("confirm")))) => {}
             _ => panic!("unquoted trust confirmation did not parse"),
         }
+
+        match SlashCommand::parse("/mode routing shell-only") {
+            Ok(Some(SlashCommand::Mode(Some("routing"), Some("shell-only"), None))) => {}
+            _ => panic!("routing mode did not parse"),
+        }
     }
 
     #[test]
@@ -344,6 +350,7 @@ mod tests {
                         | "/extensions"
                         | "/skills"
                         | "/auth"
+                        | "/agent"
                 )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()

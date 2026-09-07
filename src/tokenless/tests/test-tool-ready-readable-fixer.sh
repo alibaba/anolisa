@@ -27,14 +27,14 @@ chmod 0644 "$FIXER"
 
 OUTPUT=$(
     echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \
-        | TOKENLESS_TOOL_READY_SPEC="$SPEC" \
+        | TOKENLESS_TOOL_READY_ENABLED=1 \
+          TOKENLESS_TOOL_READY_SPEC="$SPEC" \
           TOKENLESS_ENV_FIX_SCRIPT="$FIXER" \
           TOKENLESS_FIX_MARKER="$MARKER" \
           bash "$HOOK"
 )
 
-[ -f "$MARKER" ]
-grep -q "NOT_READY" <<<"$OUTPUT"
-grep -q "Skip retry" <<<"$OUTPUT"
+[ ! -e "$MARKER" ]
+[ "$OUTPUT" = "{}" ]
 
-echo "tool-ready readable fixer test passed"
+echo "tool-ready hard bypass test passed"

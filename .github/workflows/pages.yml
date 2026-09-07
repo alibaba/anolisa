@@ -76,12 +76,23 @@ jobs:
       - name: Validate bilingual sources
         run: npm run validate:locales --prefix website
 
+      # Fork Pages deploy under a sub-path (BASE_URL=/<repo>/), which the
+      # production root path cannot catch: an asset path that hard-codes
+      # BASE_URL resolves only when BASE_URL is "/". Build once with a sub-path
+      # first, then let the real build below overwrite the output.
+      - name: Verify the website builds under a sub-path base URL
+        env:
+          SITE_URL: https://example.github.io
+          BASE_URL: /base-url-check/
+        run: npm run build --prefix website
+
       - name: Build Docusaurus and check Markdown links
         run: npm run build --prefix website
 
       - name: Validate public installer
         run: |
           bash -n website/static/install.sh
+          website/scripts/test-install.sh
           cmp website/static/install.sh website/build/install.sh
 
       - name: Smoke-test stable installer

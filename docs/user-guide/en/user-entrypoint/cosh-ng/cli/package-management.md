@@ -24,6 +24,8 @@ cosh-cli pkg remove nginx --dry-run
 
 Run without `--dry-run` to apply the change. Package operations normally need root privileges. An install that finds the package already present still returns success and marks `already_installed` in the response.
 
+`--dry-run` previews the operation without installing or removing anything, downloading packages, or writing to the package database. What it verifies depends on the backend. On dnf, apt, and zypper it confirms that dependency resolution succeeds against the current metadata; it does not cover failures that only surface during the real transaction, such as download or signature errors, file conflicts, failing scriptlets, or state changed by a concurrent package operation. Those backends read repository metadata to resolve, and fetch it from the network when the local copy is missing or expired. Homebrew has no simulation mode, so its `--dry-run` only confirms that the formula exists (install) or is installed (remove) — it does not resolve dependencies or conflicts at all.
+
 ## Search
 
 The query is passed as one argument and uses a portable package-name pattern. The accepted pattern characters are package-name characters plus `*`, `?`, `[` and `]`:

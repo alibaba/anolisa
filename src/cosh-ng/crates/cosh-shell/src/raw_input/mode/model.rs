@@ -243,6 +243,7 @@ pub enum RawInputCapture {
     PromptDraft {
         id: String,
         initial_text: String,
+        completion: Option<Box<str>>,
     },
 }
 

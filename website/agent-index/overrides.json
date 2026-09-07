@@ -12,17 +12,17 @@
       "install_name": "sec-core"
     },
     "tokenless": {
-      "install": "npm install -g anolisa-tokenless",
-      "install_method": "npm",
+      "install": "anolisa install tokenless",
+      "install_method": "cli",
       "install_variants": [
         {
           "method": "cli",
-          "preferred": false,
+          "preferred": true,
           "command": "anolisa install tokenless",
           "platforms": [
             {
               "os": "linux",
-              "architectures": ["x86_64"]
+              "architectures": ["x86_64", "aarch64"]
             },
             {
               "os": "macos",
@@ -39,29 +39,6 @@
             "anolisa --json adapter scan",
             "anolisa --json status tokenless",
             "anolisa --json doctor tokenless"
-          ]
-        },
-        {
-          "method": "npm",
-          "preferred": true,
-          "command": "npm install -g anolisa-tokenless",
-          "platforms": [
-            {
-              "os": "linux",
-              "architectures": ["x86_64", "aarch64"]
-            },
-            {
-              "os": "macos",
-              "architectures": ["x86_64", "aarch64"]
-            }
-          ],
-          "requires": ["node", "npm"],
-          "preflight": [
-            "command -v node",
-            "command -v npm"
-          ],
-          "verify": [
-            "tokenless env-check --all"
           ]
         }
       ]

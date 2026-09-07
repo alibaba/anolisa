@@ -12,6 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
 from agent_sec_cli.correlation_context import (
     TraceContext,
     clear_invocation_context_for_tests,
@@ -20,10 +21,14 @@ from agent_sec_cli.correlation_context import (
     init_invocation_context,
     init_process_trace_context,
 )
+from agent_sec_cli.daemon import server as daemon_server_module
 from agent_sec_cli.daemon.client import DaemonClient, daemon_health_reachable
 from agent_sec_cli.daemon.errors import (
     DaemonProtocolError,
     DaemonRuntimePathError,
+)
+from agent_sec_cli.daemon.handlers.skill_ledger import (
+    METHOD_SKILLFS_NOTIFY_CHANGE,
 )
 from agent_sec_cli.daemon.health import build_health_snapshot
 from agent_sec_cli.daemon.logging import (
@@ -50,6 +55,18 @@ from agent_sec_cli.daemon.server import (
     configure_logging,
     create_default_registry,
     prepare_socket_path,
+)
+from agent_sec_cli.skill_ledger.skillfs_peer_auth import (
+    AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE,
+    NOTIFY_CLIENT_DOMAIN,
+    NOTIFY_SERVER_DOMAIN,
+    AuthenticatedSession,
+    SharedSecret,
+    SkillFsPeerAuthError,
+    build_auth_init_frame,
+    build_auth_proof_frame,
+    parse_auth_challenge_frame,
+    verify_auth_proof_frame,
 )
 
 
@@ -382,8 +399,8 @@ def test_daemon_write_response_closes_writer_when_drain_is_cancelled(
 def test_daemon_server_uses_default_job_registration(monkeypatch, tmp_path: Path):
     registered_managers = []
 
-    def fake_register_default_jobs(job_manager, prompt_scan_state):
-        registered_managers.append((job_manager, prompt_scan_state))
+    def fake_register_default_jobs(job_manager):
+        registered_managers.append(job_manager)
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.server.register_default_jobs",
@@ -392,9 +409,7 @@ def test_daemon_server_uses_default_job_registration(monkeypatch, tmp_path: Path
 
     server = DaemonServer(socket_path=tmp_path / "runtime" / "daemon.sock")
 
-    assert registered_managers == [
-        (server.runtime.jobs, server.runtime.prompt_scan_state)
-    ]
+    assert registered_managers == [server.runtime.jobs]
 
 
 def test_daemon_client_calls_health_over_temp_socket(tmp_path: Path):
@@ -422,7 +437,6 @@ def test_daemon_client_calls_health_over_temp_socket(tmp_path: Path):
     assert response.ok is True
     assert response.exit_code == 0
     assert response.data["status"] == "ok"
-    assert response.data["prompt_scan"]["status"] == "pending"
     assert response.data["socket"].endswith("daemon.sock")
     assert runtime_dir_mode == 0o700
     assert socket_mode == 0o600
@@ -963,13 +977,11 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
     registry = create_default_registry()
 
     assert snapshot["status"] == "ok"
-    assert snapshot["prompt_scan"]["status"] == "pending"
     assert registry.methods() == (
         "daemon.health",
         "obs.runs.list",
         "obs.sessions.list",
         "obs.timeline.get",
-        "scan-prompt",
         "sec.events.count_by",
         "sec.events.get",
         "sec.events.list",
@@ -977,6 +989,33 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
         "skill_ledger.skillfs_notify_change",
     )
     assert _matching_modules(heavy_prefixes) == before
+
+
+def test_health_prompt_scan_is_reported_as_untracked(tmp_path: Path):
+    """Health must not claim scanner readiness it cannot observe."""
+    snapshot = build_health_snapshot(
+        DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    )
+
+    prompt_scan = snapshot["prompt_scan"]
+
+    assert prompt_scan["tracked"] is False
+    assert prompt_scan["status"] == "unknown"
+    assert prompt_scan["loaded"] is None
+    assert prompt_scan["model"] is None
+    assert prompt_scan["detail"]
+    # Legacy PromptScanRuntimeState keys stay present so monitors reading
+    # `.prompt_scan.*` keep parsing, but none may imply availability.
+    assert set(prompt_scan) == {
+        "status",
+        "model",
+        "loaded",
+        "last_error",
+        "last_started_at",
+        "last_finished_at",
+        "tracked",
+        "detail",
+    }
 
 
 def test_completion_log_is_emitted_when_inflight_request_is_cancelled(
@@ -1455,6 +1494,501 @@ def test_unknown_method_completion_log_preserves_trace_context(
     assert record.data["method"] == "unknown.method"
 
 
+def test_authenticated_notify_dispatches_and_returns_signed_coalesced_response(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret = _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+        )
+        await server.start()
+        try:
+            reader, writer, session = await _open_authenticated_notify_connection(
+                socket_path,
+                secret,
+            )
+            try:
+                # A single write deliberately coalesces the business payload and tag.
+                writer.write(
+                    session.protect_payload(_notify_request_payload(), "client")
+                )
+                await writer.drain()
+                response = await _read_authenticated_response(reader, session)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return response, dispatches
+
+    response, dispatches = asyncio.run(scenario())
+
+    assert response.ok is True
+    assert response.data == {"schemaVersion": 2, "accepted": True}
+    assert dispatches == [METHOD_SKILLFS_NOTIFY_CHANGE]
+
+
+def test_authenticated_business_bad_request_response_is_signed(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret = _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+        )
+        await server.start()
+        try:
+            reader, writer, session = await _open_authenticated_notify_connection(
+                socket_path,
+                secret,
+            )
+            try:
+                writer.write(session.protect_payload(b'{"method":', "client"))
+                await writer.drain()
+                response = await _read_authenticated_response(reader, session)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return response, dispatches
+
+    response, dispatches = asyncio.run(scenario())
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error["code"] == "bad_request"
+    assert dispatches == []
+
+
+def test_authenticated_notify_wrong_key_closes_without_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        _configure_notify_auth(monkeypatch, tmp_path, value=b"s" * 32)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            try:
+                writer.write(build_auth_init_frame())
+                await writer.drain()
+                challenge = await _read_frame(reader)
+                nonce = parse_auth_challenge_frame(challenge)
+                writer.write(
+                    build_auth_proof_frame(
+                        "auth.proof",
+                        SharedSecret(b"w" * 32),
+                        NOTIFY_CLIENT_DOMAIN,
+                        nonce,
+                    )
+                )
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_authenticated_notify_slow_handshake_closes_without_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+            request_read_timeout_ms=100,
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            try:
+                writer.write(build_auth_init_frame())
+                await writer.drain()
+                parse_auth_challenge_frame(await _read_frame(reader))
+                writer.write(b'{"authVersion":"1","type":"auth.proof"')
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_authenticated_notify_slow_init_uses_handshake_deadline(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(
+        daemon_server_module,
+        "AUTH_HANDSHAKE_TIMEOUT_SECONDS",
+        0.05,
+    )
+
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+            request_read_timeout_ms=1000,
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            try:
+                writer.write(b'{"authVersion":"1"')
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_authenticated_notify_tamper_closes_without_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret = _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+        )
+        await server.start()
+        try:
+            reader, writer, session = await _open_authenticated_notify_connection(
+                socket_path,
+                secret,
+            )
+            try:
+                protected = session.protect_payload(_notify_request_payload(), "client")
+                payload, auth_frame = protected.split(b"\n", maxsplit=1)
+                tampered = payload.replace(b'"write"', b'"rename"')
+                assert tampered != payload
+                writer.write(tampered + b"\n" + auth_frame)
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_authenticated_notify_eof_closes_without_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret = _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+        )
+        await server.start()
+        try:
+            reader, writer, _session = await _open_authenticated_notify_connection(
+                socket_path,
+                secret,
+            )
+            try:
+                writer.write(b'{"method":"skill_ledger.skillfs_notify_change"}')
+                await writer.drain()
+                assert writer.can_write_eof()
+                writer.write_eof()
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_authenticated_notify_oversize_closes_without_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret = _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        max_request_bytes = 128
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+            max_request_bytes=max_request_bytes,
+        )
+        await server.start()
+        try:
+            reader, writer, session = await _open_authenticated_notify_connection(
+                socket_path,
+                secret,
+            )
+            try:
+                writer.write(
+                    session.protect_payload(b"x" * max_request_bytes, "client")
+                )
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_auth_init_without_key_and_invalid_auth_close_without_dispatch(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.delenv(AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE, raising=False)
+
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+        )
+        await server.start()
+        try:
+            remainders = []
+            for frame in (
+                build_auth_init_frame(),
+                b'{"authVersion":"1","type":"auth.init","extra":true}\n',
+                b'{"method":"daemon.health","ty\\u0070e":"auth.init",' b'"type":0}\n',
+            ):
+                reader, writer = await asyncio.open_unix_connection(str(socket_path))
+                try:
+                    writer.write(frame)
+                    await writer.drain()
+                    remainders.append(
+                        await asyncio.wait_for(reader.read(), timeout=0.5)
+                    )
+                finally:
+                    await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainders, dispatches
+
+    remainders, dispatches = asyncio.run(scenario())
+
+    assert remainders == [b"", b"", b""]
+    assert dispatches == []
+
+
+def test_notify_auth_first_frame_uses_auth_limit_and_fails_closed(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches),
+            max_request_bytes=32,
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            try:
+                writer.write(build_auth_init_frame())
+                await writer.drain()
+                challenge = await _read_frame(reader)
+                parse_auth_challenge_frame(challenge)
+            finally:
+                await _close_stream_writer(writer)
+
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            try:
+                oversized = b'{"authVersion":"' + (b"x" * 4096) + b'"}\n'
+                writer.write(oversized)
+                await writer.drain()
+                remainder = await asyncio.wait_for(reader.read(), timeout=0.5)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return remainder, dispatches
+
+    remainder, dispatches = asyncio.run(scenario())
+
+    assert remainder == b""
+    assert dispatches == []
+
+
+def test_notify_key_rejects_plain_notify_but_keeps_plain_health(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches, include_health=True),
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+            try:
+                writer.write(_notify_request_payload() + b"\n")
+                await writer.drain()
+                plain_notify_response = await asyncio.wait_for(
+                    reader.read(), timeout=0.5
+                )
+            finally:
+                await _close_stream_writer(writer)
+
+            health_response = await _send_daemon_request(
+                socket_path,
+                DaemonRequest(method="daemon.health"),
+            )
+        finally:
+            await server.stop()
+        return plain_notify_response, health_response, dispatches
+
+    plain_notify_response, health_response, dispatches = asyncio.run(scenario())
+
+    assert plain_notify_response == b""
+    assert health_response.ok is True
+    assert health_response.data == {"status": "ok"}
+    assert dispatches == ["daemon.health"]
+
+
+def test_authenticated_non_notify_returns_signed_bad_request(
+    monkeypatch,
+    tmp_path: Path,
+):
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret = _configure_notify_auth(monkeypatch, tmp_path)
+        dispatches = []
+        server = DaemonServer(
+            socket_path=socket_path,
+            registry=_tracking_notify_registry(dispatches, include_health=True),
+        )
+        await server.start()
+        try:
+            reader, writer, session = await _open_authenticated_notify_connection(
+                socket_path,
+                secret,
+            )
+            try:
+                health_payload = serialize_request(
+                    DaemonRequest(method="daemon.health")
+                )[:-1]
+                writer.write(session.protect_payload(health_payload, "client"))
+                await writer.drain()
+                response = await _read_authenticated_response(reader, session)
+            finally:
+                await _close_stream_writer(writer)
+        finally:
+            await server.stop()
+        return response, dispatches
+
+    response, dispatches = asyncio.run(scenario())
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error["code"] == "bad_request"
+    assert METHOD_SKILLFS_NOTIFY_CHANGE in response.error["message"]
+    assert dispatches == []
+
+
+def test_invalid_notify_key_fails_before_bind_or_job_start(
+    monkeypatch,
+    tmp_path: Path,
+):
+    key_path = tmp_path / "short.key"
+    key_path.write_bytes(b"short")
+    key_path.chmod(0o600)
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE, str(key_path))
+
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        server = DaemonServer(socket_path=socket_path)
+
+        with pytest.raises(SkillFsPeerAuthError, match="between 32 and 4096 bytes"):
+            await server.start()
+
+        return (
+            server._server,
+            server._lock,
+            server.runtime.jobs.started,
+            socket_path.exists(),
+        )
+
+    bound_server, lock, jobs_started, socket_exists = asyncio.run(scenario())
+
+    assert bound_server is None
+    assert lock is None
+    assert jobs_started is False
+    assert socket_exists is False
+
+
 async def _send_daemon_request(
     socket_path: Path,
     request: DaemonRequest,
@@ -1466,3 +2000,137 @@ async def _send_daemon_request(
     writer.close()
     await writer.wait_closed()
     return parse_response_line(line)
+
+
+def _configure_notify_auth(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    value: bytes = b"n" * 32,
+) -> SharedSecret:
+    key_path = tmp_path / "notify.key"
+    key_path.write_bytes(value)
+    key_path.chmod(0o600)
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE, str(key_path))
+    return SharedSecret(value)
+
+
+def _tracking_notify_registry(
+    dispatches: list[str],
+    *,
+    include_health: bool = False,
+) -> MethodRegistry:
+    registry = MethodRegistry()
+
+    def notify_handler(
+        request: DaemonRequest,
+        _runtime: DaemonRuntime,
+    ) -> HandlerResult:
+        dispatches.append(request.method)
+        return HandlerResult(data={"schemaVersion": 2, "accepted": True})
+
+    registry.register(
+        MethodSpec(
+            method=METHOD_SKILLFS_NOTIFY_CHANGE,
+            handler=notify_handler,
+            lifecycle="skill_ledger",
+        )
+    )
+    if include_health:
+
+        def health_handler(
+            request: DaemonRequest,
+            _runtime: DaemonRuntime,
+        ) -> HandlerResult:
+            dispatches.append(request.method)
+            return HandlerResult(data={"status": "ok"})
+
+        registry.register(
+            MethodSpec(
+                method="daemon.health",
+                handler=health_handler,
+                lifecycle="admin",
+            )
+        )
+    return registry
+
+
+def _notify_request_payload() -> bytes:
+    return json.dumps(
+        {
+            "id": "skillfs-test",
+            "method": METHOD_SKILLFS_NOTIFY_CHANGE,
+            "params": {
+                "schemaVersion": 2,
+                "canonicalSkillDir": "/srv/skills/demo",
+                "skillId": "demo",
+                "eventKind": "write",
+                "paths": [".skill-meta/activation.json"],
+            },
+            "trace_context": {},
+            "timeout_ms": 5000,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+async def _read_frame(reader: asyncio.StreamReader) -> bytes:
+    return await asyncio.wait_for(reader.readline(), timeout=0.5)
+
+
+async def _open_authenticated_notify_connection(
+    socket_path: Path,
+    secret: SharedSecret,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, AuthenticatedSession]:
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    writer.write(build_auth_init_frame())
+    await writer.drain()
+
+    nonce = parse_auth_challenge_frame(await _read_frame(reader))
+    writer.write(
+        build_auth_proof_frame(
+            "auth.proof",
+            secret,
+            NOTIFY_CLIENT_DOMAIN,
+            nonce,
+        )
+    )
+    await writer.drain()
+    verify_auth_proof_frame(
+        await _read_frame(reader),
+        expected_kind="auth.ok",
+        secret=secret,
+        domain=NOTIFY_SERVER_DOMAIN,
+        nonce=nonce,
+    )
+    return (
+        reader,
+        writer,
+        AuthenticatedSession(
+            secret,
+            nonce,
+            NOTIFY_CLIENT_DOMAIN,
+            NOTIFY_SERVER_DOMAIN,
+        ),
+    )
+
+
+async def _read_authenticated_response(
+    reader: asyncio.StreamReader,
+    session: AuthenticatedSession,
+) -> DaemonResponse:
+    protected = await asyncio.wait_for(reader.read(), timeout=0.5)
+    payload, auth_frame, trailing = protected.split(b"\n", maxsplit=2)
+    assert trailing == b""
+    session.verify_payload(payload, auth_frame + b"\n", "server")
+    return parse_response_line(payload)
+
+
+async def _close_stream_writer(writer: asyncio.StreamWriter) -> None:
+    writer.close()
+    with contextlib.suppress(
+        ConnectionError,
+        BrokenPipeError,
+        OSError,
+    ):
+        await writer.wait_closed()

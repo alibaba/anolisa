@@ -38,6 +38,7 @@ def files_to_check(root: Path) -> list[Path]:
             ":(glob)docs/*.md",
             ":(glob)*.md",
             ":(glob)src/*/README*.md",
+            ":(glob)src/*/python/*/README*.md",
         ],
         capture_output=True,
         text=True,

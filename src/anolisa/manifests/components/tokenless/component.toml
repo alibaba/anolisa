@@ -1,6 +1,6 @@
 [component]
 name = "tokenless"
-version = "0.7.5"
+version = "0.8.0"
 layer = "runtime"
 domain = "optimization"
 display_name = "Tokenless"
@@ -52,19 +52,8 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "libexec/anolisa/tokenless/toon"
-target = "{libexecdir}/tokenless/toon"
-mode = "0755"
-type = "executable"
-
-[[component.layout.files]]
 source = "{libexecdir}/tokenless/rtk"
 target = "{bindir}/rtk"
-type = "symlink"
-
-[[component.layout.files]]
-source = "{libexecdir}/tokenless/toon"
-target = "{bindir}/toon"
 type = "symlink"
 
 # Shared hooks are interpreter-loaded resources, so the common tree stays
@@ -102,6 +91,18 @@ detect = { binary = "hermes" }
 
 [adapters.bundle]
 entry = "plugin.yaml"
+
+[[adapters]]
+framework = "qwenpaw"
+kind = "third-party"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qwenpaw"
+dest = "{datadir}/adapters/{component}/qwenpaw/"
+detect = { binary = "qwenpaw" }
+
+[adapters.bundle]
+entry = "plugin.json"
 
 [[adapters]]
 framework = "qoder"

@@ -143,6 +143,8 @@ ws-ckpt config -w ~/my-workspace --reset               # Remove local policy.tom
 ws-ckpt reload
 ```
 
+`config -g` writes the global file, then verifies the daemon reloaded the same settings — it exits non-zero and lists any field that differs. In a Kubernetes sidecar deployment the CLI and daemon run in separate containers, so `/etc/ws-ckpt` must be on a volume shared by both, or global settings will not reach the daemon.
+
 ## Command Reference
 
 | Command | Description |

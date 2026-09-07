@@ -1,10 +1,8 @@
-//! Environment readiness checker for Tool Ready feature.
+//! Dormant environment-readiness implementation for Tool Ready.
 //!
-//! Loads per-tool dependency declarations from tool-ready-spec.json.
-//! Supports both string format ("jq") and object format ({binary, version, package, manager, ...}).
-//! Checks binary availability (with version constraints), config files,
-//! permissions, and network connectivity. Generates a structured
-//! ready checklist and supports auto-fix via config-driven install engine.
+//! Release builds hard-bypass the legacy checks before loading a specification,
+//! repairing the environment, or producing a blocking result. The retained
+//! implementation remains covered by unit tests for a future redesign.
 
 use serde_json::Value;
 use std::fs;
@@ -20,6 +18,22 @@ use std::sync::LazyLock;
 // anchored on digit groups avoids these false matches.
 static VERSION_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap());
+
+fn tool_ready_hard_bypassed() -> bool {
+    // Release builds always bypass Tool Ready. Unit tests retain a test-only
+    // escape hatch so the dormant legacy implementation remains covered.
+    #[cfg(test)]
+    {
+        !matches!(
+            std::env::var("TOKENLESS_TOOL_READY_TEST_LEGACY").as_deref(),
+            Ok("1")
+        )
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -518,7 +532,7 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = user_home {
         paths.push(home.join(".local/bin").join(binary));
-        if matches!(binary, "rtk" | "toon") {
+        if binary == "rtk" {
             paths.extend([
                 // Anolisa CLI user mode.
                 home.join(".local/lib/anolisa/libexec/tokenless")
@@ -529,12 +543,12 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
         }
     }
     paths.push(PathBuf::from("/usr/local/bin").join(binary));
-    if matches!(binary, "rtk" | "toon") {
+    if binary == "rtk" {
         // Anolisa CLI system mode.
         paths.push(PathBuf::from("/usr/local/libexec/anolisa/tokenless").join(binary));
     }
     paths.push(PathBuf::from("/usr/bin").join(binary));
-    if matches!(binary, "rtk" | "toon") {
+    if binary == "rtk" {
         paths.extend([
             // Makefile system mode and RPM.
             PathBuf::from("/usr/libexec/anolisa/tokenless").join(binary),
@@ -569,7 +583,7 @@ fn is_executable_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn resolve_binary_path(binary: &str) -> Option<String> {
+pub(crate) fn resolve_binary_path(binary: &str) -> Option<String> {
     let which_result = Command::new("sh")
         .args(["-c", "command -v \"$1\"", "--", binary])
         .output();
@@ -590,6 +604,44 @@ fn resolve_binary_path(binary: &str) -> Option<String> {
                 .map(|path| path.to_string_lossy().into_owned())
         }
     }
+}
+
+pub(crate) fn resolve_rtk_path() -> Option<String> {
+    let path_candidate = if let Ok(output) = Command::new("sh")
+        .args(["-c", "command -v \"$1\"", "--", "rtk"])
+        .output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    } else {
+        None
+    };
+    select_rtk_path(path_candidate, &crate::get_home_dir())
+}
+
+fn select_rtk_path(path_candidate: Option<PathBuf>, home: &str) -> Option<String> {
+    let mut candidates = path_candidate.into_iter().collect::<Vec<_>>();
+    candidates.extend(binary_fallback_paths("rtk", home));
+    candidates.into_iter().find_map(|path| {
+        if !is_executable_file(&path) {
+            return None;
+        }
+        let output = Command::new(&path).arg("--version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let version_text = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let version = VERSION_RE
+            .captures(&version_text)
+            .and_then(|captures| captures.get(1))?
+            .as_str();
+        version_ge(version, "0.35.0").then(|| path.to_string_lossy().into_owned())
+    })
 }
 
 /// Check if a binary is available and meets version constraints.
@@ -695,9 +747,9 @@ fn load_spec(
     spec_path: &PathBuf,
 ) -> Result<std::collections::HashMap<String, ToolDepSpec>, String> {
     let content =
-        fs::read_to_string(spec_path).map_err(|e| format!("Failed to read spec file: {}", e))?;
+        fs::read_to_string(spec_path).map_err(|e| format!("Failed to read spec file: {e}"))?;
     let value: Value =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse spec JSON: {}", e))?;
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse spec JSON: {e}"))?;
 
     let mut specs = std::collections::HashMap::new();
     // Skip _comment key
@@ -809,7 +861,7 @@ fn check_tool(tool_name: &str, spec: &ToolDepSpec) -> ToolReadyResult {
     let has_perm_missing = permission_results.iter().any(|(_, ok)| !ok);
     let has_recommended_missing = recommended_results
         .iter()
-        .any(|(_, s)| s == &DepStatus::Missing);
+        .any(|(_, s)| s == &DepStatus::Missing || matches!(s, DepStatus::VersionLow { .. }));
     let has_config_missing = config_results.iter().any(|(_, ok)| !ok);
     let has_net_missing = network_results.iter().any(|(_, ok)| !ok);
 
@@ -841,7 +893,7 @@ fn format_dep_status(status: &DepStatus) -> String {
             installed,
             required,
         } => {
-            format!("version low ({} < {})", installed, required)
+            format!("version low ({installed} < {required})")
         }
     }
 }
@@ -855,7 +907,7 @@ fn format_dep_status_label(status: &DepStatus) -> String {
             installed,
             required,
         } => {
-            format!("OUTDATED ({}/{})", installed, required)
+            format!("OUTDATED ({installed}/{required})")
         }
     }
 }
@@ -892,16 +944,21 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
         }
         for (cfg, ok) in &result.config_results {
             let label = if *ok { "INSTALLED" } else { "MISSING" };
-            output.push_str(&format!("  config:     {:12} {}\n", cfg, label));
+            output.push_str(&format!("  config:     {cfg:12} {label}\n"));
         }
         for (perm, ok) in &result.permission_results {
             let label = if *ok { "GRANTED" } else { "DENIED" };
-            output.push_str(&format!("  permission: {:12} {}\n", perm, label));
+            output.push_str(&format!("  permission: {perm:12} {label}\n"));
+        }
+        for (net, ok) in &result.network_results {
+            let label = if *ok { "OK" } else { "FAIL" };
+            output.push_str(&format!("  network:    {net:12} {label}\n"));
         }
         if !result.required_results.is_empty()
             || !result.recommended_results.is_empty()
             || !result.config_results.is_empty()
             || !result.permission_results.is_empty()
+            || !result.network_results.is_empty()
         {
             output.push('\n');
         }
@@ -925,16 +982,133 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
         .count();
 
     let mut summary = format!(
-        "Summary: {} ready, {} partial, {} not ready",
-        ready_count, partial_count, not_ready_count
+        "Summary: {ready_count} ready, {partial_count} partial, {not_ready_count} not ready"
     );
     if unknown_count > 0 {
-        summary.push_str(&format!(", {} unknown", unknown_count));
+        summary.push_str(&format!(", {unknown_count} unknown"));
     }
     summary.push_str(&format!(" (total: {})\n", results.len()));
     output.push_str(&summary);
 
     output
+}
+
+/// Serialize checklist results as a JSON object for machine consumption.
+///
+/// **Sync rule**: when `ToolReadyResult` gains a new check category, add a
+/// matching array here so JSON consumers see every field the text path shows.
+///
+/// **Ordering contract**: the `tools` array preserves the caller's order.
+/// `run()` sorts tool names before building results, so output is stable
+/// across processes and safe for diff/hash/cache/snapshot consumers.
+///
+/// Schema:
+/// ```json
+/// {
+///   "tools": [
+///     {
+///       "tool": "<name>",
+///       "status": "READY|PARTIAL|NOT_READY|UNKNOWN",
+///       "required":    [{"binary":"…","status":"…"}, …],
+///       "recommended": [{"binary":"…","status":"…"}, …],
+///       "config":      [{"name":"…","ok":true}, …],
+///       "permissions": [{"name":"…","ok":true}, …],
+///       "network":     [{"name":"…","ok":true}, …]
+///     },
+///     …
+///   ],
+///   "summary": {
+///     "ready": N, "partial": N, "not_ready": N, "unknown": N, "total": N
+///   }
+/// }
+/// ```
+fn generate_checklist_json(results: &[ToolReadyResult]) -> Value {
+    let tools: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("tool".to_string(), Value::String(r.tool_name.clone()));
+            obj.insert(
+                "status".to_string(),
+                Value::String(format_status(&r.status).to_string()),
+            );
+
+            let required: Vec<Value> = r
+                .required_results
+                .iter()
+                .map(|(dep, status)| {
+                    serde_json::json!({
+                        "binary": dep.binary,
+                        "status": format_dep_status_label(status)
+                    })
+                })
+                .collect();
+            obj.insert("required".to_string(), Value::Array(required));
+
+            let recommended: Vec<Value> = r
+                .recommended_results
+                .iter()
+                .map(|(dep, status)| {
+                    serde_json::json!({
+                        "binary": dep.binary,
+                        "status": format_dep_status_label(status)
+                    })
+                })
+                .collect();
+            obj.insert("recommended".to_string(), Value::Array(recommended));
+
+            let config: Vec<Value> = r
+                .config_results
+                .iter()
+                .map(|(name, ok)| serde_json::json!({"name": name, "ok": ok}))
+                .collect();
+            obj.insert("config".to_string(), Value::Array(config));
+
+            let permissions: Vec<Value> = r
+                .permission_results
+                .iter()
+                .map(|(name, ok)| serde_json::json!({"name": name, "ok": ok}))
+                .collect();
+            obj.insert("permissions".to_string(), Value::Array(permissions));
+
+            let network: Vec<Value> = r
+                .network_results
+                .iter()
+                .map(|(name, ok)| serde_json::json!({"name": name, "ok": ok}))
+                .collect();
+            obj.insert("network".to_string(), Value::Array(network));
+
+            Value::Object(obj)
+        })
+        .collect();
+
+    let ready = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::Ready)
+        .count();
+    let partial = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::Partial)
+        .count();
+    let not_ready = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::NotReady)
+        .count();
+    let unknown = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::Unknown)
+        .count();
+
+    serde_json::json!({
+        "tools": tools,
+        "summary": {
+            "ready": ready,
+            "partial": partial,
+            "not_ready": not_ready,
+            "unknown": unknown,
+            "total": results.len()
+        }
+    })
 }
 
 /// Build the ordered candidate list for `auto_fix`.
@@ -1039,8 +1213,8 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
         })
         .collect();
 
-    let json_str = serde_json::to_string(&deps_json)
-        .map_err(|e| format!("Failed to serialize deps: {}", e))?;
+    let json_str =
+        serde_json::to_string(&deps_json).map_err(|e| format!("Failed to serialize deps: {e}"))?;
 
     // Use timeout if available (coreutils procps), otherwise run without timeout
     let has_timeout = Command::new("sh")
@@ -1059,7 +1233,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to run env-fix: {}", e))?
+            .map_err(|e| format!("Failed to run env-fix: {e}"))?
     } else {
         Command::new("bash")
             .arg(&fix_script)
@@ -1068,7 +1242,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to run env-fix: {}", e))?
+            .map_err(|e| format!("Failed to run env-fix: {e}"))?
     };
 
     let mut stdin_handle = child
@@ -1077,12 +1251,12 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
         .ok_or_else(|| "Failed to open stdin for env-fix process".to_string())?;
     stdin_handle
         .write_all(json_str.as_bytes())
-        .map_err(|e| format!("Failed to write deps to env-fix stdin: {}", e))?;
+        .map_err(|e| format!("Failed to write deps to env-fix stdin: {e}"))?;
     drop(stdin_handle);
 
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("Failed to wait for env-fix: {}", e))?;
+        .map_err(|e| format!("Failed to wait for env-fix: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
@@ -1172,7 +1346,7 @@ fn build_json_result(
     if *status == ReadyStatus::NotReady {
         let diag_parts: Vec<String> = missing
             .iter()
-            .map(|m| format!("required dependency missing: {}", m))
+            .map(|m| format!("required dependency missing: {m}"))
             .collect();
         obj.insert(
             "diagnostic".to_string(),
@@ -1194,15 +1368,49 @@ pub fn run(
     checklist: bool,
     json: bool,
 ) -> Result<(), (String, i32)> {
+    if tool.is_none() && !all && !checklist {
+        return Err(("Specify --tool <name> or --all".to_string(), 1));
+    }
+
+    // HARD BYPASS: the legacy readiness model can incorrectly block valid
+    // agent work. JSON callers receive only {tool,status,enabled}; in
+    // particular, checklist mode never exposes its dormant tools/summary
+    // schema. Re-enabling checks or expanding this contract requires an
+    // intentional source change.
+    if tool_ready_hard_bypassed() {
+        if json {
+            let result = serde_json::json!({
+                "tool": tool.unwrap_or(if all { "all" } else { "checklist" }),
+                "status": "UNKNOWN",
+                "enabled": false,
+            });
+            println!("{}", serde_json::to_string(&result).unwrap());
+        } else {
+            println!("Tool Ready is hard-disabled in this build");
+        }
+        return Ok(());
+    }
+
     let spec_path = find_spec_path().map_err(|e| (e, 1))?;
     let specs = load_spec(&spec_path).map_err(|e| (e, 1))?;
 
     if checklist {
-        let results: Vec<ToolReadyResult> = specs
-            .keys()
-            .map(|name| check_tool(name, specs.get(name).unwrap()))
+        // Sort tool names before building results so both the text and JSON
+        // checklist output keep a stable order across processes; `specs` is a
+        // HashMap, whose iteration order is randomized per process.
+        let mut tool_names: Vec<&str> = specs.keys().map(String::as_str).collect();
+        tool_names.sort_unstable();
+        let results: Vec<ToolReadyResult> = tool_names
+            .iter()
+            .map(|name| check_tool(name, specs.get(*name).unwrap()))
             .collect();
-        println!("{}", generate_checklist(&results));
+        if json {
+            let json_value = serde_json::to_string(&generate_checklist_json(&results))
+                .map_err(|e| (format!("Failed to serialize checklist JSON: {e}"), 1))?;
+            println!("{json_value}");
+        } else {
+            println!("{}", generate_checklist(&results));
+        }
         return Ok(());
     }
 
@@ -1238,7 +1446,7 @@ pub fn run(
         }
         vec![resolved]
     } else {
-        return Err(("Specify --tool <name> or --all".to_string(), 1));
+        unreachable!("tool arguments were validated before the readiness gate")
     };
 
     for tool_name in &tool_names {
@@ -1277,7 +1485,7 @@ pub fn run(
             let fix_output = auto_fix(&fixable_deps).map_err(|e| (e, 1))?;
             if !json {
                 for line in fix_output.lines() {
-                    println!("  {}", line);
+                    println!("  {line}");
                 }
             }
 

@@ -5,7 +5,8 @@ use crate::question::runtime::pending_question_capture;
 use crate::runtime::approval_state::ApprovalRequestStatus;
 use crate::runtime::prelude::*;
 use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
-use crate::runtime::state::{CoshApprovalMode, InlineState};
+use crate::runtime::state::InlineState;
+use crate::shell_host::ShellEventView;
 
 use super::dispatcher::RuntimeDispatcher;
 use super::events::ShellEventSnapshot;
@@ -20,23 +21,26 @@ pub(crate) use bootstrap::{
     run_adapter_demo, run_demo, run_host_demo, run_interactive, run_interactive_demo, run_raw,
 };
 
-fn render_raw_inline_events<W: Write>(
-    events: &[ShellEvent],
+fn render_raw_inline_event_view<W: Write>(
+    view: ShellEventView<'_>,
     output: &mut W,
     adapter: &AdapterInstance,
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    let snapshot = ShellEventSnapshot::with_base(view.base(), view.events());
     if let Some(audit) = inline_state.audit.as_mut() {
-        audit.observe_shell_events(events);
+        let batch = snapshot.batch_since(inline_state.control.event_cursor());
+        audit.observe_shell_event_batch(batch.events);
     }
     let mut terminal_output = CrLfWriter::new(output);
-    redraw_active_question_if_width_changed(
-        inline_state,
-        &mut terminal_output,
-        RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
-    )?;
-    let snapshot = ShellEventSnapshot::new(events);
+    if inline_state.questions.active_panel_id.is_some() {
+        redraw_active_question_if_width_changed(
+            inline_state,
+            &mut terminal_output,
+            RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
+        )?;
+    }
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
         adapter,
@@ -48,7 +52,7 @@ fn render_raw_inline_events<W: Write>(
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
-        .emit_next_approved(snapshot.events().len())
+        .emit_next_approved(snapshot.cursor().position())
     {
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
@@ -69,7 +73,7 @@ fn render_raw_inline_events<W: Write>(
             ghost_route: std::mem::take(&mut inline_state.pending_input_ghost_route),
         });
     }
-    let shell_busy = shell_has_active_foreground_command(snapshot.events());
+    let shell_busy = inline_state.control.shell_busy();
     if let Some(action) =
         shell_handoff_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
     {
@@ -97,6 +101,23 @@ fn render_raw_inline_events<W: Write>(
     } else {
         Ok(RawObserverAction::Continue)
     }
+}
+
+#[cfg(test)]
+fn render_raw_inline_events<W: Write>(
+    events: &[ShellEvent],
+    output: &mut W,
+    adapter: &AdapterInstance,
+    shell_label: &str,
+    inline_state: &mut InlineState,
+) -> std::io::Result<RawObserverAction> {
+    render_raw_inline_event_view(
+        ShellEventView::new(0, events),
+        output,
+        adapter,
+        shell_label,
+        inline_state,
+    )
 }
 
 fn shell_handoff_timeout_recovery_action<W: Write>(
@@ -194,20 +215,16 @@ pub(crate) fn render_inline_guidance<W: Write>(
     Ok(())
 }
 
-fn approval_mode_from_config(value: &str) -> CoshApprovalMode {
-    match value {
-        "recommend" | "suggest" => CoshApprovalMode::Recommend,
-        "trust" => CoshApprovalMode::Trust,
-        _ => CoshApprovalMode::Auto,
-    }
-}
-
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
     // #1721 D13: an open draft card owns every keystroke until submit/cancel.
     if let Some(draft) = state.prompt_draft.as_ref() {
         return Some(RawInputCapture::PromptDraft {
             id: draft.id.clone(),
             initial_text: draft.text.clone(),
+            completion: draft
+                .completions
+                .first()
+                .map(|completion| completion.replacement.clone().into_boxed_str()),
         });
     }
     if let Some(session_panel) = state.control.session().pending_panel() {
@@ -258,6 +275,12 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
                 id: consultation.card_id.clone(),
             });
         }
+    }
+
+    // Hook-action disambiguation panel (#1629): when a hook id collides
+    // between shell and agent layers, capture input for the question panel.
+    if let Some(capture) = crate::slash::hooks::pending_hook_action_capture(state) {
+        return Some(capture);
     }
 
     if let Some(capture) = pending_question_capture(state) {
@@ -319,21 +342,6 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn approval_mode_config_keeps_legacy_suggest_as_recommend() {
-        assert_eq!(
-            approval_mode_from_config("recommend"),
-            CoshApprovalMode::Recommend
-        );
-        assert_eq!(
-            approval_mode_from_config("suggest"),
-            CoshApprovalMode::Recommend
-        );
-        assert_eq!(approval_mode_from_config("trust"), CoshApprovalMode::Trust);
-        assert_eq!(approval_mode_from_config("auto"), CoshApprovalMode::Auto);
-        assert_eq!(approval_mode_from_config("unknown"), CoshApprovalMode::Auto);
-    }
-
-    #[test]
     fn active_foreground_command_keeps_raw_passthrough_even_when_agent_running() {
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState::default();
@@ -351,6 +359,30 @@ mod tests {
             .expect("render raw inline events");
 
         assert_eq!(action, RawObserverAction::RawPassthrough);
+    }
+
+    #[test]
+    fn completed_agent_run_restores_prompt_through_the_pty_owner() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.agent_run.needs_prompt_after_run = true;
+        let mut output = Vec::new();
+
+        let action = render_raw_inline_events(&[], &mut output, &adapter, "bash", &mut state)
+            .expect("restore prompt after agent run");
+
+        assert_eq!(
+            action,
+            RawObserverAction::RestorePrompt {
+                ghost_text: None,
+                ghost_route: Default::default(),
+            }
+        );
+        assert!(
+            output.is_empty(),
+            "runtime must not write a bare PS1 outside PromptPresentation"
+        );
+        assert!(!state.agent_run.needs_prompt_after_run);
     }
 
     #[test]

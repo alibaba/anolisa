@@ -93,6 +93,7 @@ pub mod activation_reload;
 pub mod activation_watcher;
 pub mod active;
 pub mod audit;
+pub(crate) mod auth;
 pub mod backing_root;
 pub mod config;
 pub mod control_socket;
@@ -114,6 +115,7 @@ pub mod resolver;
 pub mod runtime_metrics;
 pub mod session_stats;
 pub mod session_stats_writer;
+mod skill_dir;
 pub mod telemetry_gate;
 pub mod trusted_writer;
 
@@ -182,7 +184,9 @@ pub use mode::{SecurityModeConfig, SecurityModeError};
 pub use notify::{
     CapturedNotify, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS, FailingNotifyClient,
     InMemoryNotifyClient, MAX_NOTIFY_PATHS, NOTIFY_METHOD, NOTIFY_SCHEMA_VERSION, NoopNotifyClient,
-    NotifyChangeEvent, NotifyClient, NotifyController, NotifyError, NotifyEventKind, NotifyParams,
+    NotifyChangeEvent, NotifyClient, NotifyController, NotifyError, NotifyEventKind,
+    NotifyMetricsSnapshot, NotifyParams, NotifyRetryClass, RECONCILE_AMBIGUOUS_RETRY_LIMIT,
+    RECONCILE_RETRY_BASE_MS, RECONCILE_RETRY_MAX_MS, ScriptedNotifyClient, ScriptedNotifyFailure,
     SlowNotifyClient, UnixSocketNotifyClient,
 };
 pub use path::{SKILL_META_DIR, is_skill_meta_path};

@@ -30,10 +30,10 @@ use anolisa_core::domain::{
     ProviderBinding,
 };
 use anolisa_core::executor::{DelegatedExecutionTarget, RecordSink, execute_delegated_steps};
-use anolisa_core::facts::{JournalEvidence, JournalInventory, ObserveRequest, assemble_facts};
+use anolisa_core::facts::{JournalEvidence, JournalInventory};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
-use anolisa_core::planner::{Intent, NativeProbe, Plan, PlanError, RecordWrite, Step, plan};
+use anolisa_core::planner::{NativeProbe, PlanError, RecordWrite, Step};
 use anolisa_core::providers::{DelegatedProvider, ProviderError};
 use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
 use anolisa_core::state::{ObjectKind, OperationRecord};
@@ -44,10 +44,10 @@ use anolisa_core::transaction::{
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
-use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
+#[cfg(test)]
+use anolisa_platform::pkg_transaction::PackageTransaction;
+use anolisa_platform::pkg_transaction::PackageTransactionError;
 use anolisa_platform::privilege;
-use anolisa_platform::rpm_query::RpmPackageQuery;
-use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use crate::color::Palette;
 use crate::commands::common;
@@ -59,10 +59,11 @@ use crate::commands::tier1::install::{
 };
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install::{self, PendingRpmInstall};
-use crate::commands::tier1::update::rpm_repo_source_for_update;
 use crate::context::CliContext;
-use crate::resolution::{ResolutionUse, load_optional_component_index};
+use crate::resolution::load_optional_component_index;
 use crate::response::{CliError, render_json};
+
+mod application;
 
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "repair";
@@ -109,42 +110,19 @@ struct RepairResultPayload {
 /// Returns [`CliError`] when the component is untracked, its record is
 /// unrecoverable, the native database is ambiguous, or an executor fails.
 pub fn handle(args: RepairArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let command = format!("repair {}", args.component);
-    let layout = common::resolve_layout(ctx);
-    let (resolved, view) = common::resolve_mutation_target(&args.component, ctx, &command)?;
-    let store = &view.writable.state;
-    let is_delegated = matches!(
-        store
-            .find(ObjectKind::Component, &resolved)
-            .map(|r| &r.binding),
-        Some(ProviderBinding::Delegated { .. })
-    );
-    // R4 may re-run `dnf install`; when the component is delegated and an
-    // ANOLISA rpm repo is configured, pin the transaction to it exactly like
-    // update does. Unlike update, repair must not *require* the repo: R3 and
-    // R5 only read the native db and need to work on a bare host.
-    if is_delegated
-        && let Ok(repo_config) =
-            common::load_repo_config(ctx, &layout, &command, RepoPersistPolicy::BestEffort)
-    {
-        let env = anolisa_env::EnvService::detect();
-        if let Ok(Some(repo)) = rpm_repo_source_for_update(&repo_config, &env, &command) {
-            let query = RpmPackageQuery::system_with_repo(repo.clone());
-            let txn = RpmTransaction::system_with_repo(repo);
-            return repair_with_deps(&args.component, ctx, &query, &txn, privilege::is_root());
-        }
-    }
-    repair_with_deps(
-        &args.component,
+    let outcome = application::run(
+        application::ApplicationRequest {
+            component: &args.component,
+            intent: execution_intent(ctx),
+        },
         ctx,
-        &RpmPackageQuery::system(),
-        &RpmTransaction::system(),
-        privilege::is_root(),
-    )
+    )?;
+    render_application_outcome(ctx, outcome)
 }
 
 /// Core of [`handle`] with the package backends injected so tests drive
 /// every branch without a live rpmdb/dnf or real privileges.
+#[cfg(test)]
 pub(crate) fn repair_with_deps(
     target: &str,
     ctx: &CliContext,
@@ -152,321 +130,29 @@ pub(crate) fn repair_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> Result<(), CliError> {
-    repair_attempt(target, ctx, query, txn, is_root, true)
+    let outcome = application::run_with_dependencies(
+        application::ApplicationRequest {
+            component: target,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+        query,
+        txn,
+        is_root,
+    )?;
+    render_application_outcome(ctx, outcome)
 }
 
-/// One observe → plan → execute pass. `may_recover_journal` bounds the R1
-/// re-entry: consuming a journal replans exactly once, so two independent
-/// pending journals need two `repair` invocations instead of looping here.
-fn repair_attempt(
-    input: &str,
-    ctx: &CliContext,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-    may_recover_journal: bool,
-) -> Result<(), CliError> {
-    let command = format!("repair {input}");
-    let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let journal_dir = rpm_install::journal_dir(&layout);
-    let uid = privilege::effective_uid();
-    let scope = match ctx.install_mode {
-        crate::context::InstallMode::System => InstallationScope::System,
-        crate::context::InstallMode::User => InstallationScope::User { uid },
-    };
-    let now = now_iso8601();
-
-    let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
-    let mut store = view.writable.state;
-    common::hydrate_owned_file_contracts(&mut store, &layout);
-    let target = resolved.as_str();
-
-    // The probe target: an active delegated record's resolved package (a
-    // legacy record without one resolves through the adopt candidate chain
-    // so R3 can backfill it), a quarantined record's package metadata (its
-    // own name as a last resort — R5 checks the native authority before the
-    // file-based exit), nothing for owned or absent records.
-    let native_package: Option<String> = match store.find(ObjectKind::Component, target) {
-        Some(installation) => match &installation.binding {
-            ProviderBinding::Delegated { package, .. } => match package.resolved_name() {
-                Some(name) => Some(name.to_string()),
-                None => Some(resolve_repair_package(target, ctx, query, &command)?),
-            },
-            ProviderBinding::Owned { .. } => None,
-        },
-        None => quarantined_record(&store, target).map(|q| {
-            q.record
-                .rpm_metadata
-                .as_ref()
-                .map(|m| m.package_name.trim())
-                .filter(|n| !n.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| target.to_string())
-        }),
-    };
-
-    // Whether missing rpm tooling is fatal: a delegated record cannot be
-    // repaired without the native authority, and neither can a quarantined
-    // record that names a package. A quarantined record with no package
-    // metadata degrades to the file-based exit (R6) instead.
-    let record_requires_native = match store.find(ObjectKind::Component, target) {
-        Some(installation) => matches!(installation.binding, ProviderBinding::Delegated { .. }),
-        None => quarantined_record(&store, target).is_some_and(|q| {
-            q.record
-                .rpm_metadata
-                .as_ref()
-                .is_some_and(|m| !m.package_name.trim().is_empty())
-        }),
-    };
-
-    // A same-version external RPM upgrade can replace the package-owned
-    // component contract without touching ANOLISA state. Compare it with the
-    // state snapshot for active delegated records so repair heals a stale
-    // snapshot even when the record itself needs nothing.
-    let manifest_drifted = matches!(
-        store
-            .find(ObjectKind::Component, target)
-            .map(|r| &r.binding),
-        Some(ProviderBinding::Delegated { .. })
-    ) && {
-        let inspection =
-            inspect_datadir_contract_drift(&layout, target, &command, ctx.packaged_data_probe());
-        if !ctx.quiet {
-            for warning in &inspection.warnings {
-                eprintln!("warning: {warning}");
-            }
-        }
-        inspection.drifted
-    };
-    let manifest_reconciliation = manifest_drifted.then_some("component manifest drift");
-
-    let provider = DelegatedProvider::new(query, txn);
-    let observe_request = ObserveRequest {
-        kind: ObjectKind::Component,
-        name: target,
-        scope,
-        native_package: native_package.as_deref(),
-        observed_at: &now,
-        verify_owned_files: true,
-    };
-    let facts = match assemble_facts(
-        &observe_request,
-        &store,
-        Some(&provider),
-        &layout,
-        &journal_dir,
-    ) {
-        Ok(facts) => facts,
-        Err(anolisa_core::facts::FactsError::Probe(ProviderError::Query(
-            PackageQueryError::CommandMissing { command: bin },
-        ))) => {
-            if record_requires_native {
-                return Err(rpm_tooling_missing_error(&command, &bin, target));
-            }
-            assemble_facts(&observe_request, &store, None, &layout, &journal_dir).map_err(
-                |err| CliError::Runtime {
-                    command: command.clone(),
-                    reason: err.to_string(),
-                },
-            )?
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command: command.clone(),
-                reason: err.to_string(),
-            });
-        }
-    };
-
-    let steps = match plan(&Intent::Repair, &facts) {
-        Ok(Plan::Execute { steps, .. }) => steps,
-        Ok(Plan::NoOp { .. }) => {
-            // Only owned records reach NoOp (a delegated record present in
-            // rpmdb always replans R3), so a drifted contract snapshot can
-            // never be stranded here.
-            return render_result(
-                ctx,
-                &RepairResultPayload {
-                    component: target.to_string(),
-                    package: native_package,
-                    action: "nothing-to-repair".to_string(),
-                    from_version: None,
-                    to_version: None,
-                    dry_run: ctx.dry_run,
-                    plan: Vec::new(),
-                    operation_id: None,
-                    manifest_reconciliation,
-                },
-            );
-        }
-        Err(err) => return Err(plan_error_to_cli(err, target, &command)),
-    };
-
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-
+fn execution_intent(ctx: &CliContext) -> anolisa_core::execution::ExecutionIntent {
     if ctx.dry_run {
-        return render_result(
-            ctx,
-            &RepairResultPayload {
-                component: target.to_string(),
-                package: native_package,
-                action: plan_action(&steps).to_string(),
-                from_version: None,
-                to_version: None,
-                dry_run: true,
-                plan: plan_labels,
-                operation_id: None,
-                manifest_reconciliation,
-            },
-        );
+        anolisa_core::execution::ExecutionIntent::Plan
+    } else {
+        anolisa_core::execution::ExecutionIntent::Apply
     }
-
-    // R1: the journal is consumed under the lock; a recovery that only
-    // clears the journal replans once with fresh facts.
-    if matches!(steps.as_slice(), [Step::RecoverJournal]) {
-        if !may_recover_journal {
-            return Err(CliError::Runtime {
-                command,
-                reason: format!(
-                    "another operation journal for '{target}' is still pending after the last recovery; run `anolisa repair {target}` again"
-                ),
-            });
-        }
-        return match recover_journal(
-            input,
-            target,
-            ctx,
-            &layout,
-            &state_path,
-            &journal_dir,
-            scope,
-            &now,
-            &provider,
-            &command,
-        )? {
-            Recovery::Recovered => Ok(()),
-            Recovery::Cleared => repair_attempt(input, ctx, query, txn, is_root, false),
-        };
-    }
-
-    // R6: restore a quarantined record whose files verified intact. The plan
-    // is a single record write; nothing touches the host.
-    if matches!(steps.as_slice(), [Step::WriteRecord(RecordWrite::Owned)]) {
-        let execution = repair_restore_quarantined(
-            target,
-            ctx,
-            &layout,
-            &state_path,
-            &journal_dir,
-            scope,
-            &now,
-            &steps,
-            &plan_labels,
-            &command,
-        )?;
-        return continue_after_locked_repair(
-            execution,
-            may_recover_journal,
-            target,
-            &command,
-            || repair_attempt(input, ctx, query, txn, is_root, true),
-        );
-    }
-
-    // R2: replay the recorded owned artifact over its damaged files.
-    if steps.iter().any(|s| matches!(s, Step::PlaceFiles)) {
-        let prior = match store
-            .find(ObjectKind::Component, target)
-            .map(|r| &r.binding)
-        {
-            Some(ProviderBinding::Owned { artifact }) => artifact.clone(),
-            _ => {
-                return Err(CliError::Runtime {
-                    command,
-                    reason: format!(
-                        "internal: planner produced an owned plan but the record for '{target}' is not owned"
-                    ),
-                });
-            }
-        };
-        let execution = repair_owned_replay(
-            target,
-            ctx,
-            &layout,
-            &state_path,
-            &journal_dir,
-            scope,
-            &now,
-            &steps,
-            &plan_labels,
-            prior,
-            &command,
-        )?;
-        return continue_after_locked_repair(
-            execution,
-            may_recover_journal,
-            target,
-            &command,
-            || repair_attempt(input, ctx, query, txn, is_root, true),
-        );
-    }
-
-    // R3/R4/R5: the delegated family.
-    let package = native_package.clone().ok_or_else(|| CliError::Runtime {
-        command: command.clone(),
-        reason: format!(
-            "internal: planner produced a delegated plan but no probe target was resolved for '{target}'"
-        ),
-    })?;
-
-    // dnf transactions (R4) need root; observation-only plans do not.
-    let needs_txn = steps
-        .iter()
-        .any(|s| matches!(s, Step::NativeTransaction { .. }));
-    if needs_txn && !is_root {
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "reinstalling system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa repair {target}`"
-            ),
-        });
-    }
-
-    let from_version = match store.find(ObjectKind::Component, target) {
-        Some(installation) => match &installation.binding {
-            ProviderBinding::Delegated { last_observed, .. } => last_observed
-                .as_ref()
-                .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone())),
-            _ => None,
-        },
-        None => quarantined_record(&store, target).map(|q| q.record.version.clone()),
-    };
-    drop(store);
-
-    let execution = repair_delegated(
-        target,
-        ctx,
-        &layout,
-        &state_path,
-        &journal_dir,
-        scope,
-        &now,
-        &steps,
-        &plan_labels,
-        &package,
-        from_version,
-        &provider,
-        manifest_drifted,
-        &command,
-    )?;
-    continue_after_locked_repair(execution, may_recover_journal, target, &command, || {
-        repair_attempt(input, ctx, query, txn, is_root, true)
-    })
 }
 
 enum LockedRepairExecution {
-    Completed,
+    Completed(Box<application::ApplicationOutcome>),
     RecoveryAppeared,
 }
 
@@ -475,10 +161,10 @@ fn continue_after_locked_repair(
     may_recover_journal: bool,
     target: &str,
     command: &str,
-    retry: impl FnOnce() -> Result<(), CliError>,
-) -> Result<(), CliError> {
+    retry: impl FnOnce() -> Result<application::ApplicationOutcome, CliError>,
+) -> Result<application::ApplicationOutcome, CliError> {
     match execution {
-        LockedRepairExecution::Completed => Ok(()),
+        LockedRepairExecution::Completed(outcome) => Ok(*outcome),
         LockedRepairExecution::RecoveryAppeared if may_recover_journal => retry(),
         LockedRepairExecution::RecoveryAppeared => Err(CliError::Runtime {
             command: command.to_string(),
@@ -501,7 +187,6 @@ fn repair_delegated(
     scope: InstallationScope,
     now: &str,
     steps: &[Step],
-    plan_labels: &[String],
     package: &str,
     from_version: Option<String>,
     provider: &DelegatedProvider<'_>,
@@ -631,10 +316,22 @@ fn repair_delegated(
                 plan_action(steps)
             ),
         );
-        return Err(CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("the record for '{target}' was repaired, but {reason}"),
-        });
+        return Ok(LockedRepairExecution::Completed(Box::new(
+            application::partially_applied(
+                command,
+                application::RepairSubject {
+                    component: target.to_string(),
+                    package: Some(package.to_string()),
+                    from_version,
+                    to_version,
+                },
+                plan_action(steps),
+                steps.to_vec(),
+                operation_id,
+                format!("the record for '{target}' was repaired, but {reason}"),
+                Some("component manifest drift"),
+            ),
+        )));
     }
 
     append_repair_log(
@@ -651,21 +348,22 @@ fn repair_delegated(
         ),
     );
 
-    render_result(
-        ctx,
-        &RepairResultPayload {
-            component: target.to_string(),
-            package: Some(package.to_string()),
-            action: plan_action(steps).to_string(),
-            from_version,
-            to_version,
-            dry_run: false,
-            plan: plan_labels.to_vec(),
-            operation_id: Some(operation_id),
-            manifest_reconciliation: manifest_drifted.then_some("component manifest drift"),
-        },
-    )?;
-    Ok(LockedRepairExecution::Completed)
+    Ok(LockedRepairExecution::Completed(Box::new(
+        application::applied(
+            command,
+            application::RepairSubject {
+                component: target.to_string(),
+                package: Some(package.to_string()),
+                from_version,
+                to_version,
+            },
+            plan_action(steps),
+            steps.to_vec(),
+            operation_id,
+            Vec::new(),
+            manifest_drifted.then_some("component manifest drift"),
+        ),
+    )))
 }
 
 /// Execute the quarantine-restore plan (R6) under the install lock: rebuild
@@ -680,7 +378,6 @@ fn repair_restore_quarantined(
     scope: InstallationScope,
     now: &str,
     steps: &[Step],
-    plan_labels: &[String],
     command: &str,
 ) -> Result<LockedRepairExecution, CliError> {
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
@@ -752,21 +449,22 @@ fn repair_restore_quarantined(
         format!("restored quarantined record for component {target} as owned ({version})"),
     );
 
-    render_result(
-        ctx,
-        &RepairResultPayload {
-            component: target.to_string(),
-            package: None,
-            action: "restore-owned-record".to_string(),
-            from_version: None,
-            to_version: Some(version),
-            dry_run: false,
-            plan: plan_labels.to_vec(),
-            operation_id: Some(operation_id),
-            manifest_reconciliation: None,
-        },
-    )?;
-    Ok(LockedRepairExecution::Completed)
+    Ok(LockedRepairExecution::Completed(Box::new(
+        application::applied(
+            command,
+            application::RepairSubject {
+                component: target.to_string(),
+                package: None,
+                from_version: None,
+                to_version: Some(version),
+            },
+            application::RepairAction::RestoreOwnedRecord,
+            steps.to_vec(),
+            operation_id,
+            Vec::new(),
+            None,
+        ),
+    )))
 }
 
 /// Execute an owned replay plan (R2) against the raw backend, pinned to the
@@ -785,7 +483,6 @@ fn repair_owned_replay(
     scope: InstallationScope,
     now: &str,
     steps: &[Step],
-    plan_labels: &[String],
     prior: anolisa_core::domain::OwnedArtifact,
     command: &str,
 ) -> Result<LockedRepairExecution, CliError> {
@@ -895,28 +592,29 @@ fn repair_owned_replay(
         format!("replayed owned files for component {target} at {version}"),
     );
 
-    render_result(
-        ctx,
-        &RepairResultPayload {
-            component: target.to_string(),
-            package: Some(package),
-            action: "replay-owned-files".to_string(),
-            from_version: None,
-            to_version: Some(version),
-            dry_run: false,
-            plan: plan_labels.to_vec(),
-            operation_id: Some(operation_id),
-            manifest_reconciliation: None,
-        },
-    )?;
-    Ok(LockedRepairExecution::Completed)
+    Ok(LockedRepairExecution::Completed(Box::new(
+        application::applied(
+            command,
+            application::RepairSubject {
+                component: target.to_string(),
+                package: Some(package),
+                from_version: None,
+                to_version: Some(version),
+            },
+            application::RepairAction::ReplayOwnedFiles,
+            steps.to_vec(),
+            operation_id,
+            Vec::new(),
+            None,
+        ),
+    )))
 }
 
 /// What consuming a pending journal (R1) left behind.
 enum Recovery {
     /// The interrupted operation was completed (its record committed) and
     /// the result rendered; nothing further to do.
-    Recovered,
+    Recovered(Box<application::ApplicationOutcome>),
     /// The journal was settled without a record change; the caller replans
     /// once against the now-unblocked facts.
     Cleared,
@@ -1142,12 +840,11 @@ fn recover_journal(
                     delegated_record_action_label(recovery.record_action),
                 ),
             );
-            render_result(
-                ctx,
-                &RepairResultPayload {
+            Ok(Recovery::Recovered(Box::new(application::applied(
+                command,
+                application::RepairSubject {
                     component: target.to_string(),
                     package: Some(package.to_string()),
-                    action: "recovered-journal".to_string(),
                     from_version: None,
                     to_version: Some(
                         observation
@@ -1155,13 +852,13 @@ fn recover_journal(
                             .clone()
                             .unwrap_or_else(|| observation.version.clone()),
                     ),
-                    dry_run: false,
-                    plan: Vec::new(),
-                    operation_id: Some(operation_id),
-                    manifest_reconciliation: None,
                 },
-            )?;
-            Ok(Recovery::Recovered)
+                application::RepairAction::RecoveredJournal,
+                Vec::new(),
+                operation_id,
+                Vec::new(),
+                None,
+            ))))
         }
         NativeProbe::MultipleVersions { .. } => Err(CliError::Runtime {
             command: command.to_string(),
@@ -1632,21 +1329,20 @@ fn recover_delegated_drop(
         LogStatus::Ok,
         format!("completed interrupted record removal for component {target}"),
     );
-    render_result(
-        ctx,
-        &RepairResultPayload {
+    Ok(Recovery::Recovered(Box::new(application::applied(
+        command,
+        application::RepairSubject {
             component: target.to_string(),
             package: package.map(str::to_string),
-            action: "recovered-journal".to_string(),
             from_version: None,
             to_version: None,
-            dry_run: false,
-            plan: Vec::new(),
-            operation_id: Some(operation_id),
-            manifest_reconciliation: None,
         },
-    )?;
-    Ok(Recovery::Recovered)
+        application::RepairAction::RecoveredJournal,
+        Vec::new(),
+        operation_id,
+        Vec::new(),
+        None,
+    ))))
 }
 
 fn delegated_record_action_label(action: DelegatedRecordAction) -> &'static str {
@@ -1742,12 +1438,11 @@ fn recover_legacy_rpm_install(
                     pending.component
                 ),
             );
-            render_result(
-                ctx,
-                &RepairResultPayload {
+            Ok(Recovery::Recovered(Box::new(application::applied(
+                command,
+                application::RepairSubject {
                     component: pending.component.clone(),
                     package: Some(pending.package.clone()),
-                    action: "recovered-pending-install".to_string(),
                     from_version: None,
                     to_version: Some(
                         observation
@@ -1755,13 +1450,13 @@ fn recover_legacy_rpm_install(
                             .clone()
                             .unwrap_or_else(|| observation.version.clone()),
                     ),
-                    dry_run: false,
-                    plan: Vec::new(),
-                    operation_id: Some(operation_id),
-                    manifest_reconciliation: None,
                 },
-            )?;
-            Ok(Recovery::Recovered)
+                application::RepairAction::RecoveredPendingInstall,
+                Vec::new(),
+                operation_id,
+                Vec::new(),
+                None,
+            ))))
         }
         NativeProbe::MultipleVersions { .. } => Err(CliError::Runtime {
             command: command.to_string(),
@@ -1981,7 +1676,6 @@ fn resolve_repair_package(
         component_index.as_ref(),
         query,
         component,
-        ResolutionUse::RepairLegacy,
     ) {
         Ok(candidates) => candidates,
         Err(PackageQueryError::CommandMissing { command: bin }) => {
@@ -2018,29 +1712,29 @@ fn resolve_repair_package(
 }
 
 /// Human-facing name of what a repair plan does, for previews and payloads.
-fn plan_action(steps: &[Step]) -> &'static str {
+fn plan_action(steps: &[Step]) -> application::RepairAction {
     if matches!(steps, [Step::RecoverJournal]) {
-        return "recover-journal";
+        return application::RepairAction::RecoverJournal;
     }
     if matches!(steps, [Step::WriteRecord(RecordWrite::Owned)]) {
-        return "restore-owned-record";
+        return application::RepairAction::RestoreOwnedRecord;
     }
     if steps.iter().any(|s| matches!(s, Step::PlaceFiles)) {
-        return "replay-owned-files";
+        return application::RepairAction::ReplayOwnedFiles;
     }
     if steps
         .iter()
         .any(|s| matches!(s, Step::NativeTransaction { .. }))
     {
-        return "reinstall-package";
+        return application::RepairAction::ReinstallPackage;
     }
     if steps
         .iter()
         .any(|s| matches!(s, Step::WriteRecord(RecordWrite::DelegatedObserved)))
     {
-        return "restore-observed-record";
+        return application::RepairAction::RestoreObservedRecord;
     }
-    "refresh-observation"
+    application::RepairAction::RefreshObservation
 }
 
 /// Map a planning refusal to an actionable CLI error. The planner names the
@@ -2230,6 +1924,81 @@ fn append_repair_log(
 }
 
 /// Render the repair result (or its dry-run preview).
+fn render_application_outcome(
+    ctx: &CliContext,
+    application_outcome: application::ApplicationOutcome,
+) -> Result<(), CliError> {
+    let payload = match application_outcome {
+        application::ApplicationOutcome::NoOp {
+            subject,
+            manifest_reconciliation,
+        } => RepairResultPayload {
+            component: subject.component,
+            package: subject.package,
+            action: application::RepairAction::NothingToRepair
+                .as_str()
+                .to_string(),
+            from_version: subject.from_version,
+            to_version: subject.to_version,
+            dry_run: ctx.dry_run,
+            plan: Vec::new(),
+            operation_id: None,
+            manifest_reconciliation,
+        },
+        application::ApplicationOutcome::Preview {
+            subject,
+            action,
+            steps,
+            manifest_reconciliation,
+        } => RepairResultPayload {
+            component: subject.component,
+            package: subject.package,
+            action: action.as_str().to_string(),
+            from_version: subject.from_version,
+            to_version: subject.to_version,
+            dry_run: true,
+            plan: steps.iter().map(step_label).collect(),
+            operation_id: None,
+            manifest_reconciliation,
+        },
+        application::ApplicationOutcome::Applied {
+            command,
+            subject,
+            action,
+            steps,
+            outcome,
+            manifest_reconciliation,
+        } => {
+            for warning in outcome.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            match outcome.status() {
+                anolisa_core::execution::CommandOutcomeStatus::Completed => {}
+                anolisa_core::execution::CommandOutcomeStatus::Partial { reason }
+                | anolisa_core::execution::CommandOutcomeStatus::Failed { reason } => {
+                    return Err(CliError::Runtime {
+                        command,
+                        reason: reason.clone(),
+                    });
+                }
+            }
+            RepairResultPayload {
+                component: subject.component,
+                package: subject.package,
+                action: action.as_str().to_string(),
+                from_version: subject.from_version,
+                to_version: subject.to_version,
+                dry_run: false,
+                plan: steps.iter().map(step_label).collect(),
+                operation_id: outcome.operation_id().map(str::to_string),
+                manifest_reconciliation,
+            }
+        }
+    };
+    render_result(ctx, &payload)
+}
+
+/// Render the repair result (or its dry-run preview).
 fn render_result(ctx: &CliContext, payload: &RepairResultPayload) -> Result<(), CliError> {
     if ctx.json {
         return render_json(COMMAND, payload);
@@ -2333,6 +2102,51 @@ mod tests {
 
     use crate::context::InstallMode;
 
+    fn no_op_application_outcome() -> application::ApplicationOutcome {
+        application::ApplicationOutcome::NoOp {
+            subject: application::RepairSubject {
+                component: "cosh".to_string(),
+                package: None,
+                from_version: None,
+                to_version: None,
+            },
+            manifest_reconciliation: None,
+        }
+    }
+
+    #[test]
+    fn failed_application_outcome_uses_its_terminal_reason() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let outcome = application::ApplicationOutcome::Applied {
+            command: "repair cosh".to_string(),
+            subject: application::RepairSubject {
+                component: "cosh".to_string(),
+                package: Some("cosh".to_string()),
+                from_version: Some("2.6.0".to_string()),
+                to_version: Some("2.7.0".to_string()),
+            },
+            action: application::RepairAction::RefreshObservation,
+            steps: Vec::new(),
+            outcome: anolisa_core::execution::CommandOutcome::new(
+                anolisa_core::execution::CommandOutcomeStatus::Failed {
+                    reason: "native package transaction failed".to_string(),
+                },
+                None,
+                Vec::new(),
+                vec!["non-terminal diagnostic".to_string()],
+            ),
+            manifest_reconciliation: None,
+        };
+
+        let err = render_application_outcome(&ctx, outcome)
+            .expect_err("a failed outcome must use the error path");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(err.exit_code(), 1);
+        assert_eq!(err.reason(), "native package transaction failed");
+    }
+
     #[test]
     fn locked_pending_reenters_recovery_after_releasing_the_lock() {
         let retries = Cell::new(0);
@@ -2344,7 +2158,7 @@ mod tests {
             "repair cosh",
             || {
                 retries.set(retries.get() + 1);
-                Ok(())
+                Ok(no_op_application_outcome())
             },
         )
         .expect("new recovery chain should be replanned once");
@@ -2363,7 +2177,7 @@ mod tests {
             "repair cosh",
             || {
                 retries.set(retries.get() + 1);
-                Ok(())
+                Ok(no_op_application_outcome())
             },
         )
         .expect_err("one invocation must not consume two recovery chains");
@@ -2512,6 +2326,14 @@ mod tests {
     }
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,

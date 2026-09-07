@@ -6,6 +6,19 @@ use std::sync::Mutex;
 use super::connection::create_connection;
 use crate::interruption::{InterruptionEvent, InterruptionType};
 
+/// Bucket key reported by the per-session breakdown for events whose
+/// `session_id` could never be resolved.
+///
+/// Grouping them under a sentinel instead of dropping the rows keeps the
+/// overview total equal to the sum of the breakdown; the dashboard renders
+/// this key as an "unassigned" row. The double-underscore shape cannot
+/// collide with a real session id (a UUID or a 32-hex fallback hash).
+pub const UNASSIGNED_SESSION_ID: &str = "__unassigned__";
+
+/// Bucket key used by the per-conversation breakdown for NULL
+/// `conversation_id`. Mirrors [`UNASSIGNED_SESSION_ID`].
+pub const UNASSIGNED_CONVERSATION_ID: &str = "__unassigned__";
+
 // ─── API response types ────────────────────────────────────────────────────────
 
 /// Summary returned by GET /api/interruptions
@@ -429,59 +442,101 @@ impl InterruptionStore {
         Ok(result)
     }
 
-    /// Statistics: count by type within a time range.
+    /// Statistics: count by (type, severity) within a time range.
+    ///
+    /// `resolved` filters by resolution state: `Some(false)` yields the
+    /// unresolved-only view that the dashboard overview shares with the
+    /// per-session breakdown, while `None` counts every event (used by the
+    /// Prometheus counter and the CLI, which must stay monotonic).
+    ///
+    /// Grouped by severity as well as type so a type whose severity mapping
+    /// changed across versions cannot report one severity for a count that
+    /// aggregates several — callers summing `by_severity` rely on this.
     pub fn stats(
         &self,
         start_ns: i64,
         end_ns: i64,
+        resolved: Option<bool>,
     ) -> Result<Vec<InterruptionTypeStat>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT interruption_type, severity, COUNT(*) AS cnt
+        // Two fixed statements instead of an assembled one: the storage layer
+        // forbids building SQL by concatenation, so no future filter can turn
+        // this into unsafe query assembly.
+        const STATS_ALL: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
              WHERE occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY interruption_type
-             ORDER BY cnt DESC",
-        )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
+             GROUP BY interruption_type, severity
+             ORDER BY cnt DESC";
+        const STATS_BY_RESOLVED: &str = "SELECT interruption_type, severity, COUNT(*) AS cnt
+             FROM interruption_events
+             WHERE occurred_at_ns BETWEEN ?1 AND ?2 AND resolved = ?3
+             GROUP BY interruption_type, severity
+             ORDER BY cnt DESC";
+
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(InterruptionTypeStat {
                 interruption_type: row.get(0)?,
                 severity: row.get(1)?,
                 count: row.get(2)?,
             })
-        })?;
+        };
         let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
+        match resolved {
+            Some(r) => {
+                let mut stmt = conn.prepare(STATS_BY_RESOLVED)?;
+                for row in stmt.query_map(params![start_ns, end_ns, r as i32], map_row)? {
+                    result.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(STATS_ALL)?;
+                for row in stmt.query_map(params![start_ns, end_ns], map_row)? {
+                    result.push(row?);
+                }
+            }
         }
         Ok(result)
     }
 
     /// Count unresolved interruptions grouped by (session_id, severity, type).
     /// Returns detailed rows for building per-severity badges with type tooltips.
+    ///
+    /// Events with a NULL `session_id` are bucketed under
+    /// [`UNASSIGNED_SESSION_ID`] rather than dropped: the overview card counts
+    /// them, so filtering them out here made the breakdown silently disagree
+    /// with the total and looked like data loss.
+    ///
+    /// `agent_name` scopes the result to one agent so the breakdown matches the
+    /// dashboard's agent filter; `None` covers all agents. Bound as a parameter
+    /// compared with `?4 IS NULL` instead of appending a clause, since the
+    /// storage layer forbids assembling SQL by concatenation.
     pub fn count_unresolved_by_session_detailed(
         &self,
         start_ns: i64,
         end_ns: i64,
+        agent_name: Option<&str>,
     ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT session_id, severity, interruption_type, COUNT(*) AS cnt
+            "SELECT COALESCE(session_id, ?3) AS sid, severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
-             WHERE session_id IS NOT NULL
-               AND resolved = 0
+             WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY session_id, severity, interruption_type
-             ORDER BY session_id, cnt DESC",
+               AND (?4 IS NULL OR agent_name = ?4)
+             GROUP BY sid, severity, interruption_type
+             ORDER BY sid, cnt DESC",
         )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![start_ns, end_ns, UNASSIGNED_SESSION_ID, agent_name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -489,35 +544,92 @@ impl InterruptionStore {
         Ok(result)
     }
 
-    /// Count unresolved interruptions grouped by (conversation_id, severity, type).
+    /// Count unresolved interruptions grouped by
+    /// (session_id, conversation_id, severity, type).
+    ///
+    /// NULL ids are bucketed under [`UNASSIGNED_SESSION_ID`] /
+    /// [`UNASSIGNED_CONVERSATION_ID`] for the same total-versus-breakdown
+    /// consistency reason as [`Self::count_unresolved_by_session_detailed`], and
+    /// `agent_name` scopes the result the same way.
+    ///
+    /// `session_id` is part of the grouping key because a conversation-only
+    /// breakdown cannot say which session an event belongs to: the dashboard
+    /// nests conversation rows under a session, so it would render every
+    /// session-less event under whichever session happens to own that
+    /// conversation, double-counting it against the unassigned-session row.
     pub fn count_unresolved_by_conversation_detailed(
         &self,
         start_ns: i64,
         end_ns: i64,
-    ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
+        agent_name: Option<&str>,
+    ) -> Result<Vec<(String, String, String, String, i64)>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT conversation_id, severity, interruption_type, COUNT(*) AS cnt
+            "SELECT COALESCE(session_id, ?3) AS sid, COALESCE(conversation_id, ?4) AS cid,
+                    severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
-             WHERE conversation_id IS NOT NULL
-               AND resolved = 0
+             WHERE resolved = 0
                AND occurred_at_ns BETWEEN ?1 AND ?2
-             GROUP BY conversation_id, severity, interruption_type
-             ORDER BY conversation_id, cnt DESC",
+               AND (?5 IS NULL OR agent_name = ?5)
+             GROUP BY sid, cid, severity, interruption_type
+             ORDER BY sid, cid, cnt DESC",
         )?;
-        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                start_ns,
+                end_ns,
+                UNASSIGNED_SESSION_ID,
+                UNASSIGNED_CONVERSATION_ID,
+                agent_name
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// Backfill a NULL `session_id` for every interruption of `call_id`.
+    ///
+    /// Companion to the GenAI store's retroactive session fix-up: a call that
+    /// escaped the session-resolution deferral window has its interruptions
+    /// already persisted with a NULL `session_id`, so repairing only
+    /// `genai_events` would leave them unattributable forever.
+    ///
+    /// Only NULL rows are touched — an already-attributed interruption keeps
+    /// whatever id it was detected with.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection mutex is poisoned (surfaced rather
+    /// than recovered, so the caller can retry on a later fix-up attempt) or
+    /// the UPDATE fails.
+    pub fn backfill_null_session_id(
+        &self,
+        call_id: &str,
+        session_id: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let updated = conn.execute(
+            "UPDATE interruption_events
+             SET session_id = ?2
+             WHERE call_id = ?1 AND session_id IS NULL",
+            params![call_id, session_id],
+        )?;
+        Ok(updated)
     }
 
     /// Check if a recent agent_crash event exists for the given PID.
@@ -624,8 +736,9 @@ impl InterruptionStore {
     ///
     /// * `retention_days` - delete rows whose `occurred_at_ns` is older than this
     ///   many days.  A value of 0 disables age-based purging.
-    /// * `max_db_size_mb` - if the database file is larger than this, delete the
-    ///   oldest rows until it fits.  A value of 0 disables size-based purging.
+    /// * `max_db_size_mb` - if the database (main file + WAL + SHM) is larger
+    ///   than this, delete the oldest rows until it fits.  A value of 0
+    ///   disables size-based purging.
     ///
     /// Returns the total number of rows deleted.
     pub fn purge_old_and_oversized(
@@ -646,24 +759,98 @@ impl InterruptionStore {
             total_deleted += self.purge_before(cutoff_ns)?;
         }
 
-        // 2. Size-based trimming: if file still exceeds max_db_size_mb, delete
-        // oldest records in batches until it fits or no rows remain.
+        // 2. Size-based trimming (checkpoints inside its own loop)
         if max_db_size_mb > 0 {
-            let max_bytes = (max_db_size_mb as u64) * 1024 * 1024;
-            let path = self.db_path();
-            for _ in 0..100 {
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                if size <= max_bytes {
+            total_deleted += self.trim_to_size_limit(max_db_size_mb)?;
+        }
+
+        // 3. Reclaim pages freed by age-based deletes. The size trim already
+        // checkpointed on its last iteration; one more pass is cheap on an
+        // already-compact file.
+        if total_deleted > 0 {
+            if let Err(e) = self.checkpoint() {
+                log::warn!("checkpoint after interruption purge failed: {e}");
+            }
+        }
+
+        Ok(total_deleted)
+    }
+
+    /// Delete oldest rows until the total on-disk size fits 90% of the limit.
+    ///
+    /// Trimming starts only once the database exceeds the configured limit;
+    /// the 90% mark is just the stop target, so a few inserts after a trim do
+    /// not immediately retrigger it.
+    fn trim_to_size_limit(&self, max_db_size_mb: u64) -> Result<usize, Box<dyn std::error::Error>> {
+        let max_bytes = (max_db_size_mb as u64) * 1024 * 1024;
+        if self.total_db_file_size() <= max_bytes {
+            return Ok(0);
+        }
+        let threshold = (max_bytes as f64 * 0.9) as u64;
+        let mut total_deleted = 0usize;
+        let mut stuck_rounds = 0u32;
+
+        for _ in 0..20 {
+            let size = self.effective_db_file_size()?;
+            if size <= threshold {
+                break;
+            }
+            let rows = self.row_count()?;
+            if rows == 0 {
+                break;
+            }
+
+            // Bigger bites when far over the limit; mirrors the sibling genai
+            // store's prune policy.
+            let overshoot = size as f64 / max_bytes as f64;
+            let pct = if overshoot > 5.0 {
+                0.50
+            } else if overshoot > 2.0 {
+                0.25
+            } else {
+                0.10
+            };
+            let batch = ((rows as f64 * pct) as usize).max(1);
+            let deleted = self.delete_oldest_batch(batch)?;
+            total_deleted += deleted;
+            if deleted == 0 {
+                break;
+            }
+
+            // A DELETE in WAL mode does not shrink the main file (it appends
+            // to the WAL instead), so size must be re-measured after a
+            // checkpoint or the loop cannot observe progress. A busy
+            // checkpoint (another connection holds a read snapshot) leaves
+            // the WAL intact — stop trimming: further deletes would keep
+            // appending WAL frames and never converge.
+            match self.checkpoint() {
+                Ok(true) => {
+                    log::warn!(
+                        "WAL checkpoint busy during interruption trim; \
+                         stopping (the WAL could not be truncated)"
+                    );
                     break;
                 }
-                let deleted = self.delete_oldest_batch(1000)?;
-                total_deleted += deleted;
-                if deleted == 0 {
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!("checkpoint during interruption trim failed: {e}");
+                }
+            }
+
+            let new_size = self.effective_db_file_size()?;
+            if new_size < size {
+                stuck_rounds = 0;
+            } else {
+                stuck_rounds += 1;
+                if stuck_rounds >= 3 {
+                    log::warn!(
+                        "Interruption trim stalled at {new_size} bytes \
+                         (threshold {threshold}, rows {rows}, overshoot {overshoot:.1}x); \
+                         VACUUM is likely failing, e.g. disk full"
+                    );
                     break;
                 }
             }
-            // Reclaim free pages after bulk deletes.
-            let _ = self.vacuum();
         }
 
         Ok(total_deleted)
@@ -691,11 +878,70 @@ impl InterruptionStore {
             .unwrap_or_else(|| std::path::PathBuf::from("interruption_events.db"))
     }
 
-    /// Run VACUUM to reclaim free pages.
-    fn vacuum(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute_batch("VACUUM;")?;
-        Ok(())
+    /// Total on-disk size: main file + WAL + SHM. Fresh writes land in the
+    /// WAL, so measuring the main file alone misses recent growth.
+    fn total_db_file_size(&self) -> u64 {
+        let path = self.db_path();
+        let mut total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // Append via OsString so non-UTF-8 db paths still resolve the sidecars.
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.clone().into_os_string();
+            sidecar.push(suffix);
+            if let Ok(meta) = std::fs::metadata(&sidecar) {
+                total += meta.len();
+            }
+        }
+        total
+    }
+
+    /// Logical data size: physical size minus freelist pages. Trim convergence
+    /// is measured on this: deletes free pages into the freelist without
+    /// shrinking the physical file.
+    ///
+    /// # Errors
+    /// Returns an error when the connection mutex is poisoned.
+    fn effective_db_file_size(&self) -> Result<u64, Box<dyn std::error::Error>> {
+        let physical = self.total_db_file_size();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let freelist: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap_or(4096);
+        Ok(physical.saturating_sub((freelist.max(0) * page_size.max(0)) as u64))
+    }
+
+    fn row_count(&self) -> Result<i64, Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let count = conn.query_row("SELECT COUNT(*) FROM interruption_events", [], |r| r.get(0))?;
+        Ok(count)
+    }
+
+    /// Flush and truncate the WAL.
+    ///
+    /// Never VACUUMs: rebuilding the file would push its pages through the
+    /// page cache, which counts against the service's cgroup memory limit and
+    /// can OOM-kill the process on large databases (#2888). Freed pages stay
+    /// on the freelist and are reused by future inserts, so the physical file
+    /// stops growing once the logical size fits.
+    ///
+    /// Returns `Ok(true)` when the checkpoint was blocked by another
+    /// connection's read snapshot (busy): the statement succeeds but the WAL
+    /// is NOT truncated.
+    fn checkpoint(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok(busy != 0)
     }
 }
 
@@ -1062,7 +1308,7 @@ mod tests {
         e.occurred_at_ns = 5_000_000_000;
         store.insert(&e).unwrap();
 
-        let stats = store.stats(0, i64::MAX).unwrap();
+        let stats = store.stats(0, i64::MAX, None).unwrap();
         // rate_limit should have count=2, agent_crash count=1
         let rl = stats
             .iter()
@@ -1094,7 +1340,7 @@ mod tests {
         store.resolve("int-csd-2").unwrap();
 
         let rows = store
-            .count_unresolved_by_session_detailed(0, i64::MAX)
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
             .unwrap();
         assert_eq!(rows.len(), 1, "only unresolved rows should appear");
         assert_eq!(rows[0].0, "sess-X");
@@ -1109,10 +1355,262 @@ mod tests {
         store.insert(&e).unwrap();
 
         let rows = store
-            .count_unresolved_by_conversation_detailed(0, i64::MAX)
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "conv-ccd");
+        assert_eq!(rows[0].0, "sess-1");
+        assert_eq!(rows[0].1, "conv-ccd");
+    }
+
+    // ── total-versus-breakdown consistency (issue: 7 high interruptions with a
+    //    NULL session_id counted in the overview but missing from the per-session
+    //    breakdown) ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn session_breakdown_buckets_null_session_id_instead_of_dropping_it() {
+        let store = temp_store();
+
+        let mut attributed = make_event("conv-a", InterruptionType::ToolFailure);
+        attributed.interruption_id = "int-attributed".to_string();
+        attributed.session_id = Some("sess-real".to_string());
+        store.insert(&attributed).unwrap();
+
+        // The empty_response / sse_truncated shape: detected before the session
+        // was resolved, so persisted with a NULL session_id.
+        for i in 0..3 {
+            let mut orphan = make_event("conv-b", InterruptionType::EmptyResponse);
+            orphan.interruption_id = format!("int-orphan-{i}");
+            orphan.session_id = None;
+            store.insert(&orphan).unwrap();
+        }
+
+        let rows = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
+            .unwrap();
+        let breakdown_total: i64 = rows.iter().map(|(_, _, _, cnt)| cnt).sum();
+        let overview_total: i64 = store
+            .stats(0, i64::MAX, Some(false))
+            .unwrap()
+            .iter()
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(
+            breakdown_total, overview_total,
+            "per-session breakdown must account for every counted interruption"
+        );
+
+        let unassigned = rows
+            .iter()
+            .find(|(sid, _, _, _)| sid == UNASSIGNED_SESSION_ID)
+            .expect("NULL session_id must land in the unassigned bucket");
+        assert_eq!(unassigned.3, 3);
+        assert!(rows.iter().any(|(sid, _, _, _)| sid == "sess-real"));
+    }
+
+    #[test]
+    fn conversation_breakdown_buckets_null_conversation_id() {
+        let store = temp_store();
+        let mut e = make_event("conv-kept", InterruptionType::SseTruncated);
+        e.interruption_id = "int-conv-kept".to_string();
+        e.conversation_id = None;
+        store.insert(&e).unwrap();
+
+        let rows = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "sess-1");
+        assert_eq!(rows[0].1, UNASSIGNED_CONVERSATION_ID);
+    }
+
+    #[test]
+    fn conversation_breakdown_keeps_session_less_events_out_of_a_real_session() {
+        let store = temp_store();
+
+        // One conversation, two events: one attributed to the session, one
+        // detected before the session was resolved. Grouping by conversation
+        // alone would file both under the session that owns the conversation,
+        // while the unassigned-session row counts the second one as well.
+        let mut attributed = make_event("conv-shared", InterruptionType::ToolFailure);
+        attributed.interruption_id = "int-shared-attributed".to_string();
+        attributed.session_id = Some("sess-owner".to_string());
+        store.insert(&attributed).unwrap();
+
+        let mut session_less = make_event("conv-shared", InterruptionType::EmptyResponse);
+        session_less.interruption_id = "int-shared-orphan".to_string();
+        session_less.session_id = None;
+        store.insert(&session_less).unwrap();
+
+        let rows = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, None)
+            .unwrap();
+
+        let owned: i64 = rows
+            .iter()
+            .filter(|(sid, cid, _, _, _)| sid == "sess-owner" && cid == "conv-shared")
+            .map(|(_, _, _, _, cnt)| cnt)
+            .sum();
+        assert_eq!(
+            owned, 1,
+            "the session's own row must not absorb the session-less event"
+        );
+
+        let orphaned: i64 = rows
+            .iter()
+            .filter(|(sid, _, _, _, _)| sid == UNASSIGNED_SESSION_ID)
+            .map(|(_, _, _, _, cnt)| cnt)
+            .sum();
+        assert_eq!(
+            orphaned, 1,
+            "the session-less event stays in the unassigned-session bucket"
+        );
+    }
+
+    #[test]
+    fn stats_resolved_filter_selects_the_intended_view() {
+        let store = temp_store();
+        let mut open = make_event("conv-open", InterruptionType::EmptyResponse);
+        open.interruption_id = "int-open".to_string();
+        store.insert(&open).unwrap();
+        let mut closed = make_event("conv-closed", InterruptionType::EmptyResponse);
+        closed.interruption_id = "int-closed".to_string();
+        store.insert(&closed).unwrap();
+        store.resolve("int-closed").unwrap();
+
+        let sum = |rows: Vec<InterruptionTypeStat>| -> i64 { rows.iter().map(|s| s.count).sum() };
+        assert_eq!(
+            sum(store.stats(0, i64::MAX, Some(false)).unwrap()),
+            1,
+            "dashboard view counts unresolved only"
+        );
+        assert_eq!(
+            sum(store.stats(0, i64::MAX, None).unwrap()),
+            2,
+            "Prometheus counter view keeps resolved events"
+        );
+    }
+
+    #[test]
+    fn breakdowns_scope_to_the_requested_agent() {
+        let store = temp_store();
+        // Both agents have an unattributed interruption; a per-agent view must
+        // not fold the other agent's rows into the unassigned bucket.
+        for (i, agent) in ["AgentA", "AgentB"].iter().enumerate() {
+            let mut e = make_event("conv-agent", InterruptionType::EmptyResponse);
+            e.interruption_id = format!("int-agent-{i}");
+            e.session_id = None;
+            e.agent_name = Some((*agent).to_string());
+            store.insert(&e).unwrap();
+        }
+
+        let only_a = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, Some("AgentA"))
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].0, UNASSIGNED_SESSION_ID);
+        assert_eq!(only_a[0].3, 1, "AgentB's row must not be counted");
+
+        let both = store
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
+            .unwrap();
+        assert_eq!(both[0].3, 2, "None must cover every agent");
+
+        let conv_only_b = store
+            .count_unresolved_by_conversation_detailed(0, i64::MAX, Some("AgentB"))
+            .unwrap();
+        assert_eq!(conv_only_b.len(), 1);
+        assert_eq!(conv_only_b[0].0, UNASSIGNED_SESSION_ID);
+        assert_eq!(conv_only_b[0].1, "conv-agent");
+        assert_eq!(conv_only_b[0].4, 1);
+    }
+
+    #[test]
+    fn stats_groups_by_severity_so_by_severity_sums_stay_exact() {
+        let store = temp_store();
+        // Same type persisted with two severities (a severity mapping that
+        // changed across versions leaves exactly this shape in the DB).
+        let mut high = make_event("conv-sev", InterruptionType::EmptyResponse);
+        high.interruption_id = "int-sev-high".to_string();
+        high.severity = crate::interruption::types::Severity::High;
+        store.insert(&high).unwrap();
+        let mut medium = make_event("conv-sev", InterruptionType::EmptyResponse);
+        medium.interruption_id = "int-sev-medium".to_string();
+        medium.severity = crate::interruption::types::Severity::Medium;
+        store.insert(&medium).unwrap();
+
+        let rows = store.stats(0, i64::MAX, Some(false)).unwrap();
+        let empty_rows: Vec<_> = rows
+            .iter()
+            .filter(|s| s.interruption_type == "empty_response")
+            .collect();
+        assert_eq!(
+            empty_rows.len(),
+            2,
+            "one row per (type, severity), not a merged count with one severity"
+        );
+        assert!(empty_rows.iter().all(|s| s.count == 1));
+        assert_eq!(empty_rows.iter().map(|s| s.count).sum::<i64>(), 2);
+    }
+
+    // ── backfill_null_session_id (retroactive fix-up companion) ───────────────
+
+    #[test]
+    fn backfill_null_session_id_only_touches_null_rows_of_the_call() {
+        let store = temp_store();
+
+        let mut orphan = make_event("conv-bf", InterruptionType::SseTruncated);
+        orphan.interruption_id = "int-bf-orphan".to_string();
+        orphan.session_id = None;
+        orphan.call_id = Some("call-1".to_string());
+        store.insert(&orphan).unwrap();
+
+        let mut already = make_event("conv-bf", InterruptionType::EmptyResponse);
+        already.interruption_id = "int-bf-attributed".to_string();
+        already.session_id = Some("sess-keep".to_string());
+        already.call_id = Some("call-1".to_string());
+        store.insert(&already).unwrap();
+
+        let mut other_call = make_event("conv-bf", InterruptionType::SseTruncated);
+        other_call.interruption_id = "int-bf-other".to_string();
+        other_call.session_id = None;
+        other_call.call_id = Some("call-2".to_string());
+        store.insert(&other_call).unwrap();
+
+        let updated = store
+            .backfill_null_session_id("call-1", "sess-resolved")
+            .unwrap();
+        assert_eq!(updated, 1, "only the NULL row of call-1 may be updated");
+
+        let session_of = |id: &str| store.get_by_id(id).unwrap().unwrap().session_id;
+        assert_eq!(
+            session_of("int-bf-orphan").as_deref(),
+            Some("sess-resolved")
+        );
+        assert_eq!(
+            session_of("int-bf-attributed").as_deref(),
+            Some("sess-keep"),
+            "an already-attributed interruption must not be overwritten"
+        );
+        assert_eq!(
+            session_of("int-bf-other"),
+            None,
+            "another call's interruption must be left alone"
+        );
+    }
+
+    #[test]
+    fn backfill_null_session_id_unknown_call_updates_nothing() {
+        let store = temp_store();
+        let mut e = make_event("conv-bf-none", InterruptionType::EmptyResponse);
+        e.interruption_id = "int-bf-none".to_string();
+        e.session_id = None;
+        e.call_id = Some("call-x".to_string());
+        store.insert(&e).unwrap();
+
+        let updated = store
+            .backfill_null_session_id("no-such-call", "sess-resolved")
+            .unwrap();
+        assert_eq!(updated, 0);
     }
 
     // ── OOM dedup ────────────────────────────────────────────────────────────
@@ -1296,6 +1794,184 @@ mod tests {
             deleted, 1,
             "very old row should be purged with 1-day retention"
         );
+    }
+
+    /// Regression for #2818: an oversized database must be trimmed to the
+    /// limit (newest rows survive) and the logical size must converge, without
+    /// wiping the table. Reverting to a main-file-only size check without an
+    /// in-loop checkpoint makes this fail: the loop then cannot observe
+    /// progress and deletes until the table is empty.
+    ///
+    /// The physical file may stay at its historical peak (#2888): freed pages
+    /// go to the freelist and are reused by future inserts.
+    #[test]
+    fn purge_size_based_keeps_newest_and_converges() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_size_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = InterruptionStore::new_with_path(&path).unwrap();
+
+        // Seed ~1.3MB across 300 rows (~4KB detail each), over a 1MB limit.
+        let blob = "y".repeat(4 * 1024);
+        for i in 0..300 {
+            let mut e = make_event("conv-size", InterruptionType::LlmError);
+            e.interruption_id = format!("int-size-{i:04}");
+            e.occurred_at_ns = 1_000 + i as i64; // oldest first
+            e.detail = Some(blob.clone());
+            store.insert(&e).unwrap();
+        }
+        // Flush the WAL so the pre-purge size reflects the seeded rows.
+        store.checkpoint().unwrap();
+        assert!(
+            store.total_db_file_size() > 1024 * 1024,
+            "setup must exceed the 1MB limit, got {}",
+            store.total_db_file_size()
+        );
+
+        let deleted = store.purge_old_and_oversized(0, 1).unwrap();
+        assert!(deleted > 0, "oversized db must be trimmed");
+        assert!(
+            deleted < 300,
+            "must stop at the limit, not wipe the table (#2818)"
+        );
+
+        // Newest rows survive.
+        let remaining = store
+            .list(0, i64::MAX, None, None, None, None, 500)
+            .unwrap();
+        assert!(
+            remaining
+                .iter()
+                .any(|r| r.interruption_id == "int-size-0299"),
+            "newest row must survive size-based trim"
+        );
+
+        // Logical size (physical minus freelist) converges below the limit;
+        // the physical file may stay at its peak since pages are not returned
+        // to the OS without VACUUM (#2888).
+        let size_after = store.effective_db_file_size().unwrap();
+        assert!(
+            size_after <= 1024 * 1024,
+            "logical size must fit after trim, got {size_after}"
+        );
+
+        // Once the file fits, the next purge is a no-op.
+        let deleted_again = store.purge_old_and_oversized(0, 1).unwrap();
+        assert_eq!(deleted_again, 0);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// A database between 90% and 100% of the limit is not oversized and must
+    /// not be trimmed: the configured limit gates triggering, the 90% mark is
+    /// only the stop target once trimming started. With the 90% mark as the
+    /// trigger this test fails (rows would be deleted).
+    #[test]
+    fn purge_size_based_below_limit_is_noop() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_below_limit_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = InterruptionStore::new_with_path(&path).unwrap();
+
+        // Grow until the total size lands in (0.9MB, 1MB] with a 1MB limit.
+        // An un-checkpointed WAL holds many stale page versions and
+        // inflates the measurement several-fold, so always measure right
+        // after a checkpoint; one 20-row batch (~90KB compact) cannot jump
+        // over the 0.1MB window.
+        let blob = "y".repeat(4 * 1024);
+        let mut seeded = 0usize;
+        loop {
+            for _ in 0..20 {
+                let mut e = make_event("conv-below", InterruptionType::LlmError);
+                e.interruption_id = format!("int-below-{seeded:04}");
+                e.occurred_at_ns = 1_000 + seeded as i64;
+                e.detail = Some(blob.clone());
+                store.insert(&e).unwrap();
+                seeded += 1;
+            }
+            store.checkpoint().unwrap();
+            if store.total_db_file_size() > 943_718 {
+                break; // > 0.9MB
+            }
+            assert!(seeded < 400, "setup should reach 0.9MB within 400 rows");
+        }
+        let size = store.total_db_file_size();
+        assert!(
+            size > 943_718 && size <= 1_048_576,
+            "setup must land in (90%, 100%] of the limit, got {size}"
+        );
+
+        let deleted = store.purge_old_and_oversized(0, 1).unwrap();
+        assert_eq!(deleted, 0, "below the configured limit must not trim");
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// When another connection holds a read snapshot, the truncating WAL
+    /// checkpoint returns busy and the trim loop must stop instead of deleting
+    /// against a size that can never converge (only the WAL keeps growing).
+    #[test]
+    fn purge_size_based_stops_when_wal_checkpoint_busy() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_busy_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = InterruptionStore::new_with_path(&path).unwrap();
+
+        // ~1.2MB across 300 rows (~4KB each), over a 1MB limit.
+        let blob = "z".repeat(4 * 1024);
+        for i in 0..300u64 {
+            let mut e = make_event("conv-busy", InterruptionType::LlmError);
+            e.interruption_id = format!("int-busy-{i:04}");
+            e.occurred_at_ns = 1_000 + i as i64;
+            e.detail = Some(blob.clone());
+            store.insert(&e).unwrap();
+        }
+        store.checkpoint().unwrap();
+
+        // Hold a read snapshot on a separate connection: this blocks
+        // `PRAGMA wal_checkpoint(TRUNCATE)` from completing (busy).
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM interruption_events;")
+            .unwrap();
+
+        let deleted = store.purge_old_and_oversized(0, 1).unwrap();
+        let remaining = store.row_count().unwrap();
+        assert!(
+            remaining > 0,
+            "trim must stop once the WAL cannot be truncated, not delete \
+             everything (deleted {deleted}, remaining {remaining})"
+        );
+
+        drop(reader);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
     // ── pure helper functions ────────────────────────────────────────────────

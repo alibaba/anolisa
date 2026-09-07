@@ -132,12 +132,12 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input(
     )
 }
 
-pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
+pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input_after_ready(
     adapter: &str,
     extra_args: &[&str],
     envs: &[(&str, &str)],
     chunks: Vec<(Vec<u8>, Duration)>,
-    session_started: mpsc::Sender<()>,
+    session_ready: mpsc::Sender<()>,
 ) -> String {
     run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         adapter,
@@ -145,8 +145,8 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
         envs,
         Path::new(env!("CARGO_MANIFEST_DIR")),
         chunks,
-        RawCliRunMode::Shared,
-        Some(session_started),
+        RawCliRunMode::Exclusive,
+        Some(session_ready),
         None,
     )
 }
@@ -709,7 +709,7 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
     current_dir: &Path,
     chunks: Vec<(Vec<u8>, Duration)>,
     run_mode: RawCliRunMode,
-    session_started: Option<mpsc::Sender<()>>,
+    session_ready: Option<mpsc::Sender<()>>,
     ready_marker: Option<&str>,
 ) -> String {
     let _run_guard = raw_cli_run_guard(run_mode);
@@ -724,16 +724,33 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         .stderr(Stdio::piped());
     configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
+    let mut input_readiness = session_ready.as_ref().map(|_| RawCliInputReadiness::new());
+    if let Some(input_readiness) = input_readiness.as_ref() {
+        input_readiness.configure(&mut command);
+    }
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
     let stdout = child.stdout.take().expect("child stdout");
     let stderr = child.stderr.take().expect("child stderr");
     let (output_receiver, stdout_reader) = read_pipe_with_chunks(stdout);
     let stderr_reader = read_pipe(stderr);
-    if let Some(session_started) = session_started {
-        session_started
+    if let Some(session_ready) = session_ready {
+        let input_readiness = input_readiness
+            .as_mut()
+            .expect("session readiness probe is configured");
+        let request = input_readiness.request();
+        let mut observed = Vec::new();
+        wait_for_raw_cli_input_ready(
+            &output_receiver,
+            &mut observed,
+            0,
+            input_readiness.token(),
+            request,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        session_ready
             .send(())
-            .expect("signal raw CLI session start");
+            .expect("signal raw CLI session readiness");
     }
     if let Some(marker) = ready_marker {
         let mut observed = Vec::new();
@@ -750,7 +767,10 @@ fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
         }
     }
 
-    let output = wait_for_raw_cli_output_with_readers(child, (stdout_reader, stderr_reader));
+    let mut output = wait_for_raw_cli_output_with_readers(child, (stdout_reader, stderr_reader));
+    if let Some(input_readiness) = input_readiness.as_ref() {
+        output.stdout = input_readiness.strip_frames(&output.stdout);
+    }
     assert!(
         output.status.success(),
         "status={:?}\nstdout={}\nstderr={}",
@@ -909,6 +929,7 @@ fn configure_raw_cli_command(command: &mut Command) {
     let git_work_tree = raw_cli_git_fixture();
     command
         .env("COSH_SHELL_ISOLATED", "1")
+        .env("COSH_SHELL_INTEGRATION", "enhanced")
         .env("COSH_SHELL_RAW_SHELL", "bash")
         .env("COSH_SHELL_DEFAULT_SHELL", "bash")
         .env("COSH_SHELL_LANG", "en-US")

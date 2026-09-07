@@ -5,12 +5,17 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+mod common;
+
 fn run_with_tools(selection: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_cosh-core"))
+    let home = tempfile::tempdir().expect("temp home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-core"));
+    command
+        .env("HOME", home.path())
         .args(["--headless", "--bare", "--tools", selection])
-        .stdin(Stdio::null())
-        .output()
-        .expect("run cosh-core")
+        .stdin(Stdio::null());
+    common::opt_out_telemetry(&mut command, home.path());
+    command.output().expect("run cosh-core")
 }
 
 fn wait_for_output(mut child: Child, timeout: Duration) -> std::process::Output {
@@ -34,7 +39,8 @@ fn wait_for_output(mut child: Child, timeout: Duration) -> std::process::Output 
 
 fn run_invalid_tools_without_credentials(selection: &str) -> std::process::Output {
     let home = tempfile::tempdir().expect("temp home");
-    let child = Command::new(env!("CARGO_BIN_EXE_cosh-core"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-core"));
+    command
         .args(["--headless", "--bare", "--tools", selection])
         .env("HOME", home.path())
         .env("COSH_AI_PROVIDER", "cli-tools-no-auth")
@@ -46,9 +52,9 @@ fn run_invalid_tools_without_credentials(selection: &str) -> std::process::Outpu
         .env_remove("ALIBABA_CLOUD_SECURITY_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cosh-core");
+        .stderr(Stdio::piped());
+    common::opt_out_telemetry(&mut command, home.path());
+    let child = command.spawn().expect("spawn cosh-core");
 
     wait_for_output(child, Duration::from_secs(5))
 }
@@ -149,12 +155,15 @@ startup_timeout_ms = 1000
     )
     .expect("write cosh-core config");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cosh-core"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-core"));
+    command
         .args(["--headless", "--bare", "--tools", "mcp__fake__echo"])
         .env("HOME", home.path())
         .env("COSH_STATES_DIR", home.path().join("states"))
         .env_remove("COSH_AI_PROVIDER")
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    common::opt_out_telemetry(&mut command, home.path());
+    let output = command
         .output()
         .expect("run cosh-core with configured MCP tool");
 

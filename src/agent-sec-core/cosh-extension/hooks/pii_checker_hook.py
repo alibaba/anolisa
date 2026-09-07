@@ -36,8 +36,6 @@ _USER_INPUT_SOURCE = "user_input"
 _TOOL_INPUT_SOURCE = "tool_input"
 _TOOL_OUTPUT_SOURCE = "tool_output"
 _MODEL_OUTPUT_SOURCE = "model_output"
-_MAX_EVIDENCE_ITEMS = 3
-_MAX_EVIDENCE_CHARS = 80
 
 
 def _allow() -> str:
@@ -53,54 +51,44 @@ def _safe_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
-    value = " ".join(value.split())
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1] + "…"
+def _finding_risk(finding: Any, verdict: str) -> str:
+    """Return the user-facing risk for a structured scanner finding."""
+    if isinstance(finding, dict):
+        severity = _safe_text(finding.get("severity"))
+        if severity == "deny":
+            return "high"
+        if severity == "warn":
+            return "general"
+
+    return "high" if verdict == "deny" else "general"
+
+
+def _risk_summary(verdict: str, findings: list[Any]) -> str:
+    """Summarize finding counts without exposing scanner-internal fields."""
+    typed_findings = [finding for finding in findings if isinstance(finding, dict)]
+    high_count = sum(
+        1 for finding in typed_findings if _finding_risk(finding, verdict) == "high"
+    )
+    general_count = len(typed_findings) - high_count
+
+    if high_count and general_count:
+        return (
+            f"检测到 {len(typed_findings)} 项敏感信息"
+            f"（高风险 {high_count}、一般风险 {general_count}）"
+        )
+    if high_count:
+        return f"检测到 {high_count} 项高风险敏感信息"
+    return f"检测到 {general_count} 项一般风险敏感信息"
 
 
 def _format_pii_warning(
     verdict: str,
     findings: list[Any],
-    action_message: str = "本轮请求将继续处理。",
+    action_message: str = "本次仅提醒，未触发确认或阻断。",
 ) -> str:
-    """Build a minimal-disclosure warning from structured PII findings."""
-    typed_findings = [item for item in findings if isinstance(item, dict)]
-    count = len(typed_findings)
-    pii_types = sorted(
-        {
-            finding_type
-            for finding in typed_findings
-            if (finding_type := _safe_text(finding.get("type")))
-        }
-    )
-    severities = sorted(
-        {
-            severity
-            for finding in typed_findings
-            if (severity := _safe_text(finding.get("severity")))
-        }
-    )
-    redacted_evidence: list[str] = []
-    for finding in typed_findings:
-        evidence = _safe_text(finding.get("evidence_redacted"))
-        if evidence and evidence not in redacted_evidence:
-            redacted_evidence.append(_shorten(evidence))
-        if len(redacted_evidence) >= _MAX_EVIDENCE_ITEMS:
-            break
-
-    risk = "高风险敏感信息" if verdict == "deny" else "敏感信息"
-    parts = [
-        f"[pii-checker] 检测到 {count} 项{risk}",
-        f"类型：{', '.join(pii_types) if pii_types else 'unknown'}",
-    ]
-    if severities:
-        parts.append(f"严重级别：{', '.join(severities)}")
-    if redacted_evidence:
-        parts.append(f"脱敏示例：{', '.join(redacted_evidence)}")
-    parts.append(action_message)
-    return "；".join(parts)
+    """Build a concise warning without exposing internal labels or evidence."""
+    # Cosh strips this exact hook-name prefix from permissive notifications.
+    return f"[pii-checker] {_risk_summary(verdict, findings)}；{action_message}"
 
 
 def _scan_text(
@@ -229,7 +217,11 @@ def _format_cosh(
         verdict == "error" or unknown -> fail-open "allow"
     """
     verdict = _safe_text(scan_result.get("verdict")) or "pass"
-    findings = _as_list(scan_result.get("findings"))
+    findings = [
+        finding
+        for finding in _as_list(scan_result.get("findings"))
+        if isinstance(finding, dict)
+    ]
 
     if verdict == "pass" or not findings:
         return _allow()
@@ -238,37 +230,48 @@ def _format_cosh(
         return _allow()
 
     decision = "allow"
-    action_message = "本轮请求将继续处理。"
+    action_message = "本次仅提醒，未触发确认或阻断。"
+    if event_name in {"PostToolUse", "PostToolUseFailure"}:
+        action_message = (
+            "工具已经执行；本次仅提醒，未触发确认或阻断；"
+            "原始工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
+        )
 
     # A scanner warning never escalates into confirmation or blocking.
     if verdict == "deny" and policy == "ask":
         if event_name == "UserPromptSubmit":
             decision = "ask"
-            action_message = "需要确认后才能继续处理本轮请求。"
+            action_message = "当前策略要求确认，请确认后继续。"
         elif event_name == "PreToolUse":
             decision = "ask"
-            action_message = "需要确认后才能执行本次工具调用。"
-        else:
+            action_message = "当前策略要求确认，请确认后继续。"
+        elif event_name in {"PostToolUse", "PostToolUseFailure"}:
             action_message = (
-                "当前 hook 不支持确认，已 fallback 为 warn；本轮处理将继续。"
+                "工具已经执行；当前环节不支持确认/阻断，本次仅提醒，不会阻断；"
+                "原始工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
             )
+        else:
+            action_message = "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
     elif verdict == "deny" and policy == "block":
         if event_name == "UserPromptSubmit":
             decision = "block"
-            action_message = "本轮请求已被阻断。"
+            action_message = "当前策略已阻断本次请求。"
         elif event_name == "PreToolUse":
             decision = "block"
-            action_message = "本次工具调用已被阻断。"
+            action_message = "当前策略已阻断本次工具调用。"
         elif event_name == "PostToolUse":
             decision = "block"
             action_message = (
                 "工具已经执行；原始工具结果不会进入模型上下文，"
                 "已发生的外部副作用不会撤销。"
             )
-        else:
+        elif event_name == "PostToolUseFailure":
             action_message = (
-                "当前 hook 不支持阻断，已 fallback 为 warn；本轮处理将继续。"
+                "工具已经执行；当前环节不支持确认/阻断，本次仅提醒，不会阻断；"
+                "原始工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
             )
+        else:
+            action_message = "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
 
     return json.dumps(
         {

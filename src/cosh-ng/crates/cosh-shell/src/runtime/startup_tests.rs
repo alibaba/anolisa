@@ -1,11 +1,20 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use nix::pty::Winsize;
+
 use super::{
-    append_startup_auth_hint, extract_bootstrap_path, merge_path_lists, plan_startup_for_render,
-    raw_passthrough_args, record_visible_personal_impressions,
+    append_startup_auth_hint, bootstrap_path_probe_plan, extract_bootstrap_path,
+    merge_bootstrap_paths, merge_path_additions_at_anchors, merge_path_lists,
+    plan_startup_for_render, record_visible_personal_impressions,
     render_pending_recommendation_notice, startup_suggestion_mode, visible_personal_candidates,
-    write_startup_suggestion_card, StartupSuggestionMode,
+    write_startup_suggestion_card, BootstrapPathProbeIo, RawShellKind, StartupSuggestionMode,
+};
+#[cfg(target_os = "linux")]
+use super::{
+    bootstrap_path_command, run_bootstrap_path_probe, BootstrapPathProbeError,
+    BOOTSTRAP_PATH_PROBE_TIMEOUT,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -24,6 +33,14 @@ use crate::runtime::state::{
 };
 use crate::ui::RatatuiInlineRenderer;
 use crate::I18n;
+
+#[cfg(target_os = "linux")]
+const BOOTSTRAP_PATH_TEST_WINSIZE: Winsize = Winsize {
+    ws_row: 40,
+    ws_col: 100,
+    ws_xpixel: 0,
+    ws_ypixel: 0,
+};
 
 #[test]
 fn recommendation_notice_is_nonblocking_persisted_and_shown_once() {
@@ -527,43 +544,261 @@ fn bootstrap_path_merge_keeps_existing_and_common_dirs() {
 }
 
 #[test]
-fn raw_passthrough_args_strips_raw_adapter_for_dash_c() {
-    assert_eq!(
-        raw_passthrough_args(&[
-            "cosh-shell".to_string(),
-            "raw".to_string(),
-            "cosh-core".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ]),
-        Some(vec![
-            "cosh-shell".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ])
-    );
+fn bash_non_login_merge_preserves_login_profile_precedence() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let inherited_dir = root.path().join("inherited");
+    let prepend_dir = root.path().join("prepend");
+    let append_dir = root.path().join("append");
+    for directory in [&inherited_dir, &prepend_dir, &append_dir] {
+        std::fs::create_dir(directory).unwrap();
+        let command = directory.join("path-precedence-probe");
+        std::fs::write(&command, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let inherited = format!("{}:/usr/bin:/bin", inherited_dir.display());
+
+    for (login_path, expected) in [
+        (
+            format!("{}:{inherited}", prepend_dir.display()),
+            prepend_dir.join("path-precedence-probe"),
+        ),
+        (
+            format!("{inherited}:{}", append_dir.display()),
+            inherited_dir.join("path-precedence-probe"),
+        ),
+        (
+            format!("{}:/usr/local/bin:{inherited}", prepend_dir.display()),
+            prepend_dir.join("path-precedence-probe"),
+        ),
+        (
+            format!("/usr/local/bin:{inherited}:{}", append_dir.display()),
+            inherited_dir.join("path-precedence-probe"),
+        ),
+    ] {
+        let discovered = [Some(inherited.to_string()), Some(login_path.to_string())];
+        let merged = merge_bootstrap_paths(&RawShellKind::Bash, false, &discovered, &inherited);
+        let resolved = merged.split(':').find_map(|entry| {
+            let candidate = std::path::Path::new(entry).join("path-precedence-probe");
+            let metadata = candidate.metadata().ok()?;
+            (metadata.permissions().mode() & 0o111 != 0).then_some(candidate)
+        });
+
+        assert_eq!(resolved.as_deref(), Some(expected.as_path()), "{merged}");
+    }
 }
 
 #[test]
-fn raw_passthrough_args_preserves_shell_option() {
+fn bash_non_login_merge_adds_fallbacks_after_login_paths() {
+    for (base, login, expected) in [
+        (
+            "/usr/bin:/bin",
+            "/login:/usr/local/bin:/usr/bin:/bin",
+            "/login:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin",
+        ),
+        (
+            "/usr/bin:/bin",
+            "/usr/bin:/bin:/usr/local/bin:/login",
+            "/usr/bin:/bin:/usr/local/bin:/login:/opt/homebrew/bin:/usr/sbin:/sbin",
+        ),
+        (
+            "/usr/bin:/usr/local/bin:/bin",
+            "/usr/bin:/login:/usr/local/bin:/bin",
+            "/usr/bin:/login:/usr/local/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin",
+        ),
+    ] {
+        assert_eq!(
+            merge_bootstrap_paths(
+                &RawShellKind::Bash,
+                false,
+                &[Some(base.to_string()), Some(login.to_string())],
+                base,
+            ),
+            expected,
+            "base={base}; login={login}",
+        );
+    }
+}
+
+#[test]
+fn login_path_additions_keep_internal_anchor_order() {
     assert_eq!(
-        raw_passthrough_args(&[
-            "cosh-shell".to_string(),
-            "raw".to_string(),
-            "--shell".to_string(),
-            "bash".to_string(),
-            "cosh-core".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ]),
-        Some(vec![
-            "cosh-shell".to_string(),
-            "--shell".to_string(),
-            "bash".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ])
+        merge_path_additions_at_anchors(
+            "/early:/usr/bin:/middle:/bin:/late",
+            "/rc:/usr/bin:/bin:/fallback",
+        ),
+        "/rc:/early:/usr/bin:/middle:/bin:/late:/fallback"
     );
+}
+
+#[cfg(target_os = "linux")]
+fn probe_bash_path(
+    home: &std::path::Path,
+    flags: &str,
+    io: BootstrapPathProbeIo,
+) -> Result<String, BootstrapPathProbeError> {
+    let mut command = bootstrap_path_command("bash", flags);
+    command
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env_remove("BASH_ENV")
+        .env_remove("ENV");
+    run_bootstrap_path_probe(
+        command,
+        BOOTSTRAP_PATH_PROBE_TIMEOUT,
+        io,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+    )
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn bash_non_login_probe_reads_bashrc_then_interactive_login_path() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "export PATH=\"$HOME/rc-only:$PATH\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".bash_profile"),
+        "case $- in *i*) [ -t 0 ] && [ -t 1 ] && \
+         export PATH=\"$HOME/login-only:$PATH\";; esac\n",
+    )
+    .unwrap();
+    let (_, probes) = bootstrap_path_probe_plan(&RawShellKind::Bash, false, true).unwrap();
+
+    let discovered = probes
+        .iter()
+        .map(|probe| Some(probe_bash_path(home.path(), probe.flags, probe.io).unwrap()))
+        .collect::<Vec<_>>();
+    let merged = merge_bootstrap_paths(&RawShellKind::Bash, false, &discovered, "/usr/bin:/bin");
+    let rc = format!("{}/rc-only", home.path().display());
+    let login = format!("{}/login-only", home.path().display());
+
+    assert!(merged.split(':').any(|entry| entry == rc));
+    assert!(merged.split(':').any(|entry| entry == login));
+    // Both startup sources must beat the inherited command directory during
+    // bootstrap. The managed non-login Bash sources .bashrc again afterward,
+    // so .bashrc still owns the final interactive-session ordering.
+    let inherited = merged.find("/usr/bin").unwrap();
+    assert!(merged.find(&login).unwrap() < inherited);
+    assert!(merged.find(&rc).unwrap() < inherited);
+    assert_eq!(probes[0].flags, "-ic");
+    assert_eq!(probes[0].io, BootstrapPathProbeIo::Pipes);
+    assert_eq!(probes[1].flags, "-lic");
+    assert_eq!(probes[1].io, BootstrapPathProbeIo::Pty);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn bash_login_probe_uses_standard_profile_precedence() {
+    let home = tempfile::tempdir().unwrap();
+    for (file, entry) in [
+        (".bash_profile", "bash-profile"),
+        (".bash_login", "bash-login"),
+        (".profile", "profile"),
+    ] {
+        std::fs::write(
+            home.path().join(file),
+            format!("export PATH=\"$HOME/{entry}:$PATH\"\n"),
+        )
+        .unwrap();
+    }
+
+    let profile_path = probe_bash_path(home.path(), "-lic", BootstrapPathProbeIo::Pty).unwrap();
+    assert!(profile_path.contains("/bash-profile:"), "{profile_path}");
+    assert!(!profile_path.contains("/bash-login:"), "{profile_path}");
+    assert!(!profile_path.contains("/profile:"), "{profile_path}");
+
+    std::fs::remove_file(home.path().join(".bash_profile")).unwrap();
+    let bash_login_path = probe_bash_path(home.path(), "-lic", BootstrapPathProbeIo::Pty).unwrap();
+    assert!(
+        bash_login_path.contains("/bash-login:"),
+        "{bash_login_path}"
+    );
+    assert!(!bash_login_path.contains("/profile:"), "{bash_login_path}");
+
+    std::fs::remove_file(home.path().join(".bash_login")).unwrap();
+    let profile_path = probe_bash_path(home.path(), "-lic", BootstrapPathProbeIo::Pty).unwrap();
+    assert!(profile_path.contains("/profile:"), "{profile_path}");
+}
+
+#[test]
+fn bootstrap_path_probe_plan_honors_disabled_switch() {
+    assert!(bootstrap_path_probe_plan(&RawShellKind::Bash, false, false).is_none());
+    assert!(bootstrap_path_probe_plan(&RawShellKind::Bash, true, false).is_none());
+    assert!(bootstrap_path_probe_plan(&RawShellKind::Zsh, false, false).is_none());
+}
+
+#[test]
+fn bootstrap_path_probe_plan_preserves_login_and_zsh_modes() {
+    let (_, bash_login) = bootstrap_path_probe_plan(&RawShellKind::Bash, true, true).unwrap();
+    assert_eq!(bash_login.len(), 1);
+    assert_eq!(bash_login[0].flags, "-lic");
+    assert_eq!(bash_login[0].io, BootstrapPathProbeIo::Pipes);
+
+    let (_, zsh_non_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, false, true).unwrap();
+    assert_eq!(zsh_non_login.len(), 1);
+    assert_eq!(zsh_non_login[0].flags, "-ic");
+    assert_eq!(zsh_non_login[0].io, BootstrapPathProbeIo::Pipes);
+    let (_, zsh_login) = bootstrap_path_probe_plan(&RawShellKind::Zsh, true, true).unwrap();
+    assert_eq!(zsh_login.len(), 1);
+    assert_eq!(zsh_login[0].flags, "-lic");
+    assert_eq!(zsh_login[0].io, BootstrapPathProbeIo::Pipes);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn bash_login_probe_reports_startup_failure() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".bash_profile"), "exit 23\n").unwrap();
+
+    let error = probe_bash_path(home.path(), "-lic", BootstrapPathProbeIo::Pty).unwrap_err();
+    assert!(matches!(
+        error,
+        BootstrapPathProbeError::Failed(status) if status.code() == Some(23)
+    ));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn bash_login_probe_timeout_preserves_non_login_path() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "export PATH=\"$HOME/rc-only:$PATH\"\n",
+    )
+    .unwrap();
+    std::fs::write(home.path().join(".bash_profile"), "sleep 30\n").unwrap();
+
+    let non_login = probe_bash_path(home.path(), "-ic", BootstrapPathProbeIo::Pipes).unwrap();
+    let mut login_command = bootstrap_path_command("bash", "-lic");
+    login_command
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env_remove("BASH_ENV")
+        .env_remove("ENV");
+    let started = Instant::now();
+    let error = run_bootstrap_path_probe(
+        login_command,
+        Duration::from_millis(50),
+        BootstrapPathProbeIo::Pty,
+        &BOOTSTRAP_PATH_TEST_WINSIZE,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        BootstrapPathProbeError::TimedOut(timeout) if timeout == Duration::from_millis(50)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let discovered = [Some(non_login), None];
+    let merged = merge_bootstrap_paths(&RawShellKind::Bash, false, &discovered, "/usr/bin:/bin");
+    let rc = format!("{}/rc-only", home.path().display());
+    assert!(merged.split(':').any(|entry| entry == rc));
+    assert!(merged.find(&rc).unwrap() < merged.find("/usr/bin").unwrap());
 }
 
 #[test]

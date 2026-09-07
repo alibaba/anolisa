@@ -12,6 +12,7 @@ use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::evidence_delivery::record_readonly_compound_completion;
 use crate::runtime::prelude::*;
 use crate::tools::command_risk::{RiskImpact, SideEffectClass};
+use crate::tools::known_provider_tool;
 use crate::tools::readonly_compound::{build_readonly_compound_plan, run_readonly_compound};
 use crate::tools::{ReadonlyPipelineConfig, ReadonlyPipelineError, ReadonlyPipelineOutput};
 
@@ -44,6 +45,12 @@ pub(crate) fn render_trusted_tool<W: Write>(
         if request.hook_requires_approval {
             continue;
         }
+        // Trust may bypass approval only for identities in the explicit
+        // provider catalog. Unknown provider tools stay pending for an
+        // explicit user decision instead of inheriting Trust implicitly.
+        if event_tool_name(event).is_some_and(|name| known_provider_tool(name).is_none()) {
+            continue;
+        }
         if provider_tool_call_fallback && !request_is_executable_bash_tool(&request) {
             continue;
         }
@@ -59,9 +66,25 @@ pub(crate) fn render_trusted_tool<W: Write>(
         }
         if provider_tool_call_fallback
             && request_is_executable_bash_tool(&request)
+            && provider_native_shell_result_is_hook_block(state, &request)
+        {
+            // The core verdict arrived inside the staging window as a block:
+            // preserve the rejection instead of replaying an approval.
+            record_hook_blocked_staged_request(state, request);
+            continue;
+        }
+        if provider_tool_call_fallback
+            && request_is_executable_bash_tool(&request)
             && provider_native_shell_result_already_visible(state, &request)
         {
             render_completed_provider_native_shell_request(state, request, output)?;
+            continue;
+        }
+        if provider_tool_call_fallback && active_run_is_cosh_core(state) {
+            // M3 (#2067): a grace-released bare ToolCall has no core-visible
+            // verdict; executing it here is what bypassed hook blocks. Journal
+            // the desync and leave execution to the core-owned channels.
+            record_staged_unresolved_request(state, request);
             continue;
         }
         if !provider_tool_call_fallback && defer_fallback_bash_tool(state, request.clone(), output)?
@@ -69,9 +92,13 @@ pub(crate) fn render_trusted_tool<W: Write>(
             render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
-        if handle_shell_request_policy(state, run_request, &request) {
-            render_approval_requests(state, &blocked_approval_ids, output)?;
-            return Ok(true);
+        match handle_shell_request_policy(state, run_request, &request) {
+            ShellRequestPolicyHandling::Continue => {}
+            ShellRequestPolicyHandling::Refused => continue,
+            ShellRequestPolicyHandling::AwaitingTerminalSweep => {
+                render_approval_requests(state, &blocked_approval_ids, output)?;
+                return Ok(true);
+            }
         }
         if trust_mode_blocks_shell_request(&mut request, AssessmentSource::ProviderShellTool) {
             blocked_approval_ids.extend(record_approval_requests(
@@ -100,6 +127,14 @@ pub(crate) fn render_trusted_tool<W: Write>(
     Ok(false)
 }
 
+fn event_tool_name(event: &GovernedEvent) -> Option<&str> {
+    match &event.event {
+        AgentEvent::ToolCall { name, .. } => Some(name),
+        AgentEvent::ToolPermissionRequest { tool_name, .. } => Some(tool_name),
+        _ => None,
+    }
+}
+
 /// Only the irrecoverable verdicts stall the auto-approval paths: a
 /// confirmed SystemControl assessment, or an unresolvable launcher chain
 /// that may hide one. Neither Trust mode nor a session trust key may
@@ -117,6 +152,17 @@ fn assessment_requires_interactive_approval(assessment: &CommandAssessment) -> b
         .side_effects
         .contains(&SideEffectClass::SystemControl)
         || assessment.reasons.contains(&"unresolvable-launcher-chain")
+}
+
+/// M3 is scoped to the cosh-core driver: claude/qwen also report
+/// `control_protocol`, but they have no core-side verdict channel, so their
+/// grace-release fallback remains the only trust surface (I4/R4).
+fn active_run_is_cosh_core(state: &InlineState) -> bool {
+    state
+        .agent_run
+        .active
+        .as_ref()
+        .is_some_and(|run| run.provider_name == crate::adapter::COSH_CORE_PROVIDER_NAME)
 }
 
 fn trust_mode_blocks_shell_request(
@@ -179,9 +225,23 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         }
         if provider_tool_call_fallback
             && request_is_executable_bash_tool(&request)
+            && provider_native_shell_result_is_hook_block(state, &request)
+        {
+            record_hook_blocked_staged_request(state, request);
+            continue;
+        }
+        if provider_tool_call_fallback
+            && request_is_executable_bash_tool(&request)
             && provider_native_shell_result_already_visible(state, &request)
         {
             render_completed_provider_native_shell_request(state, request, output)?;
+            continue;
+        }
+        if provider_tool_call_fallback && active_run_is_cosh_core(state) {
+            // M3 (#2067): a grace-released bare ToolCall has no core-visible
+            // verdict; executing it here is what bypassed hook blocks. Journal
+            // the desync and leave execution to the core-owned channels.
+            record_staged_unresolved_request(state, request);
             continue;
         }
         if request_is_readonly_builtin_tool(&request) {
@@ -197,8 +257,13 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             }
             continue;
         }
-        if handle_shell_request_policy(state, run_request, &request) {
-            return Ok(true);
+        match handle_shell_request_policy(state, run_request, &request) {
+            ShellRequestPolicyHandling::Continue => {}
+            ShellRequestPolicyHandling::Refused => continue,
+            ShellRequestPolicyHandling::AwaitingTerminalSweep => {
+                render_approval_requests(state, &blocked_approval_ids, output)?;
+                return Ok(true);
+            }
         }
 
         let raw_cmd = request
@@ -291,6 +356,27 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
 
     render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
+}
+
+/// The core's machine-readable blocked verdict: the M2 hook-block release
+/// marks the provider-native result with `cosh_hook_verdict: "blocked"` on
+/// the wire, and the adapter surfaces it as a ToolHookVerdict event that
+/// sets this flag (#2156). Keying on the flag covers every fail-closed
+/// morphology (block/deny/reject, hook failure, message-less blocks) and —
+/// unlike result text — cannot be forged by the command's own output.
+fn provider_native_shell_result_is_hook_block(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> bool {
+    if request.provider_shell_request_kind.is_control_permission() {
+        return false;
+    }
+    let Some(tool_id) = request.tool_use_id.as_deref() else {
+        return false;
+    };
+    state
+        .control
+        .provider_hook_result_is_blocked(&request.run_id, tool_id)
 }
 
 fn provider_native_shell_result_already_visible(
@@ -394,23 +480,38 @@ pub(super) enum ShellRequestPolicyDecision {
     DenyDuplicateHostExecuted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellRequestPolicyHandling {
+    Continue,
+    Refused,
+    AwaitingTerminalSweep,
+}
+
+/// Applies the shell-request policy gate to one event.
+///
+/// A delivered refusal is event-local, so callers keep processing the batch.
+/// Without a live owner, callers stop before the tail record pass so the
+/// detached terminal sweep retains responsibility for the response.
 fn handle_shell_request_policy(
-    state: &InlineState,
+    state: &mut InlineState,
     run_request: Option<&AgentRequest>,
     request: &RuntimeApprovalRequest,
-) -> bool {
-    match shell_request_policy_decision(state, run_request, request) {
-        ShellRequestPolicyDecision::Continue => false,
+) -> ShellRequestPolicyHandling {
+    let reason = match shell_request_policy_decision(state, run_request, request) {
+        ShellRequestPolicyDecision::Continue => return ShellRequestPolicyHandling::Continue,
         ShellRequestPolicyDecision::DenyAnalysisOnly => {
-            deny_shell_tool_during_analysis_continuation(state, request);
-            true
+            crate::adapter::ANALYSIS_ONLY_SHELL_DENY_MESSAGE
         }
         ShellRequestPolicyDecision::DenyDuplicateHostExecuted => {
-            deny_duplicate_host_executed_shell_request(state, request);
-            true
+            DUPLICATE_HOST_EXECUTED_SHELL_DENY_MESSAGE
         }
-    }
+    };
+    deny_policy_refused_shell_request(state, request, reason)
 }
+
+/// Refusal reason for a shell tool call the host already executed once and
+/// whose result was delivered through the control protocol.
+const DUPLICATE_HOST_EXECUTED_SHELL_DENY_MESSAGE: &str = "Duplicate shell tool request was already completed via host-executed shell result; no second foreground execution was run.";
 
 pub(super) fn shell_request_policy_decision(
     state: &InlineState,
@@ -829,15 +930,24 @@ fn respond_auto_approval_to_provider(
     true
 }
 
-fn deny_shell_tool_during_analysis_continuation(
-    state: &InlineState,
+/// Refuses one shell request on policy grounds: answer the owning provider
+/// when there is a control request to answer, then record the refusal.
+///
+/// A successfully delivered control refusal gets a terminal home so the tail
+/// pass cannot resurface it. If delivery is unavailable, the request remains
+/// unhomed for the active or detached terminal sweep. Streamed fallbacks have
+/// no provider response and are recorded as shell-local refusals.
+fn deny_policy_refused_shell_request(
+    state: &mut InlineState,
     request: &RuntimeApprovalRequest,
-) -> bool {
-    let Some(request_id) = request.request_id.as_ref() else {
-        return false;
+    reason: &str,
+) -> ShellRequestPolicyHandling {
+    let Some(request_id) = request.request_id.as_deref() else {
+        record_policy_refused_request(state, request.clone());
+        return ShellRequestPolicyHandling::Refused;
     };
     let Some(active_run) = state.agent_run.active.as_ref() else {
-        return true;
+        return ShellRequestPolicyHandling::AwaitingTerminalSweep;
     };
     let response = provider_deny_response(
         ProviderResponseInput {
@@ -845,30 +955,11 @@ fn deny_shell_tool_during_analysis_continuation(
             tool_use_id: request.tool_use_id.as_deref(),
             tool_input: request.tool_input.as_ref(),
         },
-        "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.".to_string(),
+        reason.to_string(),
     );
-    let _ = active_run.handle.respond_approval(response);
-    true
-}
-
-fn deny_duplicate_host_executed_shell_request(
-    state: &InlineState,
-    request: &RuntimeApprovalRequest,
-) -> bool {
-    let Some(request_id) = request.request_id.as_ref() else {
-        return false;
-    };
-    let Some(active_run) = state.agent_run.active.as_ref() else {
-        return true;
-    };
-    let response = provider_deny_response(
-        ProviderResponseInput {
-            request_id,
-            tool_use_id: request.tool_use_id.as_deref(),
-            tool_input: request.tool_input.as_ref(),
-        },
-        "Duplicate shell tool request was already completed via host-executed shell result; no second foreground execution was run.".to_string(),
-    );
-    let _ = active_run.handle.respond_approval(response);
-    true
+    if active_run.handle.respond_approval(response).is_err() {
+        return ShellRequestPolicyHandling::AwaitingTerminalSweep;
+    }
+    record_policy_refused_request(state, request.clone());
+    ShellRequestPolicyHandling::Refused
 }

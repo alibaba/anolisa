@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::super::{PromptGhostCandidate, RawInputCapture};
@@ -8,6 +9,24 @@ use super::*;
 struct IdleReader {
     reads: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
+}
+
+#[test]
+fn only_nonempty_shell_lines_add_pending_boundaries() {
+    let classifier = InputClassifier::default();
+    let mut state = RawInputRelayState::default();
+
+    assert!(!is_pending_shell_submission(b"", &state, &classifier));
+    assert!(!is_pending_shell_submission(b"  \t", &state, &classifier));
+    assert!(!is_pending_shell_submission(
+        b"?? what happened",
+        &state,
+        &classifier
+    ));
+    assert!(is_pending_shell_submission(b"echo ok", &state, &classifier));
+
+    state.native_line_state.observe_shell_bytes(b"echo ok");
+    assert!(is_pending_shell_submission(b"", &state, &classifier));
 }
 
 impl Read for IdleReader {
@@ -30,7 +49,7 @@ fn idle_reader_backs_off_between_would_block_retries() {
     let reader = thread::spawn({
         let reads = reads.clone();
         let stop = stop.clone();
-        move || read_input_chunks(IdleReader { reads, stop }, sender, input_mode)
+        move || read_input_chunks(IdleReader { reads, stop }, sender, input_mode, None)
     });
 
     thread::sleep(Duration::from_millis(120));
@@ -45,6 +64,45 @@ fn idle_reader_backs_off_between_would_block_retries() {
         "idle reader retried {} times",
         reads.load(Ordering::Relaxed)
     );
+}
+
+#[test]
+fn fd_reader_waits_for_readiness_without_backoff() {
+    let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
+    let flags = unsafe { nix::libc::fcntl(read_fd.as_raw_fd(), nix::libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe {
+            nix::libc::fcntl(
+                read_fd.as_raw_fd(),
+                nix::libc::F_SETFL,
+                flags | nix::libc::O_NONBLOCK,
+            )
+        },
+        0
+    );
+    let input_fd = read_fd.as_raw_fd();
+    let input = File::from(read_fd);
+    let mut writer = File::from(write_fd);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let reader = thread::spawn(move || {
+        read_input_chunks(input, sender, input_mode, Some(input_fd));
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    std::io::Write::write_all(&mut writer, b"x").expect("write input");
+    let received = receiver
+        .recv_timeout(Duration::from_millis(250))
+        .expect("poll wakes for input");
+    assert!(matches!(received, InputRead::Bytes { bytes, .. } if bytes == b"x"));
+
+    drop(writer);
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(250)),
+        Ok(InputRead::Eof)
+    ));
+    reader.join().expect("fd reader");
 }
 
 #[test]
@@ -105,6 +163,7 @@ fn relay_uses_the_validated_mode_snapshot() {
             read_ahead: None,
             expected_capture_generation: None,
             observed_mode: Some(&observed),
+            pending_shell_submits: 0,
         },
     )
     .expect("relay validated snapshot");
@@ -170,6 +229,7 @@ fn prompt_ghost_timeout_refreshes_the_validated_snapshot() {
             read_ahead: None,
             expected_capture_generation: None,
             observed_mode: Some(&observed),
+            pending_shell_submits: 0,
         },
     )
     .expect("flush escape and relay tab");
@@ -260,6 +320,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
             read_ahead: None,
             expected_capture_generation: Some(7),
             observed_mode: None,
+            pending_shell_submits: 0,
         },
     )
     .expect("buffer partial replaced ghost suffix");
@@ -346,6 +407,7 @@ fn ghost_suffix_does_not_consume_input_from_a_new_capture_generation() {
             read_ahead: None,
             expected_capture_generation: Some(8),
             observed_mode: None,
+            pending_shell_submits: 0,
         },
     )
     .expect("relay new generation input");

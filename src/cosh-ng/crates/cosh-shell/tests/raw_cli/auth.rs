@@ -11,6 +11,13 @@ if [ "$1" = "--registry" ]; then
     *'"action":"state"'*)
       printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"templates":[{"id":"openai_compat","label":"OpenAI Compatible","fields":[{"name":"base_url","label":"Base URL","hint":null,"secret":false,"required":true,"placeholder":null},{"name":"api_key","label":"API Key","hint":null,"secret":true,"required":true,"placeholder":null},{"name":"model","label":"Model","hint":null,"secret":false,"required":true,"placeholder":null}]}],"saved_providers":[]}}'
       ;;
+    *'"action":"configure"'*)
+      if [ -n "$AUTH_CONFIGURE_ERROR" ]; then
+        printf '%s\n' '{"type":"registry_response","request_id":"reg","success":false,"data":{"error_code":"invalid_credentials"},"error":"The API key was rejected. Check the API Key and try again."}'
+      else
+        printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"configured":true}}'
+      fi
+      ;;
     *)
       printf '%s\n' '{"type":"registry_response","request_id":"reg","success":true,"data":{"model":"main-model","configured":true}}'
       ;;
@@ -22,6 +29,57 @@ printf '%s\n' '{"type":"control_response","response":{"subtype":"success","reque
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"auth-inline","model":"main-model","tools":[]}'
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"auth-inline","is_error":false,"result":"done"}'
 "#;
+
+#[test]
+fn raw_cli_auth_failure_keeps_panel_and_never_claims_success() {
+    let home = temp_shell_home("auth-preflight-failure");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(&cosh_core_path, AUTH_REGISTRY_CORE);
+    let registry_log = home.join("registry.log");
+
+    let home_str = home.to_string_lossy().to_string();
+    let core_str = cosh_core_path.to_string_lossy().to_string();
+    let log_str = registry_log.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "cosh-core",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("COSH_CORE_PATH", &core_str),
+            ("AUTH_REGISTRY_LOG", &log_str),
+            ("AUTH_CONFIGURE_ERROR", "1"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$", b"/auth\n".as_slice()),
+            ("Left/Right move | Enter send", b"\n".as_slice()),
+            ("Enter Provider ID", b"test-provider\n".as_slice()),
+            ("Enter Base URL", b"http://127.0.0.1:1/v1\n".as_slice()),
+            ("Enter API Key", b"sk-rejected\n".as_slice()),
+            ("Enter Model", b"test-model\n".as_slice()),
+            ("Credentials were not saved", b"".as_slice()),
+        ],
+    );
+    let requests = fs::read_to_string(&registry_log).unwrap_or_default();
+    let _ = fs::remove_dir_all(&home);
+    let compact = compact_terminal_words(&output);
+
+    assert!(compact.contains("Validating configuration..."), "{output}");
+    assert!(
+        compact.contains("Checking endpoint, credentials, and model."),
+        "{output}"
+    );
+    assert!(compact.contains("Credentials were not saved"), "{output}");
+    let failure = compact
+        .rfind("Credentials were not saved")
+        .expect("failure panel is present");
+    assert!(compact[failure..].contains("Enter API Key"), "{output}");
+    assert!(!compact.contains("Auth configured"), "{output}");
+    assert!(!compact.contains("credentials saved"), "{output}");
+    assert_eq!(action_count(&requests, "configure"), 1, "{requests}");
+}
 
 /// A dotted Provider ID must be rejected on the spot instead of at the final `configure`.
 #[test]

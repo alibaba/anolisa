@@ -25,6 +25,7 @@ BuildRequires:  npm
 
 Requires:       rsync
 Requires:       btrfs-progs
+Provides:       anolisa-component(ws-ckpt)
 
 %description
 ws-ckpt is an AI-oriented filesystem snapshot tool. It supports workspace
@@ -137,6 +138,26 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.5-1
+- Fixed intermittent bootstrap failure when all loop devices are in use
+- Scoped sidecar preStop loop cleanup to ws-ckpt-owned devices only
+- Added bilingual sidecar deployment guide
+
+* Fri Aug 28 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.4-1
+- Added guarded checkpoint protocol with identity-fenced snapshot creation and crash-verifiable state
+- Fixed interrupted rollback state lost on daemon restart, ambiguous candidates preserved instead of deleted
+- Fixed config --global to verify the daemon actually loaded the written config file
+- Fixed sidecar deployment example to share /etc/ws-ckpt so global config reaches the daemon
+- Fixed error hints for containerized deployments and daemon mount-namespace visibility
+
+* Wed Aug 19 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.3-1
+- Added k8s sidecar containerized deployment support
+- Fixed daemon memory leak under sustained checkpoint workloads (OOM)
+- Fixed loop-device checkpoint latency under concurrent IO (up to 5x improvement)
+- Fixed bootstrap failure leaving orphan images and silent exit on startup errors
+- Fixed init cryptic EBUSY on already-mounted workspace path
+- Added RPM component identity declaration for adapter discovery
+
 * Thu Jul 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.2-1
 - Added an telemetry gate to ops log writes
 - Fixed auto-recover orphan .pre-init-bak from interrupted init

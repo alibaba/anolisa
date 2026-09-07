@@ -1,33 +1,16 @@
 # Tokenless build orchestration
 # Usage: just build       (setup rtk + build all)
 #        just setup-rtk   (clone + patch rtk only)
-#        just build-toon  (install toon binary)
 
-rtk_tag   := "v0.43.0"
-toon_ver  := "0.5.0"
 rtk_dir   := "third_party/rtk"
-patch_dir := "third_party/patches"
 
 # Default: list available recipes
 default:
     @just --list
 
-# Clone rtk from GitHub and apply tokenless patches
+# Fetch the pinned RTK commit and apply Tokenless patches
 setup-rtk:
-    @if [ ! -f {{rtk_dir}}/Cargo.toml ]; then \
-        echo "Cloning rtk {{rtk_tag}} from GitHub..."; \
-        git clone --depth 1 --branch {{rtk_tag}} \
-            https://github.com/rtk-ai/rtk.git {{rtk_dir}}; \
-        echo "Applying tokenless stats patch..."; \
-        patch --forward -p1 --no-backup-if-mismatch \
-            -d {{rtk_dir}} < {{patch_dir}}/rtk-tokenless-stats.patch && \
-        echo "Applying pytest error report patch..."; \
-        patch --forward -p1 --no-backup-if-mismatch \
-            -d {{rtk_dir}} < {{patch_dir}}/rtk-pytest-error-report.patch && \
-        echo "rtk setup complete."; \
-    else \
-        echo "rtk already set up ({{rtk_dir}}/Cargo.toml exists)."; \
-    fi
+    bash scripts/setup-rtk.sh {{rtk_dir}}
 
 # Remove cloned rtk directory (use when switching versions or re-patching)
 clean-rtk:
@@ -39,12 +22,9 @@ build: setup-rtk
     cargo build --release
     cargo build --release --manifest-path {{rtk_dir}}/Cargo.toml
 
-# Build toon (standalone binary, installed via cargo install)
-build-toon:
-    cargo install toon-format --version {{toon_ver}} --locked
-
-# Build everything (tokenless + rtk + toon)
-build-all: build build-toon
+# Build everything (tokenless + rtk; TOON is linked in via the
+# toon-format library crate)
+build-all: build
 
 # Run tokenless crate tests (rtk excluded — vendored third-party)
 test: setup-rtk
@@ -60,4 +40,3 @@ verify: build-all
     @echo "=== Verification ==="
     target/release/tokenless --version || echo "tokenless: FAILED"
     {{rtk_dir}}/target/release/rtk --version || echo "rtk: FAILED"
-    toon --version || echo "toon: FAILED"

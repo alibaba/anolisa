@@ -52,6 +52,12 @@ install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 %post
 %systemd_post agentsight-enforcer.service
 %systemd_post agentsight.service
+# Fresh install: surface opt-in features that are disabled by default.
+if [ "$1" -eq 1 ]; then
+    echo "AgentSight: dead-loop detection/auto-kill is disabled by default."
+    echo "  To enable: set \"deadloop\": {\"enabled\": true} in /etc/agentsight/config.json,"
+    echo "  then run: systemctl reload agentsight.service"
+fi
 
 %preun
 %systemd_preun agentsight.service

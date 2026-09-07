@@ -6,6 +6,7 @@ use agentsight_enforcement_protocol::{
     CredentialExfiltrationPolicy, DestinationClass, PolicyDecision, PolicyMode, SecurityEvent,
     SecurityEventKind,
 };
+use std::collections::HashMap;
 use std::collections::HashSet;
 use thiserror::Error;
 use uuid::Uuid;
@@ -110,8 +111,13 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence error when the count fails.
-    pub fn case_count(&self) -> Result<u64, AuditError> {
-        self.store.case_count()
+    pub fn case_count(
+        &self,
+        agent_id: Option<&str>,
+        status: Option<&str>,
+        blocked: Option<bool>,
+    ) -> Result<u64, AuditError> {
+        self.store.case_count(agent_id, status, blocked)
     }
 
     /// Returns complete correlated-case totals for summary views.
@@ -128,8 +134,36 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence or stored-data error when the query fails.
-    pub fn cases(&self, limit: usize, offset: i64) -> Result<Vec<RiskCase>, AuditError> {
-        self.store.list_cases(limit, offset)
+    pub fn cases(
+        &self,
+        limit: usize,
+        offset: i64,
+        agent_id: Option<&str>,
+        status: Option<&str>,
+        blocked: Option<bool>,
+    ) -> Result<Vec<RiskCase>, AuditError> {
+        self.store
+            .list_cases(limit, offset, agent_id, status, blocked)
+    }
+
+    /// Returns a mapping from (agent_id, policy_id) to the most recent case_id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed persistence or stored-data error when the query fails.
+    pub fn case_index_by_agent_policy(
+        &self,
+    ) -> Result<HashMap<(String, String, String), Uuid>, AuditError> {
+        self.store.case_index_by_agent_policy()
+    }
+
+    /// Returns a mapping from event_id to case_id using the precise
+    /// risk_evidence_links table.
+    pub fn case_ids_for_events(
+        &self,
+        event_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Uuid>, AuditError> {
+        self.store.case_ids_for_events(event_ids)
     }
 
     /// Returns one risk case and its ordered immutable evidence.

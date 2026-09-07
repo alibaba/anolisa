@@ -515,7 +515,11 @@ def test_qwen_pii_hook_blocks_deny_verdicts(tmp_path) -> None:
     assert post_tool_output["continue"] is False
     assert post_tool_output["decision"] == "block"
     assert post_tool_output["stopReason"] == post_tool_output["reason"]
-    assert "[REDACTED]" in post_tool_output["reason"]
+    assert "high-risk sensitive data" in post_tool_output["reason"]
+    assert "tool has already run" in post_tool_output["reason"]
+    assert "raw output will not enter model context" in post_tool_output["reason"]
+    assert "external side effects were not undone" in post_tool_output["reason"]
+    assert "[REDACTED]" not in post_tool_output["reason"]
     assert secret not in post_tool_proc.stdout
 
     failure_proc = _run_hook(

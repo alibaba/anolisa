@@ -1,10 +1,10 @@
-//! Backend-neutral command execution seam for host package queries.
+//! Backend-neutral command execution seam for host process boundaries.
 //!
 //! [`CommandRunner`] abstracts spawning a process and capturing its output so
-//! that query backends can be tested with a fake runner instead of shelling
-//! out to real `rpm`/`dnf`. The runner stays pure: spawn failures surface as
+//! that process-backed boundaries can be tested with a fake runner instead of
+//! changing the host. The runner stays pure: spawn failures surface as
 //! [`std::io::Error`] and business-level exit-code interpretation lives in the
-//! query layer that consumes the runner.
+//! boundary that consumes the runner.
 
 use std::process::Command;
 
@@ -57,5 +57,37 @@ impl CommandRunner for SystemCommandRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+/// Runs real [`std::process::Command`]s with the caller's environment.
+///
+/// Use this runner when command diagnostics are user-visible and must retain
+/// the caller's locale.
+pub struct InheritedLocaleCommandRunner;
+
+impl CommandRunner for InheritedLocaleCommandRunner {
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+        let output = Command::new(program).args(args).output()?;
+        Ok(CommandOutput {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_locale_runner_preserves_lc_all() {
+        let output = InheritedLocaleCommandRunner
+            .run("sh", &["-c", "printf %s \"$LC_ALL\""])
+            .expect("shell should run");
+
+        assert_eq!(output.code, Some(0));
+        assert_eq!(output.stdout, std::env::var("LC_ALL").unwrap_or_default());
     }
 }

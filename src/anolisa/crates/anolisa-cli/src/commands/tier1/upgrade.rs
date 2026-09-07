@@ -37,6 +37,7 @@ use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, ManagementRelation, NativePm, Observation,
     PackageIdentity, ProviderBinding,
 };
+use anolisa_core::execution::{CommandOutcomeStatus, ExecutionIntent};
 use anolisa_core::facts::{JournalEvidence, JournalInventory};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::state::{ObjectKind, OperationRecord};
@@ -44,24 +45,24 @@ use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
-use anolisa_platform::privilege;
-use anolisa_platform::rpm_query::RpmPackageQuery;
-use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::update::check::{
-    self, ACTION_ERROR, ACTION_INSTALL, ACTION_NOOP, ACTION_RECONCILE, ACTION_UNSUPPORTED,
+    ACTION_ERROR, ACTION_INSTALL, ACTION_NOOP, ACTION_RECONCILE, ACTION_UNSUPPORTED,
     ACTION_UNSUPPORTED_RPM, ACTION_UPDATE, CliCheck, ComponentCheck,
 };
 use crate::color::Palette;
 use crate::commands::common;
-use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{
     inspect_datadir_contract_drift, refresh_datadir_contract_snapshot,
 };
 use crate::commands::tier1::rpm_install;
-use crate::context::{CliContext, InstallMode};
+use crate::context::CliContext;
 use crate::progress::{self, Activity, ProgressReporter};
 use crate::response::{self, CliError};
+
+use self::application::{UpgradeApplicationOutcome, UpgradePreviewStatus, UpgradeRequest};
+
+mod application;
 
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "upgrade";
@@ -110,18 +111,6 @@ pub struct UpgradeArgs {
 /// status (partial / failed / blocked) — in the latter case the result has
 /// already been rendered and only the exit code is propagated.
 pub fn handle(args: UpgradeArgs, ctx: &CliContext) -> Result<(), CliError> {
-    // System-only: `upgrade` reasons about rpm-owned packages and the configured
-    // RPM repository, which do not exist in user mode. The dispatcher already
-    // gates this, but a direct caller (or a test) must be refused here too.
-    if ctx.install_mode != InstallMode::System {
-        return Err(CliError::InvalidArgument {
-            command: COMMAND.to_string(),
-            reason: "`anolisa upgrade` supports only system/RPM image scenarios; run `sudo anolisa upgrade` without `--install-mode user`".to_string(),
-        });
-    }
-
-    let layout = common::resolve_layout(ctx);
-
     // A single activity spinner spans both planning and the apply transactions,
     // so a slow repo query or `dnf` transaction never looks like a hung process.
     // It is dropped (clearing the line) before `render_result` prints the final
@@ -129,39 +118,18 @@ pub fn handle(args: UpgradeArgs, ctx: &CliContext) -> Result<(), CliError> {
     let feedback = progress::feedback_for_stderr(ctx.json, ctx.quiet);
     let activity = Activity::start(feedback, "Planning upgrade...");
 
-    // Reuse the read-only planner behind `update --check`. This performs only
-    // rpm/dnf *queries* — no transaction, no state write.
-    let report = check::compute_update_check_report(args.target.as_deref(), ctx, &layout)?;
-
-    // Resolve the configured RPM repository for the apply transactions. The
-    // planner already proved a `[backends.rpm]` table exists, so this load
-    // succeeds; it is repeated here (rather than threaded out of the planner) to
-    // keep the planner's signature read-only and repo-agnostic.
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    let env = anolisa_env::EnvService::detect();
-    let repo = super::update::rpm_repo_source_for_update(&repo_config, &env, COMMAND)?
-        .ok_or_else(|| CliError::InvalidArgument {
-            command: COMMAND.to_string(),
-            reason: "repo.toml has no [backends.rpm] table; `anolisa upgrade` needs the configured ANOLISA RPM repository".to_string(),
-        })?;
-    let query = RpmPackageQuery::system_with_repo(repo.clone());
-    let txn = RpmTransaction::system_with_repo(repo);
-
-    let plan = build_plan(report.target.clone(), &report.cli, &report.components);
-    let result = run_upgrade_with_deps(
+    let outcome = application::run(
+        UpgradeRequest {
+            target: args.target.as_deref(),
+            intent: execution_intent(ctx.dry_run),
+        },
         ctx,
-        &layout,
-        &plan,
-        &query,
-        &txn,
-        privilege::is_root(),
-        ctx.dry_run,
-        COMMAND,
         &activity,
     )?;
 
     // Clear the spinner before the final result is rendered to stdout.
     drop(activity);
+    let result = project_outcome(outcome);
     render_result(ctx, &result);
 
     // A non-`ok` status has already been rendered (human or JSON); propagate a
@@ -173,6 +141,66 @@ pub fn handle(args: UpgradeArgs, ctx: &CliContext) -> Result<(), CliError> {
         Err(CliError::BatchPartial {
             command: COMMAND.to_string(),
         })
+    }
+}
+
+fn execution_intent(dry_run: bool) -> ExecutionIntent {
+    if dry_run {
+        ExecutionIntent::Plan
+    } else {
+        ExecutionIntent::Apply
+    }
+}
+
+fn project_outcome(outcome: UpgradeApplicationOutcome) -> UpgradeResult {
+    match outcome {
+        UpgradeApplicationOutcome::Preview {
+            status,
+            report,
+            warnings,
+        } => upgrade_result(report, preview_status_label(status), true, warnings),
+        UpgradeApplicationOutcome::Blocked { reason, report } => {
+            let _reason = reason;
+            upgrade_result(report, STATUS_BLOCKED, false, Vec::new())
+        }
+        UpgradeApplicationOutcome::Applied { report, outcome } => {
+            let status = match outcome.status() {
+                CommandOutcomeStatus::Completed => STATUS_OK,
+                CommandOutcomeStatus::Partial { .. } => STATUS_PARTIAL,
+                CommandOutcomeStatus::Failed { .. } => STATUS_FAILED,
+            };
+            upgrade_result(report, status, false, outcome.warnings().to_vec())
+        }
+    }
+}
+
+fn preview_status_label(status: UpgradePreviewStatus) -> &'static str {
+    match status {
+        UpgradePreviewStatus::Completed => STATUS_OK,
+        UpgradePreviewStatus::Partial => STATUS_PARTIAL,
+        UpgradePreviewStatus::Failed => STATUS_FAILED,
+        UpgradePreviewStatus::Blocked => STATUS_BLOCKED,
+    }
+}
+
+fn upgrade_result(
+    report: UpgradeReport,
+    status: &'static str,
+    dry_run: bool,
+    warnings: Vec<String>,
+) -> UpgradeResult {
+    UpgradeResult {
+        target: report.target,
+        backend: report.backend,
+        status,
+        dry_run,
+        updated: report.updated,
+        installed: report.installed,
+        reconciled: report.reconciled,
+        recorded: report.recorded,
+        skipped: report.skipped,
+        errors: report.errors,
+        warnings,
     }
 }
 
@@ -451,6 +479,58 @@ fn observed_default(component: &ComponentCheck) -> Result<PlannedObservedDefault
 
 // ── result envelope ──────────────────────────────────────────────────────────
 
+/// Execution report without a terminal classification.
+#[derive(Debug)]
+struct UpgradeReport {
+    target: Option<String>,
+    backend: &'static str,
+    updated: Vec<UpdatedItem>,
+    installed: Vec<InstalledItem>,
+    /// RPM-backed state rows refreshed from rpmdb without a package transaction.
+    reconciled: Vec<ReconciledItem>,
+    recorded: Vec<RecordedItem>,
+    skipped: Vec<SkippedResult>,
+    errors: Vec<ErrorResult>,
+}
+
+/// Terminal classification derived from an applied upgrade report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppliedUpgradeStatus {
+    Completed,
+    Partial,
+    Failed,
+}
+
+impl AppliedUpgradeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => STATUS_OK,
+            Self::Partial => STATUS_PARTIAL,
+            Self::Failed => STATUS_FAILED,
+        }
+    }
+}
+
+/// Internal executor result before the application layer builds its outcome.
+#[derive(Debug)]
+enum UpgradeEngineOutcome {
+    Preview {
+        status: UpgradePreviewStatus,
+        report: UpgradeReport,
+        warnings: Vec<String>,
+    },
+    Blocked {
+        reason: String,
+        report: UpgradeReport,
+    },
+    Applied {
+        status: AppliedUpgradeStatus,
+        operation_id: Option<String>,
+        report: UpgradeReport,
+        warnings: Vec<String>,
+    },
+}
+
 /// Wire shape for `anolisa upgrade` (`--json`) and the human summary source.
 #[derive(Debug, Serialize)]
 struct UpgradeResult {
@@ -571,6 +651,7 @@ struct ReconciliationInspection {
 /// updated/installed) plus per-item drift errors for changes it refused to make.
 #[derive(Default)]
 struct PersistOutcome {
+    operation_id: Option<String>,
     updated: Vec<UpdatedItem>,
     installed: Vec<InstalledItem>,
     reconciled: Vec<ReconciledItem>,
@@ -688,30 +769,26 @@ fn authorize_plan<'a>(store: &StateStore, plan: &'a UpgradePlan) -> AuthorizedPl
     authorized
 }
 
-/// Core of [`handle`] with the package query, transaction, root status, and
-/// dry-run flag injected so tests drive the whole apply path without a live
-/// rpmdb/dnf or real privileges.
+/// Execute an upgrade plan with explicit host boundaries.
 ///
-/// Dry-run renders the plan (and any item errors) without touching the host.
-/// Real execution requires root, aborts before any `dnf` transaction if the plan
-/// carries errors, then applies CLI update → component updates → missing-default
-/// installs, refreshing ANOLISA state from rpmdb once at the end.
+/// Plan intent renders read-only observations without taking the install lock.
+/// Apply requires root, blocks on plan errors, and refreshes state after RPM work.
 #[allow(clippy::too_many_arguments)]
-fn run_upgrade_with_deps(
+fn execute_upgrade_plan(
     ctx: &CliContext,
     layout: &FsLayout,
     plan: &UpgradePlan,
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-    dry_run: bool,
+    intent: ExecutionIntent,
     command: &str,
     reporter: &dyn ProgressReporter,
-) -> Result<UpgradeResult, CliError> {
+) -> Result<UpgradeEngineOutcome, CliError> {
     let preview_store = common::load_state_store(ctx, command)?;
     reject_upgrade_pending_claims(layout, &preview_store.operations, command)?;
 
-    if dry_run {
+    if intent == ExecutionIntent::Plan {
         // Dry-run reads state/rpmdb without taking the install lock, applying a
         // transaction, or constructing an operation to persist.
         return Ok(render_plan_preview(
@@ -735,7 +812,13 @@ fn run_upgrade_with_deps(
 
     // Any planning error blocks the whole run before a single dnf transaction.
     if plan.has_errors() {
-        return Ok(blocked_result(plan));
+        return Ok(UpgradeEngineOutcome::Blocked {
+            reason: format!(
+                "upgrade plan contains {} error(s); no action was taken",
+                plan.errors.len()
+            ),
+            report: blocked_report(plan),
+        });
     }
 
     let mut errors: Vec<ErrorResult> = Vec::new();
@@ -744,6 +827,7 @@ fn run_upgrade_with_deps(
     let mut installed: Vec<InstalledItem> = Vec::new();
     let mut reconciled: Vec<ReconciledItem> = Vec::new();
     let mut recorded: Vec<RecordedItem> = Vec::new();
+    let operation_id;
     // An empty transaction plan can still carry RPM state drift caused by an
     // external yum/dnf run, so every real invocation enters the same locked
     // finalize boundary. A true no-op returns before save/audit below.
@@ -1001,6 +1085,7 @@ fn run_upgrade_with_deps(
         if let Some(item) = cli_updated {
             updated.push(item);
         }
+        operation_id = outcome.operation_id;
         updated.extend(outcome.updated);
         installed.extend(outcome.installed);
         reconciled.extend(outcome.reconciled);
@@ -1011,19 +1096,52 @@ fn run_upgrade_with_deps(
     let succeeded = updated.len() + installed.len() + reconciled.len() + recorded.len();
     let status = apply_status(succeeded, errors.len());
 
-    Ok(UpgradeResult {
-        target: plan.target.clone(),
-        backend: BACKEND,
+    Ok(UpgradeEngineOutcome::Applied {
         status,
-        dry_run: false,
-        updated,
-        installed,
-        reconciled,
-        recorded,
-        skipped: skipped_results(plan),
-        errors,
+        operation_id,
+        report: UpgradeReport {
+            target: plan.target.clone(),
+            backend: BACKEND,
+            updated,
+            installed,
+            reconciled,
+            recorded,
+            skipped: skipped_results(plan),
+            errors,
+        },
         warnings,
     })
+}
+
+/// Compatibility projection used by the existing executor-focused tests.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_upgrade_with_deps(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    plan: &UpgradePlan,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+    dry_run: bool,
+    command: &str,
+    reporter: &dyn ProgressReporter,
+) -> Result<UpgradeResult, CliError> {
+    application::run_with_dependencies(
+        UpgradeRequest {
+            target: plan.target.as_deref(),
+            intent: execution_intent(dry_run),
+        },
+        ctx,
+        layout,
+        plan,
+        query,
+        txn,
+        is_root,
+        command,
+        reporter,
+    )
+    .map(project_outcome)
 }
 
 /// Re-read one upgraded package from rpmdb and stage its state refresh. A
@@ -1362,13 +1480,13 @@ fn reject_upgrade_pending_claims(
 
 /// Status for a completed real run: `ok` when nothing errored, `partial` when
 /// some items succeeded and some failed, `failed` when nothing succeeded.
-fn apply_status(succeeded: usize, error_count: usize) -> &'static str {
+fn apply_status(succeeded: usize, error_count: usize) -> AppliedUpgradeStatus {
     if error_count == 0 {
-        STATUS_OK
+        AppliedUpgradeStatus::Completed
     } else if succeeded > 0 {
-        STATUS_PARTIAL
+        AppliedUpgradeStatus::Partial
     } else {
-        STATUS_FAILED
+        AppliedUpgradeStatus::Failed
     }
 }
 
@@ -1583,7 +1701,7 @@ fn render_plan_preview(
     query: &dyn PackageQuery,
     command: &str,
     packaged_data_probe: &crate::packaged::PackagedDataProbe,
-) -> UpgradeResult {
+) -> UpgradeEngineOutcome {
     let mut updated: Vec<UpdatedItem> = Vec::new();
     if let Some(cli) = &plan.cli {
         updated.push(planned_to_updated(cli));
@@ -1610,17 +1728,18 @@ fn render_plan_preview(
         .collect();
 
     if plan.has_errors() {
-        return UpgradeResult {
-            target: plan.target.clone(),
-            backend: BACKEND,
-            status: STATUS_BLOCKED,
-            dry_run: true,
-            updated,
-            installed,
-            reconciled: Vec::new(),
-            recorded,
-            skipped: skipped_results(plan),
-            errors: plan_errors(plan),
+        return UpgradeEngineOutcome::Preview {
+            status: UpgradePreviewStatus::Blocked,
+            report: UpgradeReport {
+                target: plan.target.clone(),
+                backend: BACKEND,
+                updated,
+                installed,
+                reconciled: Vec::new(),
+                recorded,
+                skipped: skipped_results(plan),
+                errors: plan_errors(plan),
+            },
             warnings: Vec::new(),
         };
     }
@@ -1653,40 +1772,42 @@ fn render_plan_preview(
     let mut errors = plan_errors(plan);
     errors.extend(inspection.errors);
 
-    let status = apply_status(
+    let status = match apply_status(
         updated.len() + installed.len() + recorded.len() + reconciled.len(),
         errors.len(),
-    );
+    ) {
+        AppliedUpgradeStatus::Completed => UpgradePreviewStatus::Completed,
+        AppliedUpgradeStatus::Partial => UpgradePreviewStatus::Partial,
+        AppliedUpgradeStatus::Failed => UpgradePreviewStatus::Failed,
+    };
 
-    UpgradeResult {
-        target: plan.target.clone(),
-        backend: BACKEND,
+    UpgradeEngineOutcome::Preview {
         status,
-        dry_run: true,
-        updated,
-        installed,
-        reconciled,
-        recorded,
-        skipped: skipped_results(plan),
-        errors,
+        report: UpgradeReport {
+            target: plan.target.clone(),
+            backend: BACKEND,
+            updated,
+            installed,
+            reconciled,
+            recorded,
+            skipped: skipped_results(plan),
+            errors,
+        },
         warnings,
     }
 }
 
-/// Build a `blocked` result: the plan carried errors, so no dnf ran.
-fn blocked_result(plan: &UpgradePlan) -> UpgradeResult {
-    UpgradeResult {
+/// Build a blocked report: the plan carried errors, so no dnf ran.
+fn blocked_report(plan: &UpgradePlan) -> UpgradeReport {
+    UpgradeReport {
         target: plan.target.clone(),
         backend: BACKEND,
-        status: STATUS_BLOCKED,
-        dry_run: false,
         updated: Vec::new(),
         installed: Vec::new(),
         reconciled: Vec::new(),
         recorded: Vec::new(),
         skipped: skipped_results(plan),
         errors: plan_errors(plan),
-        warnings: Vec::new(),
     }
 }
 
@@ -2008,7 +2129,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
     state.operations.push(OperationRecord {
         id: audit.operation_id.clone(),
         command: command.to_string(),
-        status: provisional_status.to_string(),
+        status: provisional_status.as_str().to_string(),
         started_at: audit.started_at.clone(),
         finished_at: Some(now_iso8601()),
         parent_operation_id: None,
@@ -2019,6 +2140,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+    outcome.operation_id = Some(audit.operation_id.clone());
 
     // Refresh package-owned component contracts only after state persisted.
     // This heals stale snapshots left by external yum/dnf upgrades without
@@ -2097,24 +2219,26 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
     let mut final_status_save_failure = None;
     if final_status != provisional_status {
         if let Some(operation) = state.operations.last_mut() {
-            operation.status = final_status.to_string();
+            operation.status = final_status.as_str().to_string();
         }
         if let Err(err) = state.save(&state_path) {
             if let Some(operation) = state.operations.last_mut() {
-                operation.status = provisional_status.to_string();
+                operation.status = provisional_status.as_str().to_string();
             }
             persisted_status = provisional_status;
-            let detail =
-                format!("could not finalize the upgrade operation as '{final_status}': {err}");
+            let detail = format!(
+                "could not finalize the upgrade operation as '{}': {err}",
+                final_status.as_str()
+            );
             warnings.push(detail.clone());
             final_status_save_failure = Some(detail);
         }
     }
 
     let (log_status, severity) = match persisted_status {
-        STATUS_OK => (LogStatus::Ok, Severity::Info),
-        STATUS_PARTIAL => (LogStatus::Partial, Severity::Warn),
-        _ => (LogStatus::Failed, Severity::Error),
+        AppliedUpgradeStatus::Completed => (LogStatus::Ok, Severity::Info),
+        AppliedUpgradeStatus::Partial => (LogStatus::Partial, Severity::Warn),
+        AppliedUpgradeStatus::Failed => (LogStatus::Failed, Severity::Error),
     };
 
     // Audit log is best-effort: state already persisted, so a log failure
@@ -2163,7 +2287,8 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "upgrade changes were saved with conservative status '{provisional_status}', but {detail}"
+                "upgrade changes were saved with conservative status '{}', but {detail}",
+                provisional_status.as_str()
             ),
         });
     }

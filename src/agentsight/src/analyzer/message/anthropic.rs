@@ -30,6 +30,15 @@ use super::types::{
     MessageRole,
 };
 
+/// Max of two optional counters, preserving a value when only one is set.
+fn max_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
 /// Parser for Anthropic Messages API
 ///
 /// Provides methods to parse JSON request and response bodies
@@ -297,15 +306,29 @@ impl AnthropicParser {
                     } => {
                         stop_reason = delta.stop_reason.clone();
                         if let Some(du) = delta_usage {
+                            // Counters are cumulative and split across events:
+                            // official Anthropic puts input+cache in
+                            // message_start, while some proxies report the full
+                            // terminal usage here instead. Take the max of each
+                            // so neither layout loses data.
+                            let prev = usage.as_ref();
                             usage = Some(AnthropicUsage {
-                                input_tokens: usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
-                                output_tokens: du.output_tokens,
-                                cache_creation_input_tokens: usage
-                                    .as_ref()
-                                    .and_then(|u| u.cache_creation_input_tokens),
-                                cache_read_input_tokens: usage
-                                    .as_ref()
-                                    .and_then(|u| u.cache_read_input_tokens),
+                                input_tokens: prev
+                                    .map(|u| u.input_tokens)
+                                    .unwrap_or(0)
+                                    .max(du.input_tokens.unwrap_or(0)),
+                                output_tokens: prev
+                                    .map(|u| u.output_tokens)
+                                    .unwrap_or(0)
+                                    .max(du.output_tokens),
+                                cache_creation_input_tokens: max_opt(
+                                    prev.and_then(|u| u.cache_creation_input_tokens),
+                                    du.cache_creation_input_tokens,
+                                ),
+                                cache_read_input_tokens: max_opt(
+                                    prev.and_then(|u| u.cache_read_input_tokens),
+                                    du.cache_read_input_tokens,
+                                ),
                             });
                         }
                     }
@@ -744,6 +767,82 @@ mod tests {
 
         assert_eq!(resp.stop_reason, Some("tool_use".to_string()));
         assert_eq!(resp.usage.output_tokens, 42);
+    }
+
+    /// Official Anthropic layout: input + cache in message_start, output only in
+    /// message_delta. Both must survive the merge.
+    #[test]
+    fn test_aggregate_sse_usage_official_split() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_split",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 1234,
+                        "output_tokens": 1,
+                        "cache_creation_input_tokens": 5678,
+                        "cache_read_input_tokens": 90
+                    }
+                }
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 42}
+            }
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("should aggregate");
+        assert_eq!(resp.usage.input_tokens, 1234);
+        assert_eq!(resp.usage.output_tokens, 42);
+        assert_eq!(resp.usage.cache_creation_input_tokens, Some(5678));
+        assert_eq!(resp.usage.cache_read_input_tokens, Some(90));
+    }
+
+    /// Proxy layout: zero-placeholder message_start, full terminal usage in
+    /// message_delta. The zero start must not mask the delta's counters.
+    #[test]
+    fn test_aggregate_sse_usage_delta_carries_full_usage() {
+        let events = serde_json::json!([
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_proxy",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                }
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {
+                    "output_tokens": 13,
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 22178,
+                    "cache_read_input_tokens": 7
+                }
+            }
+        ]);
+
+        let resp = AnthropicParser::parse_response(&events).expect("should aggregate");
+        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.output_tokens, 13);
+        assert_eq!(resp.usage.cache_creation_input_tokens, Some(22178));
+        assert_eq!(resp.usage.cache_read_input_tokens, Some(7));
     }
 
     /// Test: SSE stream with multiple tool calls

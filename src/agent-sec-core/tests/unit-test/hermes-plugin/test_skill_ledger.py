@@ -1,13 +1,10 @@
-"""Unit tests for hermes-plugin skill_ledger capability."""
+"""Unit tests for the Hermes Skill Ledger capability."""
 
 from __future__ import annotations
 
 import json
-import logging
-import sys
 import tomllib
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -22,23 +19,17 @@ _DEFAULT_MESSAGE = object()
 def _make_capability(
     root: Path,
     *,
-    policy: str = "ask",
+    policy: str = "observe",
     include_policy: bool = True,
-    enable_block: bool = False,
-    block_statuses: list[str] | None = None,
-    max_warnings_per_turn: int | str = 5,
-    max_warning_contexts: int | str = 128,
+    enable_block: bool | None = None,
 ) -> SkillLedgerCapability:
     cap = SkillLedgerCapability()
     cap._timeout = 5.0
-    config = {
-        "enable_block": enable_block,
-        "block_statuses": block_statuses or ["none", "drifted", "deny", "tampered"],
-        "max_warnings_per_turn": max_warnings_per_turn,
-        "max_warning_contexts": max_warning_contexts,
-    }
+    config: dict = {}
     if include_policy:
         config["policy"] = policy
+    if enable_block is not None:
+        config["enable_block"] = enable_block
     cap._on_register(config)
     cap._skills_dir = root
     return cap
@@ -65,37 +56,24 @@ def _cli_status(
     *,
     exit_code: int = 0,
     message: str | None | object = _DEFAULT_MESSAGE,
-    user_decision: dict | None = None,
+    reason_code: str | None = None,
 ) -> CliResult:
     if message is _DEFAULT_MESSAGE:
         message = None if status == "pass" else f"summary message for status={status}"
     if not isinstance(message, str):
         message = None
+    payload = {
+        "latestStatus": status,
+        "skillName": "test-skill",
+        "message": message,
+    }
+    if reason_code is not None:
+        payload["reasonCode"] = reason_code
     return CliResult(
-        stdout=json.dumps(
-            {
-                "latestStatus": status,
-                "message": message,
-                "userDecision": user_decision,
-            }
-        ),
+        stdout=json.dumps(payload),
         stderr="",
         exit_code=exit_code,
     )
-
-
-def _install_gateway_session_context(monkeypatch, session_id: str) -> None:
-    gateway_module = ModuleType("gateway")
-    session_context_module = ModuleType("gateway.session_context")
-
-    def get_session_env(name: str, default: str = "") -> str:
-        assert name == "HERMES_SESSION_ID"
-        return session_id or default
-
-    session_context_module.get_session_env = get_session_env
-    gateway_module.session_context = session_context_module
-    monkeypatch.setitem(sys.modules, "gateway", gateway_module)
-    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context_module)
 
 
 class _RecordingHermesContext:
@@ -106,28 +84,28 @@ class _RecordingHermesContext:
         self.hooks.append(hook_name)
 
 
-def test_default_config_enables_skill_ledger_ask_policy():
-    """Default Hermes installs request user attention without hard blocking."""
+def test_default_config_uses_observe_policy():
     config = tomllib.loads(
         (_HERMES_PLUGIN_DIR / "src" / "config.toml").read_text(encoding="utf-8")
     )
 
-    assert config["capabilities"]["skill-ledger"]["enabled"] is True
-    assert config["capabilities"]["skill-ledger"]["policy"] == "ask"
+    assert config["capabilities"]["skill-ledger"] == {
+        "enabled": True,
+        "timeout": 5,
+        "policy": "observe",
+    }
 
 
-def test_default_config_registers_skill_ledger_hooks():
+def test_default_config_registers_only_pre_tool_hook():
     ctx = _RecordingHermesContext()
     config = load_config(_HERMES_PLUGIN_DIR / "src")
 
     register_capabilities(ctx, [SkillLedgerCapability()], config)
 
-    assert ctx.hooks == ["pre_tool_call", "transform_llm_output"]
+    assert ctx.hooks == ["pre_tool_call"]
 
 
-def test_environment_enabled_overrides_disabled_capability(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_environment_enabled_overrides_disabled_capability(monkeypatch):
     ctx = _RecordingHermesContext()
     config = load_config(_HERMES_PLUGIN_DIR / "src")
     config["capabilities"]["skill-ledger"]["enabled"] = False
@@ -135,35 +113,72 @@ def test_environment_enabled_overrides_disabled_capability(
 
     register_capabilities(ctx, [SkillLedgerCapability()], config)
 
-    assert ctx.hooks == ["pre_tool_call", "transform_llm_output"]
+    assert ctx.hooks == ["pre_tool_call"]
 
 
-def test_environment_policy_overrides_capability_policy(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("SKILL_LEDGER_MODE", "observe")
+@pytest.mark.parametrize("policy", ["warn", "ask", "invalid"])
+def test_unsupported_policies_fall_back_to_observe(tmp_path, caplog, policy):
+    with caplog.at_level("WARNING", logger="agent-sec-core"):
+        cap = _make_capability(tmp_path, policy=policy)
 
-    capability = _make_capability(tmp_path, policy="block")
+    assert cap._policy == "observe"
+    assert "does not support capability policy" in caplog.text
+    assert "using observe" in caplog.text
 
-    assert capability._policy == "observe"
+
+@pytest.mark.parametrize(
+    ("raw_policy", "expected"),
+    [
+        ("observe", "observe"),
+        ("block", "block"),
+        ("debug", "observe"),
+        ("deny", "block"),
+    ],
+)
+def test_native_policies_and_aliases(tmp_path, raw_policy, expected):
+    assert _make_capability(tmp_path, policy=raw_policy)._policy == expected
 
 
-def test_environment_mode_deny_alias_overrides_capability_policy(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("SKILL_LEDGER_MODE", "deny")
+def test_environment_policy_overrides_capability_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("SKILL_LEDGER_MODE", "block")
 
     capability = _make_capability(tmp_path, policy="observe")
 
     assert capability._policy == "block"
 
 
+@pytest.mark.parametrize(
+    ("enable_block", "expected"),
+    [(False, "observe"), (True, "block")],
+)
+def test_legacy_enable_block_maps_to_native_policy(tmp_path, enable_block, expected):
+    cap = _make_capability(
+        tmp_path,
+        include_policy=False,
+        enable_block=enable_block,
+    )
+
+    assert cap._policy == expected
+
+
+def test_removed_warning_configs_are_ignored_with_diagnostic(tmp_path, caplog):
+    cap = SkillLedgerCapability()
+    cap._timeout = 5.0
+
+    with caplog.at_level("WARNING", logger="agent-sec-core"):
+        cap._on_register(
+            {
+                "policy": "observe",
+                "max_warnings_per_turn": 5,
+                "max_warning_contexts": 128,
+            }
+        )
+
+    assert "max_warnings_per_turn, max_warning_contexts ignored" in caplog.text
+
+
 @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-def test_hook_disabled_short_circuits_before_resolving_or_calling_cli(
-    mock_cli,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_hook_disabled_short_circuits_before_resolving(mock_cli, monkeypatch, tmp_path):
     monkeypatch.setenv("SKILL_LEDGER_HOOK_ENABLED", "false")
     capability = _make_capability(tmp_path)
 
@@ -176,18 +191,124 @@ def test_hook_disabled_short_circuits_before_resolving_or_calling_cli(
 
 
 class TestSkillLedgerHooks:
-    """Behavior tests for pre_tool_call and transform_llm_output."""
-
     @pytest.mark.parametrize(
-        "sentinel",
+        ("status", "reason_code", "expected_level"),
         [
-            ".skillfs-inbox",
-            "skill-discover/SKILL.md",
+            ("none", "latest_unscanned", "INFO"),
+            ("drifted", "root_drift", "INFO"),
+            ("warn", "normal", "INFO"),
+            ("deny", "latest_risk_pending_decision", "WARNING"),
+            ("tampered", "tampered", "WARNING"),
+            ("pass", "tampered", "WARNING"),
+            ("warn", "tampered", "WARNING"),
         ],
     )
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_observe_logs_by_risk_and_allows_without_user_content(
+        self, mock_cli, status, reason_code, expected_level, tmp_path, caplog
+    ):
+        root = tmp_path / "skills"
+        _make_skill(root, "test-skill")
+        cap = _make_capability(root, policy="observe")
+        mock_cli.return_value = _cli_status(
+            status,
+            reason_code=reason_code,
+            message=f"summary message for status={status}",
+        )
+
+        with caplog.at_level("INFO", logger="agent-sec-core"):
+            result = cap._on_pre_tool_call("skill_view", {"name": "test-skill"})
+
+        assert result is None
+        assert f"status={status}" in caplog.text
+        matching_records = [
+            record
+            for record in caplog.records
+            if f"status={status}" in record.getMessage()
+        ]
+        assert [record.levelname for record in matching_records] == [expected_level]
+        assert "transform_llm_output" not in cap.get_hooks_define()
+
+    @pytest.mark.parametrize("status", ["none", "drifted", "warn", "deny", "tampered"])
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_block_policy_uses_native_pre_tool_action(self, mock_cli, status, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "test-skill")
+        cap = _make_capability(root, policy="block")
+        mock_cli.return_value = _cli_status(status)
+
+        result = cap._on_pre_tool_call("skill_view", {"name": "test-skill"})
+
+        assert result == {
+            "action": "block",
+            "message": f"Skill 'test-skill': summary message for status={status}",
+        }
+
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_pass_or_message_less_summary_allows(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "test-skill")
+        cap = _make_capability(root, policy="block")
+        mock_cli.side_effect = [
+            _cli_status("pass"),
+            _cli_status("unmanaged", message=None),
+        ]
+
+        assert cap._on_pre_tool_call("skill_view", {"name": "test-skill"}) is None
+        assert cap._on_pre_tool_call("skill_view", {"name": "test-skill"}) is None
+
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_nonzero_exit_with_valid_json_still_blocks(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "test-skill")
+        cap = _make_capability(root, policy="block")
+        mock_cli.return_value = _cli_status("tampered", exit_code=1)
+
+        result = cap._on_pre_tool_call("skill_view", {"name": "test-skill"})
+
+        assert result is not None
+        assert result["action"] == "block"
+
+    @pytest.mark.parametrize(
+        "cli_result",
+        [
+            CliResult(stdout="", stderr="boom", exit_code=1),
+            CliResult(stdout="not-json", stderr="", exit_code=0),
+            CliResult(stdout="[]", stderr="", exit_code=0),
+        ],
+    )
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_cli_failures_fail_open(self, mock_cli, cli_result, tmp_path):
+        root = tmp_path / "skills"
+        _make_skill(root, "test-skill")
+        cap = _make_capability(root, policy="block")
+        mock_cli.return_value = cli_result
+
+        assert cap._on_pre_tool_call("skill_view", {"name": "test-skill"}) is None
+
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_passes_hermes_trace_context_to_cli(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        skill_dir = _make_skill(root, "test-skill")
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("pass")
+
+        cap._on_pre_tool_call(
+            "skill_view",
+            {"name": "test-skill"},
+            session_id="session-1",
+        )
+
+        mock_cli.assert_called_once_with(
+            ["skill-ledger", "show", str(skill_dir.resolve())],
+            timeout=5.0,
+            trace_context={"agent_name": "hermes", "session_id": "session-1"},
+        )
+
+    @pytest.mark.parametrize("sentinel", [".skillfs-inbox", "skill-discover/SKILL.md"])
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_skillfs_inplace_sentinel_does_not_bypass_ledger(
-        self, mock_cli, tmp_path, sentinel
+        self, mock_cli, sentinel, tmp_path
     ):
         root = tmp_path / "skills"
         skill_dir = _make_skill(root, "devops/risky")
@@ -199,503 +320,25 @@ class TestSkillLedgerHooks:
             )
         else:
             sentinel_path.mkdir(parents=True)
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("pass")
-
-        result = cap._on_pre_tool_call(
-            "skill_view", {"name": "devops/risky"}, session_id="s1"
-        )
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="s1"
-        )
-
-        assert result is None
-        mock_cli.assert_called_once_with(
-            ["skill-ledger", "show", str(skill_dir.resolve())],
-            timeout=5.0,
-            trace_context={"agent_name": "hermes", "session_id": "s1"},
-        )
-        assert output is None
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_skillfs_inplace_root_debug_policy_only_logs(
-        self, mock_cli, tmp_path, caplog
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        (root / ".skillfs-inbox").mkdir()
-        cap = _make_capability(root, policy="debug")
-        mock_cli.return_value = _cli_status("warn")
-        caplog.set_level(logging.DEBUG, logger="agent-sec-core")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="s1"
-        )
-
-        assert result is None
-        mock_cli.assert_called_once()
-        assert output is None
-        assert not cap._warnings_by_context
-        assert not any(
-            "暂不支持Hermes场景" in record.message for record in caplog.records
-        )
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_skillfs_inplace_root_block_policy_uses_ledger_result(
-        self, mock_cli, tmp_path
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        (root / ".skillfs-inbox").mkdir()
-        cap = _make_capability(root, policy="block")
-        mock_cli.return_value = _cli_status("warn")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="s1"
-        )
-
-        assert result["action"] == "block"
-        mock_cli.assert_called_once()
-        assert output is None
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_hidden_nested_skill_is_forwarded_as_canonical_path(
-        self, mock_cli, tmp_path
-    ):
-        root = tmp_path / "skills"
-        root.mkdir()
         cap = _make_capability(root)
         mock_cli.return_value = _cli_status("pass")
 
-        result = cap._on_pre_tool_call(
-            "skill_view",
-            {"name": "apple/apple-notes"},
-            session_id="s1",
-        )
+        cap._on_pre_tool_call("skill_view", {"name": "devops/risky"})
 
-        assert result is None
-        mock_cli.assert_called_once_with(
-            ["skill-ledger", "show", str(root / "apple" / "apple-notes")],
-            timeout=5.0,
-            trace_context={"agent_name": "hermes", "session_id": "s1"},
-        )
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.Path.rglob")
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_skill_file_traversal_loop_fails_open_with_short_notice(
-        self, mock_cli, mock_rglob, tmp_path
-    ):
-        root = tmp_path / "skills"
-        root.mkdir()
-        cap = _make_capability(root, policy="warn")
-        mock_rglob.side_effect = OSError("File system loop detected")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="s1"
-        )
-
-        assert result is None
-        mock_cli.assert_not_called()
-        assert (
-            output
-            == "暂不支持Hermes场景，请自行关注skill安全性。\n\nassistant response"
-        )
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_pass_allows_without_warning(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/pass-skill")
-        cap = _make_capability(root)
-        mock_cli.return_value = _cli_status("pass")
-
-        result = cap._on_pre_tool_call(
-            "skill_view", {"name": "pass-skill"}, session_id="s1"
-        )
-
-        assert result is None
-        assert (
-            cap._on_transform_llm_output("assistant response", session_id="s1") is None
-        )
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_warn_allows_without_warning(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/warn-skill")
-        cap = _make_capability(root)
-        mock_cli.return_value = _cli_status("warn", message=None)
-
-        result = cap._on_pre_tool_call(
-            "skill_view", {"name": "warn-skill"}, session_id="s1"
-        )
-
-        assert result is None
-        assert (
-            cap._on_transform_llm_output("assistant response", session_id="s1") is None
-        )
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_user_decision_summary_allows_without_warning(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/allowed-risk")
-        cap = _make_capability(root)
-        mock_cli.return_value = _cli_status(
-            "deny",
-            exit_code=0,
-            message=None,
-            user_decision={"action": "allow"},
-        )
-
-        result = cap._on_pre_tool_call(
-            "skill_view", {"name": "allowed-risk"}, session_id="s1"
-        )
-
-        assert result is None
-        assert (
-            cap._on_transform_llm_output("assistant response", session_id="s1") is None
-        )
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_passes_hermes_trace_context_to_cli(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/pass-skill")
-        cap = _make_capability(root)
-        mock_cli.return_value = _cli_status("pass")
-
-        result = cap._on_pre_tool_call(
-            "skill_view",
-            {"name": "pass-skill"},
-            session_id="session-1",
-            tool_call_id="tool-1",
-        )
-
-        assert result is None
-        assert mock_cli.call_args.kwargs["trace_context"] == {
-            "agent_name": "hermes",
-            "session_id": "session-1",
-            "tool_call_id": "tool-1",
-        }
-        assert "run_id" not in mock_cli.call_args.kwargs["trace_context"]
-
-    @pytest.mark.parametrize(
-        "status",
-        ["none", "drifted", "deny", "tampered", "error", "unknown"],
-    )
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_non_pass_default_ask_policy_falls_back_to_warning(
-        self, mock_cli, tmp_path, status, caplog
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root)
-        mock_cli.return_value = _cli_status(status, exit_code=1)
-        caplog.set_level(logging.DEBUG, logger="agent-sec-core")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, task_id="t1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", task_id="t1"
-        )
-
-        assert result is None
-        assert output.startswith("[agent-sec-core skill-ledger warning]")
-        assert f"status={status}" in output
-        assert any(f"status={status}" in record.message for record in caplog.records)
-
-    @pytest.mark.parametrize("status", ["deny", "drifted"])
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_debug_policy_logs_and_allows(self, mock_cli, tmp_path, status, caplog):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="debug")
-        mock_cli.return_value = _cli_status(status, exit_code=1)
-        caplog.set_level(logging.DEBUG, logger="agent-sec-core")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, task_id="t1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", task_id="t1"
-        )
-
-        assert result is None
-        assert output is None
-        assert not cap._warnings_by_context
-        assert any(f"status={status}" in record.message for record in caplog.records)
-        assert not any(record.levelno >= logging.WARNING for record in caplog.records)
-
-    @pytest.mark.parametrize(
-        "status",
-        ["none", "warn", "drifted", "deny", "tampered", "error", "unknown"],
-    )
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_warn_policy_allows_and_prepends_warning(self, mock_cli, tmp_path, status):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status(status, exit_code=1)
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, task_id="t1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", task_id="t1"
-        )
-
-        assert result is None
-        assert output.startswith("[agent-sec-core skill-ledger warning]")
-        assert f"status={status}" in output
-        assert output.endswith("assistant response")
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_legacy_enable_block_false_maps_to_warn(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, include_policy=False, enable_block=False)
-        mock_cli.return_value = _cli_status("warn")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, task_id="t1")
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", task_id="t1"
-        )
-
-        assert result is None
-        assert output.startswith("[agent-sec-core skill-ledger warning]")
-        assert "status=warn" in output
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_legacy_enable_block_true_maps_to_block(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "security/blocked")
-        cap = _make_capability(root, include_policy=False, enable_block=True)
-        mock_cli.return_value = _cli_status("deny", exit_code=1)
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "blocked"}, run_id="r1")
-
-        assert result is not None
-        assert result["action"] == "block"
-        assert "status=deny" in result["message"]
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_drifted_warning_uses_response_text_and_logs_status(
-        self, mock_cli, tmp_path, caplog
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/drifted")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("drifted", exit_code=1)
-        caplog.set_level(logging.WARNING, logger="agent-sec-core")
-
-        result = cap._on_pre_tool_call(
-            "skill_view", {"name": "drifted"}, session_id="s1"
-        )
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="s1"
-        )
-
-        assert result is None
-        assert output.startswith("[agent-sec-core skill-ledger warning]")
-        assert "status=drifted" in output
-        assert output.endswith("assistant response")
-        assert any("status=drifted" in record.message for record in caplog.records)
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_runtime_hermes_session_context_bridges_missing_pre_session_id(
-        self, mock_cli, tmp_path, monkeypatch
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("drifted", exit_code=1)
-        _install_gateway_session_context(monkeypatch, "hermes-session-1")
-
-        cap._on_pre_tool_call(
-            "skill_view", {"name": "risky"}, session_id="", task_id="t1"
-        )
-
-        assert list(cap._warnings_by_context) == ["session_id:hermes-session-1"]
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="hermes-session-1"
-        )
-        second = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="hermes-session-1"
-        )
-
-        assert output.startswith("[agent-sec-core skill-ledger warning]")
-        assert output.endswith("assistant response")
-        assert second is None
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_mismatched_keys_do_not_use_pending_warning_fallback(
-        self, mock_cli, tmp_path, monkeypatch
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("drifted", exit_code=1)
-        _install_gateway_session_context(monkeypatch, "")
-
-        cap._on_pre_tool_call(
-            "skill_view", {"name": "risky"}, session_id="", task_id="t1"
-        )
-        output = cap._on_transform_llm_output(
-            response_text="assistant response", session_id="s1"
-        )
-
-        assert output is None
-        assert list(cap._warnings_by_context) == ["task_id:t1"]
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_block_policy_blocks_message_without_warning(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "security/blocked")
-        cap = _make_capability(root, policy="block")
-        mock_cli.return_value = _cli_status("deny", exit_code=1)
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "blocked"}, run_id="r1")
-
-        assert result is not None
-        assert result["action"] == "block"
-        assert "status=deny" in result["message"]
-        assert cap._on_transform_llm_output("assistant response", run_id="r1") is None
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_block_policy_allows_when_summary_has_no_message(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "security/warn-only")
-        cap = _make_capability(root, policy="block")
-        mock_cli.return_value = _cli_status("warn", message=None)
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "warn-only"})
-
-        assert result is None
-        assert cap._on_transform_llm_output("assistant response") is None
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_nonzero_exit_with_valid_json_still_uses_status(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/drifted")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("drifted", exit_code=1)
-
-        cap._on_pre_tool_call("skill_view", {"name": "drifted"}, session_id="s1")
-        output = cap._on_transform_llm_output("assistant response", session_id="s1")
-
-        assert "status=drifted" in output
-
-    @pytest.mark.parametrize(
-        "cli_result",
-        [
-            CliResult(stdout="", stderr="timeout", exit_code=124),
-            CliResult(stdout="not-json", stderr="", exit_code=0),
-        ],
-    )
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_cli_failure_paths_fail_open(self, mock_cli, tmp_path, cli_result):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/flaky")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = cli_result
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "flaky"})
-
-        assert result is None
-        assert cap._on_transform_llm_output("assistant response") is None
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_unresolved_skill_fails_open_without_cli(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        cap = _make_capability(root, policy="warn")
-
-        result = cap._on_pre_tool_call("skill_view", {"name": "missing"})
-
-        assert result is None
-        mock_cli.assert_not_called()
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_warning_context_cache_is_bounded(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn")
-        cap._max_warning_contexts = 2
-        mock_cli.return_value = _cli_status("drifted")
-
-        for idx in range(3):
-            cap._on_pre_tool_call(
-                "skill_view",
-                {"name": "risky"},
-                session_id=f"s{idx}",
-            )
-
-        assert len(cap._warnings_by_context) == 2
-        assert "session_id:s0" not in cap._warnings_by_context
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_warning_without_context_is_not_injected_into_later_session(
-        self, mock_cli, tmp_path
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("drifted")
-
-        cap._on_pre_tool_call("skill_view", {"name": "risky"})
-        output = cap._on_transform_llm_output("assistant response", session_id="s1")
-
-        assert output is None
-        assert cap._warnings_by_context == {}
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_warning_with_context_is_not_consumed_by_contextless_transform(
-        self, mock_cli, tmp_path
-    ):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn")
-        mock_cli.return_value = _cli_status("drifted")
-
-        cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
-
-        assert cap._on_transform_llm_output("assistant response") is None
-        output = cap._on_transform_llm_output("assistant response", session_id="s1")
-        assert output.startswith("[agent-sec-core skill-ledger warning]")
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_zero_max_warnings_disables_visible_injection(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        _make_skill(root, "devops/risky")
-        cap = _make_capability(root, policy="warn", max_warnings_per_turn=0)
-        mock_cli.return_value = _cli_status("drifted")
-
-        cap._on_pre_tool_call("skill_view", {"name": "risky"}, session_id="s1")
-
-        assert (
-            cap._on_transform_llm_output("assistant response", session_id="s1") is None
-        )
-        assert cap._warnings_by_context == {}
-
-    def test_invalid_warning_config_uses_safe_defaults(self, tmp_path):
-        root = tmp_path / "skills"
-        cap = _make_capability(
-            root,
-            max_warnings_per_turn="invalid",
-            max_warning_contexts="invalid",
-        )
-
-        assert cap._max_warnings_per_turn == 5
-        assert cap._max_warning_contexts == 128
-
-    def test_negative_warning_config_clamps_to_minimum(self, tmp_path):
-        root = tmp_path / "skills"
-        cap = _make_capability(
-            root,
-            max_warnings_per_turn=-1,
-            max_warning_contexts=-1,
-        )
-
-        assert cap._max_warnings_per_turn == 0
-        assert cap._max_warning_contexts == 1
+        assert mock_cli.call_args.args[0][-1] == str(skill_dir.resolve())
 
 
 class TestSkillResolution:
-    """Hermes local skill name resolution tests."""
+    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_qualified_name_is_forwarded_as_canonical_path(self, mock_cli, tmp_path):
+        root = tmp_path / "skills"
+        root.mkdir()
+        cap = _make_capability(root)
+        mock_cli.return_value = _cli_status("pass")
+
+        cap._on_pre_tool_call("skill_view", {"name": "apple/apple-notes"})
+
+        assert mock_cli.call_args.args[0][-1] == str(root / "apple" / "apple-notes")
 
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_resolves_by_category_name(self, mock_cli, tmp_path):
@@ -706,7 +349,7 @@ class TestSkillResolution:
 
         cap._on_pre_tool_call("skill_view", {"name": "mlops/axolotl"})
 
-        assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
+        assert mock_cli.call_args.args[0][-1] == str(skill_dir.resolve())
 
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_symlink_skills_root_preserves_canonical_path(self, mock_cli, tmp_path):
@@ -720,19 +363,14 @@ class TestSkillResolution:
         cap._on_pre_tool_call("skill_view", {"name": "mlops/axolotl"})
 
         canonical_skill_dir = canonical_root / "mlops" / "axolotl"
-        assert mock_cli.call_args[0][0][-1] == str(canonical_skill_dir)
+        assert mock_cli.call_args.args[0][-1] == str(canonical_skill_dir)
         assert canonical_skill_dir != canonical_skill_dir.resolve()
 
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_frontmatter_name_is_not_used_for_resolution(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
-        _make_skill(
-            root,
-            "directory-name",
-            frontmatter_name="frontmatter-name",
-        )
+        _make_skill(root, "directory-name", frontmatter_name="frontmatter-name")
         cap = _make_capability(root)
-        mock_cli.return_value = _cli_status("pass")
 
         cap._on_pre_tool_call("skill_view", {"skill_name": "frontmatter-name"})
 
@@ -748,13 +386,10 @@ class TestSkillResolution:
 
         cap._on_pre_tool_call(
             "skill_view",
-            {
-                "name": "name-wins",
-                "file_path": str(other_dir / "SKILL.md"),
-            },
+            {"name": "name-wins", "file_path": str(other_dir / "SKILL.md")},
         )
 
-        assert mock_cli.call_args[0][0][-1] == str(skill_dir.resolve())
+        assert mock_cli.call_args.args[0][-1] == str(skill_dir.resolve())
 
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
     def test_file_path_without_name_fails_open(self, mock_cli, tmp_path):
@@ -762,37 +397,22 @@ class TestSkillResolution:
         _make_skill(root, "tools/relative")
         cap = _make_capability(root)
 
-        result = cap._on_pre_tool_call(
-            "skill_view",
-            {"file_path": "SKILL.md"},
-        )
+        result = cap._on_pre_tool_call("skill_view", {"file_path": "SKILL.md"})
 
         assert result is None
         mock_cli.assert_not_called()
 
+    @pytest.mark.parametrize("name", ["hidden", ".archive/hidden", "plugin:skill"])
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_ignored_internal_dirs_are_not_resolved(self, mock_cli, tmp_path):
+    def test_unsupported_or_internal_names_are_not_resolved(
+        self, mock_cli, name, tmp_path
+    ):
         root = tmp_path / "skills"
         _make_skill(root, ".archive/hidden")
+        _make_skill(root, "plugin/skill")
         cap = _make_capability(root)
 
-        result = cap._on_pre_tool_call("skill_view", {"name": "hidden"})
-
-        assert result is None
-        mock_cli.assert_not_called()
-
-    @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_qualified_internal_dir_is_not_resolved(self, mock_cli, tmp_path):
-        root = tmp_path / "skills"
-        root.mkdir()
-        cap = _make_capability(root)
-
-        result = cap._on_pre_tool_call(
-            "skill_view",
-            {"name": ".archive/hidden"},
-        )
-
-        assert result is None
+        assert cap._on_pre_tool_call("skill_view", {"name": name}) is None
         mock_cli.assert_not_called()
 
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
@@ -804,10 +424,7 @@ class TestSkillResolution:
         (root / "linked").symlink_to(outside, target_is_directory=True)
         cap = _make_capability(root)
 
-        result = cap._on_pre_tool_call(
-            "skill_view",
-            {"name": "linked/hidden"},
-        )
+        result = cap._on_pre_tool_call("skill_view", {"name": "linked/hidden"})
 
         assert result is None
         mock_cli.assert_not_called()
@@ -824,13 +441,15 @@ class TestSkillResolution:
         assert result is None
         mock_cli.assert_not_called()
 
+    @patch("hermes_plugin_src.capabilities.skill_ledger.Path.rglob")
     @patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_qualified_plugin_style_name_is_skipped(self, mock_cli, tmp_path):
+    def test_skill_file_traversal_error_fails_open(
+        self, mock_cli, mock_rglob, tmp_path
+    ):
         root = tmp_path / "skills"
-        _make_skill(root, "plugin/skill")
+        root.mkdir()
         cap = _make_capability(root)
+        mock_rglob.side_effect = OSError("File system loop detected")
 
-        result = cap._on_pre_tool_call("skill_view", {"name": "plugin:skill"})
-
-        assert result is None
+        assert cap._on_pre_tool_call("skill_view", {"name": "risky"}) is None
         mock_cli.assert_not_called()

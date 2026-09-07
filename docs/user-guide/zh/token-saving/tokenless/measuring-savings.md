@@ -69,6 +69,8 @@ tokenless stats summary --json
 tokenless stats summary --limit 1000
 ```
 
+`--limit` 必须为正整数。`--limit 0` 会在解析阶段以非零退出码被拒绝，行为与 `stats diff --limit` 一致。
+
 ## 查看单条记录
 
 列出最近记录：
@@ -119,7 +121,7 @@ Session 总览只包含指标。tool-use 报告会显示内容差异；只有 se
 - Hook/Plugin 无法找到 `tokenless`。
 - 输入没有经过 Tokenless 支持的 Hook。
 
-追加型 Adapter 即使让宿主保留了原始结果，也可能产生统计记录。尤其是当前 Codex PostToolUse Hook 只记录压缩候选，不替换原始工具输出。
+追加型 Adapter 即使让宿主保留了原始结果，也可能产生统计记录。Codex 避免了这种歧义：宿主无法替换原始输出，因此其 PostToolUse Hook 不执行压缩，也不记录响应候选。Codex 的节省应通过 RTK 重写记录衡量。
 
 先运行：
 
@@ -129,6 +131,37 @@ anolisa adapter status tokenless
 ```
 
 继续参阅[启用后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)。
+
+## 运行仓库参考负载
+
+源码树提供了确定性的 fixture，用于比较不同 Tokenless 版本的压缩行为。在 Linux 上，
+进入 ANOLISA 源码中的 `src/tokenless/benchmark/l1-compressor` 后运行：
+
+```bash
+cargo run --release --bin compression_rate -- --json
+```
+
+报告使用仓库内置的
+`src/tokenless/benchmark/l1-compressor/fixtures/tool_response.json` 和
+`src/tokenless/benchmark/l1-compressor/fixtures/schema_search.json`，并应用当前检出源码的
+默认压缩配置。Tokenless 0.7.11 的参考结果如下：
+
+| JSON 字段 | 独立测试阶段与输入 | 节省率 |
+|---|---|---:|
+| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 65.8% |
+| `canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
+| `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.0% |
+| `canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
+
+TOON 独立测试出现负数，表示编码后反而变大。Active 模式下，Runtime 会在候选结果
+没有减少估算 Token 数时输出原始 JSON。
+
+这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、易于
+压缩的合成数据；测试只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
+估算 Token，而不调用模型 Tokenizer。测试也不包含 Adapter 行为以及工具数据在完整
+会话中的占比。因此，这组结果只用于确认同一源码版本的行为是否相近；评估真实工作
+负载时，应使用有代表性的自有 Payload，并执行下文的 dry-run 双跑。详细口径见
+[benchmark 方法与限制](../../../../../src/tokenless/benchmark/l1-compressor/README.md#methodology)。
 
 ## 用 dry-run 做双跑对比
 
@@ -157,6 +190,8 @@ tokenless stats summary \
 注意：
 
 - `--compare` 必须提供恰好两个 Session ID，顺序为 baseline、active。
+- 任一 Session 没有记录时，命令以错误退出，而不是报告 0% 节省。
+- `--limit` 必须为正整数。`--limit 0` 会在解析阶段被拒绝，而不会被误报为 Session 缺失。
 - baseline 应为 dry-run，active 应为真实压缩；模式不匹配时 CLI 会告警。
 - 对真实 Agent 任务做对比时，应尽量使用相同输入、工具版本和环境。
 - dry-run 仍会把压缩前后文本写入本地统计数据库。
@@ -183,7 +218,7 @@ AgentSight 的 Token savings 页面可以只读聚合 `~/.tokenless/stats.db`。
 test -r ~/.tokenless/stats.db
 ```
 
-AgentSight 的安装和 Dashboard 使用方式见[AgentSight 用户指南](../../agent-observability/agentsight.md)。
+AgentSight 的安装和 Dashboard 使用方式见[AgentSight 用户指南](../../agent-observability/agentsight/README.md)。
 
 ## SLS JSONL
 

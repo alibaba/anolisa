@@ -2,7 +2,7 @@
 //!
 //! Wire format: [4-byte LE length prefix][bincode payload]
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -36,10 +36,59 @@ enum ProtocolFailure {
     UnexpectedResponse,
 }
 
+/// Whether a failed ws-ckpt request may already have changed daemon state.
+///
+/// A governed caller must never retry a `PossiblyApplied` request. It has to
+/// reconcile against durable daemon evidence or record an uncertain outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CkptRequestEffect {
+    /// The daemon provably did not apply the request.
+    KnownNoEffect,
+    /// The request may have been applied, but its result cannot be proven.
+    PossiblyApplied,
+}
+
+/// Failed ws-ckpt request together with its side-effect classification.
+#[derive(Debug)]
+pub struct CkptRequestFailure {
+    /// Whether daemon state may already have changed.
+    pub effect: CkptRequestEffect,
+    /// Redacted failure suitable for audit and presentation.
+    pub error: CoshError,
+}
+
+impl CkptRequestFailure {
+    fn known_no_effect(error: CoshError) -> Self {
+        Self {
+            effect: CkptRequestEffect::KnownNoEffect,
+            error,
+        }
+    }
+
+    fn possibly_applied(error: CoshError) -> Self {
+        Self {
+            effect: CkptRequestEffect::PossiblyApplied,
+            error,
+        }
+    }
+}
+
+/// Exact durable evidence for one snapshot identity in one workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CkptSnapshotEvidence {
+    /// Snapshot identity reported by the daemon index.
+    pub snapshot_id: String,
+    /// Workspace registration path reported verbatim by the daemon.
+    pub workspace: String,
+    /// Whether the daemon index knows the snapshot data is no longer present.
+    pub missing: bool,
+}
+
 /// Client for ws-ckpt daemon IPC.
 pub struct CkptClient {
     socket_path: String,
     timeout_ms: u64,
+    trusted_peer_uid: Option<u32>,
 }
 
 impl CkptClient {
@@ -48,6 +97,7 @@ impl CkptClient {
         Self {
             socket_path: socket_path.to_string(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
+            trusted_peer_uid: None,
         }
     }
 
@@ -56,12 +106,28 @@ impl CkptClient {
         Self {
             socket_path: socket_path.to_string(),
             timeout_ms,
+            trusted_peer_uid: None,
         }
     }
 
     /// Create a new client using the default socket path.
     pub fn default_path() -> Self {
         Self::new(DEFAULT_SOCKET_PATH)
+    }
+
+    /// Require every connection to authenticate as root or `owner_uid`.
+    ///
+    /// Path metadata alone cannot secure a socket: another principal may swap a
+    /// verified directory between the check and `connect`. Kernel peer
+    /// credentials are read after connecting and before any request byte is
+    /// written, so an impostor listener is rejected with no possible effect.
+    /// [`Self::create_classified`] and [`Self::find_snapshot`] reject the client
+    /// before socket access unless this configuration is present; legacy
+    /// operations retain their existing optional-authentication behavior.
+    #[must_use]
+    pub fn require_trusted_peer(mut self, owner_uid: u32) -> Self {
+        self.trusted_peer_uid = Some(owner_uid);
+        self
     }
 
     /// Check if the daemon socket exists (basic health check).
@@ -127,6 +193,110 @@ impl CkptClient {
                 reason: Some(reason),
             }),
             WsCkptResponse::Error { code, message } => Err(ws_error_to_cosh(code, message)),
+            _ => Err(unexpected_response()),
+        }
+    }
+
+    /// Create a workspace checkpoint, classifying failures by possible effect.
+    ///
+    /// Governed callers use this instead of [`Self::create`] because a lost
+    /// response must not be replayed. Only a failure raised before any request
+    /// byte reaches the kernel is `KnownNoEffect`. Every failure after that,
+    /// including a daemon-reported error code, is `PossiblyApplied` so the caller
+    /// reconciles or records an uncertain outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KnownNoEffect` when trusted-peer authentication was not
+    /// configured, or a classified transport, protocol, or daemon failure.
+    pub fn create_classified(
+        &self,
+        workspace: &str,
+        id: &str,
+        message: Option<&str>,
+        metadata: Option<&str>,
+        pin: bool,
+    ) -> Result<CkptCreated, CkptRequestFailure> {
+        let owner_uid = self
+            .governed_peer_uid()
+            .map_err(CkptRequestFailure::known_no_effect)?;
+        let req = WsCkptRequest::Checkpoint {
+            workspace: workspace.to_string(),
+            id: id.to_string(),
+            message: message.map(|s| s.to_string()),
+            metadata: metadata.map(|s| s.to_string()),
+            pin,
+        };
+        match self.send_request_classified_with_peer(&req, Some(owner_uid))? {
+            WsCkptResponse::CheckpointOk { snapshot_id } => Ok(CkptCreated {
+                snapshot_id: Some(snapshot_id),
+                workspace: workspace.to_string(),
+                skipped: false,
+                reason: None,
+            }),
+            WsCkptResponse::CheckpointSkipped { reason } => Ok(CkptCreated {
+                snapshot_id: None,
+                workspace: workspace.to_string(),
+                skipped: true,
+                reason: Some(reason),
+            }),
+            // A daemon error proves no snapshot was created, but not that daemon
+            // state is unchanged. The checkpoint dispatch path auto-initializes
+            // the workspace first, so registration, subvolume adoption, or a
+            // broken-symlink removal may already have happened before the code
+            // was produced. No response code is treated as proven no-effect
+            // until the protocol supplies an explicit pre-effect guarantee.
+            WsCkptResponse::Error { code, message: _ } => {
+                Err(CkptRequestFailure::possibly_applied(ws_error_to_cosh(
+                    code,
+                    "ws-ckpt daemon rejected the checkpoint request".to_owned(),
+                )))
+            }
+            // An unexpected variant means this client's model of the daemon is
+            // wrong, so no-effect cannot be claimed.
+            _ => Err(CkptRequestFailure::possibly_applied(unexpected_response())),
+        }
+    }
+
+    /// Look up exact durable evidence for one snapshot ID in one workspace.
+    ///
+    /// This is the read-only reconcile query for a checkpoint whose response was
+    /// lost. It reuses the existing workspace-scoped listing and matches the
+    /// snapshot identity exactly, so it never probes by creating a second
+    /// snapshot. `Ok(None)` means the daemon index does not list the identity,
+    /// which is not proof that no snapshot exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a permission error when trusted-peer authentication was not
+    /// configured, or a transport, protocol, or daemon-reported failure. Any
+    /// error leaves the reconciled outcome unproven.
+    pub fn find_snapshot(
+        &self,
+        workspace: &str,
+        id: &str,
+    ) -> Result<Option<CkptSnapshotEvidence>, CoshError> {
+        let owner_uid = self.governed_peer_uid()?;
+        let req = WsCkptRequest::List {
+            workspace: Some(workspace.to_string()),
+            format: None,
+        };
+        match self
+            .send_request_classified_with_peer(&req, Some(owner_uid))
+            .map_err(|failure| failure.error)?
+        {
+            WsCkptResponse::ListOk { snapshots } => Ok(snapshots
+                .into_iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| CkptSnapshotEvidence {
+                    snapshot_id: entry.id,
+                    workspace: entry.workspace,
+                    missing: entry.meta.missing,
+                })),
+            WsCkptResponse::Error { code, message: _ } => Err(ws_error_to_cosh(
+                code,
+                "ws-ckpt daemon rejected the checkpoint evidence query".to_owned(),
+            )),
             _ => Err(unexpected_response()),
         }
     }
@@ -248,60 +418,165 @@ impl CkptClient {
     /// Send a request and receive a response over the Unix socket.
     /// Wire format: [4-byte LE length prefix][bincode payload]
     fn send_request(&self, req: &WsCkptRequest) -> Result<WsCkptResponse, CoshError> {
+        self.send_request_classified(req)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Send a request, reporting whether a failure may already have taken effect.
+    ///
+    /// Only failures raised strictly before any request byte reaches the kernel
+    /// are `KnownNoEffect`. Once a byte is handed over, this client does not
+    /// assume the daemon discards a truncated frame, so the outcome is
+    /// `PossiblyApplied` until the caller proves otherwise.
+    fn send_request_classified(
+        &self,
+        req: &WsCkptRequest,
+    ) -> Result<WsCkptResponse, CkptRequestFailure> {
+        self.send_request_classified_with_peer(req, self.trusted_peer_uid)
+    }
+
+    fn governed_peer_uid(&self) -> Result<u32, CoshError> {
+        self.trusted_peer_uid
+            .ok_or_else(trusted_peer_configuration_error)
+    }
+
+    fn send_request_classified_with_peer(
+        &self,
+        req: &WsCkptRequest,
+        trusted_peer_uid: Option<u32>,
+    ) -> Result<WsCkptResponse, CkptRequestFailure> {
         // 1. Socket existence check — fast fail before attempting connection.
         if !Path::new(&self.socket_path).exists() {
-            return Err(CoshError::new(
-                ErrorCode::CheckpointDaemonUnavailable,
-                "ws-ckpt daemon socket is unavailable",
-                "checkpoint",
-            )
-            .with_hint("Start daemon with: systemctl start ws-ckpt")
-            .recoverable(true));
+            return Err(CkptRequestFailure::known_no_effect(
+                CoshError::new(
+                    ErrorCode::CheckpointDaemonUnavailable,
+                    "ws-ckpt daemon socket is unavailable",
+                    "checkpoint",
+                )
+                .with_hint("Start daemon with: systemctl start ws-ckpt")
+                .recoverable(true),
+            ));
         }
 
         // 2. Connect to Unix socket.
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|error| classify_io_error(error, IoPhase::Connect))?;
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
+            CkptRequestFailure::known_no_effect(classify_io_error(error, IoPhase::Connect))
+        })?;
+
+        // 2a. Authenticate the connected peer before writing anything. This is
+        //     what actually defeats a directory or socket swap racing the
+        //     caller's path checks.
+        if let Some(owner_uid) = trusted_peer_uid {
+            verify_peer_credentials(&stream, owner_uid)
+                .map_err(CkptRequestFailure::known_no_effect)?;
+        }
 
         // 3. Apply configurable timeout to both read and write.
         let timeout = Duration::from_millis(self.timeout_ms);
         stream.set_read_timeout(Some(timeout)).ok();
         stream.set_write_timeout(Some(timeout)).ok();
 
-        // 4. Encode and send the request frame.
-        let frame = encode_frame(req)?;
-        stream
-            .write_all(&frame)
-            .map_err(|error| classify_io_error(error, IoPhase::WriteRequest))?;
+        // 4. Encode and send the request frame, tracking how much was handed over.
+        let frame = encode_frame(req).map_err(CkptRequestFailure::known_no_effect)?;
+        write_request_frame(&mut stream, &frame)?;
 
         // 5. Read response length prefix (4 bytes, little-endian).
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            CkptRequestFailure::possibly_applied(if error.kind() == ErrorKind::UnexpectedEof {
                 protocol_error(ProtocolFailure::TruncatedLength)
             } else {
                 classify_io_error(error, IoPhase::ReadResponseLength)
-            }
+            })
         })?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
 
         if resp_len > MAX_RESPONSE_LEN {
-            return Err(protocol_error(ProtocolFailure::OversizedLength));
+            return Err(CkptRequestFailure::possibly_applied(protocol_error(
+                ProtocolFailure::OversizedLength,
+            )));
         }
 
         // 6. Read response payload.
         let mut resp_buf = vec![0u8; resp_len];
         stream.read_exact(&mut resp_buf).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            CkptRequestFailure::possibly_applied(if error.kind() == ErrorKind::UnexpectedEof {
                 protocol_error(ProtocolFailure::TruncatedPayload)
             } else {
                 classify_io_error(error, IoPhase::ReadResponsePayload)
-            }
+            })
         })?;
 
         // 7. Decode response.
-        decode_response(&resp_buf)
+        decode_response(&resp_buf).map_err(CkptRequestFailure::possibly_applied)
     }
+}
+
+/// Writes the complete request frame, classifying a partial write as applied.
+fn write_request_frame(stream: &mut UnixStream, frame: &[u8]) -> Result<(), CkptRequestFailure> {
+    let mut written = 0;
+    while written < frame.len() {
+        // A partial write leaves the peer holding an undecodable prefix. This
+        // client does not depend on the daemon's framing to discard it, so any
+        // transferred byte forfeits the known-no-effect classification.
+        let classify = |error| {
+            if written == 0 {
+                CkptRequestFailure::known_no_effect(error)
+            } else {
+                CkptRequestFailure::possibly_applied(error)
+            }
+        };
+        match stream.write(&frame[written..]) {
+            Ok(0) => {
+                return Err(classify(classify_io_error(
+                    std::io::Error::from(ErrorKind::WriteZero),
+                    IoPhase::WriteRequest,
+                )))
+            }
+            Ok(count) => written = written.saturating_add(count),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(classify(classify_io_error(error, IoPhase::WriteRequest))),
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a connected peer that is neither root nor the expected owner.
+#[cfg(target_os = "linux")]
+fn verify_peer_credentials(stream: &UnixStream, owner_uid: u32) -> Result<(), CoshError> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+
+    let credentials = getsockopt(stream, PeerCredentials).map_err(|_| peer_error())?;
+    if credentials.uid() == 0 || credentials.uid() == owner_uid {
+        Ok(())
+    } else {
+        Err(peer_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_peer_credentials(_stream: &UnixStream, _owner_uid: u32) -> Result<(), CoshError> {
+    // Without kernel peer credentials a governed caller cannot authenticate the
+    // daemon, so requiring a trusted peer fails closed instead of degrading.
+    Err(peer_error())
+}
+
+fn peer_error() -> CoshError {
+    CoshError::new(
+        ErrorCode::PermissionDenied,
+        "ws-ckpt daemon peer is not a trusted principal",
+        "checkpoint",
+    )
+    .with_hint("Verify that ws-ckpt is running as root or as the Gateway owner")
+}
+
+fn trusted_peer_configuration_error() -> CoshError {
+    CoshError::new(
+        ErrorCode::PermissionDenied,
+        "governed checkpoint request requires trusted peer authentication",
+        "checkpoint",
+    )
+    .with_hint("Configure the client with require_trusted_peer(owner_uid)")
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +721,22 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
+    #[cfg(target_os = "linux")]
+    use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::CommandExt;
+    #[cfg(target_os = "linux")]
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
+
     use super::*;
+
+    fn trusted_client(socket_path: &str) -> CkptClient {
+        CkptClient::new(socket_path).require_trusted_peer(nix::unistd::Uid::effective().as_raw())
+    }
 
     fn send_fake_response(response: Vec<u8>) -> (CoshError, String) {
         let directory = tempfile::tempdir().unwrap();
@@ -603,6 +893,357 @@ mod tests {
                 "skipped": false,
                 "reason": null,
             })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_silent_daemon() -> (tempfile::TempDir, String, thread::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ws-ckpt.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut len_buf = [0_u8; 4];
+            stream.read_exact(&mut len_buf).unwrap();
+            let mut request = vec![0_u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut request).unwrap();
+            // Accept the complete request and then vanish without answering.
+            drop(stream);
+        });
+
+        let socket_path = socket_path.to_string_lossy().into_owned();
+        (dir, socket_path, handle)
+    }
+
+    #[test]
+    fn missing_socket_create_is_known_no_effect() {
+        let client = trusted_client("/tmp/absent-ws-ckpt-classified.sock");
+
+        let failure = client
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap_err();
+
+        assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
+        assert_eq!(failure.error.code, ErrorCode::CheckpointDaemonUnavailable);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lost_response_after_full_write_is_possibly_applied() {
+        let (_dir, socket_path, daemon) = spawn_silent_daemon();
+        let client = trusted_client(&socket_path);
+
+        let failure = client
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap_err();
+        daemon.join().unwrap();
+
+        assert_eq!(failure.effect, CkptRequestEffect::PossiblyApplied);
+        assert_eq!(failure.error.code, ErrorCode::CheckpointProtocolError);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn truncated_response_payload_is_possibly_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ws-ckpt.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut len_buf = [0_u8; 4];
+            stream.read_exact(&mut len_buf).unwrap();
+            let mut request = vec![0_u8; u32::from_le_bytes(len_buf) as usize];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(&64_u32.to_le_bytes()).unwrap();
+            stream.write_all(&[1, 2, 3]).unwrap();
+        });
+        let socket_path = socket_path.to_string_lossy().into_owned();
+
+        let failure = trusted_client(&socket_path)
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap_err();
+        daemon.join().unwrap();
+
+        assert_eq!(failure.effect, CkptRequestEffect::PossiblyApplied);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unexpected_response_variant_is_possibly_applied() {
+        let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::RecoverOk {
+            workspace: "/tmp/ws".into(),
+        });
+
+        let failure = trusted_client(&socket_path)
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap_err();
+        daemon.join().unwrap();
+
+        assert_eq!(failure.effect, CkptRequestEffect::PossiblyApplied);
+        assert_eq!(failure.error.code, ErrorCode::CheckpointProtocolError);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_daemon_reported_error_is_possibly_applied() {
+        // The checkpoint dispatch path auto-initializes the workspace before it
+        // attempts a snapshot, so registration, subvolume adoption, or a
+        // broken-symlink removal may precede any of these codes. None of them
+        // proves daemon state is unchanged.
+        for code in [
+            WsCkptErrorCode::WorkspaceNotFound,
+            WsCkptErrorCode::SnapshotAlreadyExists,
+            WsCkptErrorCode::WriteLockConflict,
+            WsCkptErrorCode::InvalidPath,
+            WsCkptErrorCode::IoError,
+            WsCkptErrorCode::BtrfsError,
+            WsCkptErrorCode::InternalError,
+            WsCkptErrorCode::DiskSpaceInsufficient,
+            WsCkptErrorCode::SnapshotNotFound,
+            WsCkptErrorCode::AlreadyInitialized,
+            WsCkptErrorCode::ConfirmationRequired,
+            WsCkptErrorCode::CwdOccupied,
+            WsCkptErrorCode::CwdScanFailed,
+        ] {
+            let daemon_message = format!(
+                "/secret/workspace\n\u{1b}[31m{}",
+                "daemon-controlled-data".repeat(4096)
+            );
+            let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::Error {
+                code: code.clone(),
+                message: daemon_message,
+            });
+
+            let failure = trusted_client(&socket_path)
+                .create_classified("/tmp/ws", "ckp_1", None, None, false)
+                .unwrap_err();
+            daemon.join().unwrap();
+
+            assert_eq!(
+                failure.effect,
+                CkptRequestEffect::PossiblyApplied,
+                "{code:?} must fail closed"
+            );
+            assert_eq!(
+                failure.error.message,
+                "ws-ckpt daemon rejected the checkpoint request"
+            );
+            assert!(failure.error.message.len() < 128);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_untrusted_peer_is_rejected_as_known_no_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let socket_path = directory.path().join("untrusted.sock");
+
+        // A root peer is always trusted in production, regardless of the
+        // configured owner. Run the listener under a different kernel UID so
+        // this remains a real negative test when the suite itself runs as root.
+        let helper_exe = directory.path().join("untrusted-peer-helper");
+        fs::copy(std::env::current_exe().unwrap(), &helper_exe).unwrap();
+        fs::set_permissions(&helper_exe, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(&helper_exe);
+        command
+            .arg("--exact")
+            .arg("checkpoint::tests::untrusted_peer_daemon_helper")
+            .arg("--nocapture")
+            .env("COSH_TEST_UNTRUSTED_PEER_SOCKET", &socket_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let test_uid = nix::unistd::Uid::effective().as_raw();
+        if test_uid == 0 {
+            command.uid(65_534);
+        }
+        let mut daemon = command.spawn().unwrap();
+        for _ in 0..100 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(daemon.try_wait().unwrap().is_none());
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(socket_path.exists());
+
+        let trusted_owner = if test_uid == 0 {
+            0
+        } else {
+            test_uid.wrapping_add(1)
+        };
+
+        let socket_path_string = socket_path.to_string_lossy().into_owned();
+        let failure = CkptClient::new(&socket_path_string)
+            .require_trusted_peer(trusted_owner)
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap_err();
+
+        assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
+        assert_eq!(failure.error.code, ErrorCode::PermissionDenied);
+        assert!(daemon.wait().unwrap().success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn untrusted_peer_daemon_helper() {
+        let Ok(socket_path) = std::env::var("COSH_TEST_UNTRUSTED_PEER_SOCKET") else {
+            return;
+        };
+        let listener = UnixListener::bind(socket_path).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_trusted_peer_is_accepted() {
+        let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::CheckpointOk {
+            snapshot_id: "snap-1".into(),
+        });
+        let owner = nix::unistd::Uid::effective().as_raw();
+
+        let created = CkptClient::new(&socket_path)
+            .require_trusted_peer(owner)
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(created.snapshot_id.as_deref(), Some("snap-1"));
+    }
+
+    #[test]
+    fn missing_auth_create_refuses_before_socket_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ws-ckpt.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let failure = CkptClient::new(socket_path.to_str().unwrap())
+            .create_classified("/tmp/ws", "ckp_1", None, None, false)
+            .unwrap_err();
+
+        assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
+        assert_eq!(failure.error.code, ErrorCode::PermissionDenied);
+        assert!(failure.error.message.contains("requires trusted peer"));
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn missing_auth_find_refuses_before_socket_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ws-ckpt.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let error = CkptClient::new(socket_path.to_str().unwrap())
+            .find_snapshot("/tmp/ws", "ckp_1")
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert!(error.message.contains("requires trusted peer"));
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn governed_operations_fail_closed_when_peer_authentication_is_unavailable() {
+        let exercise = |operation: fn(&CkptClient) -> Result<(), CoshError>| {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("ws-ckpt.sock");
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let daemon = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut byte = [0_u8; 1];
+                assert_eq!(stream.read(&mut byte).unwrap(), 0);
+            });
+            let client = CkptClient::new(socket_path.to_str().unwrap()).require_trusted_peer(0);
+
+            let error = operation(&client).unwrap_err();
+            daemon.join().unwrap();
+
+            assert_eq!(error.code, ErrorCode::PermissionDenied);
+        };
+
+        exercise(|client| {
+            client
+                .create_classified("/tmp/ws", "ckp_1", None, None, false)
+                .map(|_| ())
+                .map_err(|failure| {
+                    assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
+                    failure.error
+                })
+        });
+        exercise(|client| client.find_snapshot("/tmp/ws", "ckp_1").map(|_| ()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn find_snapshot_preserves_reported_workspace_and_matches_exact_identity() {
+        let entry = |id: &str, missing: bool| SnapshotEntry {
+            id: id.to_owned(),
+            workspace: "/registered/../workspace".to_owned(),
+            meta: SnapshotMeta {
+                message: None,
+                metadata: None,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                missing,
+                parent_id: None,
+                child_ids: Vec::new(),
+            },
+        };
+        let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::ListOk {
+            snapshots: vec![entry("ckp_other", false), entry("ckp_wanted", true)],
+        });
+
+        let evidence = trusted_client(&socket_path)
+            .find_snapshot("/tmp/ws", "ckp_wanted")
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(
+            evidence,
+            Some(CkptSnapshotEvidence {
+                snapshot_id: "ckp_wanted".to_owned(),
+                workspace: "/registered/../workspace".to_owned(),
+                missing: true,
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn find_snapshot_reports_absent_identity_without_error() {
+        let (_dir, socket_path, daemon) =
+            spawn_one_shot_daemon(WsCkptResponse::ListOk { snapshots: vec![] });
+
+        let evidence = trusted_client(&socket_path)
+            .find_snapshot("/tmp/ws", "ckp_wanted")
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(evidence, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn find_snapshot_propagates_a_daemon_error() {
+        let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::Error {
+            code: WsCkptErrorCode::WorkspaceNotFound,
+            message: "/secret/workspace\n\u{1b}[31mdaemon rejection".into(),
+        });
+
+        let error = trusted_client(&socket_path)
+            .find_snapshot("/tmp/ws", "ckp_wanted")
+            .unwrap_err();
+        daemon.join().unwrap();
+
+        assert_eq!(error.code, ErrorCode::CheckpointNotFound);
+        assert_eq!(
+            error.message,
+            "ws-ckpt daemon rejected the checkpoint evidence query"
         );
     }
 

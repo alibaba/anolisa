@@ -122,8 +122,7 @@ fn resolve_sls_path(env_val: Option<&str>) -> PathBuf {
                 eprintln!(
                     "tokenless-sls: TOKENLESS_SLS_PATH rejected (must be under \
                      /var/log/ or /tmp/, and must not contain '..'), \
-                     falling back to default: {}",
-                    DEFAULT_SLS_PATH
+                     falling back to default: {DEFAULT_SLS_PATH}"
                 );
                 None
             }
@@ -171,6 +170,24 @@ pub struct SlsRecord {
     pub chars_saved_percent: f64,
     #[serde(rename = "tokenless.compression.tokens_saved_percent")]
     pub tokens_saved_percent: f64,
+    #[serde(rename = "tokenless.compression.content_type")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(rename = "tokenless.compression.content_origin")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_origin: Option<String>,
+    #[serde(rename = "tokenless.compression.applied_operations")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_operations: Option<Vec<String>>,
+    #[serde(rename = "tokenless.compression.recoverability")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recoverability: Option<String>,
+    #[serde(rename = "tokenless.compression.tokenizer_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer_id: Option<String>,
+    #[serde(rename = "tokenless.compression.unrecoverable_truncations")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrecoverable_truncations: Option<i64>,
 }
 
 impl From<&StatsRecord> for SlsRecord {
@@ -191,6 +208,12 @@ impl From<&StatsRecord> for SlsRecord {
             tokens_saved: r.tokens_saved(),
             chars_saved_percent: r.chars_percent(),
             tokens_saved_percent: r.tokens_percent(),
+            content_type: r.content_type.clone(),
+            content_origin: r.content_origin.clone(),
+            applied_operations: r.applied_operations.clone(),
+            recoverability: r.recoverability.clone(),
+            tokenizer_id: r.tokenizer_id.clone(),
+            unrecoverable_truncations: r.unrecoverable_truncations,
         }
     }
 }
@@ -246,7 +269,7 @@ impl SlsWriter {
         let line = match serde_json::to_string(&sls_record) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("tokenless-sls: serialization error: {}", e);
+                eprintln!("tokenless-sls: serialization error: {e}");
                 return;
             }
         };
@@ -341,6 +364,35 @@ mod tests {
         assert_eq!(sls.session_id, None);
         assert_eq!(sls.tool_use_id, None);
         assert_eq!(sls.source_pid, None);
+        assert_eq!(sls.content_type, None);
+        assert_eq!(sls.applied_operations, None);
+        assert_eq!(sls.recoverability, None);
+        assert_eq!(sls.tokenizer_id, None);
+        assert_eq!(sls.unrecoverable_truncations, None);
+    }
+
+    #[test]
+    fn test_sls_record_mirrors_entry_metadata() {
+        let r = make_record().with_entry_metadata(
+            Some("api-records".to_string()),
+            Some("file_content".to_string()),
+            Some(vec!["json_cleanup".to_string()]),
+            Some("lossless".to_string()),
+            "heuristic-v1",
+            Some(1),
+        );
+        let sls = SlsRecord::from(&r);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&sls).unwrap()).unwrap();
+        assert_eq!(json["tokenless.compression.content_type"], "api-records");
+        assert_eq!(json["tokenless.compression.content_origin"], "file_content");
+        assert_eq!(
+            json["tokenless.compression.applied_operations"],
+            serde_json::json!(["json_cleanup"])
+        );
+        assert_eq!(json["tokenless.compression.recoverability"], "lossless");
+        assert_eq!(json["tokenless.compression.tokenizer_id"], "heuristic-v1");
+        assert_eq!(json["tokenless.compression.unrecoverable_truncations"], 1);
     }
 
     #[test]
@@ -374,7 +426,7 @@ mod tests {
             "tokenless.compression.tokens_saved_percent",
         ];
         for expected in &expected_keys {
-            assert!(keys.contains(expected), "missing key: {}", expected);
+            assert!(keys.contains(expected), "missing key: {expected}");
         }
         assert_eq!(keys.len(), expected_keys.len());
     }
@@ -389,8 +441,7 @@ mod tests {
         for key in obj.as_object().unwrap().keys() {
             assert!(
                 !key.chars().any(|c| c.is_ascii_uppercase()),
-                "key contains uppercase: {}",
-                key
+                "key contains uppercase: {key}"
             );
         }
     }
@@ -410,9 +461,7 @@ mod tests {
                         || c == '.'
                         || c == '_'
                         || c == '-',
-                    "invalid char '{}' in key: {}",
-                    c,
-                    key
+                    "invalid char '{c}' in key: {key}"
                 );
             }
         }

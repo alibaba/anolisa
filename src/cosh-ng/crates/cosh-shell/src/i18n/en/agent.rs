@@ -78,8 +78,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentGovernanceHookDecisionUnspecified => "unspecified",
         MessageId::AgentRecommendedCommandsLabel => "recommended commands:",
         MessageId::InterceptNoticeTitle => "AI request",
-        MessageId::InterceptNoticeBody => "Sending input to Agent: {input}",
-        MessageId::InterceptNoticeFooter => "Shell input was intercepted before Bash ran it.",
+        MessageId::InterceptNoticeBody => "Agent input: {input}",
+        MessageId::InterceptNoticeFooter => "The input was intercepted before the shell ran it.",
         MessageId::FailedAnalysisCancelledTitle => "Agent cancelled",
         MessageId::FailedAnalysisCancelledBody => "cancelled pending analysis for `{command}`",
         MessageId::FailedAnalysisCancelNoActiveBody => {

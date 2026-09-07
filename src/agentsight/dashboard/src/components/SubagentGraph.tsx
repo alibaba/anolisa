@@ -5,6 +5,7 @@
 import React from 'react';
 import type { TrajNode, PositionedNode } from '../utils/trajectoryTree';
 import { layoutTree, pathKeys, encodeNodePath, NODE_W, NODE_H } from '../utils/trajectoryTree';
+import { useI18n } from '../i18n';
 
 interface SubagentGraphProps {
   root: TrajNode;
@@ -29,6 +30,7 @@ const NodeBox: React.FC<{
   isOnPath: boolean;
   onSelect: () => void;
 }> = ({ positioned, isSelected, isOnPath, onSelect }) => {
+  const { t } = useI18n();
   const { node, x, y } = positioned;
   const isExternal = !!node.externalSessionId;
 
@@ -48,7 +50,11 @@ const NodeBox: React.FC<{
         }
       }}
     >
-      <title>{node.detail ?? node.label}</title>
+      <title>
+        {isExternal
+          ? t('comp.externalTrajectoryDetail', { id: node.externalSessionId ?? '' })
+          : node.detail ?? node.label}
+      </title>
       <rect
         x={x}
         y={y}
@@ -71,14 +77,15 @@ const NodeBox: React.FC<{
       </text>
       <text x={x + 10} y={y + 36} fill="#94a3b8" style={{ fontSize: 11 }}>
         {isExternal
-          ? '外部轨迹 ↗'
-          : `${node.stepCount} 步${node.promptTokens > 0 ? ` · ${fmtTokens(node.promptTokens)} in` : ''}`}
+          ? t('comp.externalTrajectory')
+          : `${t('comp.subagentSteps', { n: node.stepCount })}${node.promptTokens > 0 ? ` · ${fmtTokens(node.promptTokens)} in` : ''}`}
       </text>
     </g>
   );
 };
 
 export const SubagentGraph: React.FC<SubagentGraphProps> = ({ root, selectedPath, onSelect }) => {
+  const { t } = useI18n();
   const layout = React.useMemo(() => layoutTree(root), [root]);
   const onPath = React.useMemo(() => pathKeys(selectedPath), [selectedPath]);
   const selectedKey = encodeNodePath(selectedPath);
@@ -87,9 +94,9 @@ export const SubagentGraph: React.FC<SubagentGraphProps> = ({ root, selectedPath
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
       <h3 className="text-sm font-semibold text-gray-900 mb-3">
-        🤖 子代理拓扑
+        {t('comp.subagentTopology')}
         <span className="ml-2 text-xs font-normal text-gray-400">
-          共 {subagentCount} 个子代理 · 点击节点在下方查看其轨迹
+          {t('comp.subagentCount', { n: subagentCount })}
         </span>
       </h3>
       <div className="overflow-x-auto flex">

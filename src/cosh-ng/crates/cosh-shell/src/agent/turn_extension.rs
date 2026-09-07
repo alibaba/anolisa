@@ -25,7 +25,7 @@ pub(crate) fn note_capped_run(
     active_run: &ActiveAgentRun,
     committed_provider_session: Option<String>,
 ) -> bool {
-    if active_run.provider_name != "cosh-core"
+    if active_run.provider_name != crate::adapter::COSH_CORE_PROVIDER_NAME
         || active_run.origin != AgentRunOrigin::Standard
         || state.agent_run.pending_turn_extension.is_some()
         || !state.agent_run.queued_requests.is_empty()
@@ -72,7 +72,7 @@ pub(crate) fn activate_pending_turn_extension<W: Write>(
         return Ok(false);
     }
     if state.agent_run.active.is_some() || !state.agent_run.queued_requests.is_empty() {
-        state.agent_run.pending_turn_extension = None;
+        discard_pending_turn_extension(state);
         return Ok(false);
     }
     if state_has_pending_interaction(state) {
@@ -88,6 +88,27 @@ pub(crate) fn activate_pending_turn_extension<W: Write>(
     }
     render_current_approval_request(state, output)?;
     Ok(true)
+}
+
+/// Withdraws a recorded extension that newer user activity superseded before
+/// rendering, closing its `approval.requested` event with a cancelled
+/// resolution so the audit pair stays balanced.
+fn discard_pending_turn_extension(state: &mut InlineState) {
+    let Some(mut pending) = state.agent_run.pending_turn_extension.take() else {
+        return;
+    };
+    // The parked copy is constructed Pending and never rendered; anything
+    // else means a caller reparked an already-resolved approval, and a
+    // second cancelled record would misstate the audit trail.
+    if pending.approval.status != ApprovalRequestStatus::Pending {
+        return;
+    }
+    pending.approval.status = ApprovalRequestStatus::Cancelled;
+    if let Some(audit) = state.audit.as_mut() {
+        // Nothing executes on this path, so there is no boundary to fail
+        // closed on; a durability failure only degrades the recorder.
+        let _ = audit.record_approval_resolved(approval_audit_input(&pending.approval));
+    }
 }
 
 /// Applies a resolved extension exactly once. A changed provider binding
@@ -269,6 +290,73 @@ mod tests {
             Some("provider-session".to_string()),
         ));
         assert!(state.agent_run.pending_turn_extension.is_none());
+    }
+
+    #[test]
+    fn superseded_pending_extension_closes_audit_with_cancelled_resolution() {
+        // TempDir cleans up on drop, so a failing assertion leaves no
+        // stray directory behind.
+        let root = audit_root();
+        let root_path = root.path().canonicalize().expect("canonicalize audit root");
+        let mut state = InlineState {
+            audit: Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+                &root_path,
+            )),
+            ..InlineState::default()
+        };
+        let capped = active_run("localized turn limit", Some(5));
+        assert!(note_capped_run(
+            &mut state,
+            &capped,
+            Some("provider-session".to_string()),
+        ));
+
+        // A newer run supersedes the recorded extension before it renders.
+        state.agent_run.active = Some(active_run("still running", None));
+        let mut output = Vec::new();
+        assert!(!activate_pending_turn_extension(&mut state, &mut output).unwrap());
+        assert!(state.agent_run.pending_turn_extension.is_none());
+
+        drop(state.audit.take());
+        let content = segment_text(&root_path);
+        assert!(content.contains("\"event_type\":\"approval.requested\""));
+        let resolved = content
+            .lines()
+            .find(|line| line.contains("\"event_type\":\"approval.resolved\""))
+            .expect("cancelled resolution pairs the requested event");
+        let event: serde_json::Value = serde_json::from_str(resolved).expect("audit json");
+        assert_eq!(event["outcome"]["status"], "cancelled");
+        assert_eq!(event["data"]["decision"], "cancelled");
+    }
+
+    fn audit_root() -> tempfile::TempDir {
+        let root = tempfile::Builder::new()
+            .prefix("cosh-shell-turn-extension-test-")
+            .tempdir()
+            .expect("create audit temp dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("restrict audit temp dir to the owner");
+        }
+        root
+    }
+
+    fn segment_text(root: &std::path::Path) -> String {
+        let mut text = String::new();
+        let dates = std::fs::read_dir(root.join("v1/segments"))
+            .expect("audit writer lays out segments under <root>/v1/segments/<date>");
+        for date in dates {
+            let date = date.expect("list date directory").path();
+            for file in std::fs::read_dir(&date).expect("date directory holds segment files") {
+                let file = file.expect("list segment file").path();
+                text.push_str(
+                    &std::fs::read_to_string(&file).expect("segment files are UTF-8 JSONL"),
+                );
+            }
+        }
+        text
     }
 
     fn active_run(error: &str, max_turns: Option<u32>) -> ActiveAgentRun {

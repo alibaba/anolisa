@@ -46,18 +46,18 @@ AI Agent 通过加载 Skill（结构化指令 + 辅助脚本）扩展能力。Sk
 │                                                       │
 │  ~/.local/share/agent-sec/skill-ledger/                     │
 │    key.enc (私钥)     ← scan/certify 签名                   │
-│    check 只读状态；scan/certify 创建签名版本与 snapshot       │
+│ analyze/check 只读；scan/certify 创建签名版本与 snapshot     │
 │    key.pub (公钥)     ← check 验签                     │
 └───────────────────────────────────────────────────────┘
 ```
 
 **组件职责**：
 
-- **skill-ledger CLI**：核心基础设施。提供 `init`（初始化密钥并可为已覆盖 Skill 建立快速扫描 baseline）、`scan`（运行内置快速扫描器并签名入账）、`check`（只读检查 JSON + 验签 + 比哈希 + 输出状态，可供宿主 hook/capability 调用）、`certify`（导入外部 findings 并签名）等子命令。`scan` / `certify` 写入的 manifest 经 Ed25519 数字签名保护，防止篡改；当 `latest.json` 缺失时，`check` 仅在历史版本 artifact 也不存在时将该缺失判为 `none`，历史 artifact 仍存在则返回 `tampered`；latest 验真且与当前文件匹配时，仍按 `scanStatus` 返回状态（包括 `none`）。`check` 不创建版本或 snapshot。确定性逻辑不依赖 LLM，不可被 prompt injection 绕过。
+- **skill-ledger CLI**：核心基础设施。提供 `init`（初始化密钥并可为已覆盖 Skill 建立快速扫描 baseline）、`analyze`（只读内容分析，不创建账本状态）、`scan`（运行内置快速扫描器并签名入账）、`check`（只读检查 JSON + 验签 + 比哈希 + 输出状态，可供宿主 hook/capability 调用）、`certify`（导入外部 findings 并签名）等子命令。`scan` / `certify` 写入的 manifest 经 Ed25519 数字签名保护，防止篡改；当 `latest.json` 缺失时，`check` 仅在历史版本 artifact 也不存在时将该缺失判为 `none`，历史 artifact 仍存在则返回 `tampered`；latest 验真且与当前文件匹配时，仍按 `scanStatus` 返回状态（包括 `none`）。`analyze` / `check` 不创建版本或 snapshot。确定性逻辑不依赖 LLM，不可被 prompt injection 绕过。
 - **Scanner Registry**：可扩展扫描框架。通过配置注册扫描器（`builtin`/`cli`/`skill`/`api` 四种调用类型）和结果解析器（将异构扫描输出归一化为统一 `NormalizedFinding` 格式）。本版本默认注册 `skill-vetter`（`type: "skill"`，由 Agent 深度扫描后通过 `certify --findings` 消费）、`code-scanner` 和 `static-scanner`（均为 `type: "builtin"`，可由 `scan` 自动调用）。当前仅实现 `findings-array` parser；`cli`/`api` adapter 及其它 parser 类型为预留扩展点。旧名称 `skill-code-scanner`、`cisco-static-scanner` 仅作为兼容 alias 读取，不再作为公开名称展示或写入新 manifest。
 - **skill-ledger Skill**：一个 Skill，三个阶段。Phase 1 做环境准备与状态查看；Phase 2 默认执行快速扫描认证（`scan` 调用内置 `code-scanner` 与 `static-scanner`）；Phase 3 在用户显式要求或确认后执行 Agent 驱动深度扫描（`skill-vetter`），再用 `certify --findings ... --delete-findings` 写入版本链。
 - **SkillFS + daemon activation**：推荐运行态入口。SkillFS 捕获 Skill 文件变化后调用 daemon 的 `skill_ledger.skillfs_notify_change` 接口，daemon 根据签名 manifest 和 activation policy 刷新 `.skill-meta/activation.json`，并尽力同步写入 xattr。
-- **Hook / capability 兼容层**：OpenClaw、copilot-shell、Hermes 和 Qwen Code 可挂载 `skill-ledger show` 作为兼容入口并读取统一 exposure summary 中的 `message`；Codex 和 Qoder CLI 在各自的 Skill 触发边界调用只读 `skill-ledger check`。默认发行配置继续挂载/注册，`policy = "ask"`。
+- **Hook / capability 兼容层**：OpenClaw、copilot-shell、Hermes 和 Qwen Code 可挂载 `skill-ledger show` 作为兼容入口并读取统一 exposure summary 中的 `message`；Codex 和 Qoder CLI 在各自的 Skill 触发边界调用只读 `skill-ledger check`。默认发行配置继续挂载/注册；支持原生确认的宿主默认 `policy = "ask"`，Hermes 默认 `policy = "observe"`。
 
 ---
 
@@ -258,7 +258,7 @@ class SigningBackend(Protocol):
 
 **合并策略**：默认目录默认启用，由 `enableDefaultSkillDirs` 控制；`managedSkillDirs` 存放 skill-ledger 动态管理或用户额外配置的目录，不再兼容旧的 `skillDirs` 字段。解析时默认目录在前，`managedSkillDirs` 在后，自动去重。`scanners` 按 `name` 合并，用户配置可覆盖同名扫描器；`activationPolicy` 是全局运行态策略，当前只执行 `pass_warn_only` 行为，历史配置值 `pass_only` / `latest_scanned` 会兼容读取并归一化；`signingBackend` 当前会被读取到配置摘要中，但不会改变实际签名后端。
 
-**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录不在当前有效目录中，会自动追加到 `managedSkillDirs`。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。若父目录下有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。
+**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录不在当前有效目录中，会自动追加到 `managedSkillDirs`。其中 `scan` 只在 manifest 持久化成功或成功返回 `noop` 后记忆；scanner 失败、落盘失败和批量跳过均不触发记忆。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。若父目录下有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。
 
 #### 默认后端：Ed25519 + 加密密钥文件
 
@@ -320,6 +320,7 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 | 子命令 | 用途 | 本版本状态 |
 |--------|------|-----------|
 | `init` | 初始化密钥，并默认为已覆盖 Skill 建立快速扫描 baseline | 已实现 |
+| `analyze` | 只读分析当前内容，不创建账本状态或认证 | 已实现 |
 | `scan` | 运行内置快速扫描器并签名写入 manifest | 已实现 |
 | `check` | 低层完整性与扫描状态检查（只读 JSON） | 已实现 |
 | `certify` | 导入外部 findings 并签名写入 manifest | 已实现 |
@@ -337,11 +338,14 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 若密钥不存在，生成 Ed25519 密钥对并写入 `~/.local/share/agent-sec/skill-ledger/key.enc`（mode 0600）；若密钥已存在则复用，不轮换。默认不加密（明文种子）；只有指定 `--passphrase` 时才启用口令逻辑，此时可交互输入口令，或设置 `SKILL_LEDGER_PASSPHRASE` 环境变量用于非交互场景。
 
-默认行为还会发现已覆盖目录中的 Skill，并执行补齐式快速扫描，建立签名 baseline。`--no-baseline` 只初始化密钥，不扫描 Skill。不访问、不可写或扫描失败的 Skill 会记录为 `error`/`skipped` 结果，不阻断其它 Skill。
+默认行为还会发现已覆盖目录中的 Skill，并执行补齐式快速扫描，建立签名 baseline。`--no-baseline` 只初始化密钥，不扫描 Skill。对于 `/usr/share/anolisa/skills/` 或 `/usr/local/share/anolisa/skills/` 的直接子目录中由 host 提供、账本状态不可写的已打包 Skill，baseline 返回逐项 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`；该项不会阻断其它 Skill，也不会单独使命令返回非零退出码。其它访问、写入或扫描失败仍记录为 `error`，并使命令返回退出码 1。
 
 兼容入口 `init-keys` 仍保留，但作为低层命令隐藏，不在普通 help 与用户主流程中展示。
 
-**`skill-ledger rotate-keys`** — 密钥轮换（预留接口，本版本不实现）
+**`skill-ledger rotate-keys`** — 密钥轮换（隐藏的预留接口，本版本不实现）
+
+当前直接执行该命令会在 stderr 报告 `not implemented`，以退出码 1 结束，且不会修改
+`key.enc`、`key.pub` 或 `keyring/`；`rotate-keys --help` 仍作为只读帮助以退出码 0 结束。
 
 设计思路：生成新密钥对 → 用新密钥重签 `latest.json` → 旧公钥移入 `keyring/` 供历史验证。
 
@@ -364,6 +368,8 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 
 `scan` 是内置快速扫描器的主入口，不是 dry-run。默认 scanner 为 `code-scanner,static-scanner`；执行结束后自动更新 `manifest.scans[]`，聚合 `scanStatus`，重算 `manifestHash`，并写入 Ed25519 签名。
 
+只读内容分析由 `skill-ledger analyze <skill_dir> --format json` 提供。用户显式执行 `scan <skill_dir>` 表示要求持久化签名账本；若目标是上述由 host 提供且账本状态不可写的已打包系统 Skill，命令保持严格语义，返回退出码 1，并提示改用 `analyze`，不会降级为未持久化的扫描结论。
+
 默认采用补齐式扫描：
 
 - 未纳管（`latest.json` 与历史版本 artifact 均不存在）、无扫描结果、缺少部分默认 scanner 结果时，只运行缺失 scanner。
@@ -371,7 +377,7 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 - `tampered`（包括缺少签名）时用户显式执行 `scan` 即表示按当前文件重新建立可信记录；CLI 不原地补签，也不继承损坏 manifest 的 scans、状态或用户决策，而是重新扫描并写入新版本。
 - 已有对应 scanner 结果且文件未变时跳过该 scanner。
 
-`scan --all` 对所有发现的 Skill 执行相同补齐逻辑；若没有任何 scanner 需要执行，不写 manifest，只报告 `noop`。`--force` 会强制重跑请求 scanner 并重签 manifest。
+`scan --all` 对所有发现的 Skill 执行相同补齐逻辑；若没有任何 scanner 需要执行，不写 manifest，只报告 `noop`。对于上述只读已打包系统 Skill，批量路径不运行 scanner，也不写入逐 Skill manifest、snapshot、`.skill-meta` 状态或配置，返回 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`。`skipped` 是运行状态，不是六种完整性状态之一，不表示 `pass`，也不构成认证；它本身不使批量命令失败，只有实际 `status=error` 才使批量命令返回退出码 1。全局密钥初始化行为不变。`--force` 会强制重跑其它请求 scanner 并重签 manifest。
 
 新版本只会链接历史中最近的完整可信 artifact：候选的 schema、`versionId`/文件名、`skillName`、manifestHash、签名与 snapshot 必须全部匹配。版本号从该可信父版本之后选择首个未被版本 JSON 或 snapshot 占用的编号；没有可信父版本时从 `v000001` 起选择首个空槽。这样既不覆盖损坏或部分写入的证据，也不允许无效 latest 或孤立的超大编号控制恢复可用性。无可信父版本时两个 previous 字段均为 `null`；只有可信父版本的 `always_allow` 决策可以继承。
 
@@ -437,6 +443,10 @@ agent-sec-cli skill-ledger decide <skill_dir> --clear
 
 `--clear` 将 latest manifest 的 `userDecision` 置空，恢复全局 activation 行为。`rollback` 未指定 `--version` 时，默认选择当前用户决策或 `pass_warn_only` 策略下的真实 active version；若当前只有 pending stub 或 hidden，没有真实 active version，则报错。
 
+`decide` 是用户决策的唯一 CLI 入口；不保留早期的 `set-policy` 占位命令，因为其
+`allow | block | warning` 执行策略语义与按版本记录的用户决策并不等价。旧调用由 Typer
+按 unknown command 处理并返回退出码 2，不创建或修改 `.skill-meta`。
+
 **`skill-ledger show <skill_dir>`** — 展示统一暴露摘要和诊断信息
 
 `show` 复用 `build_exposure_summary()`，输出 `latestStatus`、`latestVersionId`、`activeVersionId`、`target`、`userDecision`、`reasonCode`、`message`，并附带 findings、root 与 active 是否一致等人工诊断信息。hook 只消费其中的 `message`。
@@ -453,6 +463,8 @@ agent-sec-cli skill-ledger decide <skill_dir> --clear
 - `skills`：聚合健康度（已发现 Skill 数量、各状态计数、整体 `health` 标签：`healthy` / `unscanned` / `attention` / `critical` / `empty`）
 
 使用 `--verbose` 时额外输出 `results` 数组，包含每个已注册 Skill 的详细检查结果。与 `check` 的定位区分：`check` 是单个 Skill 的完整性门禁（供 hook/plugin 调用，退出码语义化），`status` 是系统级态势感知（始终退出码 0，纯信息输出）。
+
+`check` / `status` 不把批量写路径的 `skipped` 解释为完整性结论；如果跳过项此前不存在任何账本 artifact，仍分别表现为 `none` 和 `unscanned`。`none` 也可能来自已验真 manifest 中的 `scanStatus=none`；`unscanned` 表示当前所有已发现 Skill 都检查为 `none`。二者都不能解释为 `pass`。
 
 **`skill-ledger list-scanners`** — 查看已注册扫描器
 
@@ -631,7 +643,7 @@ agent-sec-cli skill-ledger certify <skill_dir> --findings /tmp/skill-vetter-find
 
 ### 设计原则
 
-推荐部署模式是 SkillFS 捕获变更并触发 daemon activation refresh。宿主 hook/capability 作为兼容入口保留并默认挂载，默认 `policy = "ask"`。OpenClaw、copilot-shell、Hermes 和 Qwen Code 根据 `skill-ledger show` 的统一 exposure summary 决定是否提示；Codex 和 Qoder CLI 在各自的 Skill 触发边界直接消费只读 `skill-ledger check` 状态。
+推荐部署模式是 SkillFS 捕获变更并触发 daemon activation refresh。宿主 hook/capability 作为兼容入口保留并默认挂载。除 Hermes 使用 `policy = "observe"` 外，其余支持提示或确认的宿主默认 `policy = "ask"`。OpenClaw、Cosh（Legacy 与 NG）、Hermes 和 Qwen Code 根据 `skill-ledger show` 的统一 exposure summary 决定宿主动作；Codex 和 Qoder CLI 在各自的 Skill 触发边界直接消费只读 `skill-ledger check` 状态。
 
 使用 exposure summary 的宿主不直接读取 `check.status`，也不自行实现扫描状态分支：
 
@@ -655,7 +667,7 @@ Policy 语义：
 | `ask` | 默认值。`message == null` 静默放行；`message != null` 时请求用户确认或使用宿主 approval UI。 |
 | `block` | `message != null` 时直接阻断，并把 message 作为原因或告警信息。 |
 
-OpenClaw、copilot-shell、Hermes、Codex 和 Qwen Code 遇到 CLI 不可用、执行失败、超时或输出不可解析时保持 fail-open。Qoder CLI 将这些基础设施异常归一为 `error`，继续通过 `observe` / `warn` / `ask` / `block` policy 处理。`block_statuses` / `blockStatuses` 是旧配置字段，新逻辑不再按状态列表判断；旧 `enable_block` / `enableBlock` 仅适用于已有兼容实现。所有宿主都把旧值 `debug` 映射为 `observe`、把旧值 `deny` 映射为 `block`。
+OpenClaw、Cosh（Legacy 与 NG）、Hermes、Codex 和 Qwen Code 遇到 CLI 不可用、执行失败、超时或输出不可解析时保持 fail-open。Qoder CLI 将这些基础设施异常归一为 `error`，继续通过 `observe` / `warn` / `ask` / `block` policy 处理。`block_statuses` / `blockStatuses` 是旧配置字段，新逻辑不再按状态列表判断；旧 `enable_block` / `enableBlock` 仅适用于已有兼容实现。所有宿主都把旧值 `debug` 映射为 `observe`、把旧值 `deny` 映射为 `block`。
 
 ### message 触发规则
 
@@ -678,13 +690,13 @@ OpenClaw、copilot-shell、Hermes、Codex 和 Qwen Code 遇到 CLI 不可用、�
 
 ## 6. 宿主集成
 
-推荐宿主集成由 SkillFS 驱动：SkillFS 负责捕获 Skill 目录变更，通知 Skill Ledger daemon 扫描并刷新 `.skill-meta/activation.json`/xattr。宿主 hook/capability 作为兼容路径保留并默认使用 `ask` policy，各宿主的 Skill 模型和 Hook 机制存在差异：
+推荐宿主集成由 SkillFS 驱动：SkillFS 负责捕获 Skill 目录变更，通知 Skill Ledger daemon 扫描并刷新 `.skill-meta/activation.json`/xattr。宿主 hook/capability 作为兼容路径保留；Hermes 默认使用 `observe`，其余宿主默认使用 `ask`，因为各宿主的 Skill 模型和 Hook 机制存在差异：
 
 | 宿主 | 触发与检查 | `observe` | `warn` | `ask` | `block` | 覆盖与默认值 |
 |------|------------|-----------|--------|-------|---------|------------|
 | OpenClaw | `before_tool_call` 读取 SKILL.md → `show` | debug 后放行 | logger warning 后放行 | `requireApproval` | `block` / `blockReason` | `~/.openclaw/skills/`；`enabled=true, policy="ask"` |
-| copilot-shell | `PreToolUse(skill)` → `show` | stderr 审计后放行 | `decision: "allow"` + `reason` | `decision: "ask"` | `decision: "block"` | project / user / system；默认注册且 policy 为 `ask` |
-| Hermes | `pre_tool_call(skill_view)` → `show` | logger 审计后放行 | 最终回复注入 warning | fallback 为 `warn` | `{"action": "block"}` | `~/.hermes/skills/**`；`enabled=true, policy="ask"` |
+| Cosh Legacy / Cosh-NG | `PreToolUse(skill)` → 归一化调用身份 → `show` | stderr 审计后放行 | `decision: "allow"` + `reason` | `decision: "ask"` | `decision: "block"` | project / user / system；默认注册且 policy 为 `ask` |
+| Hermes | `pre_tool_call(skill_view)` → `show` | logger 审计后放行 | 降级为 `observe` 并记录诊断 | 降级为 `observe` 并记录诊断 | `{"action": "block"}` | `~/.hermes/skills/**`；`enabled=true, policy="observe"` |
 | Qoder CLI | `PreToolUse(Skill)` → `check` | stderr 审计后放行 | `decision: "allow"` + `systemMessage` | `permissionDecision: "ask"` | `permissionDecision: "deny"` | project / user；默认注册且 policy 为 `ask` |
 | Codex | `UserPromptSubmit($skill-name)` → `check` | 静默审计后放行 | `systemMessage` 后放行 | fallback 为 `warn` | `decision: "block"` | repo / user / system；默认注册且 policy 为 `ask` |
 | Qwen Code | `PreToolUse(skill)` → `show` | stderr 诊断后放行 | `systemMessage` 后放行 | `permissionDecision: "ask"` | `permissionDecision: "deny"` | project / user；默认注册且 policy 为 `ask` |
@@ -693,9 +705,9 @@ OpenClaw、copilot-shell、Hermes、Codex 和 Qwen Code 遇到 CLI 不可用、�
 
 以 OpenClaw Plugin 形式分发，默认注册 `skill-ledger` capability，`capabilities.skill-ledger.policy` 默认为 `ask`。`before_tool_call` handler 过滤 read tool 对 `*/SKILL.md` 的访问，解析 `skill_dir` 后调用 `agent-sec-cli skill-ledger show`。`enabled=false` 时完全不注册；`policy=observe` 时只写 debug 审计并放行；`policy=warn` 时通过 `api.logger.warn` 输出告警并放行；`policy=block` 在 summary message 非空时返回 `block`。旧 `enableBlock` 仅在未配置 `policy` 时作为兼容映射，旧 `blockStatuses` 不再参与运行态判断。
 
-### 6.2 copilot-shell（Command Hook）
+### 6.2 Cosh Legacy / Cosh-NG（Command Hook）
 
-独立 Python 脚本 `cosh-extension/hooks/skill_ledger_hook.py`，专为 stdin/stdout 协议设计，不依赖 `agent_sec_cli` 包。默认 Cosh manifest 挂载该 hook，默认 `SKILL_LEDGER_MODE=ask`。该环境变量属于可信宿主或部署环境配置，不应由 Skill、项目脚本或不可信 shell 启动逻辑设置；若需要防止本地 shell profile 被篡改后降级策略，后续应迁移到可信宿主配置源：
+独立 Python 脚本 `cosh-extension/hooks/skill_ledger_hook.py`，专为 stdin/stdout 协议设计，不依赖 `agent_sec_cli` 包。同一 hook 同时接受 Cosh Legacy 和 Cosh-NG 的 `PreToolUse(skill)` 事件，并先把宿主输入归一化为唯一的 Skill 身份，再解析目录并调用 `agent-sec-cli skill-ledger show`。默认 Cosh manifest 挂载该 hook，默认 `SKILL_LEDGER_MODE=ask`。该环境变量属于可信宿主或部署环境配置，不应由 Skill、项目脚本或不可信 shell 启动逻辑设置；若需要防止本地 shell profile 被篡改后降级策略，后续应迁移到可信宿主配置源：
 
 配置：
 ```jsonc
@@ -715,19 +727,45 @@ OpenClaw、copilot-shell、Hermes、Codex 和 Qwen Code 遇到 CLI 不可用、�
 }
 ```
 
-**Skill 目录定位（当前版本范围）**：copilot-shell hook 仅覆盖 project → user → system 三类 skill：
+两种宿主的输入协议分别为：
+
+```jsonc
+// Cosh Legacy
+{ "tool_input": { "skill": "github" } }
+
+// Cosh-NG：显式 invoke
+{ "tool_input": { "action": "invoke", "name": "github" } }
+
+// Cosh-NG：省略 action 时仍表示 invoke
+{ "tool_input": { "name": "github" } }
+```
+
+**调用身份归一化**：只要 `tool_input` 出现 `action` 或 `name` 字段，hook 就按 Cosh-NG 协议解释，且只把 `name` 作为宿主实际执行的 canonical Skill 身份，不回退到 legacy `skill`。`action="invoke"`、缺失 action 和非字符串 action 均按 Cosh-NG 当前的 invoke 语义处理，并要求 `name` 是非空字符串；不支持的字符串 action 属于协议契约异常。若 `action/name` 均未出现，则按 Cosh Legacy 协议读取 `skill`。`name` 与 `skill` 同时出现时必须完全相同，hook 只使用 `strip()` 判断空白值，不改变身份的大小写或原始内容。
+
+`action="list"` 不执行 Skill，hook 因此立即静默放行；该分支不会读取 policy、解析 Skill 目录、初始化密钥或调用 CLI。其它缺失、空白、非字符串或互相冲突的身份，以及缺损或身份冲突的 `skill_context`，都作为协议契约异常按当前 hook policy 返回：
+
+| Policy | 协议契约异常行为 |
+|--------|------------------|
+| `observe` | 写入 stderr 诊断并放行。 |
+| `warn` | 返回 `decision: "allow"` 和用户可见的 `reason`。 |
+| `ask` | 返回 `decision: "ask"` 和确认原因。 |
+| `block` | 返回 `decision: "block"` 和阻断原因。 |
+
+**Skill 目录定位（当前版本范围）**：两种 Cosh 输入协议共用同一目录边界，hook 仅覆盖 project → user → system 三类 Skill：
 - project：`<cwd>/.copilot-shell/skills/<skill>/`
 - user：`~/.copilot-shell/skills/<skill>/`
 - system（RPM）：`/usr/share/anolisa/skills/<skill>/`
 - system（raw install）：`/usr/local/share/anolisa/skills/<skill>/`
 
-当 PreToolUse 事件包含 `skill_context.file_path` 时，hook 优先使用该路径解决 `SKILL.md` 中 `name` 与目录名不一致的问题；但该路径仍必须落在上述 project/user/system 根目录内。若路径落在 custom、extension、remote 或其他目录，当前版本不执行 skill-ledger 检查，hook fail-open，并仅写入 debug 日志说明该 skill 不在当前 hook 支持范围内。
+`skill_context` 是可选的身份佐证和路径来源，不会覆盖归一化后的调用身份。事件不含该字段时，hook 保留按名称查找目录的行为；事件包含该字段时，`skill_name` 必须与归一化身份一致，`file_path` 必须指向现有 `SKILL.md`，且 canonical path 必须落在上述 project/user/system 根目录内。若路径落在 custom、extension、remote 或其他目录，当前版本不执行 skill-ledger 检查，hook 保持既有 fail-open，并仅写入 debug 日志说明该 Skill 不在当前 hook 支持范围内。
 
-**custom / extension / remote Skills**：当前版本的 copilot-shell hook 不覆盖这些来源。未来若扩展覆盖范围，需要单独补充目录解析、信任边界和测试用例。
+**custom / extension / remote Skills**：当前版本的 Cosh hook 不覆盖这些来源。未来若扩展覆盖范围，需要单独补充目录解析、信任边界和测试用例。目录未找到、范围外路径、CLI 缺失或超时、执行失败及输出不可解析等既有基础设施路径仍保持 fail-open；这些路径与上述输入协议契约异常的 policy 映射相互独立。
+
+**检查边界**：该 hook 只保证对 sec-core 收到的原始 `PreToolUse` 快照完成身份归一化和检查，不提供端到端 fail-closed 保证。若同一轮后续 hook 通过 `tool_input_patch` 改写 `action` / `name` / `skill`，可能使最终执行身份与已检查身份不同；该 TOCTOU 问题需要宿主侧身份改写约束作为独立 follow-up 处理。
 
 ### 6.3 Hermes（Plugin Hook）
 
-以 Hermes Plugin 形式分发，默认 `capabilities.skill-ledger.enabled=true` 且 `policy="ask"`。`pre_tool_call` handler 过滤 `skill_view`，仅根据 `name` / `skill` / `skill_name` 在 Hermes 默认本地目录 `~/.hermes/skills` 下解析 Skill 目录后调用 `agent-sec-cli skill-ledger show`。`file_path` / `path` 在 Hermes 中表示 Skill 内 supporting file，不作为 Skill 身份来源。若无法解析、匹配到多个候选、命中 `~/.hermes/config.yaml` 的 `skills.external_dirs` 或 plugin-provided skills 等当前未覆盖来源，hook 采用 fail-open。`policy=observe` 时只写审计日志；`policy=ask` / `warn` 时，summary message 会记录为本轮 warning，并由 `transform_llm_output` 追加到最终回复开头；`policy=block` 在 message 非空时直接阻断本次 `skill_view`。`max_warnings_per_turn = 0` 只影响 `ask` / `warn` 的用户可见 warning 注入。旧 `enable_block` 仅在未配置 `policy` 时作为兼容映射，旧 `block_statuses` 不再参与运行态判断。
+以 Hermes Plugin 形式分发，默认 `capabilities.skill-ledger.enabled=true` 且 `policy="observe"`。`pre_tool_call` handler 过滤 `skill_view`，仅根据 `name` / `skill` / `skill_name` 在 Hermes 默认本地目录 `~/.hermes/skills` 下解析 Skill 目录后调用 `agent-sec-cli skill-ledger show`。`file_path` / `path` 在 Hermes 中表示 Skill 内 supporting file，不作为 Skill 身份来源。若无法解析、匹配到多个候选、命中 `~/.hermes/config.yaml` 的 `skills.external_dirs` 或 plugin-provided skills 等当前未覆盖来源，hook 采用 fail-open。`policy=observe` 时只写审计日志；`policy=block` 在 message 非空时直接阻断本次 `skill_view`。Hermes 未向 Python plugin 暴露原生 advisory/确认 API，因此旧 `policy=warn` / `ask` 降级为 `observe` 并记录一次宿主诊断，不再通过 `transform_llm_output` 修改最终回复。旧 `enable_block=true` / `false` 分别映射为 `block` / `observe`，旧 `block_statuses` 不再参与运行态判断，`max_warnings_per_turn` / `max_warning_contexts` 已废弃并忽略。
 
 ### 6.4 Qoder CLI（Command Hook）
 

@@ -1,0 +1,465 @@
+# AgentSec daemon Job 生命周期与执行契约
+
+| 属性 | 值 |
+| --- | --- |
+| 状态 | V1 Python production Job 行为基线及最小化 Rust JobSupervisor 目标 |
+| 实现核对日期 | 2026-08-21 |
+| 实现核对提交 | `fe58ed4b23b8` |
+| OTel V2 目标决策日期 | 2026-08-25 |
+| 适用实现 | 当前 Python daemon oracle；目标 Rust daemon |
+
+## 1. 文档地位
+
+本文是 AgentSec daemon 后台 job 注册、调度、生命周期、状态、日志、trace、失败、取消、
+恢复和健康投影的语言无关权威规范。V2 产品和进程架构以仓库内迁移总计划为准；本文记录
+V1 oracle，并定义 asc-daemon-core 首版 JobSupervisor 必须承接和明确延后的
+语义。权威关系见
+[`AGENT_SEC_RUST_MIGRATION_zh.md`](AGENT_SEC_RUST_MIGRATION_zh.md#1-文档状态与仓库内权威关系)。
+daemon transport、权限和启停见
+[`DAEMON_CURRENT_BEHAVIOR_zh.md`](DAEMON_CURRENT_BEHAVIOR_zh.md)，job 相关 wire method 和
+`daemon.health` envelope 见 [`DAEMON_PROTOCOL_V1_zh.md`](DAEMON_PROTOCOL_V1_zh.md)。
+
+本文不规定 Python 类层次、Rust crate、async runtime、线程模型或 channel 实现。Python
+和 Rust 可以采用不同内部结构，但必须满足相同的可观察行为和 contract fixtures。
+
+本文使用以下范围标记：
+
+- **[CURRENT]**：当前 Python 实现已经具备的行为；
+- **[PRESERVE V1]**：supported V1 兼容接口在兼容期必须保持的外部行为；
+- **[TARGET V2]**：与仓库内迁移总计划一致的 Rust 新增或统一能力，不能作为 Python golden；
+- **[HISTORICAL]**：只作为历史依据，不构成当前或目标要求。
+
+本文未显式标记的当前可观察行为只属于 **[CURRENT]**；是否 PRESERVE V1 由 per-crate
+compatibility inventory 和 fixture 决定。Python worker、class 和 per-user 进程形态不是
+V2 要求。
+
+## 2. 概念与职责边界
+
+### 2.1 Preparation、Background service 与 Run
+
+Rust 首版必须先区分 readiness-critical preparation 和 daemon ready 后的后台工作，不能把
+所有启动期动作都抽象成 Job：
+
+| 概念 | Ready 关系 | 当前示例 | Rust 首版承接位置 |
+| --- | --- | --- | --- |
+| 安装/升级 preparation | daemon 启动前，由部署流程完成 | 文件布局、密钥 provision、V1 到 V2 状态迁移 | installer、init container 或显式 `asc-state-migrator`，不属于 daemon Job |
+| Daemon bootstrap | 完成后才可以 Ready | 配置、权限、认证材料、runtime、数据库打开和 schema compatibility 校验 | composition root 中的有序初始化与 rollback，不属于后台 Job |
+| Background service | 由 daemon 启动并长期存活；不等待首个 run 完成即可 Ready | `skill-ledger-activation` actor | 最小化 JobSupervisor |
+| Background run | service 的一次具体处理 | startup reconcile、一次 debounced Skill 变更批次 | service 内的一次有界执行 |
+
+startup reconcile 虽然由 daemon 启动触发，但它不阻止当前 socket bind，语义上属于
+background run，而不是 readiness-critical preparation。周期触发只是未来可能增加的 trigger；
+当前没有注册任何具体 production periodic Job。
+
+长期 background service 的运行状态不能代替最近一次 run 的结果。Rust 首版只需在 health
+中区分 `running/degraded/stopped` 和最近一次 outcome，不需要预先实现两套可扩展状态机。
+
+### 2.2 daemon、Supervisor 与领域逻辑
+
+Rust 首版 JobSupervisor 只负责：
+
+- 静态注册、确定性启动和停止；
+- 持有全部长期 task、取消信号和 terminal join；
+- 轻量 health snapshot 与安全的结构化诊断；
+- 为实际执行批次建立 OTel span；
+- 在 shutdown 时停止接收 trigger 并完成 drain 或 cancel。
+
+trigger、debounce、合并和当前 retry 语义由第一个具体 service adapter 承担；只有出现第二个
+具有相同需求的 production Job 后，才评审是否上移为通用 scheduler/policy。
+
+领域 handler 负责：
+
+- 解释类型化 payload；
+- 调用所属领域 application service；security action 经 asc-action-runtime 和
+  CapabilityExecutor；
+- 返回领域结果或分类后的错误；
+- 保持领域持久化、锁和幂等语义。
+
+Job adapter 不得复制 capability、middleware lifecycle、SecurityEvent、telemetry 或
+redaction 业务逻辑。V2 daemon 直接调用 Rust application service，不保留用于复用 Python
+领域逻辑的永久 worker。
+
+## 3. **[CURRENT]** 当前 Python Job framework
+
+### 3.1 注册、启动与停止
+
+当前 Job manager 按注册顺序保存 Job，并提供 `register/get/start_all/stop_all/status` 的逻辑
+能力。默认 registry 恰好注册一个 production Job：`skill-ledger-activation`。仓库中的通用
+one-shot/periodic 类及其测试证明 Python 原型具备这些调度能力，但没有对应的默认 production
+Job，因此它们属于 **[CURRENT][HISTORICAL]** framework evidence，不是 Rust 首版功能需求。
+
+daemon 启动时的可观察顺序为：
+
+1. 完成认证 key、runtime directory、lock 和 stale socket 的前置校验；
+2. 按注册顺序启动全部 Job；
+3. bind socket；
+4. 若 Job 启动或 bind 失败，停止已经进入启动流程的 Job，并完成 socket、lock 和 umask
+   回滚；
+5. socket 可接受请求后记录 `daemon_started`。
+
+daemon 正常停止时先停止接收并 drain 在途请求，再按注册逆序停止 Job，最后清理 socket、
+lock 和 umask。SIGTERM、SIGINT 和 daemon task cancellation 必须进入同一清理路径。
+
+当前 Python `JobManager` 不拒绝重复名称；这是 **[CURRENT]** 内部缺口，不属于
+**[PRESERVE V1]**。兼容测试不得依赖重复名称或 `get()` 返回第一个同名对象。
+
+### 3.2 当前 Job 接口
+
+当前通用逻辑接口只有：
+
+| 操作 | 语义 |
+| --- | --- |
+| `start` | 启动长期任务或安排一次运行；不得阻塞 daemon 的整个服务周期 |
+| `stop` | 请求停止并等待该 Job 拥有的任务、worker 和必要清理结束 |
+| `status` | 返回不初始化重型能力的轻量、可序列化快照 |
+
+Python 的 `BackgroundJob`、`OneShotBackgroundJob` 和 `PeriodicBackgroundJob` 类名不是
+跨语言 API；Rust 不需要复制继承结构。
+
+### 3.3 当前 health schema
+
+`daemon.health.data.jobs` 是按注册顺序排列的数组。每项至少包含：
+
+| 字段 | 类型 | 当前语义 |
+| --- | --- | --- |
+| `name` | non-empty string | 稳定 Job 名称 |
+| `state` | string | 当前 Job 状态，值域因 Job kind 而异 |
+| `last_error` | string/null | 最近一次未清除的错误文本 |
+| `last_tick_at` | ISO-8601 string/null | 最近一次开始处理工作的时间 |
+
+通用 periodic/one-shot 原型可以增加以下字段；值未设置时当前序列化会省略，而不是写
+`null`。这些字段当前不会由默认 production registry 产生，属于
+**[CURRENT][HISTORICAL]**：
+
+| 字段 | 类型 | 适用范围 |
+| --- | --- | --- |
+| `interval_seconds` | positive number | periodic |
+| `last_started_at` | ISO-8601 string | periodic/one-shot |
+| `next_run_at` | ISO-8601 string | periodic |
+
+当前观察到的 `state` 值如下：
+
+| Job kind | 值域 | 说明 |
+| --- | --- | --- |
+| one-shot | `stopped/running/completed/error` | 成功后进入 `completed`，异常后进入 `error` |
+| periodic | `stopped/running/error` | 单次失败暂时为 `error`，后续 tick 仍会继续 |
+| Skill Ledger activation | `stopped/running/error` | 单次处理失败不会终止循环，后续成功可恢复 `running` |
+
+当前 schema 将长期 Job 状态和最后一次 run 结果部分混合。Rust 首版只需为实际注册的
+`skill-ledger-activation` 保留 `name/state/last_error/last_tick_at` 兼容投影；不得因为未注册的
+通用原型提前固化 periodic/one-shot optional 字段。
+
+## 4. **[CURRENT]** 当前调度语义
+
+### 4.1 **[HISTORICAL]** One-shot 原型
+
+- `start()` 安排一次后台执行并立即返回，不等待 Job body 完成；
+- Job 已在运行时重复 `start()` 不会启动第二份并发执行；
+- 成功、失败或取消分别形成 completed、failed 或 cancelled lifecycle；
+- `stop()` 取消尚未完成的 task 并等待取消清理。
+
+### 4.2 **[HISTORICAL]** Periodic 原型
+
+- `start()` 后第一次 run 立即到期；
+- 每个周期以该次 run 的开始时间为锚点；
+- run 超过一个或多个周期时跳过已经错过的边界，不进行补偿性连续执行；
+- 同一 periodic Job 不重叠执行多个 run；
+- 一次普通异常被记录为失败，但 loop 继续等待后续 tick；
+- 每个 tick 使用独立的 daemon-owned trace ID。
+
+上述两节只用于解释和测试当前 Python 通用框架，不是 supported 外部能力，也不是 Rust
+首版 no-regression gate。
+
+### 4.3 **[PRESERVE V1]** Skill Ledger activation
+
+当前默认 Job 是一个自定义 event-driven loop，不通过通用 one-shot/periodic lifecycle
+wrapper：
+
+1. 启动后状态为 `running`；
+2. 枚举显式 managed Skill 目录；
+3. 为每个目录 enqueue 一个 `eventKind=reconcile`、空 paths 的启动事件；
+4. 收到 SkillFS notify 后以 canonical Skill directory 为 key 暂存；
+5. 默认 debounce 500 ms；
+6. 逐个处理合并后的目录变更。
+
+同一 canonical directory 的合并规则为：
+
+- `eventKinds` 和 `paths` 取并集；
+- 后到且非空的 reported Skill ID 覆盖旧值；
+- 第一次加入返回 newly queued，已经存在返回 coalesced；
+- drain 过程中到达的新事件进入下一批并重新等待 debounce；
+- task cancellation 时，当前批中尚未处理的变更重新放回 pending。
+
+默认目录发现项不等于 managed 目录；startup reconcile 只处理 resolver 明确返回的 managed
+Skill 目录。
+
+## 5. **[CURRENT]** Worker、错误、重试与取消
+
+### 5.1 **[PRESERVE V1]** 当前 Python worker 外部语义
+
+当前 activation Job 延迟启动一个串行、持久 Python worker 子进程。每次只处理一个
+Skill 变更，单次默认 timeout 为 300 秒。
+
+以下错误属于 worker transport failure：
+
+- worker 启动或 stdio 失败；
+- broken pipe、EOF 或 OS communication error；
+- response 超限、协议无效或 request ID 不匹配；
+- timeout；
+- response 缺少必需 result/error。
+
+transport failure 会终止当前 worker，并对当前变更最多重新启动并重试一次，即总尝试数
+最多为 2。worker 返回的领域执行错误是 business failure，不得触发 worker 重启或自动
+重试。
+
+stop 时先关闭 worker stdin 并等待 2 秒；仍未退出则 terminate，再等待 5 秒；仍未退出则
+kill。该进程协议和三阶段终止流程是 **[CURRENT]** Python 实现细节。Rust core 完成后可以
+进程内执行，但必须保持业务错误不自动重试、transport/执行失败可区分、取消不被解释为
+工作尚未发生等外部语义。
+
+### 5.2 Job failure isolation
+
+- **[HISTORICAL]** one-shot 未处理异常结束该原型 run，并把状态设为 `error`；
+- **[HISTORICAL]** periodic 未处理异常结束当前原型 run，但不终止后续周期；
+- Skill Ledger 某个变更失败时记录 `last_error/last_processed`，继续处理后续通知；
+- Job runtime failure 当前不会自动停止 daemon 或改变 daemon 顶层 `status`；
+- Job 启动阶段抛错则 daemon 启动失败并执行资源回滚。
+
+timeout 或 cancellation 只说明调用方停止等待或发出了取消请求，不证明 blocking、文件、
+SQLite、签名或外部进程副作用尚未发生。任何有副作用的 run 不得仅因 timeout/cancel 自动
+重放。
+
+## 6. **[CURRENT][PRESERVE V1]** 队列、接受与恢复语义
+
+Skill Ledger pending 是 daemon 内存中的按目录合并 map，不是持久消息队列。notify 返回
+`accepted=true, queued=true/coalesced=true` 表示运行中的 Job 已接受到内存 pending，
+不表示变更已经执行、持久化或具备 exactly-once 保证。
+
+daemon 在接受后崩溃可能丢失尚未处理的 pending。下一次启动会对显式 managed Skill 目录
+执行全量 reconcile，用当前文件和持久化事实状态重新求值；不能承诺重放每一条历史 notify
+或保留原通知顺序。
+
+兼容迁移不得把 `accepted` 偷换为持久队列承诺。未来若要求 durable acceptance、operation
+status 或 exactly-once，必须单独设计持久 operation ID、恢复日志和版本化 wire 语义。
+
+当前 pending 没有已固化的容量上限或 queue-full wire error。Rust 兼容实现不得擅自引入
+会拒绝当前可接受请求的新上限；容量与 backpressure 必须作为独立产品决策和协议变更评审。
+
+## 7. **[CURRENT]** 日志与 trace
+
+### 7.1 **[HISTORICAL]** 当前通用 lifecycle event 原型
+
+通用 one-shot/periodic wrapper 定义：
+
+- `daemon_job_started`；
+- `daemon_job_completed`；
+- `daemon_job_failed`；
+- `daemon_job_cancelled`。
+
+当前事件 data 使用以下字段子集：
+
+| 字段 | 语义 |
+| --- | --- |
+| `job_name` | Job 稳定名称 |
+| `job_kind` | `one_shot` 或 `periodic` |
+| `state` | 事件发生后的当前状态 |
+| `latency_ms` | terminal event 的单次 run 延迟 |
+| `interval_seconds` | periodic 周期 |
+| `error_type/error_message` | failed event 的异常类型和文本 |
+
+one-shot 的 started 与 terminal event 使用同一个新 UUID trace ID。periodic 每个 tick 使用
+一个新的 trace ID，同一 tick 的 started 与 terminal event 共用该 ID；run 结束后必须恢复
+之前的 ambient context。
+
+当前默认 `skill-ledger-activation` 是自定义 loop，不承诺逐批产生上述通用 lifecycle event，
+也不承诺把 notify request trace 传播到后续 debounced 执行。上述 one-shot/periodic event
+只用于表征 Python 原型，不是 V1 production golden，也不是 Rust 首版必须复制的 event 数量。
+
+本节 UUID trace 是 **[CURRENT][HISTORICAL]** correlation 行为，不是 OTel TraceId。V2
+不得把这些 UUID 解析、hash 或 padding 成 OTel TraceId。
+
+### 7.2 当前日志安全边界
+
+daemon 诊断日志是 JSONL。Job 日志不得改变 daemon request 或领域执行结果；Rust panic、
+Python traceback、认证材料、passphrase、未脱敏 PII 和任意 secret 不得作为非结构化内容
+跨 daemon boundary。
+
+当前通用 framework 会把异常类型和 `str(exception)` 写入 job failure data，尚无独立的
+Job error sanitizer contract。这是迁移前必须补齐的安全缺口，不能把任意 worker stderr
+或领域异常原文直接复制到目标结构化日志。
+
+## 8. **[TARGET V2]** Rust 首版范围
+
+Rust 首版以当前唯一 production background service 为边界，不实现一个面向未知任务类型的
+通用调度平台。
+
+### 8.1 Daemon bootstrap 不是 Job
+
+composition root 在声明 Ready 前按显式顺序完成必要校验和资源初始化；任一步失败都停止
+启动，并按逆序释放已获取资源。bootstrap 至少覆盖配置、权限、认证材料、runtime、持久化
+连接和 schema compatibility。
+
+不可逆安装/升级和 V1 到 V2 数据迁移必须由显式 installer、init container 或
+`asc-state-migrator` 完成，daemon bootstrap 不得隐式执行。Skill Ledger startup reconcile
+可以失败并投影 degraded，但不属于 Ready 前置条件。
+
+### 8.2 最小化 JobSupervisor
+
+首版 supervisor 必须：
+
+1. 静态注册具有稳定唯一名称的 background service，并拒绝重复名称；
+2. 按确定顺序启动；部分启动失败时只逆序停止已经启动的 service；
+3. 拥有全部长期 task、取消信号和 terminal join，不创建 detached task；
+4. shutdown 时先停止接收 trigger，再 drain 或 cancel，并等待 owned task 退出；
+5. 把 blocking 文件、SQLite、签名、模型或外部进程工作放入明确的 blocking boundary；
+6. 捕获 panic/join failure，写入经过脱敏的错误和 health snapshot；
+7. 为实际注册的 service 提供 `running/degraded/stopped`、最近 outcome、最近安全错误和
+   `last_tick_at`。
+
+首版不要求公开通用 `JobSpec`。注册项只需表达 `name/start/shutdown/health`；timeout、retry、
+debounce 和 trigger payload 留在拥有该语义的具体 adapter 中。
+
+### 8.3 Skill Ledger startup/event-driven actor
+
+第一个具体 Rust background service 是 Skill Ledger activation actor。它只需要两种 trigger：
+
+```text
+StartupReconcile
+SkillFsNotify(SkillFsChange)
+```
+
+单一 actor 拥有 pending map，并在同一 select loop 中处理 notify、debounce timer 和 shutdown。
+它必须保持：
+
+- startup reconcile 只枚举显式 managed Skill 目录；
+- canonical directory 作为 coalesce key；
+- `eventKinds/paths` 并集和 reported Skill ID 覆盖规则；
+- 500 ms 默认 debounce；
+- 单目录串行处理和当前批取消后重入 pending；
+- transport/protocol/timeout 最多重试一次，domain failure 不重试；
+- startup reconcile 与显式写操作依赖领域事务、幂等键或跨进程锁，而非仅 daemon 内 mutex；
+- `accepted/queued/coalesced` 继续表示内存接受，不承诺 durable queue 或 exactly-once。
+
+### 8.4 首版日志与 tracing
+
+每个实际处理批次建立一个 SDK 管理的 `daemon.job.run` OTel span，并记录有界的 AgentSec
+语义 attributes，例如 service 名、`startup_reconcile/skillfs_notify` trigger、合并项数和
+outcome。startup run 没有上游 parent；多个 notify 合并时不得任意选择其中一个 request
+作为唯一 parent。
+
+首版不要求自定义 `job_run_id`、attempt child span 或 contributor Span Links。若没有合法
+parent，创建新的 OTel root span；诊断日志从当前 span 取得标准 TraceId/SpanId，不生成第二套
+daemon trace ID。OTel 未采样、未配置 exporter 或 Collector 故障不得改变处理结果、当前重试
+语义或本地诊断日志写入尝试。
+
+每个开始处理的批次必须产生一个 started 日志和恰好一个 completed/failed/cancelled terminal
+日志。自动判断只使用结构化字段，异常、panic payload、worker stderr、traceback、认证材料
+和未脱敏敏感值不得直接进入日志或 health。
+
+## 9. **[DEFERRED]** 有实际需求后再设计的能力
+
+以下能力不属于 Rust 首版完成条件：
+
+- 通用 one-shot abstraction；
+- periodic/cron scheduler、interval、jitter、missed-tick 和 overlap policy；
+- 包含 startup/runtime/retry/shutdown/observability policy 的通用 `JobSpec`；
+- 完整 Job lifecycle 与 Job run lifecycle 双状态机；
+- 通用 retry/backoff、attempt 模型和 attempt child span；
+- contributor cause 集合、OTel Span Links 和截断策略；
+- durable queue、operation status、replay 或 exactly-once；
+- 为未注册任务预留的 `interval_seconds/next_run_at/pending/inflight` health 字段。
+
+只有出现经过评审的具体 production periodic Job 后，才定义它的 owner、触发目的、interval
+配置、首次执行时机、missed-tick、overlap、错误、重试、shutdown、health 和验收 fixture。
+不得先以当前 Python `PeriodicBackgroundJob` 原型替未来产品做决定。
+
+## 10. 兼容与演进规则
+
+1. 当前 production registry、Skill Ledger startup reconcile、debounce、合并、retry 分类、
+   停止和 health 基础字段属于兼容基线。
+2. Python worker 进程、NDJSON worker protocol、Python class 和 asyncio primitives 不是长期
+   架构约束。
+3. Python 通用 one-shot/periodic 原型及其 optional health/log 字段不是 Rust 首版兼容要求。
+4. Rust 为实际 Skill Ledger 处理批次补充 OTel run span 和结构化 lifecycle log 是
+   **[TARGET V2]**；不得据此修改当前 Python golden event 数量，也不得要求自定义 run ID、
+   attempt span 或 Span Links。
+5. `accepted/queued/coalesced` 的 V1 含义保持内存接受语义；durable queue 需要版本化扩展。
+6. timeout/cancel 后不得自动重放有副作用工作；需要自动恢复时必须依赖领域幂等键、事务或
+   从事实状态 reconcile。
+7. Background service 与 request handler、state migrator 或其它 repository consumer 并发
+   访问持久状态时，
+   不能依赖进程内 mutex 作为唯一一致性边界；必须使用领域事务、幂等键或 reconcile。
+8. 新增 background service 必须声明具体目的、trigger、Ready 关系、health projection、日志、
+   失败/重试、shutdown 和可执行验收 fixture；不要求先套用通用 `JobSpec`。
+9. 新增 periodic 能力必须先有具体 production consumer，并完成第 9 节列出的调度语义评审。
+
+## 11. 验收矩阵
+
+### 11.1 **[CURRENT][PRESERVE V1]** 当前 production 行为基线
+
+| ID | 必须验证的行为 |
+| --- | --- |
+| DJOB-001 | 默认 registry 恰好包含 `skill-ledger-activation`，status 顺序确定 |
+| DJOB-002 | Job 在 socket bind 前启动；启动/bind 失败执行资源和 Job rollback |
+| DJOB-003 | shutdown 在 request drain 后停止 Job，并等待 worker/task 清理 |
+| DJOB-004 | `skill-ledger-activation` health 保留基础字段和当前 state 投影 |
+| DJOB-007 | Skill Ledger startup reconcile 只处理显式 managed 目录 |
+| DJOB-008 | 500 ms debounce、按 canonical directory 合并及 reported Skill ID 覆盖 |
+| DJOB-009 | drain cancellation 将未处理变更重新放回 pending |
+| DJOB-010 | worker transport/protocol/timeout 总尝试数最多 2，domain failure 不重试 |
+| DJOB-011 | 当前 worker 停止后不遗留子进程；具体 stdin/terminate/kill 序列仅属于 Python 实现 |
+| DJOB-012 | notify accepted 只表示内存接受；显式 managed 目录在重启后通过 startup reconcile 重新求值 |
+
+### 11.2 **[CURRENT][HISTORICAL]** Python 通用框架表征
+
+| ID | 仅用于理解 Python 原型的行为 |
+| --- | --- |
+| DJOB-005 | one-shot 每 run 一个 legacy trace，started 后恰好一个 completed/failed/cancelled |
+| DJOB-006 | periodic 立即首跑、按开始时间对齐、跳过 missed tick、每 tick 新 legacy trace |
+
+DJOB-005/006 不进入 Rust 首版 no-regression 或 release gate；只有未来批准了对应 production
+能力后，才以新的目标契约和 fixture 定义 Rust 语义。
+
+### 11.3 **[TARGET V2]** Rust 首版 JobSupervisor
+
+| ID | 必须验证的行为 |
+| --- | --- |
+| DJOB-013 | readiness-critical bootstrap 在 Ready 前完成并可逆序 rollback；startup reconcile 不伪装为 bootstrap gate |
+| DJOB-014 | registry 拒绝重复名称；部分启动失败只逆序停止已启动 background service |
+| DJOB-015 | Supervisor 拥有全部 task；shutdown 后无 task、worker、FD 或 blocking work 泄漏 |
+| DJOB-016 | Skill Ledger actor 只需 startup reconcile 和 notify trigger，并保持 debounce、合并、串行与取消重入语义 |
+| DJOB-017 | service health 区分 running/degraded/stopped 与最近 outcome；每个 started 批次恰好一个安全 terminal log |
+| DJOB-018 | Skill Ledger retry 只由稳定错误分类驱动，并保持 transport/protocol/timeout 最多两次、domain 不重试 |
+| DJOB-019 | Rust Skill Ledger Job 不依赖永久 Python worker，领域结果和持久化副作用与 oracle 等价 |
+| DJOB-020 | Python oracle 与 Rust daemon 对 production CURRENT/PRESERVE V1 health、调度和副作用规范化后等价；Rust 新增日志单独验收 |
+| DJOB-021 | 每个实际处理批次具有 SDK 管理的 OTel span；V2 不产生 daemon-owned legacy trace ID，也不要求自定义 job_run_id/attempt span |
+| DJOB-022 | 未采样、无 exporter 或 export/Collector 故障不改变处理、当前重试、outcome 或本地日志写入尝试 |
+| DJOB-023 | TraceId/SpanId 不参与 authorization、principal、idempotency、deduplication 或 retry decision |
+
+这些 ID 必须映射到机器可执行 manifest 和真实 test/fixture。只存在 Markdown 表格不表示
+迁移门禁已经完成。
+
+## 12. 当前实现证据
+
+- 通用 Job interface、status、one-shot、periodic 和 manager：
+  `agent-sec-cli/src/agent_sec_cli/daemon/jobs/base.py`；
+- 默认 Job 注册：`agent-sec-cli/src/agent_sec_cli/daemon/jobs/registry.py`；
+- daemon 启动、bind rollback、drain 和停止：
+  `agent-sec-cli/src/agent_sec_cli/daemon/server.py`；
+- health 投影：`agent-sec-cli/src/agent_sec_cli/daemon/health.py`；
+- Skill Ledger debounce、合并、requeue 和 startup reconcile：
+  `agent-sec-cli/src/agent_sec_cli/daemon/jobs/skill_ledger/activation.py`；
+- worker retry、timeout 和停止：
+  `agent-sec-cli/src/agent_sec_cli/daemon/jobs/skill_ledger/worker_client.py`；
+- 通用调度、trace 和日志测试：`tests/unit-test/daemon/test_jobs.py`；
+- activation 行为测试：`tests/unit-test/daemon/test_skill_ledger_activation.py`；
+- worker 生命周期测试：`tests/unit-test/daemon/test_skill_ledger_worker_client.py`；
+- daemon/Skill Ledger 端到端行为：
+  `tests/integration-test/skill-ledger/test_skill_ledger_daemon_integration.py`。
+
+## 13. V2 tracing 标准依据
+
+- [W3C Trace Context](https://www.w3.org/TR/trace-context/)；
+- [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)：
+  background run span、root/parent 关系和 context propagation 的标准语义。attempt child span
+  与 contributor Span Links 不属于 Rust 首版要求。

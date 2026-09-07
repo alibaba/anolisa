@@ -74,7 +74,7 @@ fn raw_cli_zsh_native_pasted_mode_slash_does_not_reach_shell() {
         &[("COSH_SHELL_ISOLATED", "0")],
         vec![
             (
-                b"\x1b[200~/mode approval recommend\n\x1b[201~".to_vec(),
+                b"\x1b[200~/mode approval recommend\n\x1b[201~\n".to_vec(),
                 Duration::ZERO,
             ),
             (
@@ -233,7 +233,11 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
         "{output}"
     );
     assert!(
-        manual_footer.contains("个性化提示词推荐同时暂停，可用 /recommendations 管理。"),
+        manual_footer.contains("个性化提示词推荐同时暂停，"),
+        "{output}"
+    );
+    assert!(
+        manual_footer.contains("可用 /recommendations 管理。"),
         "{output}"
     );
     assert!(!output.contains("bash: /mode"), "{output}");
@@ -327,6 +331,7 @@ fn raw_cli_mode_slash_updates_approval_mode_with_feedback() {
          /help\n\
          /approval-mode recommend\n\
          /mode auto\n\
+         /mode approval invalid\n\
          /mode invalid\n\
          echo after-mode\n\
          exit\n",
@@ -373,7 +378,7 @@ fn raw_cli_mode_root_and_language_guidance_are_canonical() {
     assert!(output.contains("approval: auto"), "{output}");
     assert!(output.contains("analysis: smart"), "{output}");
     assert!(
-        output.contains("Use /mode approval [recommend|auto|trust]"),
+        output.contains("Use /mode approval, /mode analysis, or /mode routing"),
         "{output}"
     );
     assert!(

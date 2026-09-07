@@ -31,9 +31,6 @@ except (TypeError, ValueError):
 _INCLUDE_LOW_CONFIDENCE = os.environ.get(
     "PII_CHECKER_INCLUDE_LOW_CONFIDENCE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
-_MAX_EVIDENCE_ITEMS = 3
-_MAX_EVIDENCE_CHARS = 80
-
 _USER_INPUT_SOURCE = "user_input"
 _TOOL_INPUT_SOURCE = "tool_input"
 _TOOL_OUTPUT_SOURCE = "tool_output"
@@ -49,37 +46,29 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
-    """Return compact evidence text for user-visible notices."""
-    normalized = " ".join(value.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 1] + "..."
-
-
 def _hook_event(input_data: dict[str, Any]) -> str:
     """Return the Qoder hook event name."""
     return _safe_string(input_data.get("hook_event_name"))
 
 
-def _scan_target(input_data: dict[str, Any]) -> tuple[str, str, str] | None:
-    """Return text, source label, and display source for supported Qoder hooks."""
+def _scan_target(input_data: dict[str, Any]) -> tuple[str, str] | None:
+    """Return text and source label for supported Qoder hooks."""
     event_name = _hook_event(input_data)
     if event_name == "UserPromptSubmit":
         text = _safe_string(input_data.get("prompt"))
-        return (text, _USER_INPUT_SOURCE, "user input") if text.strip() else None
+        return (text, _USER_INPUT_SOURCE) if text.strip() else None
 
     if event_name == "PreToolUse":
         if "tool_input" not in input_data:
             return None
         text = value_to_text(jsonish_value(input_data.get("tool_input")))
-        return (text, _TOOL_INPUT_SOURCE, "tool input") if text.strip() else None
+        return (text, _TOOL_INPUT_SOURCE) if text.strip() else None
 
     if event_name == "PostToolUse":
         if "tool_response" not in input_data:
             return None
         text = value_to_text(jsonish_value(input_data.get("tool_response")))
-        return (text, _TOOL_OUTPUT_SOURCE, "tool output") if text.strip() else None
+        return (text, _TOOL_OUTPUT_SOURCE) if text.strip() else None
 
     return None
 
@@ -125,47 +114,70 @@ def _scan_pii(
     return scan_result if isinstance(scan_result, dict) else None
 
 
-def _format_notice(
-    verdict: str,
-    findings: list[Any],
-    source_desc: str,
-    final_message: str,
-) -> str:
-    """Build a minimal-disclosure PII notice from sanitized findings."""
+def _risk_summary(verdict: str, findings: list[Any]) -> str:
+    """Summarize finding counts without exposing scanner-internal details."""
     typed_findings = [item for item in findings if isinstance(item, dict)]
-    pii_types = sorted(
-        {
-            finding_type
-            for finding in typed_findings
-            if (finding_type := _safe_string(finding.get("type")))
-        }
-    )
-    severities = sorted(
-        {
-            severity
-            for finding in typed_findings
-            if (severity := _safe_string(finding.get("severity")))
-        }
-    )
-    evidence: list[str] = []
+    high_count = 0
+    general_count = 0
     for finding in typed_findings:
-        redacted = _safe_string(finding.get("evidence_redacted"))
-        if redacted and redacted not in evidence:
-            evidence.append(_shorten(redacted))
-        if len(evidence) >= _MAX_EVIDENCE_ITEMS:
-            break
+        severity = _safe_string(finding.get("severity"))
+        if severity == "deny":
+            high_count += 1
+        elif severity == "warn":
+            general_count += 1
 
-    risk = "high-risk sensitive data" if verdict == "deny" else "sensitive data"
-    parts = [
-        f"[pii-checker] Detected {len(typed_findings)} {risk} finding(s) in {source_desc}",
-        f"types: {', '.join(pii_types) if pii_types else 'unknown'}",
-    ]
-    if severities:
-        parts.append(f"severity: {', '.join(severities)}")
-    if evidence:
-        parts.append(f"redacted evidence: {', '.join(evidence)}")
-    parts.append(final_message)
-    return "; ".join(parts)
+    unknown_count = len(typed_findings) - high_count - general_count
+    if verdict == "deny":
+        high_count += unknown_count
+    else:
+        general_count += unknown_count
+
+    total = len(typed_findings)
+    noun = "finding" if total == 1 else "findings"
+    if high_count and general_count:
+        return (
+            f"Detected {total} sensitive data {noun} "
+            f"({high_count} high risk, {general_count} general risk)"
+        )
+    risk = "high-risk" if high_count else "general-risk"
+    return f"Detected {total} {risk} sensitive data {noun}"
+
+
+def _format_notice(verdict: str, findings: list[Any], action: str) -> str:
+    """Build a minimal-disclosure PII notice with the actual host action."""
+    return f"[pii-checker] {_risk_summary(verdict, findings)}. {action}"
+
+
+def _warning_action(event_name: str) -> str:
+    """Describe the event-specific result of a warning-only decision."""
+    if event_name == "PreToolUse":
+        return (
+            "This is a warning only; the tool call will continue without confirmation "
+            "or blocking."
+        )
+    if event_name == "PostToolUse":
+        return (
+            "The tool has already run. This is a warning only; its raw output will enter "
+            "model context, and external side effects were not undone."
+        )
+    return (
+        "This is a warning only; the request will continue without confirmation or "
+        "blocking."
+    )
+
+
+def _unsupported_confirmation_action(event_name: str) -> str:
+    """Describe a warning when the current hook cannot request confirmation."""
+    if event_name == "PostToolUse":
+        return (
+            "The tool has already run. This stage cannot confirm or block; this is a "
+            "warning only, its raw output will enter model context, and external side "
+            "effects were not undone."
+        )
+    return (
+        "This stage cannot confirm or block; this is a warning only and the request will "
+        "continue."
+    )
 
 
 def _warn_output(notice: str) -> str:
@@ -175,10 +187,9 @@ def _warn_output(notice: str) -> str:
 
 def _invalid_policy_output() -> str:
     """Return a visible fail-open warning for an invalid checker policy."""
-    configured_mode = _shorten(_safe_string(_POLICY_RAW), 32) or "<empty>"
     notice = (
-        f"[pii-checker] invalid {_POLICY_ENV_NAME} {configured_mode!r}; expected "
-        "observe, warn, ask, or block. Falling back to observe; execution will continue."
+        "[pii-checker] PII Checker configuration is invalid; processing will continue "
+        "without confirmation or blocking."
     )
     return _warn_output(notice)
 
@@ -187,7 +198,6 @@ def _format_decision(
     input_data: dict[str, Any],
     verdict: str,
     findings: list[Any],
-    source_desc: str,
 ) -> str | None:
     """Map a scan-pii verdict to Qoder hook output."""
     if verdict == "pass" or not findings:
@@ -199,24 +209,22 @@ def _format_decision(
 
     event_name = _hook_event(input_data)
     if verdict == "warn" or _POLICY == "warn":
-        notice = _format_notice(
-            verdict,
-            findings,
-            source_desc,
-            "Execution will continue.",
-        )
+        notice = _format_notice(verdict, findings, _warning_action(event_name))
         return _warn_output(notice)
 
     if _POLICY == "ask" and event_name == "PreToolUse":
-        notice = _format_notice(verdict, findings, source_desc, "Approval is required.")
+        notice = _format_notice(
+            verdict,
+            findings,
+            "Confirmation is required before this tool call can continue.",
+        )
         return pre_tool_decision_output("ask", notice)
 
     if _POLICY == "ask":
         notice = _format_notice(
             verdict,
             findings,
-            source_desc,
-            "Approval is unavailable here; execution continues.",
+            _unsupported_confirmation_action(event_name),
         )
         return _warn_output(notice)
 
@@ -224,8 +232,7 @@ def _format_decision(
         notice = _format_notice(
             verdict,
             findings,
-            source_desc,
-            "Remove the sensitive data and submit again.",
+            "The current protection settings blocked this request.",
         )
         return deny_output(notice)
 
@@ -233,8 +240,7 @@ def _format_decision(
         notice = _format_notice(
             verdict,
             findings,
-            source_desc,
-            "This tool call was blocked.",
+            "The current protection settings blocked this tool call.",
         )
         return pre_tool_decision_output("deny", notice)
 
@@ -242,8 +248,8 @@ def _format_decision(
         notice = _format_notice(
             verdict,
             findings,
-            source_desc,
-            "The raw tool output was replaced before entering model context.",
+            "The tool has already run. Its raw output will not enter model context; "
+            "external side effects were not undone.",
         )
         return post_tool_output_replacement(notice)
 
@@ -262,7 +268,7 @@ def main() -> None:
     target = _scan_target(input_data)
     if target is None:
         return
-    text, source, source_desc = target
+    text, source = target
 
     scan_result = _scan_pii(input_data, text, source)
     if _POLICY_RAW is not None and normalize_hook_policy(_POLICY_RAW, "") == "":
@@ -273,7 +279,7 @@ def main() -> None:
 
     verdict = _safe_string(scan_result.get("verdict")) or "pass"
     findings = _as_list(scan_result.get("findings"))
-    output = _format_decision(input_data, verdict, findings, source_desc)
+    output = _format_decision(input_data, verdict, findings)
     if output:
         print(output)
 

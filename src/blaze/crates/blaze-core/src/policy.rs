@@ -84,15 +84,6 @@ pub enum FallbackOnMissingHook {
     Continue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum ResetMode {
-    #[default]
-    MmTemplate,
-    OverlayfsRollback,
-    FullRecreate,
-}
-
 /// Checkpoint strategy selection.
 /// NOTE(Phase 3): v0.1 stores strategy in policy config but does NOT invoke
 /// kernel syscalls. Real checkpoint/restore via UFFD-WP deferred to Phase 3.
@@ -117,8 +108,12 @@ pub struct PolicyFile {
     #[serde(rename = "match")]
     pub match_: PolicyMatch,
     pub select: PolicySelect,
-    #[serde(default)]
-    pub pool: Option<PolicyPool>,
+    /// Legacy policy `[pool]` input retained for package-upgrade compatibility.
+    ///
+    /// Exact defaults from the two older packaged policies are accepted but ignored.
+    /// Serialization omits the section, and any other value fails validation.
+    #[serde(default, skip_serializing)]
+    pub pool: Option<toml::Value>,
     #[serde(default)]
     pub checkpoint: Option<PolicyCheckpoint>,
     #[serde(default)]
@@ -152,6 +147,16 @@ pub struct PolicySelect {
 impl PolicyFile {
     /// Validate internal consistency constraints of a policy file.
     pub fn validate(&self) -> Result<()> {
+        if let Some(pool) = &self.pool {
+            if !is_legacy_packaged_policy_pool(self, pool) {
+                return Err(BlazeError::PolicyEvalError {
+                    reason: format!(
+                        "policy \"{}\": [pool] is not supported because warm pool management is not implemented",
+                        self.policy_name
+                    ),
+                });
+            }
+        }
         // Validate [vm] vcpus/memory if present.
         if let Some(vm) = &self.vm {
             validate_vm_resource(&self.policy_name, "[vm]", Some(&vm.memory), Some(vm.vcpus))?;
@@ -184,21 +189,26 @@ impl PolicyFile {
             });
         }
 
-        // Validate [pool].warm_ttl format (e.g. "30s", "30m", "1h", "1d"; pure numbers are illegal).
-        if let Some(pool) = self.pool.as_ref()
-            && parse_duration(&pool.warm_ttl).is_none()
-        {
-            return Err(BlazeError::PolicyEvalError {
-                reason: format!(
-                    "policy \"{policy_name}\": [pool].warm_ttl must be a duration like \"30s\", \"30m\", \"1h\", \"1d\", got \"{warm_ttl}\"",
-                    policy_name = self.policy_name,
-                    warm_ttl = pool.warm_ttl
-                ),
-            });
-        }
-
         Ok(())
     }
+}
+
+fn is_legacy_packaged_policy_pool(policy: &PolicyFile, value: &toml::Value) -> bool {
+    let expected_sizes = match (policy.policy_name.as_str(), policy.match_.workload_class) {
+        ("agent-rl-default", WorkloadClass::AgentRl) => (4, 16, 64),
+        ("agent-tool-default", WorkloadClass::AgentTool) => (2, 8, 32),
+        _ => return false,
+    };
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    table.len() == 6
+        && table.get("enabled").and_then(toml::Value::as_bool) == Some(true)
+        && table.get("min").and_then(toml::Value::as_integer) == Some(expected_sizes.0)
+        && table.get("target").and_then(toml::Value::as_integer) == Some(expected_sizes.1)
+        && table.get("max").and_then(toml::Value::as_integer) == Some(expected_sizes.2)
+        && table.get("warm_ttl").and_then(toml::Value::as_str) == Some("30m")
+        && table.get("reset_mode").and_then(toml::Value::as_str) == Some("full-recreate")
 }
 
 fn validate_vm_resource(
@@ -285,26 +295,6 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
         _ => return None,
     };
     Some(Duration::from_secs(secs))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolicyPool {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub min: u32,
-    #[serde(default)]
-    pub target: u32,
-    #[serde(default)]
-    pub max: u32,
-    #[serde(default = "default_warm_ttl")]
-    pub warm_ttl: String,
-    #[serde(default)]
-    pub reset_mode: ResetMode,
-}
-
-fn default_warm_ttl() -> String {
-    "30m".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -557,9 +547,7 @@ pub struct ImageMetadata {
     pub kernel_version: Option<String>,
 }
 
-/// Result of evaluating a request against the policy library. Drives
-/// backend selection, hook activation, and pool eligibility
-/// for a single sandbox instance.
+/// Result of evaluating a request against the policy library for one sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeDecision {
     pub policy_name: String,
@@ -568,13 +556,11 @@ pub struct RuntimeDecision {
     pub kernel_hooks: Vec<String>,
     pub templates: Vec<String>,
     pub fallback_on_missing_hook: FallbackOnMissingHook,
-    pub pool: Option<PolicyPool>,
     pub checkpoint: Option<PolicyCheckpoint>,
     pub quota: Option<PolicyQuota>,
     pub hooks: PolicyHooks,
     pub backend: BackendConfigs,
     pub vm: Option<VmConfig>,
-    pub pool_eligible: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +605,14 @@ impl PolicyEngine {
             }
             let policy = load_one(&path)?;
             policy.validate()?;
+            if policy.pool.is_some() {
+                tracing::warn!(
+                    path = %path.display(),
+                    policy_name = %policy.policy_name,
+                    workload_class = %policy.match_.workload_class,
+                    "ignoring legacy packaged policy [pool] defaults; remove this section because reusable-instance management is unavailable"
+                );
+            }
             warn_vm_config(&policy);
             tracing::info!(
                 policy_name = %policy.policy_name,
@@ -760,7 +754,6 @@ fn warn_vm_config(policy: &PolicyFile) {
 }
 
 fn build_decision(policy: &PolicyFile) -> RuntimeDecision {
-    let pool_eligible = policy.pool.as_ref().map(|p| p.enabled).unwrap_or(false);
     RuntimeDecision {
         policy_name: policy.policy_name.clone(),
         workload_class: policy.match_.workload_class,
@@ -768,13 +761,11 @@ fn build_decision(policy: &PolicyFile) -> RuntimeDecision {
         kernel_hooks: policy.select.kernel_hooks.clone(),
         templates: policy.select.templates.clone(),
         fallback_on_missing_hook: policy.select.fallback_on_missing_hook,
-        pool: policy.pool.clone(),
         checkpoint: policy.checkpoint.clone(),
         quota: policy.quota.clone(),
         hooks: policy.hooks.clone(),
         backend: policy.backend.clone(),
         vm: policy.vm.clone(),
-        pool_eligible,
     }
 }
 
@@ -798,14 +789,6 @@ backend_priority = ["kata-fc", "kata-clh", "rund"]
 kernel_hooks = ["mm-template", "uffd-wp"]
 templates = ["mm-template"]
 fallback_on_missing_hook = "fail"
-
-[pool]
-enabled = true
-min = 4
-target = 16
-max = 64
-warm_ttl = "30m"
-reset_mode = "mm-template"
 
 [checkpoint]
 enabled = true
@@ -837,7 +820,6 @@ sequence = ["template-reg:bind-mm-template"]
         assert_eq!(pf.policy_name, "agent-rl-default");
         assert_eq!(pf.match_.workload_class, WorkloadClass::AgentRl);
         assert_eq!(pf.select.backend_priority[0], BackendKind::KataFc);
-        assert!(pf.pool.as_ref().expect("pool").enabled);
         assert!(
             pf.backend
                 .firecracker
@@ -866,7 +848,6 @@ sequence = ["template-reg:bind-mm-template"]
         let decision = engine.evaluate(&labels, &img).expect("matches");
         assert_eq!(decision.policy_name, "agent-rl-override");
         assert_eq!(decision.backend_priority, vec![BackendKind::Rund]);
-        assert!(decision.pool_eligible);
     }
 
     #[test]
@@ -1085,7 +1066,7 @@ cpu_shares = 0
     }
 
     #[test]
-    fn validate_rejects_bare_number_warm_ttl() {
+    fn validate_rejects_unsupported_pool_section() {
         let raw = r#"
 manifest_version = 1
 policy_name = "test"
@@ -1097,14 +1078,152 @@ workload_class = "agent-rl"
 backend_priority = ["firecracker"]
 
 [pool]
-enabled = true
-min = 0
-target = 0
-max = 0
-warm_ttl = "300"
+enabled = false
 "#;
         let pf: PolicyFile = toml::from_str(raw).expect("parse");
-        assert!(pf.validate().is_err());
+        let error = pf.validate().expect_err("unsupported pool section");
+        assert!(
+            error
+                .to_string()
+                .contains("warm pool management is not implemented"),
+            "{error}"
+        );
+    }
+
+    fn packaged_pool_policy_toml(
+        policy_name: &str,
+        workload_class: &str,
+        min: i64,
+        target: i64,
+        max: i64,
+    ) -> String {
+        format!(
+            r#"
+manifest_version = 1
+policy_name = "{policy_name}"
+priority = 777
+
+[match]
+workload_class = "{workload_class}"
+
+[select]
+backend_priority = ["firecracker"]
+
+[pool]
+enabled = true
+min = {min}
+target = {target}
+max = {max}
+warm_ttl = "30m"
+reset_mode = "full-recreate"
+"#
+        )
+    }
+
+    #[test]
+    fn validate_accepts_only_packaged_policy_pool_defaults_without_serializing_them() {
+        for (policy_name, workload_class, min, target, max) in [
+            ("agent-rl-default", "agent-rl", 4, 16, 64),
+            ("agent-tool-default", "agent-tool", 2, 8, 32),
+        ] {
+            let raw = packaged_pool_policy_toml(policy_name, workload_class, min, target, max);
+            let policy: PolicyFile = toml::from_str(&raw).expect("packaged policy parses");
+
+            policy
+                .validate()
+                .expect("packaged policy remains upgrade-compatible");
+            let serialized = toml::to_string(&policy).expect("serialize policy");
+            assert!(!serialized.contains("[pool]"));
+            assert!(!serialized.contains("warm_ttl"));
+            assert!(!serialized.contains("reset_mode"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_modified_packaged_policy_pool_defaults() {
+        let raw = packaged_pool_policy_toml("agent-tool-default", "agent-tool", 2, 8, 32);
+        let base: PolicyFile = toml::from_str(&raw).expect("packaged policy parses");
+        let mut modified = Vec::new();
+
+        let mut wrong_name = base.clone();
+        wrong_name.policy_name = "renamed-agent-tool".to_string();
+        modified.push(wrong_name);
+
+        let mut wrong_class = base.clone();
+        wrong_class.match_.workload_class = WorkloadClass::AgentRl;
+        modified.push(wrong_class);
+
+        let rl_raw = packaged_pool_policy_toml("agent-rl-default", "agent-rl", 4, 16, 64);
+        let mut wrong_rl_class: PolicyFile =
+            toml::from_str(&rl_raw).expect("packaged policy parses");
+        wrong_rl_class.match_.workload_class = WorkloadClass::AgentTool;
+        modified.push(wrong_rl_class);
+
+        let mut missing = base.clone();
+        missing
+            .pool
+            .as_mut()
+            .and_then(toml::Value::as_table_mut)
+            .expect("pool table")
+            .remove("max");
+        modified.push(missing);
+
+        let mut extra = base.clone();
+        extra
+            .pool
+            .as_mut()
+            .and_then(toml::Value::as_table_mut)
+            .expect("pool table")
+            .insert("extra".to_string(), toml::Value::Boolean(true));
+        modified.push(extra);
+
+        for (key, value) in [
+            ("enabled", toml::Value::Boolean(false)),
+            ("min", toml::Value::Integer(3)),
+            ("target", toml::Value::Integer(9)),
+            ("max", toml::Value::Integer(33)),
+            ("warm_ttl", toml::Value::String("31m".to_string())),
+            (
+                "reset_mode",
+                toml::Value::String("reuse-runtime".to_string()),
+            ),
+            ("min", toml::Value::String("2".to_string())),
+        ] {
+            let mut policy = base.clone();
+            policy
+                .pool
+                .as_mut()
+                .and_then(toml::Value::as_table_mut)
+                .expect("pool table")
+                .insert(key.to_string(), value);
+            modified.push(policy);
+        }
+
+        for policy in modified {
+            policy
+                .validate()
+                .expect_err("modified pool settings remain unsupported");
+        }
+    }
+
+    #[test]
+    fn load_dir_accepts_both_preserved_packaged_policy_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            tmp.path().join("agent-rl.toml"),
+            packaged_pool_policy_toml("agent-rl-default", "agent-rl", 4, 16, 64),
+        )
+        .expect("write agent-rl policy");
+        fs::write(
+            tmp.path().join("agent-tool.toml"),
+            packaged_pool_policy_toml("agent-tool-default", "agent-tool", 2, 8, 32),
+        )
+        .expect("write agent-tool policy");
+
+        let engine = PolicyEngine::load_dir(tmp.path()).expect("load preserved policies");
+
+        assert_eq!(engine.policies().len(), 2);
+        assert!(engine.policies().iter().all(|policy| policy.pool.is_some()));
     }
 
     #[test]

@@ -49,14 +49,6 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
-            name: "/draft",
-            usage: "/draft",
-            summary_id: MessageId::HelpSummaryDraft,
-            group: Some("Prompt"),
-            scope: "read-only",
-            state: SlashCommandState::Public,
-        },
-        SlashCommandSpec {
             name: "/health",
             usage: "/health",
             summary_id: MessageId::HelpSummaryHealth,
@@ -153,12 +145,20 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/mode",
+            usage: "/mode routing [assisted|shell-only]",
+            summary_id: MessageId::HelpSummaryModeRouting,
+            group: Some("Modes"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/agent",
             usage: "/agent",
             summary_id: MessageId::HelpSummaryAgent,
-            group: None,
+            group: Some("Prompt"),
             scope: "session",
-            state: SlashCommandState::Hidden,
+            state: SlashCommandState::Public,
         },
         SlashCommandSpec {
             name: "/explain",
@@ -395,9 +395,17 @@ mod tests {
             .any(|usage| usage.starts_with("/session [new|status|list [--all]|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
+        assert!(visible.contains(&"/mode routing [assisted|shell-only]"));
         assert!(visible.contains(&"/hooks"));
         assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
-        assert!(!visible.iter().any(|usage| usage.starts_with("/agent")));
+        assert!(visible.contains(&"/agent"));
+        assert!(!visible.contains(&"/draft"));
+        assert!(!slash_command_registry()
+            .iter()
+            .any(|spec| spec.name == "/draft"));
+        assert!(!exact_slash_control_commands().any(|name| name == "/draft"));
+        assert!(!active_slash_commands().any(|name| name == "/draft"));
+        assert!(!active_slash_hint_commands().any(|name| name == "/draft"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/explain")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/cancel")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/details")));
@@ -435,7 +443,6 @@ mod tests {
             ));
         }
         for hidden in [
-            "/agent",
             "/explain",
             "/cancel",
             "/details",
@@ -484,7 +491,7 @@ mod tests {
     fn shell_marker_exact_tokens_match_registry_routing_c4_per_shell_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
         for (shell, marker) in [
-            ("bash", include_str!("../shell_host/marker/bash.rs")),
+            ("bash", include_str!("../shell_host/marker/bash.sh")),
             ("zsh", include_str!("../shell_host/marker/zsh.rs")),
         ] {
             let case_lines = marker

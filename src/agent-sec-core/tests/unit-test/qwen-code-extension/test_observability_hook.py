@@ -24,6 +24,29 @@ def _qwen_environment(monkeypatch):
     monkeypatch.setenv("QWEN_CODE_PROMPT_ID", "prompt-run-123")
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, 5),
+        ("", 5),
+        ("invalid", 5),
+        ("0", 5),
+        ("-1", 5),
+        ("3", 3),
+        ("5", 5),
+        ("7", 5),
+        ("999999", 5),
+    ],
+)
+def test_observability_timeout_environment(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("OBSERVABILITY_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("OBSERVABILITY_TIMEOUT", value)
+
+    assert observability_hook._read_cli_timeout_seconds() == expected
+
+
 def _base(hook_event_name, **overrides):
     payload = {
         "hook_event_name": hook_event_name,

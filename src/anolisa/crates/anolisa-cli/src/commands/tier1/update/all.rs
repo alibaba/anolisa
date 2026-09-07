@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use anolisa_core::domain::NativePm;
+use anolisa_core::execution::ExecutionIntent;
 use anolisa_core::executor::{
     DelegatedExecutionTarget, PHASE_NATIVE_TXN, delegated_recovery_context,
     execute_delegated_steps_resumed,
@@ -40,12 +41,18 @@ use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json, render_json_with_status};
 
+use super::application::UpdateBatchOutcome;
 use super::{
-    AdapterAction, AdapterBundleSnapshot, COMMAND, ComponentUpdateResult, PlannedComponentUpdate,
-    PlannedUpdateRoute, UpdateOutcome, adapter_actions_after_update, adapter_bundle_snapshot,
-    append_update_log, complete_delegated_update, native_update_authorized, now_iso8601,
-    plan_component_update, render_adapter_action_notices, step_label, update_backends,
-    update_component_with_deps,
+    AdapterAction, AdapterRevisionSnapshot, COMMAND, PlannedComponentUpdate, PlannedUpdateRoute,
+    adapter_actions_after_update, adapter_revision_snapshot, append_update_log,
+    complete_delegated_update, native_update_authorized, now_iso8601,
+    render_adapter_action_notices, step_label, update_backends,
+};
+
+mod application;
+use application::{
+    BatchApplicationOutcome, BatchEffectOutcome, BatchMemberOutcome, BatchMemberStatus,
+    BatchOutputEvent, MemberApplicationOutcome, batch_status, failed_item, partial_item,
 };
 
 const BATCH_COMMAND: &str = "update all";
@@ -84,22 +91,23 @@ struct UpdateAllPayload {
 }
 
 pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
-    let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let store = StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
-        .map_err(|err| CliError::Runtime {
-            command: BATCH_COMMAND.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        })?;
-    let names: Vec<String> = store
-        .installations
-        .iter()
-        .filter(|installation| installation.kind == ObjectKind::Component)
-        .map(|installation| installation.name.clone())
-        .collect();
-    drop(store);
+    let mut output = |event| render_batch_event(ctx, event);
+    let outcome = application::run(
+        application::BatchRequest {
+            intent: super::execution_intent(ctx),
+        },
+        ctx,
+        &mut output,
+    )?;
+    render_application_outcome(ctx, outcome)
+}
 
-    if names.is_empty() {
+fn render_application_outcome(
+    ctx: &CliContext,
+    outcome: BatchApplicationOutcome,
+) -> Result<(), CliError> {
+    let dry_run = outcome.is_preview();
+    if outcome.items.is_empty() {
         if !ctx.quiet && !ctx.json {
             let color = Palette::new(ctx.no_color);
             println!(
@@ -116,7 +124,7 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
                     planned: 0,
                     already_current: 0,
                     failed: 0,
-                    dry_run: ctx.dry_run,
+                    dry_run,
                     merged_transaction: None,
                     items: Vec::new(),
                 },
@@ -125,139 +133,41 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // Suppress per-component rendering: the batch owns the final output.
-    let mut suppressed_ctx = ctx.clone();
-    suppressed_ctx.json = false;
-    suppressed_ctx.quiet = true;
-
-    // Peek phase: plan every component read-only and classify. Delegated
-    // refreshes (U5) merge into one native transaction; everything else
-    // (owned plans, NoOps, planning errors) re-plans through the per-item
-    // pipeline, which reproduces the same outcome — the extra probe is
-    // cheap next to a dnf run.
-    let mut merged: Vec<MergedUpdate> = Vec::new();
-    let mut per_item: Vec<String> = Vec::new();
-    for name in &names {
-        let candidate = update_backends(name, &suppressed_ctx)
-            .and_then(|(query, txn)| plan_component_update(name, &suppressed_ctx, &query, &txn))
-            .ok()
-            .and_then(|planned| {
-                merged_update_package(&planned).map(|package| MergedUpdate {
-                    name: name.clone(),
-                    package,
-                    planned,
-                })
-            });
-        match candidate {
-            Some(item) => merged.push(item),
-            None => per_item.push(name.clone()),
-        }
-    }
-
-    // A single delegated refresh gains nothing from merging; keep it on the
-    // per-item pipeline.
-    if merged.len() < 2 {
-        per_item = names.clone();
-        merged.clear();
-    }
-    let merged_transaction: Option<Vec<String>> =
-        (!merged.is_empty()).then(|| merged.iter().map(|item| item.package.clone()).collect());
-
-    let mut results: HashMap<String, UpdateAllItem> = HashMap::with_capacity(names.len());
-
-    if !merged.is_empty() {
-        if !ctx.quiet && !ctx.json {
-            let color = Palette::new(ctx.no_color);
-            let members = merged
-                .iter()
-                .map(|item| item.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("{} {members} (one rpm transaction)", color.label("==>"));
-        }
-        if ctx.dry_run {
-            // Each member previews its own plan in the single-component
-            // format; the group header above already announced that the
-            // native transactions will merge into one dnf run.
-            for item in &merged {
-                let steps = match &item.planned.route {
-                    PlannedUpdateRoute::Delegated { steps } => steps.as_slice(),
-                    _ => &[],
-                };
-                let labels: Vec<String> = steps.iter().map(step_label).collect();
-                if !ctx.quiet && !ctx.json {
-                    let color = Palette::new(ctx.no_color);
-                    println!(
-                        "{} {} {}",
-                        color.command("update"),
-                        item.name,
-                        color.muted("(dry-run — nothing updated)"),
-                    );
-                    if let Some(from) = &item.planned.native_from {
-                        println!("{} {from}", color.label("current:"));
-                    }
-                    for label in &labels {
-                        println!("  - {label}");
-                    }
-                }
-                results.insert(
-                    item.name.clone(),
-                    UpdateAllItem {
-                        component: item.name.clone(),
-                        status: "planned",
-                        reason: None,
-                        plan: Some(labels),
-                        adapter_actions: Vec::new(),
-                    },
-                );
-            }
-        } else {
-            for item in execute_merged_updates(merged, ctx) {
-                results.insert(item.component.clone(), item);
-            }
-        }
-    }
-
-    for name in &per_item {
-        if !ctx.quiet && !ctx.json {
-            let color = Palette::new(ctx.no_color);
-            println!("{} {name}", color.label("==>"));
-        }
-        let outcome = update_backends(name, &suppressed_ctx).and_then(|(query, txn)| {
-            update_component_with_deps(name, &suppressed_ctx, &query, &txn, privilege::is_root())
-        });
-        let item = match outcome {
-            Ok((outcome, adapter_actions)) => UpdateAllItem {
-                component: name.clone(),
-                status: item_status(outcome, ctx.dry_run),
-                reason: None,
-                plan: None,
-                adapter_actions,
-            },
-            Err(err) => UpdateAllItem {
-                component: name.clone(),
-                status: "failed",
-                reason: Some(err.reason().to_string()),
-                plan: None,
-                adapter_actions: Vec::new(),
-            },
-        };
-        results.insert(name.clone(), item);
-    }
-
-    // Rebuild the summary in the original record order.
-    let items: Vec<UpdateAllItem> = names
+    let total = outcome.items.len();
+    let updated = outcome
+        .items
         .iter()
-        .filter_map(|name| results.remove(name))
-        .collect();
-
-    let updated = items.iter().filter(|i| i.status == "updated").count();
-    let planned = items.iter().filter(|i| i.status == "planned").count();
-    let already_current = items
-        .iter()
-        .filter(|i| i.status == "already-current")
+        .filter(|item| item.status == BatchMemberStatus::Updated)
         .count();
-    let failed = items.iter().filter(|i| i.status == "failed").count();
+    let planned = outcome
+        .items
+        .iter()
+        .filter(|item| item.status == BatchMemberStatus::Planned)
+        .count();
+    let already_current = outcome
+        .items
+        .iter()
+        .filter(|item| item.status == BatchMemberStatus::AlreadyCurrent)
+        .count();
+    let failed = outcome
+        .items
+        .iter()
+        .filter(|item| item.status.is_unsuccessful())
+        .count();
+    debug_assert_eq!(outcome.has_failures(), failed > 0);
+    let items = outcome
+        .items
+        .into_iter()
+        .map(|item| UpdateAllItem {
+            component: item.component,
+            status: item.status.as_str(),
+            reason: item.reason,
+            plan: item
+                .plan
+                .map(|steps| steps.iter().map(step_label).collect()),
+            adapter_actions: item.adapter_actions,
+        })
+        .collect::<Vec<_>>();
 
     if ctx.json {
         // The batch summary is the single, complete JSON response; a partial
@@ -267,13 +177,13 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
             BATCH_COMMAND,
             failed == 0,
             UpdateAllPayload {
-                total: names.len(),
+                total,
                 updated,
                 planned,
                 already_current,
                 failed,
-                dry_run: ctx.dry_run,
-                merged_transaction,
+                dry_run,
+                merged_transaction: outcome.merged_transaction,
                 items,
             },
         )?;
@@ -289,8 +199,8 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
     if !ctx.quiet {
         let color = Palette::new(ctx.no_color);
         println!();
-        let ok_word = if ctx.dry_run { "planned" } else { "updated" };
-        let ok_count = if ctx.dry_run { planned } else { updated };
+        let ok_word = if dry_run { "planned" } else { "updated" };
+        let ok_count = if dry_run { planned } else { updated };
         let current_segment = if already_current > 0 {
             format!("  already-current={already_current}")
         } else {
@@ -300,7 +210,7 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
             println!(
                 "{} total={}  {ok_word}={ok_count}{current_segment}",
                 color.label("summary:"),
-                names.len(),
+                total,
             );
         } else {
             let failed_names: Vec<&str> = items
@@ -311,7 +221,7 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
             println!(
                 "{} total={}  {ok_word}={ok_count}{current_segment}  failed={failed} ({})",
                 color.label("summary:"),
-                names.len(),
+                total,
                 failed_names.join(", "),
             );
             for item in items.iter().filter(|i| i.status == "failed") {
@@ -341,14 +251,39 @@ pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
     }
 }
 
-/// Batch status string for a successful per-item update, combining the
-/// outcome with dry-run: nothing is written on dry-run, so a would-be update
-/// reads "planned" while an idempotent NoOp reads the same either way.
-fn item_status(outcome: UpdateOutcome, dry_run: bool) -> &'static str {
-    match (outcome, dry_run) {
-        (UpdateOutcome::Updated, false) => "updated",
-        (UpdateOutcome::Updated, true) => "planned",
-        (UpdateOutcome::AlreadyCurrent, _) => "already-current",
+fn render_batch_event(ctx: &CliContext, event: BatchOutputEvent) {
+    let color = Palette::new(ctx.no_color);
+    match event {
+        BatchOutputEvent::Warning(warning) => {
+            eprintln!("warning: {warning}");
+        }
+        BatchOutputEvent::MergedGroup { members } if !ctx.quiet && !ctx.json => {
+            println!("{} {members} (one rpm transaction)", color.label("==>"));
+        }
+        BatchOutputEvent::PreviewPlan {
+            component,
+            from_version,
+            steps,
+        } if !ctx.quiet && !ctx.json => {
+            println!(
+                "{} {} {}",
+                color.command("update"),
+                component,
+                color.muted("(dry-run — nothing updated)"),
+            );
+            if let Some(from) = from_version {
+                println!("{} {from}", color.label("current:"));
+            }
+            for step in &steps {
+                println!("  - {}", step_label(step));
+            }
+        }
+        BatchOutputEvent::Member { component } if !ctx.quiet && !ctx.json => {
+            println!("{} {component}", color.label("==>"));
+        }
+        BatchOutputEvent::MergedGroup { .. }
+        | BatchOutputEvent::PreviewPlan { .. }
+        | BatchOutputEvent::Member { .. } => {}
     }
 }
 
@@ -387,7 +322,11 @@ fn merged_update_package(planned: &PlannedComponentUpdate) -> Option<String> {
 /// Execute the merged group against the live host: real backends pointed at
 /// the configured ANOLISA repo, degrade re-plans through the per-item
 /// pipeline.
-fn execute_merged_updates(group: Vec<MergedUpdate>, ctx: &CliContext) -> Vec<UpdateAllItem> {
+fn execute_merged_updates(
+    group: Vec<MergedUpdate>,
+    ctx: &CliContext,
+    output: &mut dyn FnMut(BatchOutputEvent),
+) -> BatchEffectOutcome {
     let mut suppressed_ctx = ctx.clone();
     suppressed_ctx.json = false;
     suppressed_ctx.quiet = true;
@@ -395,17 +334,33 @@ fn execute_merged_updates(group: Vec<MergedUpdate>, ctx: &CliContext) -> Vec<Upd
         Ok(backends) => backends,
         Err(err) => {
             let reason = err.reason().to_string();
-            return group
-                .iter()
-                .map(|item| failed_item(&item.name, reason.clone()))
-                .collect();
+            return BatchEffectOutcome {
+                items: group
+                    .iter()
+                    .map(|item| failed_item(&item.name, reason.clone()))
+                    .collect(),
+            };
         }
     };
     let mut degrade = |name: &str| {
-        let (query, txn) = update_backends(name, &suppressed_ctx)?;
-        update_component_with_deps(name, &suppressed_ctx, &query, &txn, privilege::is_root())
+        let outcome = super::application::run_for_batch(
+            super::application::ApplicationRequest {
+                component: name,
+                intent: ExecutionIntent::Apply,
+            },
+            &suppressed_ctx,
+        );
+        Ok(application::member_application_outcome(outcome))
     };
-    execute_merged_updates_with_deps(group, ctx, &query, &txn, privilege::is_root(), &mut degrade)
+    execute_merged_updates_with_deps(
+        group,
+        ctx,
+        &query,
+        &txn,
+        privilege::is_root(),
+        &mut degrade,
+        output,
+    )
 }
 
 /// Core of the merged execution with the backends and the degrade pipeline
@@ -426,13 +381,16 @@ fn execute_merged_updates_with_deps(
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-    degrade: &mut dyn FnMut(&str) -> ComponentUpdateResult,
-) -> Vec<UpdateAllItem> {
-    let all_failed = |group: &[MergedUpdate], reason: &str| -> Vec<UpdateAllItem> {
-        group
-            .iter()
-            .map(|item| failed_item(&item.name, reason.to_string()))
-            .collect()
+    degrade: &mut dyn FnMut(&str) -> Result<MemberApplicationOutcome, CliError>,
+    output: &mut dyn FnMut(BatchOutputEvent),
+) -> BatchEffectOutcome {
+    let all_failed = |group: &[MergedUpdate], reason: &str| -> BatchEffectOutcome {
+        BatchEffectOutcome {
+            items: group
+                .iter()
+                .map(|item| failed_item(&item.name, reason.to_string()))
+                .collect(),
+        }
     };
 
     if !is_root {
@@ -466,7 +424,7 @@ fn execute_merged_updates_with_deps(
 
     // Re-validate each member's authority under the lock and open its
     // journal, mirroring the single-component race check.
-    let mut items: Vec<UpdateAllItem> = Vec::with_capacity(group.len());
+    let mut items: Vec<BatchMemberOutcome> = Vec::with_capacity(group.len());
     let mut active: Vec<(MergedUpdate, Transaction)> = Vec::with_capacity(group.len());
     for item in group {
         let target = item.planned.target.as_str();
@@ -485,15 +443,15 @@ fn execute_merged_updates_with_deps(
         }
     }
     if active.is_empty() {
-        return items;
+        return BatchEffectOutcome { items };
     }
-    let prior_adapter_bundles: HashMap<String, AdapterBundleSnapshot> = active
+    let prior_adapter_revisions: HashMap<String, AdapterRevisionSnapshot> = active
         .iter()
         .map(|(item, _)| {
             let target = item.planned.target.clone();
             (
                 target.clone(),
-                adapter_bundle_snapshot(ctx, &layout, &target),
+                adapter_revision_snapshot(ctx, &layout, &target),
             )
         })
         .collect();
@@ -541,7 +499,7 @@ fn execute_merged_updates_with_deps(
                 let _ = journal.finish(TransactionOutcomeStatus::Failed);
                 items.push(failed_item(&member.name, reason.clone()));
             }
-            return items;
+            return BatchEffectOutcome { items };
         }
     }
 
@@ -567,12 +525,14 @@ fn execute_merged_updates_with_deps(
                 parent_operation_id: None,
             });
             if let Err(err) = store.save(&state_path) {
-                eprintln!("warning: failed to record operation history: {err}");
+                output(BatchOutputEvent::Warning(format!(
+                    "failed to record operation history: {err}"
+                )));
             }
             for (item, mut journal) in active {
                 let target = item.planned.target.clone();
                 if let Err(err) = journal.mark_done(0) {
-                    items.push(failed_item(
+                    items.push(partial_item(
                         &item.name,
                         format!(
                             "update of '{target}' failed: the merged native transaction committed but its journal could not be updated: {err}; run `anolisa repair {target}` to reconcile"
@@ -653,7 +613,7 @@ fn execute_merged_updates_with_deps(
                             completion_failure.as_deref(),
                         );
                         if let Some(reason) = completion_failure {
-                            items.push(failed_item(
+                            items.push(partial_item(
                                 &item.name,
                                 format!(
                                     "the update of '{target}' committed, but {reason}; run `anolisa repair {target}` to reconcile"
@@ -668,7 +628,7 @@ fn execute_merged_updates_with_deps(
                         // A member whose EVR did not move changed nothing,
                         // so it cannot require adapter follow-up (issue #1885).
                         let adapter_actions = if moved {
-                            let before = prior_adapter_bundles
+                            let before = prior_adapter_revisions
                                 .get(&target)
                                 .cloned()
                                 .unwrap_or_default();
@@ -676,15 +636,19 @@ fn execute_merged_updates_with_deps(
                         } else {
                             Vec::new()
                         };
-                        items.push(UpdateAllItem {
+                        items.push(BatchMemberOutcome {
                             component: item.name.clone(),
-                            status: if moved { "updated" } else { "already-current" },
+                            status: if moved {
+                                BatchMemberStatus::Updated
+                            } else {
+                                BatchMemberStatus::AlreadyCurrent
+                            },
                             reason: None,
                             plan: None,
                             adapter_actions,
                         });
                     }
-                    Err(err) => items.push(failed_item(
+                    Err(err) => items.push(partial_item(
                         &item.name,
                         format!(
                             "update of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
@@ -697,7 +661,7 @@ fn execute_merged_updates_with_deps(
             // history reads the same as the members' journals.
             let any_member_failed = items[members_start..]
                 .iter()
-                .any(|item| item.status == "failed");
+                .any(|item| item.status.is_unsuccessful());
             if let Some(parent) = store
                 .operations
                 .iter_mut()
@@ -710,9 +674,11 @@ fn execute_merged_updates_with_deps(
             // committed record refreshes, exactly like the single-component
             // path.
             if let Err(err) = store.save(&state_path) {
-                eprintln!("warning: failed to record operation history: {err}");
+                output(BatchOutputEvent::Warning(format!(
+                    "failed to record operation history: {err}"
+                )));
             }
-            items
+            BatchEffectOutcome { items }
         }
         Err(source) => {
             // Forward-only classification: only the exact pre-transaction
@@ -743,7 +709,7 @@ fn execute_merged_updates_with_deps(
                     Err(err) => Some(format!("could not be re-observed in the rpmdb: {err}")),
                 };
                 let journal_outcome = if let Some(uncertain_reason) = uncertain_reason {
-                    items.push(failed_item(
+                    items.push(partial_item(
                         &item.name,
                         format!(
                             "merged native transaction failed and '{}' {uncertain_reason}: {reason}; run `anolisa repair {target}` to reconcile",
@@ -759,46 +725,46 @@ fn execute_merged_updates_with_deps(
                     .mark_failed(0, &reason)
                     .and_then(|()| journal.finish(journal_outcome))
                 {
-                    eprintln!(
-                        "warning: failed to journal the merged transaction outcome for '{}': {err}",
+                    output(BatchOutputEvent::Warning(format!(
+                        "failed to journal the merged transaction outcome for '{}': {err}",
                         item.name
-                    );
+                    )));
                 }
             }
             drop(store);
             drop(_lock);
 
             if clean.is_empty() {
-                return items;
+                return BatchEffectOutcome { items };
             }
-            eprintln!(
-                "warning: merged rpm transaction failed ({reason}); retrying {} component(s) individually",
+            output(BatchOutputEvent::Warning(format!(
+                "merged rpm transaction failed ({reason}); retrying {} component(s) individually",
                 clean.len()
-            );
+            )));
             for name in clean {
                 match degrade(&name) {
-                    Ok((outcome, adapter_actions)) => items.push(UpdateAllItem {
-                        component: name,
-                        status: item_status(outcome, false),
-                        reason: None,
-                        plan: None,
-                        adapter_actions,
-                    }),
+                    Ok(outcome) => {
+                        for warning in outcome.warnings {
+                            output(BatchOutputEvent::Warning(warning));
+                        }
+                        let item = match outcome.outcome {
+                            UpdateBatchOutcome::Completed(member) => BatchMemberOutcome {
+                                component: name.clone(),
+                                status: batch_status(member, ExecutionIntent::Apply),
+                                reason: None,
+                                plan: None,
+                                adapter_actions: outcome.adapter_actions,
+                            },
+                            UpdateBatchOutcome::Partial { reason } => partial_item(&name, reason),
+                            UpdateBatchOutcome::Failed { reason } => failed_item(&name, reason),
+                        };
+                        items.push(item);
+                    }
                     Err(err) => items.push(failed_item(&name, err.reason().to_string())),
                 }
             }
-            items
+            BatchEffectOutcome { items }
         }
-    }
-}
-
-fn failed_item(name: &str, reason: String) -> UpdateAllItem {
-    UpdateAllItem {
-        component: name.to_string(),
-        status: "failed",
-        reason: Some(reason),
-        plan: None,
-        adapter_actions: Vec::new(),
     }
 }
 
@@ -811,6 +777,7 @@ mod tests {
 
     use anolisa_core::domain::InstallationScope;
     use anolisa_core::facts::{JournalEvidence, pending_journal_for};
+    use anolisa_core::planner::Plan;
     use anolisa_core::state::{
         InstallMode as StateInstallMode, InstalledObject, InstalledState, Ownership,
     };
@@ -818,8 +785,9 @@ mod tests {
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
+    use super::super::UpdateOutcome;
     use super::super::tests::{
-        ctx, load_store, pkg_info, raw_manifest_with_adapter, rpm_object,
+        FakeRpm, ctx, load_store, pkg_info, raw_manifest_with_adapter, rpm_object,
         seed_package_contract_and_stale_snapshot,
     };
     use crate::context::InstallMode;
@@ -974,6 +942,10 @@ mod tests {
             owned_execution: None,
             owned_versions: None,
             native_from: Some(from_evr.to_string()),
+            plan: Plan::Execute {
+                steps: steps.clone(),
+                notes: Vec::new(),
+            },
             route: PlannedUpdateRoute::Delegated { steps },
         }
     }
@@ -986,11 +958,90 @@ mod tests {
         }
     }
 
-    fn find<'a>(items: &'a [UpdateAllItem], name: &str) -> &'a UpdateAllItem {
+    fn find<'a>(items: &'a [BatchMemberOutcome], name: &str) -> &'a BatchMemberOutcome {
         items
             .iter()
             .find(|item| item.component == name)
             .unwrap_or_else(|| panic!("no summary item for {name}"))
+    }
+
+    fn applied_member(outcome: UpdateOutcome) -> MemberApplicationOutcome {
+        MemberApplicationOutcome {
+            outcome: UpdateBatchOutcome::Completed(outcome),
+            warnings: Vec::new(),
+            adapter_actions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn merged_degrade_preserves_partial_application_failure() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        managed_pair(&c);
+        let merged_host = FakeHost::new(
+            &[
+                (
+                    "copilot-shell",
+                    pkg_info("copilot-shell", "1.0.0", Some("1.al4"), "x86_64"),
+                ),
+                (
+                    "agent-sec-core",
+                    pkg_info("agent-sec-core", "1.0.0", Some("1.al4"), "x86_64"),
+                ),
+            ],
+            true,
+        );
+        let retry_host = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al4"), "x86_64")),
+        )
+        .post_update_missing();
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
+            if name != "cosh" {
+                return Ok(applied_member(UpdateOutcome::AlreadyCurrent));
+            }
+            let outcome = super::super::application::run_with_dependencies_classified(
+                super::super::application::ApplicationRequest {
+                    component: name,
+                    intent: ExecutionIntent::Apply,
+                },
+                &c,
+                &retry_host,
+                &retry_host,
+                true,
+            );
+            Ok(application::member_application_outcome(outcome))
+        };
+        let mut output = |_: BatchOutputEvent| {};
+
+        let items = execute_merged_updates_with_deps(
+            vec![
+                u5_item("cosh", "copilot-shell", "1.0.0-1.al4"),
+                u5_item("sec-core", "agent-sec-core", "1.0.0-1.al4"),
+            ],
+            &c,
+            &merged_host,
+            &merged_host,
+            true,
+            &mut degrade,
+            &mut output,
+        )
+        .items;
+
+        let cosh = find(&items, "cosh");
+        assert_eq!(cosh.status, BatchMemberStatus::Partial);
+        assert!(
+            cosh.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("repair")),
+            "degraded application failure must retain repair guidance: {:?}",
+            cosh.reason
+        );
+        assert_eq!(
+            retry_host.update_call_count(),
+            1,
+            "the retry transaction ran"
+        );
     }
 
     #[test]
@@ -1001,9 +1052,7 @@ mod tests {
         );
 
         let mut owned = u5_planned("cosh", "copilot-shell", "1.0.0-1.al4");
-        owned.route = PlannedUpdateRoute::Owned {
-            steps: vec![Step::PlaceFiles],
-        };
+        owned.route = PlannedUpdateRoute::Owned;
         assert!(merged_update_package(&owned).is_none());
 
         let mut noop = u5_planned("cosh", "copilot-shell", "1.0.0-1.al4");
@@ -1049,9 +1098,10 @@ mod tests {
             ],
             false,
         );
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a committed merged transaction must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1063,7 +1113,9 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         assert_eq!(
             host.calls.borrow().as_slice(),
@@ -1073,8 +1125,8 @@ mod tests {
             )],
             "both packages must share one dnf update"
         );
-        assert_eq!(find(&items, "cosh").status, "updated");
-        assert_eq!(find(&items, "sec-core").status, "updated");
+        assert_eq!(find(&items, "cosh").status, BatchMemberStatus::Updated);
+        assert_eq!(find(&items, "sec-core").status, BatchMemberStatus::Updated);
 
         // Each record absorbed its own fresh observation.
         let store = load_store(&c);
@@ -1149,9 +1201,10 @@ mod tests {
             ],
             false,
         );
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a committed merged transaction must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1163,10 +1216,12 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
-        assert_eq!(find(&items, "cosh").status, "updated");
-        assert_eq!(find(&items, "sec-core").status, "updated");
+        assert_eq!(find(&items, "cosh").status, BatchMemberStatus::Updated);
+        assert_eq!(find(&items, "sec-core").status, BatchMemberStatus::Updated);
         for snapshot in [&cosh_snapshot, &sec_snapshot] {
             assert_eq!(
                 std::fs::read_to_string(snapshot).expect("read snapshot"),
@@ -1219,9 +1274,10 @@ mod tests {
             ],
             false,
         );
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a committed merged transaction must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1233,16 +1289,18 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         let cosh_item = find(&items, "cosh");
-        assert_eq!(cosh_item.status, "failed");
+        assert_eq!(cosh_item.status, BatchMemberStatus::Partial);
         let reason = cosh_item.reason.as_deref().expect("failure reason");
         assert!(
             reason.contains("committed") && reason.contains("repair"),
             "reason must state the update committed and point at repair: {reason}"
         );
-        assert_eq!(find(&items, "sec-core").status, "updated");
+        assert_eq!(find(&items, "sec-core").status, BatchMemberStatus::Updated);
         assert_eq!(
             std::fs::read_to_string(&sec_snapshot).expect("read snapshot"),
             "framework = \"new\"\n",
@@ -1296,9 +1354,10 @@ mod tests {
             )],
             false,
         );
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a recovery-blocked member must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![u5_item("cosh", "copilot-shell", "1.0.0-1.al4")],
@@ -1307,11 +1366,13 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         assert!(host.calls.borrow().is_empty(), "dnf must not run");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].status, "failed");
+        assert_eq!(items[0].status, BatchMemberStatus::Failed);
         assert!(
             items[0]
                 .reason
@@ -1352,15 +1413,22 @@ mod tests {
             true,
         );
         let degraded = RefCell::new(Vec::new());
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let events = RefCell::new(Vec::new());
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             degraded.borrow_mut().push(name.to_string());
+            events.borrow_mut().push(format!("degrade:{name}"));
             if name == "cosh" {
                 Err(CliError::Runtime {
                     command: "update cosh".to_string(),
                     reason: "repo unreachable for copilot-shell".to_string(),
                 })
             } else {
-                Ok((UpdateOutcome::Updated, Vec::new()))
+                Ok(applied_member(UpdateOutcome::Updated))
+            }
+        };
+        let mut output = |event| {
+            if let BatchOutputEvent::Warning(warning) = event {
+                events.borrow_mut().push(format!("warning:{warning}"));
             }
         };
 
@@ -1374,13 +1442,18 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
+        let events = events.borrow();
+        assert!(events[0].contains("retrying 2 component(s) individually"));
+        assert_eq!(events[1..], ["degrade:cosh", "degrade:sec-core"]);
         assert_eq!(degraded.borrow().as_slice(), ["cosh", "sec-core"]);
         let cosh = find(&items, "cosh");
-        assert_eq!(cosh.status, "failed");
+        assert_eq!(cosh.status, BatchMemberStatus::Failed);
         assert!(cosh.reason.as_deref().unwrap().contains("repo unreachable"));
-        assert_eq!(find(&items, "sec-core").status, "updated");
+        assert_eq!(find(&items, "sec-core").status, BatchMemberStatus::Updated);
 
         // Clean failure journals never stay pending.
         let layout = common::resolve_layout(&c);
@@ -1415,10 +1488,11 @@ mod tests {
             true,
         );
         let degraded = RefCell::new(Vec::new());
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             degraded.borrow_mut().push(name.to_string());
-            Ok((UpdateOutcome::Updated, Vec::new()))
+            Ok(applied_member(UpdateOutcome::Updated))
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1430,16 +1504,18 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         // Forward-only for the moved member: no retry, repair reconciles.
         assert_eq!(degraded.borrow().as_slice(), ["sec-core"]);
         let cosh = find(&items, "cosh");
-        assert_eq!(cosh.status, "failed");
+        assert_eq!(cosh.status, BatchMemberStatus::Partial);
         let reason = cosh.reason.as_deref().unwrap();
         assert!(reason.contains("changed in the rpmdb"), "got: {reason}");
         assert!(reason.contains("anolisa repair cosh"), "got: {reason}");
-        assert_eq!(find(&items, "sec-core").status, "updated");
+        assert_eq!(find(&items, "sec-core").status, BatchMemberStatus::Updated);
 
         let layout = common::resolve_layout(&c);
         let journal_dir = rpm_install::journal_dir(&layout);
@@ -1479,10 +1555,11 @@ mod tests {
         );
         let host = FakeHost::new(&[], true).with_multiple_versions(&["copilot-shell"]);
         let degraded = RefCell::new(Vec::new());
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             degraded.borrow_mut().push(name.to_string());
-            Ok((UpdateOutcome::Updated, Vec::new()))
+            Ok(applied_member(UpdateOutcome::Updated))
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![u5_item("cosh", "copilot-shell", "1.0.0-1.al4")],
@@ -1491,7 +1568,9 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         assert_eq!(host.calls.borrow().len(), 1, "dnf must run only once");
         assert!(
@@ -1499,7 +1578,7 @@ mod tests {
             "an indeterminate rpmdb state must not trigger a second update"
         );
         let cosh = find(&items, "cosh");
-        assert_eq!(cosh.status, "failed");
+        assert_eq!(cosh.status, BatchMemberStatus::Partial);
         assert!(
             cosh.reason
                 .as_deref()
@@ -1522,9 +1601,10 @@ mod tests {
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         managed_pair(&c);
         let host = FakeHost::new(&[], false);
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a refused merged group must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1536,12 +1616,14 @@ mod tests {
             &host,
             false,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         assert!(host.calls.borrow().is_empty(), "dnf must not run");
         for component in ["cosh", "sec-core"] {
             let item = find(&items, component);
-            assert_eq!(item.status, "failed");
+            assert_eq!(item.status, BatchMemberStatus::Failed);
             assert!(item.reason.as_deref().unwrap().contains("requires root"));
         }
     }
@@ -1570,9 +1652,10 @@ mod tests {
             )],
             false,
         );
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1584,17 +1667,19 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
         let sec = find(&items, "sec-core");
-        assert_eq!(sec.status, "failed");
+        assert_eq!(sec.status, BatchMemberStatus::Failed);
         assert!(
             sec.reason
                 .as_deref()
                 .unwrap()
                 .contains("changed while this update was planning")
         );
-        assert_eq!(find(&items, "cosh").status, "updated");
+        assert_eq!(find(&items, "cosh").status, BatchMemberStatus::Updated);
         // The refused member never entered the transaction.
         assert_eq!(
             host.calls.borrow().as_slice(),
@@ -1602,10 +1687,10 @@ mod tests {
         );
     }
 
-    /// A merged batch reports each changed source bundle under its own
-    /// component (issue #1885): only cosh changes during the transaction.
+    /// A merged batch does not infer drift from directory bytes when its fake
+    /// native backend supplies no authoritative file inventory.
     #[test]
-    fn merged_updates_associate_adapter_actions_with_the_right_component() {
+    fn merged_updates_require_authoritative_inventory_for_adapter_actions() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         managed_pair(&c);
@@ -1644,9 +1729,10 @@ mod tests {
             std::fs::write(changed_cosh_root.join("plugin.json"), b"v2")
                 .expect("replace cosh bundle");
         }));
-        let mut degrade = |name: &str| -> ComponentUpdateResult {
+        let mut degrade = |name: &str| -> Result<MemberApplicationOutcome, CliError> {
             panic!("a committed merged transaction must not degrade ({name})");
         };
+        let mut output = |_: BatchOutputEvent| {};
 
         let items = execute_merged_updates_with_deps(
             vec![
@@ -1658,23 +1744,16 @@ mod tests {
             &host,
             true,
             &mut degrade,
-        );
+            &mut output,
+        )
+        .items;
 
-        assert_eq!(find(&items, "cosh").status, "updated");
-        assert_eq!(find(&items, "sec-core").status, "updated");
-        assert_eq!(
-            find(&items, "cosh").adapter_actions,
-            vec![AdapterAction {
-                component: "cosh".to_string(),
-                framework: "openclaw".to_string(),
-                reason: "adapter bundle changed during system update".to_string(),
-                command: "anolisa adapter status cosh".to_string(),
-            }],
-            "the changed source bundle must surface on cosh's own item"
-        );
+        assert_eq!(find(&items, "cosh").status, BatchMemberStatus::Updated);
+        assert_eq!(find(&items, "sec-core").status, BatchMemberStatus::Updated);
         assert!(
-            find(&items, "sec-core").adapter_actions.is_empty(),
-            "an unchanged source bundle must not produce an action"
+            find(&items, "cosh").adapter_actions.is_empty()
+                && find(&items, "sec-core").adapter_actions.is_empty(),
+            "unmanaged directory bytes must not be treated as package revisions"
         );
     }
 
@@ -1709,7 +1788,7 @@ mod tests {
             adapter_actions: vec![AdapterAction {
                 component: "cosh".to_string(),
                 framework: "openclaw".to_string(),
-                reason: anolisa_core::adapter::claim::BUNDLE_CHANGED_REASON.to_string(),
+                reason: anolisa_core::adapter::claim::SOURCE_REVISION_CHANGED_REASON.to_string(),
                 command: "anolisa adapter enable cosh openclaw".to_string(),
             }],
         };
@@ -1721,7 +1800,7 @@ mod tests {
             serde_json::json!([{
                 "component": "cosh",
                 "framework": "openclaw",
-                "reason": "resource bundle changed since enable",
+                "reason": "adapter source revision changed since enable",
                 "command": "anolisa adapter enable cosh openclaw",
             }]),
             "each batch item carries its own adapter actions (issue #1885): {json}"

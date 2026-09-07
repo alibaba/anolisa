@@ -431,7 +431,7 @@ fn collect_config(builder: &mut HealthReportBuilder, config: &CoshConfig, elapse
         .add_fact(
             HealthFactCategory::Config,
             "config.approval_mode",
-            HealthFactValue::String(config.approval_mode.clone()),
+            HealthFactValue::String(config.approval_mode.label().to_string()),
             None,
             HealthFactSource::Derived,
             elapsed_ms,

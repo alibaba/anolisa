@@ -47,7 +47,16 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 
 | 文档 | 组件 | 说明 |
 |------|------|------|
-| [AgentSight](agent-observability/agentsight.md) | agentsight | eBPF 追踪、Token 计账、Web Dashboard |
+| [AgentSight](agent-observability/agentsight/README.md) | agentsight | eBPF 追踪、Token 计账、Web Dashboard |
+| [AgentSight 快速开始](agent-observability/agentsight/QUICKSTART.md) | agentsight | 安装、采集第一条会话、打开 Dashboard |
+| [AgentSight Dashboard 指南](agent-observability/agentsight/dashboard.md) | agentsight | 令牌访问方式与逐页说明 |
+| [AgentSight CLI 参考](agent-observability/agentsight/cli-reference.md) | agentsight | 全部命令与参数，附真实输出 |
+| [AgentSight 配置](agent-observability/agentsight/configuration.md) | agentsight | 配置文件、功能开关、Agent 发现规则 |
+| [中断检测](agent-observability/agentsight/interruption-detection.md) | agentsight | 18 种中断类型与排查流程 |
+| [AgentSight 部署](agent-observability/agentsight/deployment.md) | agentsight | systemd、容器/Sidecar、macOS、升级、卸载 |
+| [AgentSight 数据与存储](agent-observability/agentsight/data-and-storage.md) | agentsight | 数据库、保留策略、HTTP API、Prometheus、ATIF 导出 |
+| [AgentSight 集成](agent-observability/agentsight/integrations.md) | agentsight | Tokenless、agent-sec-core、enforcer、cosh、Prometheus |
+| [AgentSight 排查](agent-observability/agentsight/troubleshooting.md) | agentsight | 没数据、401、端口不通、数据库增长 |
 
 ### 安全 `agent-security/`
 
@@ -55,9 +64,12 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 |------|------|------|
 | [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | 系统加固、代码扫描、提示词扫描、技能账本 |
 | [Code Scanner Hook 配置](agent-security/agent-sec-core/code-scanner.md) | agent-sec-core | 各 Agent 的 hook 模式、环境变量与 fallback 行为 |
+| [Prompt Scanner](agent-security/agent-sec-core/prompt-scanner.md) | agent-sec-core | 提示词注入 / 越狱检测、模式与 verdict |
 | [PII 检测](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | 个人数据/凭证检测与脱敏 |
+| [资产验证](agent-security/agent-sec-core/asset-verification.md) | agent-sec-core | GPG 签名的 Skill 分发验证与发现结果 |
 | [Skill Ledger 用户指南](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | 技能账本完整性链与签名工作流 |
 | [OpenClaw 兼容部署与升级](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw 插件部署与升级指南 |
+| [内部命令](agent-security/agent-sec-core/internal-commands.md) | agent-sec-core | hook 调用的隐藏命令契约与清单 |
 
 ### Token 节省 `token-saving/`
 
@@ -65,8 +77,10 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 |------|------|------|
 | [Tokenless 快速开始](token-saving/tokenless/QUICKSTART.md) | tokenless | 安装、接入 Agent、首次压缩与验收 |
 | [Tokenless 用户手册](token-saving/tokenless/user-manual.md) | tokenless | 能力边界、运行行为与任务导航 |
-| [Tokenless 框架集成](token-saving/tokenless/framework-integration.md) | tokenless | cosh、OpenClaw、Hermes、Qoder、Claude Code、Codex、Qwen Code |
-| [Tokenless CLI 参考](token-saving/tokenless/cli-reference.md) | tokenless | 压缩、环境检查、Stash、MCP 与统计命令 |
+| [Tokenless Python SDK](token-saving/tokenless/sdk.md) | tokenless | 通用与 AgentScope 两层、Runtime 操作、统计与示例 |
+| [Tokenless AgentScope SDK 集成](token-saving/tokenless/sdk/agentscope.md) | tokenless | 把 AgentScope 1.x、2.x 与 App 挂载到通用 SDK |
+| [Tokenless Agent 集成](token-saving/tokenless/framework-integration.md) | tokenless | 产品 Adapter、Hook 与 Plugin |
+| [Tokenless CLI 参考](token-saving/tokenless/cli-reference.md) | tokenless | Protocol Pipeline、直接压缩、Stash、MCP 与统计命令 |
 | [Tokenless 效果度量](token-saving/tokenless/measuring-savings.md) | tokenless | 统计、diff、dry-run、AgentSight 与 SLS 度量 |
 | [Tokenless 配置与数据隐私](token-saving/tokenless/configuration-and-privacy.md) | tokenless | 配置优先级、本地数据与敏感工作负载 |
 | [Tokenless 故障排查](token-saving/tokenless/troubleshooting.md) | tokenless | Adapter、数据库、Stash、升级与卸载 |

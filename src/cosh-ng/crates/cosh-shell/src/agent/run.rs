@@ -475,12 +475,53 @@ pub(crate) fn stop_active_agent_run_without_rendering<W: Write>(
     );
     active_run.handle.cancel();
     active_run.status_animation.clear(output)?;
+    // Surface unconsumed hook notifications before teardown; dropping them
+    // with the run is how block decisions went missing (#2067).
+    drain_pending_hook_notifications(&mut active_run, output)?;
     active_run.held_events.clear();
     active_run.deferred_events.clear();
     active_run.cosh_request_filter.clear();
     active_run.pending_cosh_requests.clear();
     active_run.pending_cosh_request_audits.clear();
     output.flush()?;
+    Ok(())
+}
+
+/// Takes the run's unconsumed hook notifications as governable events.
+pub(crate) fn take_pending_hook_notification_events(
+    active_run: &mut ActiveAgentRun,
+) -> Vec<AgentEvent> {
+    let run_id = active_run.request.id.clone();
+    active_run
+        .pending_hook_notifications
+        .drain(..)
+        .map(|notification| AgentEvent::HookNotification {
+            run_id: run_id.clone(),
+            hook_name: notification.hook_name,
+            message: notification.message,
+            tool_use_id: notification.tool_use_id,
+            decision: notification.decision,
+        })
+        .collect()
+}
+
+/// Drains unconsumed hook notifications through governance and renders them
+/// with the guarded writer. Teardown paths must surface an orphan block/ask
+/// decision instead of dropping it with the run (#2067).
+pub(crate) fn drain_pending_hook_notifications<W: Write>(
+    active_run: &mut ActiveAgentRun,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let events = take_pending_hook_notification_events(active_run);
+    if events.is_empty() {
+        return Ok(());
+    }
+    let governed =
+        govern_agent_events_with_language(&events, &Policy::default(), active_run.language).events;
+    active_run
+        .renderer
+        .write_governed_events(output, &governed)?;
+    active_run.governed_events.extend(governed);
     Ok(())
 }
 

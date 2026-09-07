@@ -32,6 +32,17 @@ from agent_sec_cli.skill_ledger.core.live_root import (
     SkillRootResolver,
 )
 from agent_sec_cli.skill_ledger.errors import SkillRootResolveError
+from agent_sec_cli.skill_ledger.skillfs_peer_auth import (
+    AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE,
+    NOTIFY_CLIENT_DOMAIN,
+    NOTIFY_SERVER_DOMAIN,
+    AuthenticatedSession,
+    SharedSecret,
+    build_auth_init_frame,
+    build_auth_proof_frame,
+    parse_auth_challenge_frame,
+    verify_auth_proof_frame,
+)
 
 PENDING_DECISION_TARGET = ".skill-meta/versions/__pending_decision__.snapshot"
 
@@ -181,6 +192,65 @@ def write_isolated_config(root: Path, extra: dict[str, Any] | None = None) -> No
     )
 
 
+async def send_authenticated_notify(
+    socket_path: Path,
+    secret: SharedSecret,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Send one SkillFS-compatible authenticated notify request."""
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    try:
+        writer.write(build_auth_init_frame())
+        await writer.drain()
+
+        nonce = parse_auth_challenge_frame(await reader.readline())
+        writer.write(
+            build_auth_proof_frame(
+                "auth.proof",
+                secret,
+                NOTIFY_CLIENT_DOMAIN,
+                nonce,
+            )
+        )
+        await writer.drain()
+        verify_auth_proof_frame(
+            await reader.readline(),
+            expected_kind="auth.ok",
+            secret=secret,
+            domain=NOTIFY_SERVER_DOMAIN,
+            nonce=nonce,
+        )
+        session = AuthenticatedSession(
+            secret,
+            nonce,
+            NOTIFY_CLIENT_DOMAIN,
+            NOTIFY_SERVER_DOMAIN,
+        )
+        payload = json.dumps(
+            {
+                "id": "skillfs-integration",
+                "method": METHOD_SKILLFS_NOTIFY_CHANGE,
+                "params": params,
+                "trace_context": {},
+                "timeout_ms": 3000,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        writer.write(session.protect_payload(payload, "client"))
+        await writer.drain()
+
+        response_payload = await reader.readline()
+        response_tag = await reader.readline()
+        raw_response = response_payload.removesuffix(b"\n")
+        session.verify_payload(raw_response, response_tag, "server")
+        response = json.loads(raw_response)
+        assert isinstance(response, dict)
+        return response
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
@@ -252,6 +322,49 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
     assert second_pid == first_pid
     with pytest.raises(ProcessLookupError):
         os.kill(first_pid, 0)
+
+
+def test_authenticated_daemon_notify_writes_activation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    write_isolated_config(tmp_path)
+    skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
+    socket_path = daemon_socket_path(tmp_path)
+    key_path = tmp_path / "notify.key"
+    key_path.write_bytes(b"n" * 32)
+    key_path.chmod(0o600)
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE, str(key_path))
+    secret = SharedSecret.load(key_path)
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            response = await send_authenticated_notify(
+                socket_path,
+                secret,
+                notify_payload(skill_dir),
+            )
+            activation = await wait_for(
+                lambda: (
+                    read_activation(skill_dir)
+                    if (skill_dir / ".skill-meta" / "activation.json").is_file()
+                    else None
+                )
+            )
+        finally:
+            await server.stop()
+        return response, activation
+
+    response, activation = asyncio.run(scenario())
+
+    assert response["ok"] is True
+    assert response["data"]["accepted"] is True
+    assert activation["schemaVersion"] == 1
+    assert activation["target"] == ".skill-meta/versions/v000001.snapshot"
 
 
 def test_daemon_notify_resolves_hidden_canonical_to_live_once(

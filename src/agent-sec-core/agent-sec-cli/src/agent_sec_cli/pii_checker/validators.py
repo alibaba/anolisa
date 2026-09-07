@@ -2,8 +2,13 @@
 
 import base64
 import binascii
+import json
 import re
 from datetime import datetime
+
+_EMAIL_LOCAL_RE = re.compile(r"[A-Za-z0-9._%+-]+")
+_EMAIL_DOMAIN_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+_EMAIL_TLD_RE = re.compile(r"[A-Za-z]{2,63}")
 
 
 def luhn_check(value: str) -> bool:
@@ -42,6 +47,25 @@ def validate_cn_id(value: str) -> bool:
     return normalized[-1] == checks[total % 11]
 
 
+def validate_email(value: str) -> bool:
+    """Validate the supported ASCII email-address syntax."""
+    if len(value) > 254 or value.count("@") != 1:
+        return False
+
+    local, domain = value.split("@")
+    if not local or len(local) > 64 or not domain or len(domain) > 253:
+        return False
+    if local.startswith(".") or local.endswith(".") or ".." in local:
+        return False
+    if _EMAIL_LOCAL_RE.fullmatch(local) is None:
+        return False
+
+    labels = domain.split(".")
+    if len(labels) < 2 or _EMAIL_TLD_RE.fullmatch(labels[-1]) is None:
+        return False
+    return all(_EMAIL_DOMAIN_LABEL_RE.fullmatch(label) is not None for label in labels)
+
+
 def validate_jwt(value: str) -> bool:
     """Validate the structural shape of a JWT."""
     parts = value.split(".")
@@ -50,14 +74,39 @@ def validate_jwt(value: str) -> bool:
     if not all(re.fullmatch(r"[A-Za-z0-9_-]+", part) for part in parts):
         return False
 
-    for part in parts[:2]:
+    decoded_parts: list[bytes] = []
+    for index, part in enumerate(parts):
+        if len(part) % 4 == 1:
+            return False
         padded = part + "=" * (-len(part) % 4)
         try:
-            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+            decoded = base64.b64decode(
+                padded.encode("ascii"), altchars=b"-_", validate=True
+            )
         except (binascii.Error, ValueError):
             return False
-        if not decoded.strip():
+        if not decoded:
             return False
+        # Preserve canonical JSON segments while accepting signature aliases
+        # that permissive JWT libraries decode to the same bytes.
+        if index < 2:
+            canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+            if canonical != part:
+                return False
+        decoded_parts.append(decoded)
+
+    json_parts: list[object] = []
+    for decoded in decoded_parts[:2]:
+        try:
+            json_parts.append(json.loads(decoded.decode("utf-8")))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return False
+    if not all(isinstance(part, dict) for part in json_parts):
+        return False
+
+    algorithm = json_parts[0].get("alg")
+    if not isinstance(algorithm, str) or not algorithm.strip():
+        return False
     return True
 
 

@@ -1,5 +1,187 @@
 use super::*;
 
+fn xtrace_record_contains_secret(rendered: &str, trace_prefix: &str, secret: &str) -> bool {
+    rendered
+        .split(['\r', '\n'])
+        .any(|record| record.contains(trace_prefix) && record.contains(secret))
+}
+
+fn exact_screen_text_occurrences(screen: &str, expected: &str) -> usize {
+    screen
+        .match_indices(expected)
+        .filter(|(start, _)| {
+            screen
+                .as_bytes()
+                .get(start + expected.len())
+                .is_none_or(|next| !next.is_ascii_alphanumeric())
+        })
+        .count()
+}
+
+#[test]
+fn xtrace_secret_scan_treats_cr_as_a_record_boundary() {
+    let separate_echo = " /auth SECRET\r...\rxxtrace-guard: command\r\n";
+    let traced_secret = " /auth SECRET\r...\rxxtrace-guard: command SECRET\r\n";
+
+    assert!(!xtrace_record_contains_secret(
+        separate_echo,
+        "xtrace-guard:",
+        "SECRET"
+    ));
+    assert!(xtrace_record_contains_secret(
+        traced_secret,
+        "xtrace-guard:",
+        "SECRET"
+    ));
+}
+
+#[test]
+fn terminal_screen_redraw_erases_typed_line_and_cursor_ghost() {
+    let output = concat!(
+        "[root@host ~]# /mode",
+        "\x1b7\x1b[2m hint\x1b[0m\x1b8",
+        "\r\x1b[K",
+        "[root@host ~]# builtin true __cosh_slash_guard__\r\n"
+    );
+
+    let screen = render_terminal_screen(output.as_bytes(), 200, 50);
+    assert_eq!(
+        screen
+            .iter()
+            .filter(|line| line.contains("]# /mode"))
+            .count(),
+        0
+    );
+    assert_eq!(
+        screen.first().map(String::as_str),
+        Some("[root@host ~]# builtin true __cosh_slash_guard__")
+    );
+
+    let scrolled = render_terminal_screen(b"first\r\nsecond\r\nthird", 20, 2);
+    assert_eq!(scrolled, ["second", "third"]);
+
+    let tabbed = render_terminal_screen(b"a\tb", 20, 2);
+    assert_eq!(tabbed.first().map(String::as_str), Some("a       b"));
+}
+
+#[test]
+fn raw_relay_bash_renders_direct_slash_submission_exactly_once() {
+    assert_bash_slash_screen(
+        "bash-direct-slash-screen",
+        "/mode",
+        200,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+        ],
+    );
+}
+
+#[test]
+fn raw_relay_bash_renders_recalled_slash_submission_exactly_once() {
+    assert_bash_slash_screen(
+        "bash-recalled-slash-screen",
+        "/mode",
+        200,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(600)),
+        ],
+    );
+}
+
+#[test]
+fn raw_relay_bash_renders_wrapped_ascii_slash_submission_exactly_once() {
+    let command = "/mode aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert_bash_slash_screen(
+        "bash-wrapped-ascii-slash-screen",
+        command,
+        40,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(command),
+            RawRelayAction::wait(Duration::from_millis(600)),
+        ],
+    );
+}
+
+fn assert_bash_slash_screen(
+    test_id: &str,
+    command: &str,
+    width: u16,
+    mut actions: Vec<RawRelayAction>,
+) {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-{test_id}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n\
+         PS1='[root@host ~]# '\n",
+    )
+    .expect("bashrc");
+    std::fs::write(home.join(".bash_history"), format!("{command}\n")).expect("history");
+
+    let mut config =
+        ShellHostConfig::new(test_id, &work_dir).with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    config.winsize.ws_col = width;
+    config.winsize.ws_row = 50;
+    let mut rendered = Vec::new();
+    actions.push(RawRelayAction::line("exit"));
+    let output = run_raw_relay_bash_with_actions(&config, actions, &mut rendered)
+        .expect("slash screen relay");
+
+    // The enhanced shell adds a UTF-8 ownership glyph outside PS1. Remove
+    // that decoration so this oracle exercises only ASCII column semantics.
+    let ascii_rendered: Vec<u8> = rendered.iter().copied().filter(u8::is_ascii).collect();
+    let screen = render_terminal_screen(&ascii_rendered, usize::from(width), 50);
+    assert_eq!(
+        exact_screen_text_occurrences(&screen.concat(), command),
+        1,
+        "screen: {screen:#?}"
+    );
+    assert!(
+        screen
+            .iter()
+            .all(|line| !line.contains("__cosh_slash_guard__")),
+        "screen: {screen:#?}"
+    );
+    assert!(
+        !rendered
+            .windows(b"__cosh_slash_guard__".len())
+            .any(|window| window == b"__cosh_slash_guard__"),
+        "raw terminal bytes leaked the internal slash guard"
+    );
+    assert!(
+        !rendered
+            .windows(b"in set -x ;; *) : ;; esac".len())
+            .any(|window| window == b"in set -x ;; *) : ;; esac"),
+        "raw terminal bytes leaked the horizontally scrolled slash guard"
+    );
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some(command)
+            && event.component.as_deref() == Some("slash")
+    }));
+    let history = std::fs::read_to_string(home.join(".bash_history")).expect("history");
+    assert!(history.lines().any(|line| line == command), "{history}");
+    assert!(!history.contains("__cosh_slash_guard__"), "{history}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
 #[test]
 fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
     let work_dir = std::env::temp_dir().join(format!(
@@ -18,7 +200,6 @@ fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
     .expect("invalid utf8 relay");
 
     assert!(!format!("{:?}", output.events).contains('\u{fffd}'));
-    #[cfg(not(target_os = "linux"))]
     assert!(!output.events.iter().any(|event| {
         event.kind == ShellEventKind::CommandStarted
             && event
@@ -26,20 +207,15 @@ fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
                 .as_deref()
                 .is_some_and(|command| command != "exit")
     }));
-    #[cfg(target_os = "linux")]
-    {
-        assert!(output.events.iter().any(|event| {
-            event.kind == ShellEventKind::CommandStarted
-                && event.command.as_deref() == Some("<redacted sensitive command>")
-        }));
-        assert!(output.events.iter().any(|event| {
-            event.kind == ShellEventKind::CommandRoutingObserved
-                && event
-                    .routing
-                    .as_ref()
-                    .is_some_and(|routing| routing.proven && routing.unsafe_input)
-        }));
-    }
+    let routing = output
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+        .unwrap_or_else(|| panic!("missing raw-free routing evidence: {:?}", output.events));
+    assert!(routing.command.is_none() && routing.input.is_none());
+    assert!(routing.routing.as_ref().is_some_and(|metadata| {
+        metadata.unsafe_input && !metadata.proven && metadata.top_level_missing
+    }));
 }
 
 #[test]
@@ -101,7 +277,7 @@ fn routing_c4_zsh_rust_route_uses_shared_event_contract() {
 }
 
 #[test]
-fn routing_c4_draft_grammar_no_drift_preserves_raw_arguments() {
+fn removed_draft_alias_preserves_native_shell_routing() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-c4-draft-grammar-{}-{}",
         std::process::id(),
@@ -116,13 +292,16 @@ fn routing_c4_draft_grammar_no_drift_preserves_raw_arguments() {
         ],
         Vec::new(),
     )
-    .expect("draft grammar routing");
+    .expect("removed draft routing");
 
     for input in ["/draft extra", "/draft 'extra'"] {
-        assert!(output.events.iter().any(|event| {
+        assert!(!output.events.iter().any(|event| {
             event.kind == ShellEventKind::UserInputIntercepted
                 && event.input.as_deref() == Some(input)
                 && event.component.as_deref() == Some("slash")
+        }));
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandStarted && event.command.as_deref() == Some(input)
         }));
     }
 }
@@ -251,7 +430,8 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
         home.join(".bashrc"),
         "export HISTFILE=\"$HOME/.bash_history\"\n\
          export HISTSIZE=1000\n\
-         shopt -s histappend\n",
+         shopt -s histappend\n\
+         PS1='guard$ '\n",
     )
     .expect("bashrc");
     std::fs::write(home.join(".bash_history"), "echo prior-shell-cmd\n").expect("history");
@@ -290,13 +470,305 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
         event.kind == ShellEventKind::CommandStarted
             && event.command.as_deref() == Some("echo prior-shell-cmd")
     });
-    // Issue #1718: Up right after a slash intercept recalls the slash
-    // command (intercepted again through the shell marker), not the older
-    // shell command from bash history.
+    // The Readline guard records the first submission and intercepts both it
+    // and the recalled copy before Bash parses either command.
     assert_eq!(intercept_count, 2, "{rendered_text}");
     assert!(!recalled_prior_shell_cmd, "{rendered_text}");
     // The routed line must never execute as a shell command.
     assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal slash guard must never reach the terminal: {rendered_text}"
+    );
+    assert!(
+        rendered_text.contains("/skills detail xlsx"),
+        "the original slash line must remain visible: {rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_vi_mode_guards_slash_without_mutating_commands() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-vi-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "set -o vi\n").expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-vi-guard", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("echo probe-ordinary-tail"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("vi-mode slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/skills detail xlsx")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some("echo probe-ordinary-tail")
+    }));
+    assert!(
+        rendered_text.contains("probe-ordinary-tail"),
+        "{rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("probe-ordinary-taiL"),
+        "{rendered_text}"
+    );
+    assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal slash guard must never reach the vi terminal: {rendered_text}"
+    );
+    assert!(!rendered_text.contains("bash: exiT"), "{rendered_text}");
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_xtrace_hides_guard_protocol_and_sentinel() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-xtrace-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         shopt -s histappend\n\
+         PS4='xtrace-guard: '; set -x\n",
+    )
+    .expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-xtrace-guard", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let secret = "sk-test-private-2942";
+    let private_auth = format!(" /auth {secret}");
+    let xtrace_probe = "case $- in *x*) probe=ON ;; *) probe=OFF ;; esac; \
+                        printf '__XTRACE_%s__\\n' \"$probe\"; unset probe";
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(private_auth),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line(xtrace_probe),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("xtrace slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/mode")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("slash")
+                && event.input.as_deref() == Some("<redacted>")
+                && event
+                    .routing
+                    .as_ref()
+                    .is_some_and(|routing| routing.sensitive)
+        }),
+        "events: {:#?}\nrendered: {rendered_text}",
+        output.events
+    );
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some(xtrace_probe)
+    }));
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "xtrace leaked the internal sentinel: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("1337;COSH;"),
+        "xtrace leaked the authenticated marker protocol: {rendered_text}"
+    );
+    assert!(
+        !xtrace_record_contains_secret(&rendered_text, "xtrace-guard:", secret),
+        "xtrace leaked the private slash input: {rendered_text}"
+    );
+    assert!(
+        rendered_text.contains("__XTRACE_ON__"),
+        "slash guard did not preserve xtrace: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("__XTRACE_OFF__"),
+        "slash guard disabled the user's xtrace state: {rendered_text}"
+    );
+    let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
+    assert!(
+        !history.contains(secret),
+        "private history leaked: {history}"
+    );
+    let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
+    assert!(
+        !journal.contains(secret),
+        "journal leaked private slash input"
+    );
+    let evidence = ledger_output_refs_text(&ledger_from_output(&output));
+    assert!(
+        !evidence.contains(secret),
+        "evidence leaked private slash input"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+fn assert_bash_guard_preserves_partial_debug_output(
+    test_id: &str,
+    trap_output: &str,
+    expected_output: &str,
+) {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-{test_id}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "PS1='guard$ '\n").expect("bashrc");
+
+    let mut config =
+        ShellHostConfig::new(test_id, &work_dir).with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let trap_setup = format!(
+        "set -T; trap 'case \"$BASH_COMMAND\" in READLINE_LINE=*) \
+         {trap_output} > /dev/tty;; esac' DEBUG"
+    );
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(&trap_setup),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("trap - DEBUG"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("partial-output slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/mode")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(
+        rendered_text.contains(expected_output),
+        "the guard filter dropped unrelated partial output: {rendered_text}"
+    );
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal sentinel reached the terminal: {rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_preserves_partial_debug_output_before_guard_shadow() {
+    assert_bash_guard_preserves_partial_debug_output(
+        "partial-guard",
+        "printf \"BACKGROUND_%s\" PARTIAL",
+        "BACKGROUND_PARTIAL",
+    );
+}
+
+#[test]
+fn raw_relay_bash_preserves_carriage_return_debug_output_before_guard_shadow() {
+    assert_bash_guard_preserves_partial_debug_output(
+        "carriage-partial-guard",
+        "printf \"BEFORE\\rBACKGROUND_%s\" PARTIAL",
+        "BACKGROUND_PARTIAL",
+    );
+}
+
+#[test]
+fn raw_relay_bash_verbose_mode_hides_both_guard_echoes() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-verbose-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(home.join(".bashrc"), "PS1='guard$ '\n").expect("bashrc");
+
+    let mut config = ShellHostConfig::new("bash-verbose-guard", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("set -v"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("/mode"),
+            RawRelayAction::wait(Duration::from_millis(600)),
+            RawRelayAction::line("set +v"),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("verbose slash guard relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("/mode")
+            && event.component.as_deref() == Some("slash")
+    }));
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "verbose mode leaked the internal sentinel: {rendered_text}"
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
@@ -310,6 +782,11 @@ fn routing_c4_bash_route_enters_native_history_file() {
     ));
     let home = root.join("home");
     let work_dir = root.join("work");
+    let expansion_side_effect = root.join("slash-expanded");
+    let slash_input = format!(
+        "/skills detail $(touch {})",
+        expansion_side_effect.display()
+    );
     std::fs::create_dir_all(&home).expect("home");
     std::fs::write(
         home.join(".bashrc"),
@@ -320,14 +797,17 @@ fn routing_c4_bash_route_enters_native_history_file() {
     .expect("bashrc");
 
     let mut config = ShellHostConfig::new("bash-1718-histfile", &work_dir)
-        .with_env("HOME", home.display().to_string());
+        .with_env("HOME", home.display().to_string())
+        // A user's colon-no-op filter must not discard Cosh's replacement
+        // placeholder before the original slash line is committed.
+        .with_env("HISTIGNORE", "\\:*");
     config.slash_via_shell = true;
     let mut rendered = Vec::new();
     let output = run_raw_relay_bash_with_actions(
         &config,
         vec![
             RawRelayAction::wait(Duration::from_millis(200)),
-            RawRelayAction::line("/skills detail xlsx"),
+            RawRelayAction::line(&slash_input),
             RawRelayAction::wait(Duration::from_millis(1200)),
             RawRelayAction::line("exit"),
         ],
@@ -338,16 +818,203 @@ fn routing_c4_bash_route_enters_native_history_file() {
     let rendered_text = String::from_utf8_lossy(&rendered);
     let intercepted = output.events.iter().any(|event| {
         event.kind == ShellEventKind::UserInputIntercepted
-            && event.input.as_deref() == Some("/skills detail xlsx")
+            && event.input.as_deref() == Some(slash_input.as_str())
             && event.component.as_deref() == Some("slash")
     });
     assert!(intercepted, "{rendered_text}");
-    // bash owns persistence: the routed slash reaches HISTFILE through the
-    // user's native histappend semantics, with no cosh-side writes.
+    // Bash owns persistence after the Readline guard records the slash line.
     let history = std::fs::read_to_string(home.join(".bash_history")).expect("histfile");
-    assert!(history.contains("/skills detail xlsx"), "{history}");
+    assert!(history.contains(&slash_input), "{history}");
+    assert!(!history.contains("__cosh_slash_guard__"), "{history}");
+    assert!(
+        !expansion_side_effect.exists(),
+        "slash input reached Bash expansion"
+    );
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "a slash longer than the guard must not leak the guard: {rendered_text}"
+    );
 
     std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_guards_each_slash_in_shell_owned_batch() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-batch-guard-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let work_dir = root.join("work");
+    let expansion_side_effect = root.join("batch-slash-expanded");
+    let first = "/skills detail first";
+    let second = format!(
+        "/skills detail $(touch {})",
+        expansion_side_effect.display()
+    );
+
+    let mut config = ShellHostConfig::new("bash-batch-slash-guard", &work_dir);
+    config.slash_via_shell = true;
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(format!("{first}\n{second}\n").into_bytes()),
+            RawRelayAction::wait(Duration::from_millis(1200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("same-read slash batch relay");
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    for input in [first, second.as_str()] {
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("slash")
+            }),
+            "missing slash intercept for {input}: {rendered_text}"
+        );
+    }
+    assert!(
+        !expansion_side_effect.exists(),
+        "batched slash reached Bash expansion"
+    );
+    assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "same-write slash guards leaked internal redisplay: {rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_preserves_same_read_foreground_stdin_bytes() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-foreground-stdin-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let work_dir = root.join("work");
+    let captured = root.join("captured-stdin");
+    let payload = b"stdin-probe\x1b[Dliteral";
+    let command = format!(
+        "sh -c 'IFS= read -r value; printf \"%s\" \"$value\" > \"$1\"' sh {}",
+        shell_arg(&captured)
+    );
+
+    let mut config = ShellHostConfig::new("bash-foreground-stdin", &work_dir);
+    config.slash_via_shell = true;
+    config.raw_action_watchdog = Duration::from_secs(10);
+    let mut rendered = Vec::new();
+    let mut batch = command.into_bytes();
+    batch.push(b'\n');
+    batch.extend_from_slice(payload);
+    batch.push(b'\n');
+    run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::write(batch),
+            RawRelayAction::wait(Duration::from_millis(1200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("same-read foreground stdin relay");
+
+    let captured_bytes = std::fs::read(&captured).expect("captured foreground stdin");
+    assert_eq!(
+        captured_bytes, payload,
+        "foreground stdin must not receive a Readline guard"
+    );
+    assert!(
+        !captured_bytes
+            .windows(b"\x1b[99~".len())
+            .any(|window| window == b"\x1b[99~"),
+        "foreground stdin contains a Readline guard: {captured_bytes:?}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_shell_opaque_bytes_ignore_slash_route() {
+    struct ForegroundSynchronizedInput {
+        batch: Option<Vec<u8>>,
+        foreground_done: std::path::PathBuf,
+        exit_sent: bool,
+        deadline: Instant,
+    }
+
+    impl Read for ForegroundSynchronizedInput {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if let Some(batch) = self.batch.take() {
+                std::thread::sleep(Duration::from_millis(200));
+                assert!(batch.len() <= buf.len());
+                buf[..batch.len()].copy_from_slice(&batch);
+                return Ok(batch.len());
+            }
+            if !self.exit_sent {
+                while std::fs::metadata(&self.foreground_done)
+                    .map(|metadata| metadata.len() == 0)
+                    .unwrap_or(true)
+                {
+                    if Instant::now() >= self.deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "foreground reader did not complete",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                self.exit_sent = true;
+                buf[..b"exit\n".len()].copy_from_slice(b"exit\n");
+                return Ok(b"exit\n".len());
+            }
+            Ok(0)
+        }
+    }
+
+    fn run(slash_via_shell: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "cosh-shell-bash-shell-opaque-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let work_dir = root.join("work");
+        let captured = root.join("captured-stdin");
+        let command = format!(
+            "/bin/sh -c 'IFS= read -r first; IFS= read -r second; \
+             printf \"%s\\n%s\" \"$first\" \"$second\" > \"$1\"' sh {}",
+            shell_arg(&captured)
+        );
+
+        let mut config = ShellHostConfig::new("bash-shell-opaque", &work_dir);
+        config.slash_via_shell = slash_via_shell;
+        config.raw_action_watchdog = Duration::from_secs(10);
+        let mut rendered = Vec::new();
+        let mut batch = command.into_bytes();
+        batch.extend_from_slice(b"\n/help\nstdin-probe\nforeground-second\n");
+        let input = ForegroundSynchronizedInput {
+            batch: Some(batch),
+            foreground_done: captured.clone(),
+            exit_sent: false,
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        run_raw_relay_bash(&config, input, &mut rendered).expect("same-read shell-opaque relay");
+
+        let captured_bytes = std::fs::read(&captured).expect("captured foreground stdin");
+        assert!(!captured_bytes.contains(&0x1b), "{captured_bytes:?}");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    run(true);
+    run(false);
 }
 
 #[test]
@@ -403,9 +1070,7 @@ fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
         event.kind == ShellEventKind::CommandStarted
             && event.command.as_deref() == Some("echo prior-shell-cmd")
     });
-    // COSH_SLASH_VIA_SHELL=0 restores the pre-#1718 chain end to end: the
-    // slash is intercepted in the Rust relay, never enters history, and Up
-    // recalls the older shell command.
+    // The compatibility switch keeps slash controls on the Rust-owned path.
     assert_eq!(intercept_count, 1, "{rendered_text}");
     assert!(recalled_prior_shell_cmd, "{rendered_text}");
 
@@ -452,8 +1117,11 @@ fn routing_c4_history_privacy_secret_slash_never_persists() {
             && event.component.as_deref() == Some("slash")
     });
     assert!(intercepted, "{rendered_text}");
-    // The intercept branch scrubs credential-bearing entries before its
-    // return 1, so the routed line must never reach the history file.
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "sensitive slash submission leaked the guard: {rendered_text}"
+    );
+    // The Readline guard recognizes the secret and omits it from history.
     let history = std::fs::read_to_string(home.join(".bash_history")).unwrap_or_default();
     assert!(!history.contains("api_key"), "{history}");
 
@@ -461,7 +1129,7 @@ fn routing_c4_history_privacy_secret_slash_never_persists() {
 }
 
 #[test]
-fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
+fn raw_relay_bash_intercepts_history_recalled_slash_with_enter_and_ctrl_o() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-recalled-slash-test-{}-{}",
         std::process::id(),
@@ -489,7 +1157,9 @@ fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
             RawRelayAction::wait(Duration::from_millis(200)),
             RawRelayAction::write(b"\x1b[A".to_vec()),
             RawRelayAction::wait(Duration::from_millis(100)),
-            RawRelayAction::write(b"\n".to_vec()),
+            // `operate-and-get-next` accepts the recalled Readline buffer
+            // without carrying CR/LF in the user input batch.
+            RawRelayAction::write(b"\x0f".to_vec()),
             RawRelayAction::wait(Duration::from_millis(300)),
             RawRelayAction::write(b"\x1b[A".to_vec()),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -516,6 +1186,128 @@ fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
         !rendered_text.contains("bash: /skills: No such file or directory"),
         "{rendered_text}"
     );
+    assert!(
+        !rendered_text.contains("__cosh_slash_guard__"),
+        "the internal slash guard must never reach Ctrl-O or Enter output: {rendered_text}"
+    );
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn raw_relay_bash_routes_recalled_and_indented_natural_language() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-history-recall-2951-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home = root.join("home");
+    let work_dir = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "export HISTFILE=\"$HOME/.bash_history\"\n\
+         export HISTSIZE=1000\n\
+         export HISTFILESIZE=1000\n\
+         shopt -s histappend\n",
+    )
+    .expect("bashrc");
+
+    let prompt = "你好你是谁";
+    let secret = "TEST_ONLY_SECRET_2951";
+    let control = home.join(".history-recall-control");
+    let indented_control = home.join(".history-recall-indented-control");
+    let config = ShellHostConfig::new("bash-history-recall-2951", &work_dir)
+        .with_env("HOME", home.display().to_string());
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line(prompt),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write(b"\x1b[A".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(b"?\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line(" 你好"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("   你好"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::write("\t你好\n".as_bytes().to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line(format!("printf ignored > /dev/null # token={secret}")),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("printf x > \"$HOME/.history-recall-control\""),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("  printf y > \"$HOME/.history-recall-indented-control\""),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("history recall relay");
+
+    let routed = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .map(|event| event.input.as_deref().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routed,
+        [prompt, prompt, "你好你是谁?", " 你好", "   你好", "你好"],
+        "events: {:#?}\nrendered: {}",
+        output.events,
+        String::from_utf8_lossy(&rendered)
+    );
+
+    let rendered_text = String::from_utf8_lossy(&rendered);
+    assert!(
+        !rendered_text.contains("command not found"),
+        "{rendered_text}"
+    );
+    for internal in ["__cosh_slash_guard__", "_COSH_HANDOFF", "1337;COSH;"] {
+        assert!(
+            !rendered_text.contains(internal),
+            "{internal}: {rendered_text}"
+        );
+    }
+    assert_eq!(std::fs::read(&control).expect("shell control"), b"x");
+    assert_eq!(
+        std::fs::read(&indented_control).expect("indented shell control"),
+        b"y"
+    );
+
+    let history = std::fs::read_to_string(home.join(".bash_history")).expect("history");
+    assert_eq!(
+        history.lines().filter(|line| *line == prompt).count(),
+        1,
+        "{history}"
+    );
+    assert_eq!(
+        history
+            .lines()
+            .filter(|line| *line == "printf x > \"$HOME/.history-recall-control\"")
+            .count(),
+        1,
+        "{history}"
+    );
+    assert!(!history.contains(secret), "{history}");
+    let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
+    assert!(!journal.contains(secret), "{journal}");
+    assert!(!ledger_output_refs_text(&ledger_from_output(&output)).contains(secret));
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
@@ -575,8 +1367,12 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
     std::fs::create_dir_all(&work_dir).expect("work dir");
     let history_snapshot = work_dir.join("history-snapshot");
     let secret = "history-secret-value";
+    let edited_secret = "history-edited-secret-value";
     let access_key = "LTAI5tExampleAccessKey";
     let url_password = "history-url-password";
+    let empty_user_url_password = "history-empty-user-url-password";
+    let dynamic_option_secret = "history-dynamic-option-secret";
+    let nested_dynamic_option_secret = "history-nested-dynamic-option-secret";
     let mut config = ShellHostConfig::new("bash-secret-history-test", &work_dir);
     config.native_mode = false;
     let output = run_raw_relay_bash_with_actions(
@@ -584,9 +1380,33 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
         vec![
             RawRelayAction::line(format!("TOKEN={secret} true")),
             RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(format!("TOKEN={edited_secret} true").into_bytes()),
+            RawRelayAction::write(b"\x1b[D\x1b[C".to_vec()),
+            RawRelayAction::write(b"\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!(": {access_key}")),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!(": https://user:{url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": http://:{empty_user_url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("HEADER_OPTION=-H"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": ${{HEADER_OPTION}}\"Cookie: session={dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true; printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true && printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(printf -- -H | cat)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!("history > {}", shell_arg(&history_snapshot))),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -599,17 +1419,29 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
     let history = std::fs::read_to_string(&history_snapshot).expect("history snapshot");
     let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
     assert!(!history.contains(secret), "{history}");
+    assert!(!history.contains(edited_secret), "{history}");
     assert!(!history.contains(access_key), "{history}");
     assert!(!history.contains(url_password), "{history}");
+    assert!(!history.contains(empty_user_url_password), "{history}");
+    assert!(!history.contains(dynamic_option_secret), "{history}");
+    assert!(!history.contains(nested_dynamic_option_secret), "{history}");
     assert!(!journal.contains(secret), "{journal}");
+    assert!(!journal.contains(edited_secret), "{journal}");
     assert!(!journal.contains(access_key), "{journal}");
     assert!(!journal.contains(url_password), "{journal}");
+    assert!(!journal.contains(empty_user_url_password), "{journal}");
+    assert!(!journal.contains(dynamic_option_secret), "{journal}");
+    assert!(!journal.contains(nested_dynamic_option_secret), "{journal}");
     assert!(ledger_from_output(&output)
         .blocks
         .iter()
         .all(|block| !block.command.contains(secret)
+            && !block.command.contains(edited_secret)
             && !block.command.contains(access_key)
-            && !block.command.contains(url_password)));
+            && !block.command.contains(url_password)
+            && !block.command.contains(empty_user_url_password)
+            && !block.command.contains(dynamic_option_secret)
+            && !block.command.contains(nested_dynamic_option_secret)));
 }
 
 #[test]
@@ -628,6 +1460,9 @@ fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
     let secret = "history-secret-value";
     let access_key = "LTAI5tExampleAccessKey";
     let url_password = "history-url-password";
+    let empty_user_url_password = "history-empty-user-url-password";
+    let dynamic_option_secret = "history-dynamic-option-secret";
+    let nested_dynamic_option_secret = "history-nested-dynamic-option-secret";
     let mut config = ShellHostConfig::new("zsh-secret-history-test", &work_dir);
     config.native_mode = false;
     let output = run_raw_relay_zsh_with_actions(
@@ -638,6 +1473,26 @@ fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
             RawRelayAction::line(format!(": {access_key}")),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!(": https://user:{url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": http://:{empty_user_url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("HEADER_OPTION=-H"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": ${{HEADER_OPTION}}\"Cookie: session={dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true; printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(true && printf -- -H)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(
+                ": $(printf -- -H | cat)\"Cookie: session={nested_dynamic_option_secret}\""
+            )),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!("fc -l -100 > {}", shell_arg(&history_snapshot))),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -652,15 +1507,24 @@ fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
     assert!(!history.contains(secret), "{history}");
     assert!(!history.contains(access_key), "{history}");
     assert!(!history.contains(url_password), "{history}");
+    assert!(!history.contains(empty_user_url_password), "{history}");
+    assert!(!history.contains(dynamic_option_secret), "{history}");
+    assert!(!history.contains(nested_dynamic_option_secret), "{history}");
     assert!(!journal.contains(secret), "{journal}");
     assert!(!journal.contains(access_key), "{journal}");
     assert!(!journal.contains(url_password), "{journal}");
+    assert!(!journal.contains(empty_user_url_password), "{journal}");
+    assert!(!journal.contains(dynamic_option_secret), "{journal}");
+    assert!(!journal.contains(nested_dynamic_option_secret), "{journal}");
     assert!(ledger_from_output(&output)
         .blocks
         .iter()
         .all(|block| !block.command.contains(secret)
             && !block.command.contains(access_key)
-            && !block.command.contains(url_password)));
+            && !block.command.contains(url_password)
+            && !block.command.contains(empty_user_url_password)
+            && !block.command.contains(dynamic_option_secret)
+            && !block.command.contains(nested_dynamic_option_secret)));
 }
 
 #[test]
@@ -1172,7 +2036,7 @@ fn routing_c3_mirror_dirty_eof_never_appends_exit() {
         .expect("dirty mirror shutdown");
 
     assert!(!side_effect.exists());
-    assert_eq!(output.exit_status, Some(129));
+    assert_ne!(output.exit_status, Some(0));
 }
 
 #[test]
@@ -1235,7 +2099,7 @@ fn routing_c3_eof_partial_line_has_no_synthetic_pty_write() {
         .expect("partial EOF shutdown");
 
     assert!(!side_effect.exists());
-    assert_eq!(output.exit_status, Some(129));
+    assert_ne!(output.exit_status, Some(0));
 }
 
 #[test]

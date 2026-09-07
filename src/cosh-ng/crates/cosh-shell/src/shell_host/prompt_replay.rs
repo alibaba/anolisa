@@ -140,6 +140,27 @@ impl PromptReplayTracker {
         }
     }
 
+    pub(super) fn idle_reconcile_remaining(
+        &self,
+        command_running: bool,
+        prompt_painted: bool,
+        last_pty_output: Option<Instant>,
+    ) -> Option<Duration> {
+        if (self.outstanding_submits == 0 && self.pending_intercepts == 0)
+            || command_running
+            || !prompt_painted
+            || self.input_generation.current() != self.last_written
+        {
+            return None;
+        }
+        let remaining = |at: Option<Instant>| {
+            at.map_or(Duration::ZERO, |at| {
+                self.idle_reconcile_window.saturating_sub(at.elapsed())
+            })
+        };
+        Some(remaining(self.last_write_seen).max(remaining(last_pty_output)))
+    }
+
     /// Arms replay dedup for a synthesized prompt (panel restore or handoff
     /// prompt echo).
     ///
@@ -151,12 +172,12 @@ impl PromptReplayTracker {
     /// accept-line response. Submissions the DEBUG trap intercepted are
     /// exempt: their only response is the repaint this arm exists to strip.
     ///
-    /// Known limit: custom `.inputrc` bindings to `accept-line` other than
-    /// CR/LF/Ctrl-O are invisible to the submission counter, so a boundary
-    /// or intercept they produce can let this arm over a queued Enter. The
-    /// strip fail-open bounds that mistake to a duplicate prompt paint: the
-    /// Enter's response never opens with the prompt bytes, so it is passed
-    /// through verbatim.
+    /// Known limit: editor-execute functions and custom `.inputrc` submission
+    /// bindings without CR/LF/Ctrl-O are invisible to the submission counter,
+    /// so a boundary or intercept they produce can let this arm over a queued
+    /// Enter. The strip fail-open bounds that mistake to a duplicate prompt
+    /// paint: the Enter's response never opens with the prompt bytes, so it is
+    /// passed through verbatim.
     pub(super) fn arm_for_replay(&mut self, prompt: &[u8]) {
         let current = self.input_generation.current();
         if current != self.last_written || self.outstanding_submits > self.pending_intercepts {
@@ -175,6 +196,10 @@ impl PromptReplayTracker {
     pub(super) fn strip<'a>(&mut self, bytes: &'a [u8]) -> &'a [u8] {
         self.expire_on_user_input();
         strip_replayed_prompt_prefix(bytes, &mut self.pending_prompt)
+    }
+
+    pub(super) fn pending_prompt_len(&self) -> usize {
+        self.pending_prompt.as_ref().map_or(0, Vec::len)
     }
 
     fn expire_on_user_input(&mut self) {

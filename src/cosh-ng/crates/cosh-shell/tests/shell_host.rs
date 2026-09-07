@@ -19,7 +19,7 @@ use cosh_shell::shell_host::{
     run_raw_relay_zsh_with_actions as shell_run_raw_relay_zsh_with_actions,
     run_raw_relay_zsh_with_output_control as shell_run_raw_relay_zsh_with_output_control,
     run_scripted_bash as shell_run_scripted_bash, run_scripted_zsh as shell_run_scripted_zsh,
-    LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput,
+    LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput, ShellIntegration,
 };
 use cosh_shell::types::{
     AgentEvent, GovernanceDecision, ImplicitPagerPolicy, Policy, ShellEvent, ShellEventKind,
@@ -31,8 +31,8 @@ mod support_shell_host;
 use support_shell_host::{
     assert_clean_shell_output_ref, assert_fullscreen_terminal_modes_balanced, assert_no_osc_marker,
     assert_no_synthetic_terminal_restore_after_interrupt, ledger_from_output,
-    ledger_output_refs_text, make_executable, shell_arg, stty_flag_probe, unique_suffix,
-    DelayedInput,
+    ledger_output_refs_text, make_executable, render_terminal_screen, shell_arg, stty_flag_probe,
+    unique_suffix, DelayedInput,
 };
 
 fn bash_supports_command_not_found_handler() -> bool {
@@ -45,6 +45,18 @@ fn bash_supports_command_not_found_handler() -> bool {
         ])
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+fn bash_supports_prompt_command_array() -> bool {
+    Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))",
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[path = "shell_host/foreground.rs"]
@@ -61,6 +73,8 @@ mod input_intent;
 mod marker;
 #[path = "shell_host/native.rs"]
 mod native;
+#[path = "shell_host/parity.rs"]
+mod parity;
 #[path = "shell_host/relay.rs"]
 mod relay;
 #[path = "shell_host/termios.rs"]
@@ -106,14 +120,31 @@ fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
 }
 
 fn with_raw_byte_readline(config: ShellHostConfig) -> ShellHostConfig {
+    with_bracketed_paste_readline(config, false)
+}
+
+fn with_bracketed_paste_readline(
+    config: ShellHostConfig,
+    enable_bracketed_paste: bool,
+) -> ShellHostConfig {
     std::fs::create_dir_all(&config.work_dir).expect("readline work dir");
     let inputrc = config.work_dir.join("inputrc");
     std::fs::write(
         &inputrc,
-        "set input-meta on\nset convert-meta off\nset output-meta on\n",
+        format!(
+            "set input-meta on\nset convert-meta off\nset output-meta on\n\
+             set enable-bracketed-paste {}\n",
+            if enable_bracketed_paste { "on" } else { "off" }
+        ),
     )
     .expect("readline inputrc");
     config.with_env("INPUTRC", inputrc.display().to_string())
+}
+
+fn without_readline_mode_controls(terminal: &str) -> String {
+    terminal
+        .replace("\x1b[?2004h", "")
+        .replace("\x1b[?2004l", "")
 }
 
 fn run_scripted_bash(

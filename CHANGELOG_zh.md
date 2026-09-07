@@ -6,6 +6,83 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [1.3] - 2026-08-31
+
+### 组件版本
+
+| 组件 | 版本 |
+|------|------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.11.1 |
+| agentsight | 0.11.2 |
+| tokenless | 0.7.14 |
+| agent-memory | 0.2.6 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.8 |
+| skillfs | 0.4.2 |
+| ws-ckpt | 0.4.5 |
+| cosh-ng | 0.22.2 |
+
+> **说明：** copilot-shell 与 agent-memory 自 v1.1 起未更新；版本表保留这两个组件以展示完整组件组合。
+>
+> **说明：** agent-sec-core 采用发布分支流程，`main` 仍显示 0.11.0；1.3 组件栈的实际发布物取自 `sec-core/v0.11.1` tag，下文条目描述的是该 tag 上的行为，而非 `main` 上的行为。
+
+### 重点特性
+
+- **cosh-ng**：更新到 v0.22.2，新增 Native Shell 集成模式与 `Shift+Tab` Shell-only 切换，终端输出以卡片前缀区分归属，用户可使用无 Hook 的 Shell，同时一眼看出每行输出来自哪个子系统（#2759、#2832）
+- **agent-sec-core**：更新到 v0.11.1，用 Rust 重写提示词扫描内核，引入可更新规则包与可选的深度分析后端，同时收窄不可见字符规则，用户获得更快的提示词扫描，合法的 emoji 与多语言提示词不再被误判为严重注入（#2409、#2531、#2699、#2900）
+- **agentsight**：更新到 v0.11.2，模型流量抓取失效后可自行恢复，并支持识别 Bun 构建的 Claude Code，用户无需重启采集器即可保持连续观测（#2782、#2792）
+- **tokenless**：更新到 v0.7.14，新增统一的 `tokenless compress` 入口，`stats summary` 补齐净节省与 Retrieve 归因，Adapter 最多只发起一次子进程调用，用户可看到估算的净 Token 节省（#2844、#2885）
+- **ws-ckpt**：更新到 v0.4.5，新增 k8s Sidecar 部署（#2034、#2965）与受保护的 checkpoint 协议（快照按存储身份围栏），用户可在容器化工作区做快照，并在崩溃后校验 checkpoint 状态
+- **skillfs**：更新到 v0.4.2，新增 Kubernetes Sidecar 部署与可选的双向 HMAC-SHA256 认证保护 control 与 notify socket，非特权工作负载可跨容器 namespace 使用 FUSE Skill View（#2057、#2449）
+
+### 组件更新
+
+- **cosh-ng**：更新到 v0.22.2，新增通过 `cosh agent task|doctor|run` 暴露的本地 Gateway 控制面、有界的 transcript 内存与 32 MB `run_command` 输出上限、亚毫秒级交互回显、包管理目录外系统扩展的自动发现，以及 `/hooks enable|disable` 的层级消歧；修复终端显示与输入路由（已批准命令与斜杠命令执行后终端残留内部标记行、批量粘贴的斜杠输入误路由、含路径的中文提示词、斜杠命令历史召回、中断后终端滞留 raw 模式）、安全与审计缺口（trust 模式下被 Hook 拦截的命令仍被执行、审批批次竞态、Hook 输出畸形时工具调用被静默放行、中断的 `precmd` 标记退出码被伪造）以及打包问题（RPM 卸载残留悬挂登录 Shell、systemd 255 上 Gateway 启动失败、`dnf --dry-run` 误报、代码扫描漏检 awk `system()` 调用），用户获得输出归属可见、内存有界且审批可审计的原生 Shell（#2125、#2400、#2402、#2405、#2529、#2599、#2603、#2605、#2622、#2655、#2667、#2682、#2709、#2843、#2880、#2909、#2914、#2917、#2918、#2938、#2943、#2949、#2955、#2968）
+- **agent-sec-core**：更新到 v0.11.1，新增 SkillFS HMAC 对端认证、`agent-sec-cli capabilities` 子命令以及 `verify` 的 `CHECKED`/`PASSED`/`FAILED` 显式计数；只读系统 Skill 不再让批量扫描失败，占位的 `set-policy`/`rotate-keys` 不再虚报成功，daemon 健康检查不再夸大就绪状态，非回环模型服务地址不再被接受，用户可在跨容器部署中审计 Skill 并信任 CLI 的校验结论（#2356、#2493、#2875、#2876、#2892、#2893、#2906）
+- **agentsight**：更新到 v0.11.2，新增历史 Agent 活动视图、会话语义搜索、双语 Dashboard、LLM 延迟指标与存储大小上限；修复模型流量抓取失效后无法自行恢复、采集器因内存占用被终止后不自动重启、事件突增时内存不受控，以及中断事件分组计数与总数不一致，用户在长时间运行中获得存储有界、抓取可自愈的可观测能力（#2578、#2612、#2644、#2733、#2792、#2796、#2817、#2925）
+- **tokenless**：更新到 v0.7.14，新增提供框架中立生命周期的 `anolisa-tokenless` Python Wheel、AgentScope 与 DeepSeek Harness 集成、Gemini `functionDeclarations` Schema 压缩以及可配置的数组尾部窗口；修复 Codex 集成重复压缩与小负载 TOON 处理不一致，更多框架上的 Agent 可节省 Token，并通过截断标记内嵌的可执行命令恢复被截断内容（#2433、#2507、#2581、#2627、#2663、#2866、#2869、#2885）
+- **anolisa**：更新到 v0.3.8，新增 Linux x64/arm64 与 macOS arm64 的已验证预编译 CLI 归档、原生 DSH Adapter 驱动、容器运行时 Telemetry 与基于 schema v2 的目标可用性判定；修复 raw 安装误展开渲染内容中的 `${VAR}`、`--quiet` 下 Adapter 输出不干净、`--dry-run` forget 与 restart 预览失真，以及卸载后 systemd 模板实例仍在运行，用户可按平台安装独立 CLI，并在无副作用的前提下预览操作（#2533、#2580、#2603、#2642、#2752、#2762、#2774、#2883、#2903）
+- **os-skills**：更新到 v0.6.3，RPM 补充 `anolisa-component(os-skills)` 声明，仓库侧组件索引不可用时用户仍可执行 `anolisa upgrade` 升级 OS Skills（#2576）
+- **ws-ckpt**：更新到 v0.4.5，新增 k8s Sidecar 部署（含中英文指南，#2034、#2965）与受保护的 checkpoint 协议；修复 daemon 内存泄漏最终耗尽内存导致进程被终止（#2554）、并发 IO 下 loop 设备后端 checkpoint 延迟（最多降低至原来的 1/5，#2523）、bootstrap 失败遗留悬空镜像与 loop 设备及启动失败静默退出（#1956）、`config --global` 写入未被 daemon 实际加载（#2813），以及 loop 设备全部被占用时的间歇性 bootstrap 失败（#2965），用户可在容器中以更低延迟做快照并获得明确的启动诊断
+- **skillfs**：更新到 v0.4.2，新增 Kubernetes Sidecar 部署、双向 HMAC-SHA256 socket 认证、可选的 Alibaba Cloud Linux 4 Sidecar 镜像，以及启动 reconcile 对晚启动 notify daemon 的有界退避重试；修复 flat normal 模式挂载下分类 Skill 无法被找到，非特权工作负载可使用经认证且在 daemon 重启后自动收敛的 Skill View（#2057、#2449、#2777、#2787、#2790、#2901）
+
+## [1.2] - 2026-08-14
+
+### 组件版本
+
+| 组件 | 版本 |
+|------|------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.10.1 |
+| agentsight | 0.10.1 |
+| tokenless | 0.7.6 |
+| agent-memory | 0.2.6 |
+| os-skills | 0.6.2 |
+| anolisa | 0.2.19 |
+| skillfs | 0.4.0 |
+| ws-ckpt | 0.4.2 |
+| cosh-ng | 0.16.1 |
+
+> **说明：** copilot-shell、agent-memory、skillfs 与 ws-ckpt 自 v1.1 起未更新；版本表保留这些组件以展示完整组件组合。
+
+### 重点特性
+
+- **cosh-ng**：更新到 v0.16.1，将一次性 Agent 请求统一到 `/agent`，并收敛 cosh-core 与 cosh-shell 运行时路径、引入显式协议协商，用户用一个命令即可发起单次 Agent 请求，两条运行时入口行为一致（#2403、#2441）
+- **agent-sec-core**：更新到 v0.10.1，统一各 Agent 框架的 Hook 策略开关，代码扫描、提示词扫描与可观测性均可独立由环境变量控制，用户无需改动 Hook 脚本即可按部署启用各项防护（#2141、#2199、#2239）
+- **agentsight**：更新到 v0.10.1，修正回合边界与 cosh 重启后的会话连续性，将暂停事件重新归类为正常结束而非异常中断（#2320），并新增 Codex 轨迹转换与跟随浏览器语言的 Dashboard，用户可获得准确的跨运行时轨迹并以本地语言查看
+- **tokenless**：更新到 v0.7.6，新增 OpenCode Adapter，并将 Qoder Adapter 迁移到原生插件与 Hook 机制，两种运行时上的 Agent 都能获得命令重写以及就地替换原始工具输出的 Schema/响应压缩
+- **anolisa**：更新到 v0.2.19，新增 raw 安装的包体系后端映射、更新后的 Adapter 变更提示与 2 GiB 完整性降级判定，管理员可在精简 RPM/DEB 主机上安装，大体积组件不再被误判为损坏（#2018、#2271、#2314）
+
+### 组件更新
+
+- **cosh-ng**：更新到 v0.16.1，新增带跨目标构建校验与可移植 macOS 启动器的 raw 打包接口；修复时钟跳变导致的输入停滞、流式响应解码不严格、敏感文件写入、退出后残留 raw 模式、临时文件路径可预测、斜杠命令只提示首个匹配项与 CJK 折行，用户获得可复现归档，以及能正确折行东亚文本且不残留终端状态的 Shell（#2176、#2209、#2211、#2357、#2361、#2410、#2411、#2446）
+- **agent-sec-core**：更新到 v0.10.1，新增 OpenClaw 代码扫描拦截模式、更广的提示词扫描入站字段覆盖、只读 Skill 分析、把未打包的 Skill 目录纳入账本检查、加载 Skill 包前先验证清单签名，以及事件查询的会话与运行过滤，用户可拦截风险代码、检查未打包 Skill 并按会话查询安全事件（#2044、#2132、#2185、#2201、#2242、#2277）
+- **agentsight**：更新到 v0.10.1，新增 Codex 轨迹转换为 ATIF、抓取到的模型流量附带进程归属信息且进程号在观测者命名空间内解析（#2360）与 Dashboard 本地化；修复工具调用结束后回合被提前关闭、暂停事件被误判为异常中断（#2320）、流式响应被截断、QwenCode 轨迹数据不准、cosh 重启后会话丢失，以及 cosh 会话临时文件写入未被映射（#2080），用户可在浏览器语言环境下获得准确的跨运行时轨迹
+- **tokenless**：更新到 v0.7.6，`TOKENLESS_DATA_DIR` 支持用户 Home 之外的绝对目录，硬关闭 Tool Ready 调用前检查与阻断；修复 JSON Schema 被重复 Stash、Dry-run 配置被环境变量覆盖与 `retrieve` 额外添加换行，Agent 一次 Retrieve 即可恢复内容，且不再被错误的就绪判定阻塞（#2380、#2386、#2396、#2399、#2425、#2434、#2487）
+- **anolisa**：更新到 v0.2.19，新增 `anolisa update` 后的 Adapter 变更提示、Qoder 原生插件生命周期支持、Codex Hook 信任持久化、`OPENCLAW_STATE_DIR` 处理与遗留命令的标准 JSON 信封，并将 Telemetry 迁移到 `SLS_PROJECT_PREFIX`，用户可跨框架管理 Adapter，并以同一方式解析所有 JSON 输出（#2018、#2221、#2260、#2281、#2319、#2337）
+- **os-skills**：更新到 v0.6.2，新增用于确定性内核诊断、调优与回滚的 `ktuner` 技能，移除遗留的 OpenClaw 与 Hermes 适配器脚本，并补齐技能账本的认证恢复说明，用户可获得基于规则的调优建议并一键应用与回滚（#1172、#1278、#2185）
+
 ## [1.1] - 2026-08-08
 
 ### 组件版本

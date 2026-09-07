@@ -69,24 +69,15 @@ pub async fn auth_login(
 
 /// GET /api/auth/status
 ///
-/// Returns whether authentication is enabled.  Exempt from auth middleware.
+/// Returns whether authentication is enabled plus the capability list the
+/// dashboard should render (probed from installed companion components).
+/// Exempt from auth middleware.
 #[get("/status")]
 pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(json!({
         "auth_enabled": data.auth.enabled,
         "mode": "linux",
-        "capabilities": [
-            "agent_observability",
-            "sessions",
-            "token_savings",
-            "optimization",
-            "skills",
-            "security",
-            "enforcement",
-            "atif",
-            "settings",
-            "agent_health"
-        ],
+        "capabilities": super::capabilities::app_capabilities(),
     }))
 }
 
@@ -129,6 +120,17 @@ pub struct SessionQuery {
     pub end_ns: Option<i64>,
     /// Include auxiliary calls (recap, web_search) in results (default: false)
     pub include_auxiliary: Option<bool>,
+}
+
+/// Query parameters for a Session resource timeline.
+#[derive(Debug, Deserialize)]
+pub struct SessionResourceQuery {
+    /// Optional lower timestamp bound in Unix epoch nanoseconds.
+    pub start_ns: Option<i64>,
+    /// Optional upper timestamp bound in Unix epoch nanoseconds.
+    pub end_ns: Option<i64>,
+    /// Maximum number of raw samples returned after stride-based downsampling.
+    pub max_points: Option<usize>,
 }
 
 /// GET /api/sessions?start_ns=<i64>&end_ns=<i64>
@@ -190,6 +192,51 @@ pub async fn list_traces_by_session(
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
+    }
+}
+
+/// GET /api/sessions/{session_id}/resources
+///
+/// Returns process-level CPU/RSS observations during the Session together
+/// with LLM and inferred Tool Call intervals on the same epoch-nanosecond clock.
+#[get("/sessions/{session_id}/resources")]
+pub async fn get_session_resources(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<SessionResourceQuery>,
+) -> impl Responder {
+    const DEFAULT_MAX_POINTS: usize = 2_000;
+    const MAX_POINTS_LIMIT: usize = 10_000;
+
+    if matches!((query.start_ns, query.end_ns), (Some(start), Some(end)) if start > end) {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "start_ns must not exceed end_ns"}));
+    }
+    let max_points = query.max_points.unwrap_or(DEFAULT_MAX_POINTS);
+    if max_points == 0 || max_points > MAX_POINTS_LIMIT {
+        return HttpResponse::BadRequest().json(json!({
+            "error": format!("max_points must be between 1 and {MAX_POINTS_LIMIT}")
+        }));
+    }
+
+    let db_path = data.storage_path.clone();
+    let session_id = path.into_inner();
+    let start_ns = query.start_ns;
+    let end_ns = query.end_ns;
+    let loaded = web::block(move || {
+        let store = GenAISqliteStore::new_with_path(&db_path).map_err(|error| error.to_string())?;
+        store
+            .get_session_resource_timeline(&session_id, start_ns, end_ns, max_points)
+            .map_err(|error| error.to_string())
+    })
+    .await;
+
+    match loaded {
+        Ok(Ok(Some(timeline))) => HttpResponse::Ok().json(timeline),
+        Ok(Ok(None)) => HttpResponse::NotFound().json(json!({"error": "session not found"})),
+        Ok(Err(error)) => HttpResponse::InternalServerError().json(json!({"error": error})),
+        Err(error) => HttpResponse::InternalServerError()
+            .json(json!({"error": format!("resource query worker failed: {error}")})),
     }
 }
 
@@ -415,6 +462,47 @@ pub struct TimeseriesQuery {
     pub agent_name: Option<String>,
     /// Number of buckets (default 30)
     pub buckets: Option<u32>,
+}
+
+/// Query parameters for LLM latency percentile metrics.
+#[derive(Debug, Deserialize)]
+pub struct LatencyMetricsQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub agent_name: Option<String>,
+}
+
+/// GET /api/metrics/latency
+#[get("/metrics/latency")]
+pub async fn get_latency_metrics(
+    data: web::Data<AppState>,
+    query: web::Query<LatencyMetricsQuery>,
+) -> impl Responder {
+    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = match query.start_ns {
+        Some(start_ns) => start_ns,
+        None => match end_ns.checked_sub(86_400_000_000_000i64) {
+            Some(start_ns) => start_ns,
+            None => {
+                return HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": "default time range is out of bounds"}));
+            }
+        },
+    };
+    if start_ns > end_ns {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "start_ns must not exceed end_ns"}));
+    }
+    match GenAISqliteStore::new_with_path(&data.storage_path) {
+        Ok(store) => match store.get_latency_metrics(start_ns, end_ns, query.agent_name.as_deref())
+        {
+            Ok(summary) => HttpResponse::Ok().json(summary),
+            Err(error) => HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": error.to_string()})),
+        },
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": error.to_string()})),
+    }
 }
 
 /// GET /api/agent-names?start_ns=<i64>&end_ns=<i64>
@@ -857,8 +945,10 @@ mod tests {
     };
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
-    use crate::storage::sqlite::genai::{PendingCallInfo, PendingOrigin};
-    use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
+    use crate::storage::sqlite::genai::{AgentActivitySummary, PendingCallInfo, PendingOrigin};
+    use agentsight_trajectory_collector::{
+        TrajectoryAgentActivitySummary, TrajectoryRecord, TrajectoryStore,
+    };
 
     use super::*;
 
@@ -1618,6 +1708,17 @@ mod tests {
             serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
                 .unwrap();
         assert_eq!(body["auth_enabled"], true);
+        // Intrinsic capabilities must always be advertised; component-backed
+        // ones (security/enforcement/token_savings) depend on the host.
+        let caps = body["capabilities"].as_array().unwrap();
+        for cap in [
+            "agent_observability",
+            "sessions",
+            "agent_health",
+            "settings",
+        ] {
+            assert!(caps.iter().any(|v| v == cap), "missing capability {cap}");
+        }
     }
 
     #[actix_web::test]
@@ -1777,19 +1878,24 @@ mod tests {
     fn test_app_state_with_trajectory_store(
         store: Option<Arc<TrajectoryStore>>,
     ) -> web::Data<AppState> {
+        test_app_state_with_activity_stores(PathBuf::from(":memory:"), store)
+    }
+
+    fn test_app_state_with_activity_stores(
+        storage_path: PathBuf,
+        trajectory_store: Option<Arc<TrajectoryStore>>,
+    ) -> web::Data<AppState> {
         let auth_config = crate::config::ServerAuthConfig { enabled: false };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(
             &auth_config,
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
-            storage_path: PathBuf::from(":memory:"),
+            evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            storage_path,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
-            evaluation_store: Arc::new(
-                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
-            ),
             enforcement: None,
             containment: None,
             audit_service: Arc::new(agentsight_audit::AuditService::new(
@@ -1800,7 +1906,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: Arc::new(RwLock::new(store)),
+            trajectory_store: Arc::new(RwLock::new(trajectory_store)),
         })
     }
 
@@ -1977,15 +2083,27 @@ mod tests {
     async fn genai_query_handlers_return_persisted_data() {
         let db_path = unique_handler_db("genai_queries");
         write_completed_conversation_event(&db_path, "conv-handler");
+        GenAISqliteStore::new_with_path(&db_path)
+            .unwrap()
+            .insert_resource_samples(&[crate::storage::sqlite::ResourceSample {
+                timestamp_ns: 1_700_000_000_000_000_250,
+                pid: 1234,
+                agent_name: Some("claude".to_string()),
+                cpu_percent: 42.5,
+                memory_bytes: 256 * 1024 * 1024,
+            }])
+            .unwrap();
         let app = awtest::init_service(
             App::new()
                 .app_data(test_app_state_with_storage(db_path.clone()))
                 .service(list_sessions)
                 .service(list_traces_by_session)
+                .service(get_session_resources)
                 .service(get_trace_detail)
                 .service(get_conversation_events)
                 .service(list_agent_names)
-                .service(get_timeseries),
+                .service(get_timeseries)
+                .service(get_latency_metrics),
         )
         .await;
 
@@ -2013,6 +2131,37 @@ mod tests {
         assert_eq!(traces.status(), StatusCode::OK);
         let traces_body = service_response_json(traces).await;
         assert_eq!(traces_body.as_array().unwrap().len(), 1);
+
+        let resources = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/sessions/{session_id}/resources"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resources.status(), StatusCode::OK);
+        let resources_body = service_response_json(resources).await;
+        assert_eq!(resources_body["samples"].as_array().map(Vec::len), Some(1));
+        assert_eq!(resources_body["samples"][0]["cpu_percent"], 42.5);
+        assert_eq!(resources_body["phases"][0]["kind"], "llm");
+
+        let invalid_resources = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/sessions/{session_id}/resources?max_points=0"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(invalid_resources.status(), StatusCode::BAD_REQUEST);
+
+        let missing_resources = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/sessions/missing/resources")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing_resources.status(), StatusCode::NOT_FOUND);
 
         let detail = awtest::call_service(
             &app,
@@ -2070,6 +2219,41 @@ mod tests {
         assert!(timeseries_body["token_series"].as_array().is_some());
         assert!(timeseries_body["model_series"].as_array().is_some());
 
+        let latency = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/metrics/latency?start_ns=0&end_ns=9223372036854775807&agent_name=claude")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(latency.status(), StatusCode::OK);
+        let latency_body = service_response_json(latency).await;
+        assert_eq!(latency_body.as_array().map(Vec::len), Some(1));
+        assert_eq!(latency_body[0]["agent_name"], "claude");
+        assert!(latency_body[0]["e2e_latency_ms"]["p50"].is_number());
+        assert!(latency_body[0]["ttft_ms"].is_null());
+
+        cleanup_db(&db_path);
+    }
+
+    #[actix_web::test]
+    async fn latency_rejects_unrepresentable_default_start() {
+        let db_path = unique_handler_db("latency_overflow");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(get_latency_metrics),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/metrics/latency?end_ns=-9223372036854775808")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         cleanup_db(&db_path);
     }
 
@@ -2140,7 +2324,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn agent_health_filters_clients_and_allows_deletion() {
+    async fn agent_health_process_records_can_still_be_deleted() {
         let state = test_app_state(0);
         {
             let mut store = state.health_store.write().unwrap();
@@ -2151,6 +2335,7 @@ mod tests {
                     agent_name: "Gateway".to_string(),
                     category: "agent".to_string(),
                     exe_path: "/bin/gateway".to_string(),
+                    workspace_path: Some("/workspace/gateway".to_string()),
                     ports: vec![8080],
                     status: crate::health::store::AgentHealthState::Healthy,
                     last_check_time: 1,
@@ -2170,6 +2355,7 @@ mod tests {
                     agent_name: "Client".to_string(),
                     category: "agent".to_string(),
                     exe_path: "/bin/client".to_string(),
+                    workspace_path: Some("/workspace/client".to_string()),
                     ports: Vec::new(),
                     status: crate::health::store::AgentHealthState::Healthy,
                     last_check_time: 1,
@@ -2189,6 +2375,7 @@ mod tests {
                     agent_name: "Cosh".to_string(),
                     category: "agent".to_string(),
                     exe_path: "/bin/cosh".to_string(),
+                    workspace_path: None,
                     ports: Vec::new(),
                     status: crate::health::store::AgentHealthState::Offline,
                     last_check_time: 1,
@@ -2205,31 +2392,35 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(state)
-                .service(get_agent_health)
+                .service(get_agent_process_health)
                 .route("/agent-health/{pid}", web::delete().to(delete_agent_health)),
         )
         .await;
 
         let filtered = awtest::call_service(
             &app,
-            awtest::TestRequest::get().uri("/agent-health").to_request(),
+            awtest::TestRequest::get()
+                .uri("/agent-process-health")
+                .to_request(),
         )
         .await;
         let filtered_body = service_response_json(filtered).await;
         let filtered_agents = filtered_body["agents"].as_array().unwrap();
         assert_eq!(filtered_agents.len(), 1);
         assert_eq!(filtered_agents[0]["pid"], 1001);
+        assert_eq!(filtered_body["filtered_count"], 2);
 
         let include_clients = awtest::call_service(
             &app,
             awtest::TestRequest::get()
-                .uri("/agent-health?include_clients=true")
+                .uri("/agent-process-health?include_clients=true")
                 .to_request(),
         )
         .await;
         let include_body = service_response_json(include_clients).await;
         let agents = include_body["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 2, "Cosh should still be excluded");
+        assert_eq!(include_body["filtered_count"], 1);
 
         let deleted = awtest::call_service(
             &app,
@@ -2249,6 +2440,91 @@ mod tests {
         )
         .await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn agent_health_lists_activity_from_both_sqlite_stores() {
+        let genai_path = unique_handler_db("agent-activity-genai");
+        write_completed_conversation_event(&genai_path, "agent-health");
+        let trajectory_store = seeded_trajectory_store("agent-activity-trajectory");
+        let state = test_app_state_with_activity_stores(genai_path.clone(), Some(trajectory_store));
+        let app = awtest::init_service(App::new().app_data(state).service(get_agent_health)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/agent-health").to_request(),
+        )
+        .await;
+        let body = service_response_json(response).await;
+        let agents = body["agents"].as_array().unwrap();
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0]["agent_name"], "claude");
+        assert_eq!(agents[0]["genai_calls"], 1);
+        assert_eq!(agents[0]["genai_tokens"], 15);
+        assert_eq!(agents[0]["trajectory_steps"], 0);
+        assert_eq!(agents[0]["source"], "genai_events");
+        assert_eq!(agents[1]["agent_name"], "qoder");
+        assert_eq!(agents[1]["genai_calls"], 0);
+        assert_eq!(agents[1]["trajectory_steps"], 4);
+        assert_eq!(agents[1]["trajectory_tokens"], 240);
+        assert_eq!(agents[1]["source"], "trajectories");
+
+        cleanup_db(&genai_path);
+    }
+
+    #[actix_web::test]
+    async fn agent_health_returns_empty_agents_for_empty_stores() {
+        let genai_path = unique_handler_db("agent-activity-empty");
+        let state = test_app_state_with_activity_stores(genai_path.clone(), None);
+        let app = awtest::init_service(App::new().app_data(state).service(get_agent_health)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/agent-health").to_request(),
+        )
+        .await;
+        let body = service_response_json(response).await;
+
+        assert_eq!(body["agents"], json!([]));
+        cleanup_db(&genai_path);
+    }
+
+    #[test]
+    fn agent_activity_merge_combines_source_totals() {
+        let genai = vec![AgentActivitySummary {
+            agent_name: "Claude".to_string(),
+            last_seen_ns: 200,
+            total_calls: 2,
+            total_tokens: 50,
+        }];
+        let trajectories = vec![
+            TrajectoryAgentActivitySummary {
+                agent_name: "claude".to_string(),
+                last_seen_ns: 300,
+                total_steps: 8,
+                total_tokens: 320,
+            },
+            TrajectoryAgentActivitySummary {
+                agent_name: "Qoder".to_string(),
+                last_seen_ns: 250,
+                total_steps: 5,
+                total_tokens: 120,
+            },
+        ];
+
+        let merged = merge_agent_activity_summaries(genai, trajectories);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].agent_name, "Claude");
+        assert_eq!(merged[0].last_seen_ns, 300);
+        assert_eq!(merged[0].genai_calls, 2);
+        assert_eq!(merged[0].genai_tokens, 50);
+        assert_eq!(merged[0].trajectory_steps, 8);
+        assert_eq!(merged[0].trajectory_tokens, 320);
+        assert_eq!(merged[0].source, "genai_events+trajectories");
+        assert_eq!(merged[1].agent_name, "Qoder");
+        assert_eq!(merged[1].source, "trajectories");
     }
 
     #[actix_web::test]
@@ -2343,10 +2619,12 @@ mod tests {
                 .to_request(),
         )
         .await;
-        assert_eq!(
-            service_response_json(conversation_counts).await[0]["total"],
-            2
-        );
+        let conversation_row = service_response_json(conversation_counts).await;
+        assert_eq!(conversation_row[0]["total"], 2);
+        // The owning session must ship with the row; the dashboard keys the
+        // breakdown on (session_id, conversation_id).
+        assert_eq!(conversation_row[0]["session_id"], "sess-handler");
+        assert_eq!(conversation_row[0]["conversation_id"], "conv-handler-i");
 
         let by_session = awtest::call_service(
             &app,
@@ -2699,7 +2977,9 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
 
     // agentsight_interruptions_total (per type, all-time)
     if let Some(ref istore) = data.interruption_store {
-        if let Ok(stats) = istore.stats(0, i64::MAX) {
+        // `None`: a Prometheus counter must never decrease, so resolving an
+        // event may not remove it from this total.
+        if let Ok(stats) = istore.stats(0, i64::MAX, None) {
             out.push_str(
                 "# HELP agentsight_interruptions_total Total interruption events by type\n",
             );
@@ -2725,36 +3005,190 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
 /// Response body for /api/agent-health
 #[derive(Debug, Serialize)]
 pub struct AgentHealthResponse {
+    /// Historical activity summaries sorted by most recent observation.
+    pub agents: Vec<AgentActivity>,
+    /// Data sources that could not be queried; omitted when all available sources succeeded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Live process-health response retained for diagnostics and recovery actions.
+#[derive(Debug, Serialize)]
+pub struct AgentProcessHealthResponse {
     pub agents: Vec<AgentHealthStatus>,
     pub last_scan_time: u64,
+    /// Entries hidden by the default view (Cosh + healthy client agents).
+    pub filtered_count: usize,
+}
+
+/// Historical activity for one Agent across the available SQLite stores.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentActivity {
+    /// Canonical Agent display name.
+    pub agent_name: String,
+    /// Most recent observation in either source, as Unix nanoseconds.
+    pub last_seen_ns: i64,
+    /// LLM calls recorded in `genai_events.db`.
+    pub genai_calls: i64,
+    /// Tokens recorded in `genai_events.db`.
+    pub genai_tokens: i64,
+    /// Steps recorded in `trajectories.db`.
+    pub trajectory_steps: i64,
+    /// Tokens recorded in `trajectories.db`.
+    pub trajectory_tokens: i64,
+    /// SQLite stores that contributed to this Agent summary.
+    pub source: String,
+}
+
+fn merge_agent_activity_summaries(
+    genai: Vec<crate::storage::sqlite::genai::AgentActivitySummary>,
+    trajectories: Vec<agentsight_trajectory_collector::TrajectoryAgentActivitySummary>,
+) -> Vec<AgentActivity> {
+    let mut by_name = HashMap::new();
+    for summary in genai {
+        let key = summary.agent_name.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        by_name.insert(
+            key,
+            AgentActivity {
+                agent_name: summary.agent_name,
+                last_seen_ns: summary.last_seen_ns,
+                genai_calls: summary.total_calls,
+                genai_tokens: summary.total_tokens,
+                trajectory_steps: 0,
+                trajectory_tokens: 0,
+                source: "genai_events".to_string(),
+            },
+        );
+    }
+
+    for summary in trajectories {
+        let key = summary.agent_name.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(existing) = by_name.get_mut(&key) {
+            existing.last_seen_ns = existing.last_seen_ns.max(summary.last_seen_ns);
+            existing.trajectory_steps = summary.total_steps;
+            existing.trajectory_tokens = summary.total_tokens;
+            existing.source = "genai_events+trajectories".to_string();
+        } else {
+            by_name.insert(
+                key,
+                AgentActivity {
+                    agent_name: summary.agent_name,
+                    last_seen_ns: summary.last_seen_ns,
+                    genai_calls: 0,
+                    genai_tokens: 0,
+                    trajectory_steps: summary.total_steps,
+                    trajectory_tokens: summary.total_tokens,
+                    source: "trajectories".to_string(),
+                },
+            );
+        }
+    }
+
+    let mut agents: Vec<_> = by_name.into_values().collect();
+    agents.sort_by(|left, right| {
+        right
+            .last_seen_ns
+            .cmp(&left.last_seen_ns)
+            .then_with(|| left.agent_name.cmp(&right.agent_name))
+    });
+    agents
 }
 
 /// GET /api/agent-health
 ///
-/// Returns the latest health check results for all discovered agent processes.
-/// Cosh is excluded from the response: it has no HTTP port and no daemon process,
-/// so there is nothing meaningful to display in the UI. Agent-crash interruption
-/// detection for Cosh still works via the health checker background scan.
+/// Returns every Agent observed in either the GenAI event or trajectory store.
 #[get("/agent-health")]
-pub async fn get_agent_health(
+pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
+    let storage_path = data.storage_path.clone();
+    let app_state = data.clone();
+    let loaded = web::block(move || {
+        let genai = GenAISqliteStore::new_with_path(&storage_path)
+            .map_err(|error| error.to_string())
+            .and_then(|store| {
+                store
+                    .list_agent_activity_summaries()
+                    .map_err(|error| error.to_string())
+            });
+        let trajectories = app_state.trajectory_store().map(|store| {
+            store
+                .list_agent_activity_summaries()
+                .map_err(|error| error.to_string())
+        });
+        (genai, trajectories)
+    })
+    .await;
+
+    let Ok((genai_result, trajectory_result)) = loaded else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Agent activity query worker failed"
+        }));
+    };
+
+    let mut warnings = Vec::new();
+    let (genai, genai_failed) = match genai_result {
+        Ok(summaries) => (summaries, false),
+        Err(error) => {
+            log::warn!("Failed to query GenAI Agent activity: {error}");
+            warnings.push("genai_events unavailable".to_string());
+            (Vec::new(), true)
+        }
+    };
+    let (trajectories, trajectory_available) = match trajectory_result {
+        Some(Ok(summaries)) => (summaries, true),
+        Some(Err(error)) => {
+            log::warn!("Failed to query trajectory Agent activity: {error}");
+            warnings.push("trajectories unavailable".to_string());
+            (Vec::new(), false)
+        }
+        None => (Vec::new(), false),
+    };
+
+    if genai_failed && !trajectory_available {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "No Agent activity data source is available",
+            "warnings": warnings
+        }));
+    }
+
+    HttpResponse::Ok().json(AgentHealthResponse {
+        agents: merge_agent_activity_summaries(genai, trajectories),
+        warnings,
+    })
+}
+
+/// GET /api/agent-process-health
+///
+/// Returns live process-health snapshots used by hung detection and recovery UI.
+#[get("/agent-process-health")]
+pub async fn get_agent_process_health(
     data: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
     let include_clients = req.query_string().contains("include_clients=true");
-    let store = data.health_store.read().unwrap();
-    let agents = store
-        .all_agents()
+    let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
+    let all = store.all_agents();
+    let total = all.len();
+    let agents: Vec<AgentHealthStatus> = all
         .into_iter()
-        .filter(|a| a.agent_name != "Cosh")
-        .filter(|a| {
+        .filter(|agent| agent.agent_name != "Cosh")
+        .filter(|agent| {
             include_clients
-                || a.role == crate::health::store::AgentRole::Gateway
-                || a.status == crate::health::store::AgentHealthState::Offline
+                || agent.role == crate::health::store::AgentRole::Gateway
+                || agent.status == crate::health::store::AgentHealthState::Offline
         })
         .collect();
-    HttpResponse::Ok().json(AgentHealthResponse {
+    let filtered_count = total.saturating_sub(agents.len());
+
+    HttpResponse::Ok().json(AgentProcessHealthResponse {
         agents,
         last_scan_time: store.last_scan_time,
+        filtered_count,
     })
 }
 
@@ -3005,6 +3439,8 @@ pub async fn list_interruptions(
 /// GET /api/interruptions/count?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
 ///
 /// Returns total interruption count + breakdown by severity within a time range.
+/// Counts unresolved events only, so the total always equals the sum of the
+/// `session-counts` / `conversation-counts` breakdowns.
 /// Response: { total, by_severity: { critical, high, medium, low } }
 #[get("/interruptions/count")]
 pub async fn interruption_count(
@@ -3021,7 +3457,7 @@ pub async fn interruption_count(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.stats(start_ns, end_ns) {
+    match istore.stats(start_ns, end_ns, Some(false)) {
         Ok(stats) => {
             let mut total = 0u64;
             let mut critical = 0u64;
@@ -3055,7 +3491,8 @@ pub async fn interruption_count(
 
 /// GET /api/interruptions/stats
 ///
-/// Returns per-type count statistics within a time range.
+/// Returns per-type count statistics within a time range. Unresolved only, to
+/// stay consistent with the overview card whose tooltip this feeds.
 #[get("/interruptions/stats")]
 pub async fn interruption_stats(
     data: web::Data<AppState>,
@@ -3071,7 +3508,7 @@ pub async fn interruption_stats(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.stats(start_ns, end_ns) {
+    match istore.stats(start_ns, end_ns, Some(false)) {
         Ok(stats) => HttpResponse::Ok().json(stats),
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
@@ -3097,7 +3534,8 @@ pub async fn interruption_session_counts(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.count_unresolved_by_session_detailed(start_ns, end_ns) {
+    match istore.count_unresolved_by_session_detailed(start_ns, end_ns, query.agent_name.as_deref())
+    {
         Ok(rows) => {
             let mut map: std::collections::HashMap<
                 String,
@@ -3145,7 +3583,13 @@ pub async fn interruption_session_counts(
 
 /// GET /api/interruptions/conversation-counts?start_ns=<i64>&end_ns=<i64>
 ///
-/// Returns unresolved interruption breakdown per conversation_id, grouped by severity and type.
+/// Returns unresolved interruption breakdown per (session_id, conversation_id),
+/// grouped by severity and type.
+///
+/// The pair is the grouping key, not `conversation_id` alone: the dashboard
+/// nests conversation rows under a session, so a session-less event must not be
+/// attributed to whichever session owns its conversation — the
+/// unassigned-session row already accounts for it.
 #[get("/interruptions/conversation-counts")]
 pub async fn interruption_conversation_counts(
     data: web::Data<AppState>,
@@ -3161,19 +3605,23 @@ pub async fn interruption_conversation_counts(
         .start_ns
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64);
 
-    match istore.count_unresolved_by_conversation_detailed(start_ns, end_ns) {
+    match istore.count_unresolved_by_conversation_detailed(
+        start_ns,
+        end_ns,
+        query.agent_name.as_deref(),
+    ) {
         Ok(rows) => {
             let mut map: std::collections::HashMap<
-                String,
+                (String, String),
                 (
                     i64,
                     std::collections::HashMap<String, i64>,
                     Vec<serde_json::Value>,
                 ),
             > = std::collections::HashMap::new();
-            for (cid, severity, itype, cnt) in rows {
+            for (sid, cid, severity, itype, cnt) in rows {
                 let entry = map
-                    .entry(cid)
+                    .entry((sid, cid))
                     .or_insert_with(|| (0, std::collections::HashMap::new(), Vec::new()));
                 entry.0 += cnt;
                 *entry.1.entry(severity.clone()).or_insert(0) += cnt;
@@ -3185,8 +3633,9 @@ pub async fn interruption_conversation_counts(
             }
             let json: Vec<_> = map
                 .into_iter()
-                .map(|(cid, (total, by_sev, types))| {
+                .map(|((sid, cid), (total, by_sev, types))| {
                     serde_json::json!({
+                        "session_id": sid,
                         "conversation_id": cid,
                         "total": total,
                         "by_severity": {

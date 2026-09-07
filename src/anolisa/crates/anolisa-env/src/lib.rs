@@ -318,7 +318,18 @@ fn parse_cap_bpf_from_proc_status(content: &str) -> Option<bool> {
     Some((bits & (1u64 << CAP_BPF_BIT)) != 0)
 }
 
-fn detect_container() -> Option<String> {
+/// Detect the container runtime flavor the current process runs in.
+///
+/// Probes marker files first (`/.dockerenv` -> `"docker"`,
+/// `/run/.containerenv` -> `"podman"`), then scans `/proc/1/cgroup`
+/// and `/proc/self/cgroup` for known container-instance paths. Returns
+/// `None` on a bare-metal host or a platform without cgroups.
+///
+/// Matching deliberately looks for *container instance* paths rather
+/// than substring-anywhere so a host that merely runs the containerd
+/// daemon is not misclassified — see `parse_cgroup` for the exact
+/// rules.
+pub fn detect_container() -> Option<String> {
     if std::path::Path::new("/.dockerenv").exists() {
         return Some("docker".to_string());
     }

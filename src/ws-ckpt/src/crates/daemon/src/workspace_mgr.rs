@@ -61,10 +61,13 @@ async fn adopt_existing_subvol(
         SnapshotIndex::new(registered_path.clone())
     };
     if index.snapshots.is_empty() {
-        if let Ok(rebuilt) =
+        if let Ok(mut rebuilt) =
             index_store::rebuild_from_fs(&btrfs_snap_dir, registered_path.clone()).await
         {
             if !rebuilt.snapshots.is_empty() {
+                // Re-adoption may recover orphan snapshot metadata, but it
+                // must not discard guarded receipts loaded from index.json.
+                rebuilt.governed_evidence = index.governed_evidence.clone();
                 info!(
                     "Recovered {} snapshot(s) from filesystem for {}",
                     rebuilt.snapshots.len(),
@@ -153,10 +156,27 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // 1. Canonicalize (resolves symlinks to real path)
     let abs_path = match tokio::fs::canonicalize(workspace).await {
         Ok(p) => p,
-        Err(_) => {
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // Resolution happens in the daemon's mount namespace, which in a
+                // sidecar deployment shows only the volumes it shares with the
+                // client — so a path the caller can see may still be absent here.
+                return Ok(error_resp(
+                    ErrorCode::InvalidPath,
+                    format!(
+                        "path does not exist in the daemon's mount namespace: {}. \
+                         In a sidecar deployment the workspace must live on a volume \
+                         shared with the daemon container.",
+                        workspace
+                    ),
+                ));
+            }
+            // A different failure (symlink loop, permission, I/O) means the path
+            // exists but cannot be resolved — report the real cause instead of
+            // pointing at the sidecar shared-volume layout.
             return Ok(error_resp(
                 ErrorCode::InvalidPath,
-                format!("path does not exist: {}", workspace),
+                format!("cannot resolve workspace path {}: {}", workspace, e),
             ));
         }
     };
@@ -495,6 +515,7 @@ pub async fn delete_snapshot(
     // 5. Unlink from DAG, then remove from index + save
     ws.index.unlink_node(&resolved_id);
     ws.index.snapshots.remove(&resolved_id);
+    ws.index.governed_evidence.remove(&resolved_id);
     let snap_dir = state.index_dir(&ws.ws_id);
     tokio::fs::create_dir_all(&snap_dir)
         .await
@@ -726,6 +747,40 @@ mod tests {
         match resp {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
             _ => panic!("expected InvalidPath error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_symlink_loop_reports_resolution_error_not_shared_volume_hint() {
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        // A self-referential symlink exists on disk (so it passes any lstat-based
+        // pre-check), but canonicalize cannot resolve it (ELOOP). The error must
+        // report the real resolution failure, not the sidecar "path does not
+        // exist in the daemon's mount namespace" hint, which would send users
+        // looking at their shared-volume layout for a symlink problem.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let loop_link = tmpdir.path().join("loop");
+        tokio::fs::symlink("loop", &loop_link).await.unwrap();
+        let resp = init(&state, &loop_link.to_string_lossy()).await.unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidPath);
+                assert!(
+                    message.contains("cannot resolve"),
+                    "expected a resolution error, got: {}",
+                    message
+                );
+                assert!(
+                    !message.contains("shared with the daemon container"),
+                    "must not point at the sidecar shared-volume layout: {}",
+                    message
+                );
+            }
+            other => panic!("expected InvalidPath error, got {:?}", other),
         }
     }
 

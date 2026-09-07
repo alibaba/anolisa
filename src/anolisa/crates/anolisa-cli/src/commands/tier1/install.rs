@@ -1,9 +1,7 @@
 //! `anolisa install` — install a component through a configured backend.
 //!
-//! The handler is a thin shell over the planner pipeline: pick the provider
-//! family (`--backend` > recorded provenance > `default_backend`), resolve
-//! the component to a provider target, assemble host facts, and execute the
-//! planner's step sequence (decision table I1–I11).
+//! The single-component handler maps CLI input into the lifecycle application
+//! layer and renders its typed outcome. Batch orchestration remains separate.
 //!
 //! The **raw** family resolves an artifact from the distribution index and
 //! places it through the owned executor: sha256-verified download, install
@@ -18,9 +16,17 @@
 //! health checks.
 
 use clap::Parser;
+use serde::Serialize;
+
+use anolisa_core::execution::ExecutionIntent;
+use anolisa_core::planner::NoOpReason;
 
 use crate::context::CliContext;
-use crate::response::CliError;
+use crate::progress;
+use crate::response::{CliError, render_json};
+
+mod application;
+use self::application::{InstallApplicationOutcome, InstallSubject};
 
 mod rpm;
 pub(crate) use rpm::*;
@@ -107,6 +113,267 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
         .clone()
         .expect("clap ArgGroup ensures component is set when --all is absent");
     handle_one(component, args, ctx).map(|_| ())
+}
+
+/// Run and render one component while preserving the legacy batch classification.
+pub(crate) fn handle_one(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+) -> Result<InstallOutcome, CliError> {
+    let outcome = application::run(
+        application::InstallRequest {
+            component: &component,
+            args: &args,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+    )?;
+    let batch_outcome = outcome.batch_outcome();
+    render_outcome(ctx, outcome)?;
+    Ok(batch_outcome)
+}
+
+fn execution_intent(ctx: &CliContext) -> ExecutionIntent {
+    if ctx.dry_run {
+        ExecutionIntent::Plan
+    } else {
+        ExecutionIntent::Apply
+    }
+}
+
+/// Test entry with package backends injected so no live rpmdb/dnf is used.
+#[cfg(test)]
+pub(crate) fn install_component_with_deps(
+    input: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    query: &dyn anolisa_platform::pkg_query::PackageQuery,
+    txn: &dyn anolisa_platform::pkg_transaction::PackageTransaction,
+    is_root: bool,
+) -> Result<InstallOutcome, CliError> {
+    let env = anolisa_env::EnvService::detect();
+    install_component_with_deps_and_env(
+        input,
+        args,
+        ctx,
+        &env,
+        &RpmdbProbe::absent(),
+        query,
+        txn,
+        is_root,
+    )
+}
+
+/// Test entry with host facts and package backends injected.
+#[cfg(test)]
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn install_component_with_deps_and_env(
+    input: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
+    query: &dyn anolisa_platform::pkg_query::PackageQuery,
+    txn: &dyn anolisa_platform::pkg_transaction::PackageTransaction,
+    is_root: bool,
+) -> Result<InstallOutcome, CliError> {
+    let mut activity = crate::progress::Activity::start(
+        crate::progress::feedback_for_stderr(ctx.json, ctx.quiet),
+        &format!("Preparing to install {input}..."),
+    );
+    let outcome = application::run_with_dependencies(
+        application::InstallRequest {
+            component: input,
+            args,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+        env,
+        rpmdb,
+        query,
+        txn,
+        is_root,
+        &std::collections::HashSet::new(),
+        &mut activity,
+    )?;
+    let batch_outcome = outcome.batch_outcome();
+    render_outcome(ctx, outcome)?;
+    Ok(batch_outcome)
+}
+
+fn render_outcome(ctx: &CliContext, outcome: InstallApplicationOutcome) -> Result<(), CliError> {
+    let payload = match outcome {
+        InstallApplicationOutcome::NoOp { subject, reason } => {
+            debug_assert!(matches!(
+                reason,
+                NoOpReason::AlreadyInstalled | NoOpReason::AlreadyTracked
+            ));
+            InstallResultPayload::from_subject(
+                subject,
+                "already-installed",
+                ctx.dry_run,
+                Vec::new(),
+            )
+        }
+        InstallApplicationOutcome::Preview {
+            subject,
+            steps,
+            warnings,
+        } => {
+            for warning in warnings {
+                progress::suspend_output(|| eprintln!("warning: {warning}"));
+            }
+            InstallResultPayload::from_subject(
+                subject,
+                "planned",
+                true,
+                steps.iter().map(step_label).collect(),
+            )
+        }
+        InstallApplicationOutcome::Applied {
+            subject,
+            steps,
+            outcome,
+        } => {
+            for warning in outcome.warnings() {
+                progress::suspend_output(|| eprintln!("warning: {warning}"));
+            }
+            let mut payload = InstallResultPayload::from_subject(
+                subject,
+                "installed",
+                false,
+                steps.iter().map(step_label).collect(),
+            );
+            payload.operation_id = outcome.operation_id().map(str::to_string);
+            payload
+        }
+    };
+    render_result(ctx, &payload)
+}
+
+/// JSON payload for a completed, previewed, or idempotent install.
+///
+/// Version-pin fields are additive and backend-specific: delegated installs
+/// report the resolved EVR and NEVRA, while raw installs report the distribution
+/// version and artifact URL. `version` retains the effective installed or
+/// resolved version across both routes. Optional evidence is omitted instead of
+/// serialized as `null` to preserve the established sparse wire envelope.
+#[derive(Debug, Serialize)]
+struct InstallResultPayload {
+    component: String,
+    /// Provider-native package identity, when resolution produced one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+    /// Effective installed or resolved version kept for wire compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    backend: String,
+    /// `installed` | `planned` (dry-run) | `already-installed`.
+    action: &'static str,
+    /// Durable operation identifier, present only after an applied install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    /// Exact `--version` value supplied for a version-pinned install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_version: Option<String>,
+    /// Resolved EVR for delegated installs or distribution version for raw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_version: Option<String>,
+    /// DNF repository id or raw repository base URL that supplied the pin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
+    /// Resolved NEVRA for delegated installs or artifact URL for raw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<String>,
+    dry_run: bool,
+    plan: Vec<String>,
+}
+
+impl InstallResultPayload {
+    fn from_subject(
+        subject: InstallSubject,
+        action: &'static str,
+        dry_run: bool,
+        plan: Vec<String>,
+    ) -> Self {
+        Self {
+            component: subject.component,
+            package: subject.package,
+            version: subject.version,
+            backend: subject.backend,
+            action,
+            operation_id: None,
+            requested_version: subject.requested_version,
+            resolved_version: subject.resolved_version,
+            source_repo: subject.source_repo,
+            artifact: subject.artifact,
+            dry_run,
+            plan,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_pin(mut self, pin: &DelegatedPin) -> Self {
+        self.requested_version = Some(pin.requested_version.clone());
+        self.resolved_version = Some(pin.resolved_evr.clone());
+        self.source_repo.clone_from(&pin.source_repo);
+        self.artifact = Some(pin.artifact.clone());
+        if self.version.is_none() {
+            self.version = Some(pin.resolved_version.clone());
+        }
+        self
+    }
+}
+
+fn dry_run_detail_lines(payload: &InstallResultPayload) -> Vec<String> {
+    let mut lines = Vec::new();
+    if payload.artifact.is_some() {
+        if let Some(package) = &payload.package {
+            lines.push(format!("package: {package}"));
+        }
+        if let Some(requested) = &payload.requested_version {
+            lines.push(format!("requested version: {requested}"));
+        }
+        if let Some(resolved) = &payload.resolved_version {
+            lines.push(format!("resolved version: {resolved}"));
+        }
+        if let Some(artifact) = &payload.artifact {
+            lines.push(format!("artifact: {artifact}"));
+        }
+        if let Some(repo) = &payload.source_repo {
+            lines.push(format!("repository: {repo}"));
+        }
+    }
+    lines
+}
+
+fn render_result(ctx: &CliContext, payload: &InstallResultPayload) -> Result<(), CliError> {
+    if ctx.json {
+        return render_json(COMMAND, payload);
+    }
+    if ctx.quiet {
+        return Ok(());
+    }
+    if payload.dry_run {
+        println!("install {} (dry-run):", payload.component);
+        for line in dry_run_detail_lines(payload) {
+            println!("  {line}");
+        }
+        for label in &payload.plan {
+            println!("  - {label}");
+        }
+        return Ok(());
+    }
+    match (payload.action, &payload.version) {
+        ("already-installed", Some(version)) => {
+            println!("{} {version} is already installed", payload.component);
+        }
+        ("already-installed", None) => println!("{} is already installed", payload.component),
+        (_, Some(version)) => println!("installed {} {version}", payload.component),
+        (_, None) => println!("installed {}", payload.component),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

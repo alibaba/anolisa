@@ -36,6 +36,10 @@ pub struct InstanceInfo {
     /// Distribution version from /etc/os-release (e.g. "3", "20.04")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distro_version: Option<String>,
+    /// Container runtime flavor (e.g. "docker", "podman", "containerd");
+    /// `None` on a bare-metal host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
 }
 
 // ── Instance snapshot ────────────────────────────────────────────────
@@ -64,6 +68,11 @@ pub struct InstanceSnapshot {
     pub distro_name: String,
     #[serde(rename = "distro.version")]
     pub distro_version: String,
+    /// Container runtime flavor; omitted on a bare-metal host to match
+    /// the downstream SLS JSONL schema.
+    #[serde(rename = "instance.container")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_container: Option<String>,
 }
 
 impl InstanceSnapshot {
@@ -82,6 +91,7 @@ impl InstanceSnapshot {
             instance_image_id: info.image_id.clone(),
             distro_name: info.distro_name.clone().unwrap_or_default(),
             distro_version: info.distro_version.clone().unwrap_or_default(),
+            instance_container: info.container.clone(),
         }
     }
 
@@ -173,6 +183,7 @@ impl InstanceProber {
             owner_account_id: self.probe_owner_account_id(),
             vcpu_count: self.probe_vcpu_count(),
             image_id: self.probe_image_id(),
+            container: InstanceProber::probe_container(),
             distro_name,
             distro_version,
         }
@@ -210,13 +221,13 @@ impl InstanceProber {
     }
 
     fn write_cached_id(&self, id: &str) {
-        if let Some(parent) = self.instance_id_cache_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!(
-                    "[anolisa] warn: cannot create instance-id cache dir {}: {e}",
-                    parent.display()
-                );
-            }
+        if let Some(parent) = self.instance_id_cache_path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "[anolisa] warn: cannot create instance-id cache dir {}: {e}",
+                parent.display()
+            );
         }
         if let Err(e) = fs::write(&self.instance_id_cache_path, id) {
             eprintln!(
@@ -275,10 +286,10 @@ impl InstanceProber {
 
     fn probe_image_id(&self) -> Option<String> {
         // 1. /etc/image-id (image_id="...")
-        if let Ok(content) = fs::read_to_string(&self.image_id_path) {
-            if let Some(id) = parse_image_id(&content) {
-                return Some(id);
-            }
+        if let Ok(content) = fs::read_to_string(&self.image_id_path)
+            && let Some(id) = parse_image_id(&content)
+        {
+            return Some(id);
         }
         // 2. Metadata API fallback
         self.client.query_metadata("image-id")
@@ -296,15 +307,15 @@ impl InstanceProber {
         let mut version: Option<String> = None;
 
         for line in content.lines() {
-            if id.is_none() {
-                if let Some(val) = line.strip_prefix("ID=") {
-                    id = Some(unquote(val));
-                }
+            if id.is_none()
+                && let Some(val) = line.strip_prefix("ID=")
+            {
+                id = Some(unquote(val));
             }
-            if version.is_none() {
-                if let Some(val) = line.strip_prefix("VERSION_ID=") {
-                    version = Some(unquote(val));
-                }
+            if version.is_none()
+                && let Some(val) = line.strip_prefix("VERSION_ID=")
+            {
+                version = Some(unquote(val));
             }
             if id.is_some() && version.is_some() {
                 break;
@@ -312,6 +323,15 @@ impl InstanceProber {
         }
 
         (id, version)
+    }
+
+    // ── Container runtime ─────────────────────────────────────────
+
+    /// Delegate to [`anolisa_env::detect_container`] so the snapshot
+    /// carries the same flavor classification as the rest of the agent
+    /// OS without re-implementing marker/cgroup heuristics here.
+    fn probe_container() -> Option<String> {
+        anolisa_env::detect_container()
     }
 }
 
@@ -665,6 +685,7 @@ mod tests {
             instance_type: Some("ecs.g7.xlarge".to_string()),
             instance_vcpu_count: "4".to_string(),
             instance_image_id: Some("img-test".to_string()),
+            instance_container: Some("docker".to_string()),
             distro_name: "alinux".to_string(),
             distro_version: "3".to_string(),
         };
@@ -679,6 +700,7 @@ mod tests {
         assert!(content.contains("\"instance.image-id\":\"img-test\""));
         assert!(content.contains("\"distro.name\":\"alinux\""));
         assert!(content.contains("\"distro.version\":\"3\""));
+        assert!(content.contains("\"instance.container\":\"docker\""));
     }
 
     #[test]
@@ -692,6 +714,7 @@ mod tests {
             instance_type: Some("ecs.g7.xlarge".to_string()),
             instance_vcpu_count: "4".to_string(),
             instance_image_id: Some("img-test".to_string()),
+            instance_container: Some("docker".to_string()),
             distro_name: "alinux".to_string(),
             distro_version: "3".to_string(),
         };
@@ -716,6 +739,7 @@ mod tests {
             owner_account_id: Some("1644215368948677".to_string()),
             vcpu_count: Some(4),
             image_id: Some("img-test".to_string()),
+            container: Some("docker".to_string()),
             distro_name: Some("alinux".to_string()),
             distro_version: Some("3".to_string()),
         };
@@ -729,7 +753,28 @@ mod tests {
         assert!(!snapshot.contains("device_id"));
         // L2 aggregate fields stay for anonymous scale statistics.
         assert!(snapshot.contains("\"instance.source\":\"ecs\""));
+        assert!(snapshot.contains("\"instance.container\":\"docker\""));
         assert!(snapshot.contains("\"distro.name\":\"alinux\""));
+    }
+
+    #[test]
+    fn test_snapshot_omits_container_when_absent() {
+        let info = InstanceInfo {
+            id: "i-x".to_string(),
+            source: "ecs".to_string(),
+            instance_type: None,
+            owner_account_id: None,
+            vcpu_count: None,
+            image_id: None,
+            container: None,
+            distro_name: Some("alinux".to_string()),
+            distro_version: Some("3".to_string()),
+        };
+
+        let snapshot = InstanceSnapshot::from_instance_info(&info);
+        let s = serde_json::to_string(&snapshot).unwrap();
+        assert!(!s.contains("instance.container"));
+        assert!(s.contains("\"instance.source\":\"ecs\""));
     }
 
     #[test]

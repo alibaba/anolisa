@@ -259,10 +259,10 @@ impl GenAIBuilder {
             token_usage,
             error,
             pid: pid_i32,
-            // Process name = the *process* comm (/proc/<pid>/comm), not the SSL
-            // event's per-event thread comm (which may be a library worker-thread
-            // name such as "HTTP client"). Falls back to the event comm only when
-            // /proc is unreadable (process already gone).
+            // Process name = the *process* comm (`<procfs root>/<pid>/comm`), not
+            // the SSL event's per-event thread comm (which may be a library
+            // worker-thread name such as "HTTP client"). Falls back to the event
+            // comm only when the entry is unreadable (process already gone).
             process_name: crate::discovery::scanner::read_comm(http.pid)
                 .unwrap_or_else(|| http.comm.clone()),
             agent_name: Some(agent_name.clone()),
@@ -272,6 +272,12 @@ impl GenAIBuilder {
                 meta.insert("path".to_string(), http.path.clone());
                 meta.insert("status_code".to_string(), http.status_code.to_string());
                 meta.insert("is_sse".to_string(), http.is_sse.to_string());
+                if let Some(timestamp_ns) = http.first_output_timestamp_ns {
+                    meta.insert(
+                        "first_output_timestamp_ns".to_string(),
+                        timestamp_ns.to_string(),
+                    );
+                }
                 meta.insert(
                     "sse_event_count".to_string(),
                     http.sse_event_count.to_string(),
@@ -617,11 +623,19 @@ impl GenAIBuilder {
                                 crate::analyzer::message::AnthropicContentBlock::ToolResult {
                                     tool_use_id,
                                     content,
-                                    ..
+                                    is_error,
                                 } => {
-                                    // Anthropic tool_result: convert to MessagePart::ToolCallResponse
-                                    let response_val =
-                                        content.clone().unwrap_or(serde_json::Value::Null);
+                                    // Anthropic tool_result: convert to MessagePart::ToolCallResponse.
+                                    // `is_error` must ride along inside the wrapper so the ATIF
+                                    // converter can preserve it as a structured failure signal.
+                                    let response_val = match (content.clone(), *is_error) {
+                                        (Some(value), Some(flag)) => {
+                                            serde_json::json!({"content": value, "is_error": flag})
+                                        }
+                                        (Some(value), None) => value,
+                                        (None, Some(flag)) => serde_json::json!({"is_error": flag}),
+                                        (None, None) => serde_json::Value::Null,
+                                    };
                                     parts.push(MessagePart::ToolCallResponse {
                                         id: Some(tool_use_id.clone()),
                                         response: response_val,
@@ -758,6 +772,14 @@ impl GenAIBuilder {
                 }
             }
             msgs
+        } else if messages.is_empty() && Self::is_dashscope_native_path(&http.path) {
+            // Non-streaming DashScope/Bailian native protocol: no typed parser
+            // claims `/aigc/*-generation/generation`, so the `output` envelope
+            // has to be reconstructed from the raw response body.
+            http.response_body
+                .as_ref()
+                .and_then(|body| Self::parse_sse_response_body(body, finish_reason.as_deref()))
+                .unwrap_or(messages)
         } else {
             messages
         };
@@ -804,6 +826,7 @@ mod tests {
             response_headers: "{}".to_string(),
             response_body,
             duration_ns: 1_000_000,
+            first_output_timestamp_ns: None,
             is_sse: false,
             sse_event_count: 0,
         }
@@ -900,6 +923,89 @@ mod tests {
         let builder = GenAIBuilder::new();
         let token = TokenRecord::new(1, "x".to_string(), "openai".to_string(), 1, 2);
         assert!(build_call(&builder, &[AnalysisResult::Token(token)]).is_none());
+    }
+
+    /// DashScope native path for reference in the tests below.
+    const DASHSCOPE_TEXT_GEN_PATH: &str = "/api/v1/services/aigc/text-generation/generation";
+
+    /// Non-streaming native calls used to be dropped entirely by the
+    /// `!is_llm && !is_sse` gate, so nothing reached the Dashboard.
+    #[test]
+    fn test_build_llm_call_dashscope_native_non_streaming() {
+        let builder = GenAIBuilder::new();
+        let request_body = serde_json::json!({
+            "model": "qwen-plus",
+            "input": {"messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Count to 3"}
+            ]},
+            "parameters": {"result_format": "message"}
+        })
+        .to_string();
+        // Native responses have no top-level `model`, only output/usage/request_id.
+        let response_body = serde_json::json!({
+            "output": {"choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "1, 2, 3."}
+            }]},
+            "usage": {"input_tokens": 22, "output_tokens": 8, "total_tokens": 30},
+            "request_id": "req-native-1"
+        })
+        .to_string();
+
+        let http = make_http(
+            DASHSCOPE_TEXT_GEN_PATH,
+            Some(request_body),
+            Some(response_body),
+        );
+        let call = build_call(&builder, &[AnalysisResult::Http(http)])
+            .expect("native non-streaming call must build an LLMCall");
+
+        assert_eq!(call.provider, "dashscope");
+        assert_eq!(call.model, "qwen-plus", "model comes from the request body");
+
+        // Request side: `input` is an object, so extract_messages_view must
+        // reach into `input.messages`.
+        assert_eq!(call.request.messages.len(), 2);
+        assert_eq!(call.request.messages[0].role, "system");
+        assert_eq!(call.request.messages[1].role, "user");
+
+        // Response side: non-streaming native has no typed parser, so the
+        // envelope must be reconstructed from the raw body.
+        assert_eq!(call.response.messages.len(), 1);
+        assert!(matches!(
+            &call.response.messages[0].parts[0],
+            MessagePart::Text { content } if content == "1, 2, 3."
+        ));
+        assert_eq!(
+            call.response.messages[0].finish_reason.as_deref(),
+            Some("stop")
+        );
+        assert!(!call.is_semantically_empty());
+    }
+
+    /// The token record provider must not leak `anthropic` into the call, and a
+    /// model-less token record must not shadow the request-body model.
+    #[test]
+    fn test_build_llm_call_dashscope_native_provider_beats_token_record() {
+        let builder = GenAIBuilder::new();
+        let request_body =
+            serde_json::json!({"model": "qwen3-vl-plus", "input": {"messages": []}}).to_string();
+        let http = make_http(
+            "/api/v1/services/aigc/multimodal-generation/generation",
+            Some(request_body),
+            None,
+        );
+        // Simulates the pre-fix mislabelling reaching build_llm_call.
+        let token = TokenRecord::new(100, "python3".to_string(), "anthropic".to_string(), 30, 12)
+            .with_model(String::new());
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Token(token)],
+        )
+        .expect("native call builds");
+        assert_eq!(call.provider, "dashscope");
+        assert_eq!(call.model, "qwen3-vl-plus");
     }
 
     #[test]
@@ -1691,6 +1797,53 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert!(call.request.messages.is_empty());
         assert!(!call.request.stream);
+    }
+
+    #[test]
+    fn first_output_timestamp_reaches_latency_query() {
+        let mut http = make_http(
+            "/v1/chat/completions",
+            Some(
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}"#
+                    .to_string(),
+            ),
+            Some(
+                r#"{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    .to_string(),
+            ),
+        );
+        http.duration_ns = 500_000_000;
+        http.first_output_timestamp_ns = Some(1_100_000_000);
+        http.is_sse = true;
+        http.sse_event_count = 4;
+
+        let builder = GenAIBuilder::new();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("first_output_timestamp_ns"),
+            Some(&"1100000000".to_string())
+        );
+        assert_eq!(call.metadata.get("is_sse"), Some(&"true".to_string()));
+
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_timing_pipeline_{}_{}.db",
+            std::process::id(),
+            1_100_000_000u64
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        let event = crate::genai::semantic::GenAISemanticEvent::LLMCall(call);
+        store.complete_pending(&event).unwrap();
+
+        let metrics = store.get_latency_metrics(0, 2_000_000_000, None).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].streaming_call_count, 1);
+        assert_eq!(
+            metrics[0].ttft_ms.as_ref().map(|metric| metric.p50),
+            Some(100.0)
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

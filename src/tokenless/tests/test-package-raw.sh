@@ -16,12 +16,16 @@ mkdir -p \
     "$ADAPTERS/common/hooks" \
     "$ADAPTERS/common/commands" \
     "$ADAPTERS/openclaw/dist" \
+    "$ADAPTERS/dsh/dist" \
     "$ADAPTERS/hermes" \
     "$ADAPTERS/qoder/.qoder-plugin" \
     "$ADAPTERS/claude-code/.claude-plugin" \
     "$ADAPTERS/claude-code/hooks" \
     "$ADAPTERS/codex/.codex-plugin" \
-    "$ADAPTERS/qwencode/hooks"
+    "$ADAPTERS/agentscope/build/lib/tokenless_agentscope" \
+    "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info" \
+    "$ADAPTERS/qwencode/hooks" \
+    "$ADAPTERS/qwenpaw"
 
 cat > "$SOURCE/Cargo.toml" <<EOF
 [workspace]
@@ -42,14 +46,23 @@ write_json_version() {
 write_json_version "$ADAPTERS/manifest.json"
 write_json_version "$ADAPTERS/openclaw/package.json"
 write_json_version "$ADAPTERS/openclaw/openclaw.plugin.json"
+printf '{"lockfileVersion":3}\n' > "$ADAPTERS/openclaw/package-lock.json"
+write_json_version "$ADAPTERS/dsh/package.json"
 write_json_version "$ADAPTERS/qoder/.qoder-plugin/plugin.json"
 write_json_version "$ADAPTERS/claude-code/.claude-plugin/plugin.json"
 write_json_version "$ADAPTERS/codex/.codex-plugin/plugin.json"
 write_json_version "$ADAPTERS/qwencode/qwen-extension.json"
+write_json_version "$ADAPTERS/qwenpaw/plugin.json"
+printf 'plugin = None\n' > "$ADAPTERS/qwenpaw/plugin.py"
+printf 'anolisa-tokenless @ https://github.com/alibaba/anolisa/releases/download/tokenless/v%s/anolisa_tokenless-%s-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl ; sys_platform == "linux"\n' \
+    "$VERSION" "$VERSION" > "$ADAPTERS/qwenpaw/requirements.txt"
 printf '{"name":"anolisa-tokenless"}\n' \
     > "$ADAPTERS/claude-code/.claude-plugin/marketplace.json"
 printf 'version: "%s"\n' "$VERSION" > "$ADAPTERS/hermes/plugin.yaml"
 printf 'export default {};\n' > "$ADAPTERS/openclaw/dist/index.js"
+printf '%s\n' '- insert:' '    - id: anolisa-tokenless' "      name: '@anolisa/dsh-tokenless'" \
+    > "$ADAPTERS/dsh/cordis.patch.yml"
+printf 'export function apply() {}\n' > "$ADAPTERS/dsh/dist/index.js"
 printf '{"name":"tokenless","version":"%s"}\n' "$VERSION" \
     > "$ADAPTERS/common/cosh-extension.json"
 printf '{}\n' > "$ADAPTERS/common/tool-ready-spec.json"
@@ -58,6 +71,12 @@ printf '#!/usr/bin/env bash\nprintf "shared hook\\n"\n' \
     > "$ADAPTERS/common/hooks/run-hook.sh"
 printf 'description = "fixture"\n' \
     > "$ADAPTERS/common/commands/tokenless-stats.toml"
+printf '[build-system]\nrequires = ["setuptools"]\n' \
+    > "$ADAPTERS/agentscope/pyproject.toml"
+printf 'legacy build output\n' \
+    > "$ADAPTERS/agentscope/build/lib/tokenless_agentscope/middleware.py"
+printf 'Name: anolisa-tokenless-agentscope\n' \
+    > "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info/PKG-INFO"
 chmod 0755 \
     "$ADAPTERS/common/tokenless-env-fix.sh" \
     "$ADAPTERS/common/hooks/run-hook.sh"
@@ -88,10 +107,10 @@ if os_name == "linux":
 else:
     cpu = {"aarch64": 0x0100000C}[arch]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("tokenless", "rtk", "toon"):
+for name in ("tokenless", "rtk"):
     (root / name).write_bytes(content)
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk" "$destination/toon"
+    chmod 0755 "$destination/tokenless" "$destination/rtk"
 }
 
 LINUX_X64="$TMP/bin-linux-x64"
@@ -144,7 +163,6 @@ tar -xzf "$OUT_ONE/$LINUX_ARTIFACT" -C "$EXTRACTED"
 cmp "$CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/tokenless" "$EXTRACTED/bin/tokenless"
 cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
-cmp "$LINUX_X64/toon" "$EXTRACTED/libexec/anolisa/tokenless/toon"
 
 for relative in \
     adapters/claude-code/hooks/run-hook.sh \
@@ -153,10 +171,23 @@ for relative in \
     test ! -L "$EXTRACTED/$relative"
     cmp "$ADAPTERS/common/hooks/run-hook.sh" "$EXTRACTED/$relative"
 done
+test -f "$EXTRACTED/adapters/dsh/package.json"
+test -f "$EXTRACTED/adapters/dsh/cordis.patch.yml"
+test -f "$EXTRACTED/adapters/dsh/dist/index.js"
 test -f "$EXTRACTED/extensions/tokenless/cosh-extension.json"
 test -f "$EXTRACTED/extensions/tokenless/hooks/run-hook.sh"
+test ! -e "$EXTRACTED/adapters/agentscope"
 test -z "$(find "$EXTRACTED" -type l -print -quit)"
-test -z "$(find "$EXTRACTED" \( -name '*.in' -o -name node_modules \) -print -quit)"
+test -z "$(find "$EXTRACTED" \( \
+    -name '*.in' -o \
+    -name package-lock.json -o \
+    -name node_modules -o \
+    -name build -o \
+    -name '*.egg-info' -o \
+    -name '__pycache__' -o \
+    -name '*.pyc' -o \
+    -name '*.pyo' \
+\) -print -quit)"
 test "$(stat -c '%a' "$EXTRACTED/bin/tokenless")" = 755
 test "$(stat -c '%a' "$EXTRACTED/adapters/manifest.json")" = 644
 test "$(stat -c '%a' "$EXTRACTED/adapters/common/hooks/run-hook.sh")" = 755

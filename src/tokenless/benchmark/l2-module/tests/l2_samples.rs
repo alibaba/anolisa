@@ -124,7 +124,7 @@ fn every_category_has_a_probe_file_with_enough_questions() {
     }
 }
 
-/// `ResponseCompressor` drops noise fields (`logs`, `debug`, `trace`, ...)
+/// `JsonCompressor` drops noise fields (`logs`, `debug`, `trace`, ...)
 /// by design, so JSON ground truth must never reference their contents —
 /// otherwise retention would penalise the compressor for doing its job
 /// (the miscalibration behind an early 40/60-vs-60/60 smoke reading).

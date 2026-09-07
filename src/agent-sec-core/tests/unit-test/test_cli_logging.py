@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import stat
 import sys
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from pathlib import Path
 import pytest
 from agent_sec_cli import diagnostic_logging
 from agent_sec_cli.cli_logging import (
+    _RUST_LOGGER_NAMES,
     CLI_LOG_BACKUP_COUNT,
     CLI_LOG_MAX_BYTES,
     JsonlCliLogHandler,
@@ -25,6 +27,9 @@ from agent_sec_cli.correlation_context import (
     init_invocation_context,
     init_process_trace_context,
 )
+
+_AGENT_SEC_CLI_DIR = Path(__file__).resolve().parents[2] / "agent-sec-cli"
+_LOG_MACRO_RE = re.compile(r"\blog::(?:error|warn|info|debug|trace)!")
 
 
 @pytest.fixture(autouse=True)
@@ -368,9 +373,7 @@ def test_handler_stringifies_non_json_data_values(tmp_path: Path) -> None:
     }
 
 
-def test_handler_does_not_chmod_log_file_on_emit(tmp_path: Path) -> None:
-    # Access control relies on the parent directory's 0o700 mode; the handler
-    # must not chmod the log file itself on each write.
+def test_handler_tightens_existing_log_file_on_emit(tmp_path: Path) -> None:
     init_invocation_context()
     path = tmp_path / "cli.jsonl"
     path.write_text("", encoding="utf-8")
@@ -379,9 +382,7 @@ def test_handler_does_not_chmod_log_file_on_emit(tmp_path: Path) -> None:
 
     handler.emit(_make_record())
 
-    # File mode is untouched by the handler — whatever umask/explicit chmod
-    # set it to, that's what remains.
-    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_setup_cli_logging_is_idempotent(
@@ -513,3 +514,122 @@ def test_handler_ignores_non_string_correlation_field_overrides(tmp_path: Path) 
     assert payload["trace_id"] == "real-trace"
     assert payload["session_id"] == "real-session"
     assert payload["run_id"] == "real-run"
+
+
+def test_setup_cli_logging_collects_rust_bridge_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pyo3-log names each logger after the emitting Rust crate's `log` target,
+    # so these records never pass through the `agent_sec_cli` tree. They still
+    # belong to the CLI stream: they describe this invocation's scan.
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_SEC_INVOCATION_ID", "invocation-rust")
+    init_invocation_context()
+
+    setup_cli_logging()
+    logging.getLogger("model_service").warning(
+        "Ignoring AGENT_SEC_MODEL_SERVICE_TIMEOUT"
+    )
+    logging.getLogger("prompt_scanner.scanner").warning("Detector is not available")
+
+    payloads = [
+        json.loads(line)
+        for line in (tmp_path / "cli.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [payload["logger"] for payload in payloads] == [
+        "model_service",
+        "prompt_scanner.scanner",
+    ]
+    assert {payload["component"] for payload in payloads} == {"cli"}
+    assert {payload["event"] for payload in payloads} == {"cli_log"}
+    # Correlation still works: Rust records join the rest of the invocation.
+    assert {payload["invocation_id"] for payload in payloads} == {"invocation-rust"}
+
+
+def test_setup_cli_logging_shares_one_handler_across_rust_loggers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A single handler instance keeps one stream and one level authoritative;
+    # disabling propagation stops the records from also reaching the
+    # handler-less root, where logging.lastResort would print raw text to
+    # stderr that hook layers capture and discard.
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+
+    setup_cli_logging()
+
+    attached = set()
+    for name in ("agent_sec_cli", *_RUST_LOGGER_NAMES):
+        logger = logging.getLogger(name)
+        handlers = [
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, JsonlCliLogHandler)
+        ]
+        assert len(handlers) == 1
+        assert logger.propagate is False
+        attached.add(id(handlers[0]))
+    assert len(attached) == 1
+
+
+def test_reset_detaches_handlers_from_rust_loggers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A handler left behind on a Rust logger would keep writing to the previous
+    # test's log path for the rest of the process.
+    _clear_cli_env(monkeypatch)
+    monkeypatch.setenv("AGENT_SEC_DATA_DIR", str(tmp_path))
+    setup_cli_logging()
+
+    _reset_cli_logging_for_tests()
+
+    for name in ("agent_sec_cli", *_RUST_LOGGER_NAMES):
+        logger = logging.getLogger(name)
+        assert [
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, JsonlCliLogHandler)
+        ] == []
+        assert logger.propagate is True
+
+
+def test_logging_rust_crates_are_covered_by_cli_logger_names() -> None:
+    # The set of bridged logger names is maintained by hand, so a new crate
+    # that starts logging would silently fall out of the CLI stream again.
+    # Fail here instead of losing its records in production.
+    crates_dir = _AGENT_SEC_CLI_DIR / "crates"
+    if not crates_dir.is_dir():
+        pytest.skip("Rust sources are unavailable outside a source checkout")
+
+    logging_crates = {
+        source.relative_to(crates_dir).parts[0].replace("-", "_")
+        for source in crates_dir.glob("*/src/**/*.rs")
+        if _LOG_MACRO_RE.search(source.read_text(encoding="utf-8"))
+    }
+
+    assert logging_crates, "expected at least one Rust crate to emit log records"
+    assert logging_crates <= set(_RUST_LOGGER_NAMES), (
+        "Rust crates emitting log records but missing from _RUST_LOGGER_NAMES: "
+        f"{sorted(logging_crates - set(_RUST_LOGGER_NAMES))}"
+    )
+
+
+def test_native_extension_crate_emits_no_log_records() -> None:
+    # Records from the cdylib itself would arrive under `agent_sec_cli_native`
+    # (its Cargo `[lib] name`) — a top-level logger that neither the
+    # `agent_sec_cli` tree nor _RUST_LOGGER_NAMES covers.
+    native_src_dir = _AGENT_SEC_CLI_DIR / "src"
+    if not native_src_dir.is_dir():
+        pytest.skip("Rust sources are unavailable outside a source checkout")
+
+    offenders = sorted(
+        source.name
+        for source in native_src_dir.glob("*.rs")
+        if _LOG_MACRO_RE.search(source.read_text(encoding="utf-8"))
+    )
+
+    assert offenders == [], (
+        "log records emitted from the cdylib crate would bypass the CLI "
+        f"diagnostic stream: {offenders}"
+    )

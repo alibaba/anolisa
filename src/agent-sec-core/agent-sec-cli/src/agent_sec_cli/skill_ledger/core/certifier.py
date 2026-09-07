@@ -11,7 +11,10 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from agent_sec_cli.skill_ledger.config import remember_skill_dir
+from agent_sec_cli.skill_ledger.config import (
+    is_default_system_skill_dir,
+    remember_skill_dir,
+)
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
@@ -20,6 +23,7 @@ from agent_sec_cli.skill_ledger.core.live_root import (
     ResolvedSkillRoot,
     SkillRootInput,
     canonical_skill_operation,
+    ledger_update_access,
     resolve_skill_root,
     validate_resolved_skill_root,
 )
@@ -81,6 +85,24 @@ def _remember_skill_dir_best_effort(skill_dir: str) -> None:
         logger.debug(
             "auto-remember failed for %s, continuing", skill_dir, exc_info=True
         )
+
+
+def _readonly_system_skip_payload(
+    root: ResolvedSkillRoot,
+) -> dict[str, Any] | None:
+    """Return a batch skip result for a host-backed, read-only system Skill."""
+    if root.source != "host" or not is_default_system_skill_dir(root.canonical_dir):
+        return None
+    writable, _reason = ledger_update_access(root)
+    if writable:
+        return None
+    return {
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
+        "status": "skipped",
+        "reasonCode": "readonly_system_skill",
+        "persisted": False,
+    }
 
 
 def _sign_manifest(manifest: SignedManifest, backend: SigningBackend) -> SignedManifest:
@@ -499,8 +521,13 @@ def scan_skill(
     """Run built-in scanners as needed and record signed scan results."""
     root = resolve_skill_root(skill_dir)
     validate_resolved_skill_root(root)
+    if _readonly_system_skip_payload(root) is not None:
+        raise SkillLedgerError(
+            f"cannot update read-only system skill: {root.canonical_dir}; "
+            "use 'agent-sec-cli skill-ledger analyze <skill_dir> --format json' "
+            "for read-only analysis"
+        )
     io_skill_dir = str(root.io_dir)
-    _remember_skill_dir_best_effort(str(root.canonical_dir))
 
     current_hashes = compute_file_hashes(io_skill_dir)
     registry = ScannerRegistry.from_config()
@@ -527,7 +554,7 @@ def scan_skill(
             raise SkillLedgerError(
                 f"scan cannot recover {state} skill without scanner results"
             )
-        return _result_payload(
+        result = _result_payload(
             manifest,
             root=root,
             new_version_created=False,
@@ -535,6 +562,8 @@ def scan_skill(
             skipped_scanners=requested,
             status="noop",
         )
+        _remember_skill_dir_best_effort(str(root.canonical_dir))
+        return result
 
     scan_entries = _auto_invoke_scanners(io_skill_dir, registry, scanners_to_run)
     if not scan_entries:
@@ -542,7 +571,7 @@ def scan_skill(
             raise SkillLedgerError(
                 f"scan cannot recover {state} skill without scanner results"
             )
-        return _result_payload(
+        result = _result_payload(
             manifest,
             root=root,
             new_version_created=False,
@@ -550,6 +579,8 @@ def scan_skill(
             skipped_scanners=scanners_to_run,
             status="noop",
         )
+        _remember_skill_dir_best_effort(str(root.canonical_dir))
+        return result
 
     _persist_manifest_update(
         root,
@@ -568,7 +599,7 @@ def scan_skill(
                 scanners_run=scanners_run,
             )
         ]
-    return _result_payload(
+    result = _result_payload(
         manifest,
         root=root,
         new_version_created=new_version_created,
@@ -576,6 +607,8 @@ def scan_skill(
         skipped_scanners=[name for name in requested if name not in scanners_to_run],
         extra=extra,
     )
+    _remember_skill_dir_best_effort(str(root.canonical_dir))
+    return result
 
 
 def scan_batch(
@@ -589,9 +622,15 @@ def scan_batch(
     results: list[dict[str, Any]] = []
     for skill_dir in skill_dirs:
         try:
+            root = resolve_skill_root(skill_dir)
+            validate_resolved_skill_root(root)
+            skipped = _readonly_system_skip_payload(root)
+            if skipped is not None:
+                results.append(skipped)
+                continue
             results.append(
                 scan_skill(
-                    str(skill_dir),
+                    root,
                     backend,
                     scanner_names=scanner_names,
                     force=force,

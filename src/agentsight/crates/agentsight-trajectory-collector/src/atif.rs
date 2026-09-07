@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use agentsight_atif::{
     Agent, AtifTrajectory, FinalMetrics, Metrics, Observation, ObservationResult, Step, StepSource,
-    ToolCall, ATIF_SCHEMA_VERSION,
+    ToolCall, ATIF_SCHEMA_VERSION, EXTRA_IS_ERROR,
 };
 
 /// Event types to skip entirely.
@@ -69,7 +69,7 @@ pub fn convert_qoder_events(
                     for tr in &tool_results {
                         let extra = if tr.is_error {
                             let mut m = HashMap::new();
-                            m.insert("is_error".into(), serde_json::Value::Bool(true));
+                            m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
                             Some(m)
                         } else {
                             None
@@ -323,7 +323,7 @@ pub fn convert_qoder_events(
                         for tr in &trs {
                             let extra = if tr.is_error {
                                 let mut m = HashMap::new();
-                                m.insert("is_error".into(), serde_json::Value::Bool(true));
+                                m.insert(EXTRA_IS_ERROR.into(), serde_json::Value::Bool(true));
                                 Some(m)
                             } else {
                                 None

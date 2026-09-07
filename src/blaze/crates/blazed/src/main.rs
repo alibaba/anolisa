@@ -5,6 +5,7 @@
 //! exposed via the HTTP API; this binary only handles daemon lifecycle.
 
 mod api;
+mod checkpoint_store;
 mod cli;
 mod daemon;
 mod error;
@@ -19,6 +20,7 @@ mod metrics;
 mod sandbox;
 mod spawner;
 mod state;
+mod state_store;
 
 use std::process::ExitCode;
 

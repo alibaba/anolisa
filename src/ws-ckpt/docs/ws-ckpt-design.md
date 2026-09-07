@@ -75,6 +75,9 @@ pub enum Request {
     GetWorkspacePolicy,
     ResetWorkspacePolicy,
     PatchWorkspacePolicy,
+    WorkspaceIdentityV2,
+    GuardedCheckpointV2,
+    CheckpointEvidenceV2,
 }
 
 pub enum Response {
@@ -93,6 +96,10 @@ pub enum Response {
     HealthAdvisoryOk,
     WorkspacePolicyOk,
     ConfigOverviewOk,
+    WorkspaceIdentityV2Ok,
+    GuardedCheckpointV2Ok,
+    CheckpointEvidenceV2Ok,
+    GuardedCheckpointV2Rejected,
     Error,
 }
 
@@ -131,6 +138,9 @@ pub enum ErrorCode {
 | `BtrfsError` / `IoError` / `InvalidPath` / `DiskSpaceInsufficient` / `ConfirmationRequired` / `InternalError` | 通用错误                                                                         | 见 dispatcher / backend                    |
 
 CLI 把 `ErrorCode` 翻译成人类可读消息 + 退出码；Plugin 进一步映射成对 LLM 友好的提示（见 [plugin 设计文档](./ws-ckpt-plugin-design.md) 中的 `mapErrorToLLMMessage`）。
+
+Guarded checkpoint V2 的完整说明见独立的
+[双语设计文档](design/guarded-checkpoint-v2_zh.md)。
 
 ---
 
@@ -535,7 +545,8 @@ pub struct DaemonState {
 2. 初始化 `tracing_subscriber`
 3. 创建 `/var/lib/ws-ckpt/indexes/`
 4. `lockfile::acquire` 单实例守卫
-5. `startup::resolve_state`：加载 `state.json` → 创建 backend → bootstrap → 重建 in-memory state
+5. `startup::resolve_state`：加载 `state.json` → 创建 backend → bootstrap；bootstrap 在 backend
+   mount/data root 就绪后同步恢复可证明的 interrupted rollback，再重建 in-memory state 和 watcher
 6. `save_manifest`：持久化初始状态（bootstrap 可能改了 backend 选择）
 7. `util::ensure_symlinks`：重启后修复工作区 symlink
 8. `seccomp::apply_seccomp_filter`
@@ -548,15 +559,36 @@ pub struct DaemonState {
 
 ## 后台调度
 
-`scheduler::start_scheduler` 启动三个后台任务，全部通过 `config_notify` push 唤醒（不轮询）：
+`scheduler::start_scheduler` 启动两个后台任务，全部通过 `config_notify` push 唤醒（不轮询）：
 
 | 任务 | 触发 | 行为 |
 |------|------|------|
 | **Auto-cleanup** | 每 `auto_cleanup_interval_secs` 或 config reload 唤醒 | 遍历所有 ws，按各自 effective policy 的 `Count(N)` 或 `Age(duration)` 删除过期快照。任一 ws 有局部 override 启用 cleanup 即运行，全部 disabled 时 park |
 | **Health-check** | 每 `health_check_interval_secs` 或 config reload 唤醒 | 上报 fs 使用率 + 快照超限告警（>1000 / >90%），结果缓存供 CLI `HealthAdvisory` 拉取 |
-| **Orphan recovery** | 启动时一次性 | 扫描 mount path 下 `.rollback-tmp` 残留目录并清理 |
 
 config reload（`notify_waiters()`）会立即打断 sleep，让 loop 重读配置。`Notified` 在读 config 之前就 `enable()` 注册，避免 notify 丢失。
+
+### Rollback 崩溃恢复
+
+`.rollback-tmp` 是 rollback 把旧 live subvolume 移开后留下的中间状态，不能按文件名当作
+可删除的 orphan。恢复由各 Btrfs backend 的 `bootstrap` 在 state rebuild、watcher、scheduler
+和 listener 之前同步完成，并扫描 backend 自己的 data root：BtrfsBase 使用
+`<btrfs-mount>/ws-ckpt-data`，BtrfsLoop 使用 loop image 的 mount root。
+
+- tmp 是已验证的 Btrfs subvolume、live 不存在：使用 `RENAME_NOREPLACE` 恢复旧 live。
+- tmp 不存在：幂等 no-op。
+- live 与 tmp 同时存在，或任一路径是 symlink、普通目录、文件或无法验证：保留所有路径并
+  阻止 backend bootstrap。没有 durable rollback commit evidence 时，daemon 不能证明应该
+  保留哪一个 subvolume。
+- recovery 只接管在 `snapshots/<workspace-id>/` 中有对应 ownership marker 的
+  `.rollback-tmp`。该证据同时覆盖当前 ID 和 migration 保留的 legacy ID；没有 marker 的
+  foreign path 只告警并保留。
+
+当前 fail-closed 粒度是整个 daemon：一个 workspace 的 ambiguous rollback 会阻止其他
+workspace 一同启动。这是缺少 per-workspace quarantine 时的安全取舍。该恢复也不能关闭
+“新 live 已创建或旧 tmp 已删除，但 `index.head` 尚未持久化”的逻辑提交窗口；完整自动恢复
+需要 durable rollback journal/commit record。真实 Btrfs crash injection 与断电持久性仍需
+在隔离的特权环境验证。
 
 ---
 

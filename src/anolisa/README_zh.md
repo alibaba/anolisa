@@ -33,8 +33,8 @@ anolisa update all
 | `upgrade` | 应用 RPM/system image 升级计划（system scope） |
 | `status` | 显示组件健康状态 |
 | `doctor` | 诊断问题并给出修复建议 |
-| `logs` | 查询组件日志 |
-| `restart` | 重启组件服务 |
+| `logs` | 查询组件日志（`--severity`，别名 `--level`） |
+| `restart` | 重启组件服务（`--dry-run` 仅列出 unit，不执行重启） |
 | `repair` | 手工修改 RPM 后协调 ANOLISA 状态与 rpmdb |
 | `adopt` | 将已有 system RPM 记录为已采纳安装 |
 | `forget` | 仅删除状态记录，不执行包操作 |
@@ -95,10 +95,14 @@ scope。因此，即使 system scope 已安装同名组件，
 planner 区分 ANOLISA 自有文件与 native package authority，并在副作用前
 记录崩溃恢复意图。组件元数据通过 `component.toml` 声明。
 
+raw backend 每次解析都会重新拉取 distribution index，仓库不可达时命令直接
+失败。`repo.toml` 中旧的 `cache_ttl_secs` 和 `offline_fallback` 字段仍可正常
+解析以保持向后兼容，但当前 raw backend 不会使用这些值。
+
 ## 环境要求
 
 - Linux（x86_64 / aarch64）或 macOS（arm64，功能受限）
-- 从源码构建需要 Rust ≥ 1.88
+- 从源码构建需要 Rust ≥ 1.93
 
 ## 许可证
 

@@ -168,18 +168,7 @@ impl AuditStore {
             transaction.commit()?;
             return Ok(ContainmentActivationResult::LostClaim);
         }
-        if status == RiskCaseStatus::Open {
-            let confirmed = transaction.execute(
-                "UPDATE risk_cases SET status = 'confirmed', updated_at_ns = ?1
-                 WHERE case_id = ?2 AND status = 'open'",
-                params![updated_at_ns, action.0],
-            )?;
-            if confirmed != 1 {
-                return Err(AuditError::InvalidData(format!(
-                    "risk case {case_id} changed before confirmation"
-                )));
-            }
-        }
+        resolve_case_after_activation(&transaction, &action.0, updated_at_ns)?;
         transaction.commit()?;
         Ok(ContainmentActivationResult::Activated)
     }
@@ -340,6 +329,34 @@ impl AuditStore {
         )?;
         Ok(changed == 1)
     }
+}
+
+/// Marks a case resolved once its containment action becomes active.
+///
+/// Matching zero rows is an expected, idempotent outcome: the case has already
+/// reached a terminal status (`resolved`, `false_positive`, or `accepted_risk`),
+/// so activation cannot and must not change it. That situation is logged loudly
+/// instead of being silently ignored, because it usually means containment was
+/// activated against a case a human already triaged out of scope.
+fn resolve_case_after_activation(
+    conn: &Connection,
+    case_id: &str,
+    updated_at_ns: i64,
+) -> Result<(), AuditError> {
+    let resolved = conn.execute(
+        "UPDATE risk_cases SET status = 'resolved', updated_at_ns = ?1
+         WHERE case_id = ?2 AND status IN ('open', 'confirmed')",
+        params![updated_at_ns, case_id],
+    )?;
+    if resolved == 0 {
+        log::warn!(
+            "containment activation for case {case_id} updated 0 risk_cases rows; \
+             the case is likely already in a terminal state \
+             (resolved/false_positive/accepted_risk), so containment activation \
+             did not change its status"
+        );
+    }
+    Ok(())
 }
 
 fn insert_action(conn: &Connection, action: &ContainmentAction) -> Result<usize, AuditError> {
@@ -514,5 +531,60 @@ fn parse_failure_stage(value: &str) -> Result<ContainmentFailureStage, AuditErro
         _ => Err(AuditError::InvalidData(format!(
             "unknown containment failure stage '{value}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insert_case(conn: &Connection, case_id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO risk_cases (
+                case_id, correlation_key, policy_id, policy_revision, agent_id,
+                severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                case_id, case_id, "policy", 1_i64, "agent", "high", 10_i64, status, 0_i64, 1_i64,
+                1_i64, "summary",
+            ],
+        )
+        .unwrap();
+    }
+
+    fn case_status(conn: &Connection, case_id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM risk_cases WHERE case_id = ?1",
+            [case_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolve_case_after_activation_resolves_an_open_case() {
+        let store = AuditStore::open_in_memory().unwrap();
+        let conn = store.connection().unwrap();
+        let case_id = Uuid::new_v4().to_string();
+        insert_case(&conn, &case_id, "open");
+
+        resolve_case_after_activation(&conn, &case_id, 2).unwrap();
+
+        assert_eq!(case_status(&conn, &case_id), "resolved");
+    }
+
+    #[test]
+    fn resolve_case_after_activation_ignores_zero_rows_for_terminal_case() {
+        let store = AuditStore::open_in_memory().unwrap();
+        let conn = store.connection().unwrap();
+        let case_id = Uuid::new_v4().to_string();
+        // A case already triaged out of scope must not be revived, and the
+        // 0-row update must stay idempotent (warn, never error).
+        insert_case(&conn, &case_id, "false_positive");
+
+        let result = resolve_case_after_activation(&conn, &case_id, 5);
+
+        assert!(result.is_ok());
+        assert_eq!(case_status(&conn, &case_id), "false_positive");
     }
 }

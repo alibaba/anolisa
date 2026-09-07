@@ -3,6 +3,92 @@ use crate::raw_input::UserPtyInputGeneration;
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
 
+#[test]
+fn relay_wake_bytes_are_coalesced_and_fully_drained() {
+    let (master, _master_writer) = nix::unistd::pipe().expect("master pipe");
+    let (mut wake_reader, mut wake_writer) = UnixStream::pair().expect("wake pair");
+    let (mut resize_reader, _resize_writer) = UnixStream::pair().expect("resize pair");
+    wake_reader.set_nonblocking(true).expect("nonblocking wake");
+    resize_reader
+        .set_nonblocking(true)
+        .expect("nonblocking resize");
+    wake_writer
+        .set_nonblocking(true)
+        .expect("nonblocking writer");
+    wake_writer.write_all(&[1; 128]).expect("queue wakes");
+
+    let activity = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_millis(50),
+    )
+    .expect("wait for wake");
+    assert_eq!(
+        activity,
+        RelayActivity {
+            pty: false,
+            wake: true,
+            resize: false,
+        }
+    );
+
+    let drained = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_millis(2),
+    )
+    .expect("wait after drain");
+    assert_eq!(drained, RelayActivity::default());
+}
+
+#[test]
+fn relay_wait_returns_when_pty_becomes_readable() {
+    let (master, master_writer) = nix::unistd::pipe().expect("master pipe");
+    let (mut wake_reader, _wake_writer) = UnixStream::pair().expect("wake pair");
+    let (mut resize_reader, _resize_writer) = UnixStream::pair().expect("resize pair");
+    wake_reader.set_nonblocking(true).expect("nonblocking wake");
+    resize_reader
+        .set_nonblocking(true)
+        .expect("nonblocking resize");
+    nix::unistd::write(&master_writer, b"output").expect("write master output");
+
+    let activity = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_secs(1),
+    )
+    .expect("wait for pty");
+    assert!(activity.pty);
+    assert!(!activity.wake);
+    assert!(!activity.resize);
+}
+
+#[test]
+fn relay_wait_distinguishes_resize_from_regular_wake() {
+    let (master, _master_writer) = nix::unistd::pipe().expect("master pipe");
+    let (mut wake_reader, _wake_writer) = UnixStream::pair().expect("wake pair");
+    let (mut resize_reader, mut resize_writer) = UnixStream::pair().expect("resize pair");
+    wake_reader.set_nonblocking(true).expect("nonblocking wake");
+    resize_reader
+        .set_nonblocking(true)
+        .expect("nonblocking resize");
+    resize_writer.write_all(&[1]).expect("queue resize");
+
+    let activity = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_secs(1),
+    )
+    .expect("wait for resize");
+    assert!(!activity.pty);
+    assert!(!activity.wake);
+    assert!(activity.resize);
+}
+
 fn parser_for_test(name: &str) -> OscParser {
     let dir = std::env::temp_dir().join(format!("cosh-raw-relay-{name}"));
     OscParser::new(name.to_string(), dir, TEST_MARKER_TOKEN.to_string())
@@ -22,6 +108,82 @@ fn feed_shell_ready(parser: &mut OscParser) {
     );
     marker.push(b'\x07');
     parser.feed(&marker).expect("feed precmd");
+}
+
+fn feed_enhanced_prompt_ready(parser: &mut OscParser) {
+    parser
+        .feed(
+            b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\",\"prompt_ready\":true}\x07",
+        )
+        .expect("feed enhanced prompt ready");
+}
+
+#[test]
+fn prompt_snapshot_publishes_only_after_pty_is_drained() {
+    for (name, drained, expected) in [
+        ("not-drained", false, b"".as_slice()),
+        ("drained", true, b"prompt> ".as_slice()),
+    ] {
+        let mut parser = parser_for_test(name);
+        let generation = UserPtyInputGeneration::default();
+        parser.set_prompt_epoch_exchange(generation.prompt_epoch_exchange());
+        feed_enhanced_prompt_ready(&mut parser);
+        parser.feed(b"prompt> ").expect("feed prompt");
+
+        publish_prompt_snapshot_if_drained(&parser, drained);
+        generation.bump();
+        parser
+            .feed(b"\x1b]1337;COSH;{\"e\":\"slash_guard\",\"t\":\"test-marker-token\"}\x07")
+            .expect("arm slash guard");
+
+        assert_eq!(
+            parser
+                .pending_slash_guard_prompt_for_test()
+                .expect("pending slash guard"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn buffered_pty_output_stays_before_queued_candidate_redraw() {
+    let mut parser = parser_for_test("buffered-output-before-redraw");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    let mut display_start = 0usize;
+    let mut echoed = 0usize;
+    let mut prompt_presentation = PromptPresentation::new(false);
+
+    parser
+        .feed(b"BACKGROUND\r\n")
+        .expect("feed buffered PTY output");
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+            input: b"/cancel".to_vec(),
+            hint: None,
+        })
+        .expect("queue candidate redraw");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write older PTY output");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("draw queued candidate");
+
+    assert_eq!(output, b"BACKGROUND\r\n\r\x1b[2Kprompt> /cancel");
 }
 
 #[test]
@@ -49,6 +211,7 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
     parser.feed(b"bash-4.4$ ").expect("feed prompt");
     let mut display_start = parser.display.len();
     let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut output = Vec::new();
 
     restore_prompt_display_before_handoff(
@@ -56,6 +219,7 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
         &mut output,
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
     )
     .expect("restore prompt");
 
@@ -65,8 +229,14 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
     parser
         .feed(b"bash-4.4$ echo ok\r\n")
         .expect("feed echoed handoff");
-    write_pending_display(&parser, &mut output, &mut display_start, &mut prompt_replay)
-        .expect("write echoed handoff");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write echoed handoff");
 
     assert_eq!(String::from_utf8_lossy(&output), "bash-4.4$ echo ok\r\n");
     assert!(!prompt_replay.is_armed());
@@ -79,6 +249,7 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
     parser.feed(b"prompt> \x1b[?2004h").expect("feed prompt");
     let mut display_start = parser.display.len();
     let (generation, mut prompt_replay) = tracker_for_test();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut output = Vec::new();
 
     restore_prompt_display_before_handoff(
@@ -86,6 +257,7 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
         &mut output,
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
     )
     .expect("restore prompt");
     assert!(prompt_replay.is_armed());
@@ -97,13 +269,25 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
     parser
         .feed(b"\x1b[?2004l\r\r\n")
         .expect("feed empty enter accept");
-    write_pending_display(&parser, &mut output, &mut display_start, &mut prompt_replay)
-        .expect("write empty enter accept");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write empty enter accept");
     parser
         .feed(b"prompt> \x1b[?2004h")
         .expect("feed fresh prompt");
-    write_pending_display(&parser, &mut output, &mut display_start, &mut prompt_replay)
-        .expect("write fresh prompt");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write fresh prompt");
 
     assert_eq!(
         String::from_utf8_lossy(&output),
@@ -139,6 +323,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
+    let prompt_presentation = PromptPresentation::new(false);
 
     let barrier_count = |parser: &OscParser| {
         parser
@@ -166,6 +351,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
+        &prompt_presentation,
     )
     .expect("drain pty writes");
     assert_eq!(
@@ -190,6 +376,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
+        &prompt_presentation,
     )
     .expect("drain post-prompt write");
     assert_eq!(
@@ -206,6 +393,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
+    let prompt_presentation = PromptPresentation::new(false);
 
     sender
         .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -220,16 +408,216 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         "",
         &mut echoed,
         &mut prompt_replay,
+        &prompt_presentation,
     )
     .expect("draw candidate hint");
 
     assert_eq!(
         output,
-        b"\x1b[K/m\x1b7\x1b[2m /mode approval [recommend|auto|trust]\x1b[0m\x1b8"
+        b"\x1b[K/m\x1b7\x1b[?7l\x1b[2m /mode approval [recommend|auto|trust]\x1b[0m\x1b[?7h\x1b8"
     );
     assert_eq!(echoed, 2);
     assert!(!output.windows(3).any(|window| window == b"\x1b[s"));
     assert!(!output.windows(3).any(|window| window == b"\x1b[u"));
+}
+
+#[test]
+fn isolated_candidate_repaints_keep_prompt_presentation_owner() {
+    let mut parser = parser_for_test("candidate-prompt-owner");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    let mut echoed = 0usize;
+    let prompt_presentation = PromptPresentation::new(true);
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+            input: "你好".as_bytes().to_vec(),
+            hint: None,
+        })
+        .expect("queue candidate redraw");
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateCommit(
+            "你好".as_bytes().to_vec(),
+        ))
+        .expect("queue candidate commit");
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateClearLine)
+        .expect("queue candidate clear");
+
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+        &prompt_presentation,
+    )
+    .expect("draw isolated candidate states");
+
+    assert_eq!(
+        String::from_utf8(output).expect("utf8 output"),
+        "\r\x1b[2K◇ prompt> 你好\r\x1b[2K◇ prompt> 你好\n\r\x1b[2K◇ prompt> "
+    );
+}
+
+// A wrapped hint tail would land below the erase-to-EOL reach of the next
+// redraw/commit, so the hint write must keep auto-wrap disabled in both
+// the native and the prompt-owned branches.
+#[test]
+fn candidate_hint_disables_autowrap_in_both_branches() {
+    for prompt in ["", "prompt> "] {
+        let mut parser = parser_for_test("candidate-hint-autowrap");
+        let (_generation, mut prompt_replay) = tracker_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut output = Vec::new();
+        let mut echoed = 0usize;
+        let prompt_presentation = PromptPresentation::new(false);
+
+        sender
+            .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+                input: b"/s".to_vec(),
+                hint: Some("/status · /stats · /session · /skills".to_string()),
+            })
+            .expect("queue candidate redraw");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            prompt,
+            &mut echoed,
+            &mut prompt_replay,
+            &prompt_presentation,
+        )
+        .expect("draw candidate hint");
+
+        let rendered = String::from_utf8(output).expect("utf8 output");
+        let disable = rendered.find("\x1b[?7l").expect("auto-wrap disabled");
+        let hint = rendered.find("/status · /stats").expect("hint rendered");
+        let enable = rendered.find("\x1b[?7h").expect("auto-wrap restored");
+        assert!(
+            disable < hint && hint < enable,
+            "hint must render inside the no-wrap window: {rendered:?}"
+        );
+    }
+}
+
+// A prompt ghost can be longer than the remaining terminal row. Its clear
+// restores the saved prompt cursor and erases that physical line, so a wrapped
+// tail would survive below the next draft as stale screen content.
+#[test]
+fn prompt_ghost_disables_autowrap_before_restoring_the_cursor() {
+    let mut output = Vec::new();
+
+    write_prompt_ghost(
+        &mut output,
+        "Analyze and handle the previous input that did not run successfully",
+        false,
+    )
+    .expect("render prompt ghost");
+
+    let rendered = String::from_utf8(output).expect("utf8 output");
+    let disable = rendered.find("\x1b[?7l").expect("auto-wrap disabled");
+    let ghost = rendered.find("Analyze and handle").expect("ghost rendered");
+    let enable = rendered.find("\x1b[?7h").expect("auto-wrap restored");
+    let restore = rendered.find(RESTORE_CURSOR).expect("cursor restored");
+    assert!(
+        disable < ghost && ghost < enable && enable < restore,
+        "ghost must render inside the no-wrap window: {rendered:?}"
+    );
+}
+
+struct OneShotFailingWriter {
+    output: Vec<u8>,
+    fail_after: usize,
+    failed: bool,
+}
+
+impl Write for OneShotFailingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if !self.failed && self.output.len() >= self.fail_after {
+            self.failed = true;
+            return Err(io::Error::other("injected prompt ghost failure"));
+        }
+        if !self.failed && self.output.len() + bytes.len() > self.fail_after {
+            let accepted = self.fail_after - self.output.len();
+            self.output.extend_from_slice(&bytes[..accepted]);
+            return Ok(accepted);
+        }
+        self.output.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn prompt_ghost_restores_terminal_after_a_recoverable_partial_write() {
+    let fail_after = b"\x1b7\x1b[?7l\x1b[2mAnalyze".len();
+    let mut output = OneShotFailingWriter {
+        output: Vec::new(),
+        fail_after,
+        failed: false,
+    };
+
+    let error = write_prompt_ghost(
+        &mut output,
+        "Analyze and handle the previous input that did not run successfully",
+        false,
+    )
+    .expect_err("body write must preserve the injected error");
+
+    assert_eq!(error.to_string(), "injected prompt ghost failure");
+    assert!(output.failed, "writer must exercise its one-shot failure");
+    assert!(
+        output.output.ends_with(b"\x1b[0m\x1b[?7h\x1b8"),
+        "recoverable error must restore SGR, autowrap, and cursor: {:?}",
+        String::from_utf8_lossy(&output.output)
+    );
+}
+
+#[test]
+fn overlay_does_not_restore_an_unpaired_cursor_after_save_failure() {
+    let mut output = OneShotFailingWriter {
+        output: Vec::new(),
+        fail_after: 0,
+        failed: false,
+    };
+
+    let error = write_no_wrap_overlay(&mut output, |output| output.write_all(b"body"))
+        .expect_err("cursor save must preserve the injected error");
+
+    assert_eq!(error.to_string(), "injected prompt ghost failure");
+    assert_eq!(output.output, b"\x1b[0m\x1b[?7h");
+    assert!(
+        !output.output.windows(2).any(|bytes| bytes == b"\x1b8"),
+        "a failed DECSC must not consume an older cursor save"
+    );
+}
+
+#[test]
+fn overlay_returns_first_cleanup_error_after_restoring_later_state() {
+    let body = b"\x1b[2m cleanup";
+    let fail_after = SAVE_CURSOR.len() + b"\x1b[?7l".len() + body.len();
+    let mut output = OneShotFailingWriter {
+        output: Vec::new(),
+        fail_after,
+        failed: false,
+    };
+
+    let error = write_no_wrap_overlay(&mut output, |output| output.write_all(body))
+        .expect_err("first cleanup write must preserve the injected error");
+
+    assert_eq!(error.to_string(), "injected prompt ghost failure");
+    assert!(output.failed, "writer must exercise its cleanup failure");
+    assert!(
+        output.output.ends_with(b"\x1b[?7h\x1b8"),
+        "later cleanup must restore autowrap and cursor: {:?}",
+        String::from_utf8_lossy(&output.output)
+    );
 }
 
 #[test]
@@ -553,6 +941,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     let (_generation, mut prompt_replay) = tracker_for_test();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut null = File::open("/dev/null").expect("open null");
 
     let action = resolve_pty_emit(
@@ -568,9 +957,11 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         },
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
         &mut pending_terminal_restore,
         Path::new("/tmp/cosh-test-recovery"),
         Path::new("/tmp/cosh-test-handoff"),
+        false,
     )
     .expect("restore prompt");
     assert_eq!(action, RawObserverAction::Continue);
@@ -583,12 +974,13 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         &mut output,
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
         &input_mode,
     )
     .expect("write prompt fragment");
 
     assert!(
-        output.ends_with(b"\x1b7\x1b[2m objdump\x1b[0m\x1b8"),
+        output.ends_with(b"\x1b7\x1b[?7l\x1b[2m objdump\x1b[0m\x1b[?7h\x1b8"),
         "{}",
         String::from_utf8_lossy(&output)
     );

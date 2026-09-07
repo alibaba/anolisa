@@ -1,11 +1,8 @@
 //! Trusted peer control socket.
 //!
-//! Provides a Unix domain socket control plane authenticated via
-//! `SO_PEERCRED` + executable identity + starttime. External daemons
-//! connect to this socket; SkillFS verifies the peer's pid/uid/gid,
-//! resolves the peer's `/proc/<pid>/exe` to match a pinned `(dev, ino)`,
-//! and reads `/proc/<pid>/stat` field 22 (starttime) for PID reuse
-//! defense.
+//! Provides a Unix domain socket control plane authenticated either by
+//! the legacy executable identity contract or an explicitly configured
+//! shared-key challenge-response contract for isolated containers.
 //!
 //! ## Protocol
 //!
@@ -64,8 +61,15 @@ use tracing::{debug, info, warn};
 use super::activation::{ACTIVATION_XATTR, ActivationRecord};
 use super::activation_reload::ReloadOutcome;
 use super::active::{ActiveSkillResolver, ActiveTarget};
+#[cfg(test)]
+use super::auth::authenticate_client;
+use super::auth::{
+    AuthenticatedSession, CONTROL_CLIENT_DOMAIN, CONTROL_SERVER_DOMAIN, FrameSender, SharedSecret,
+    authenticate_server,
+};
 use super::ledger::validate_skill_name_component;
 use super::protocol_events::{ProtocolEvent, ProtocolEventWriter};
+use super::skill_dir::{SkillDirError, VerifiedSkillDir, open_verified_skill_dir};
 use super::trusted_writer::FileId;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -522,8 +526,7 @@ fn extract_and_validate_meta_request<'a>(
             ControlResponse::err("invalid_request", "missing or non-string 'skillName' field")
         })?;
 
-    validate_skill_name_component(skill_name)
-        .map_err(|e| ControlResponse::err("invalid_skill_name", e.to_string()))?;
+    validate_skill_id(skill_name, ctx.layout)?;
 
     let activation_value = raw
         .get("activation")
@@ -542,6 +545,39 @@ fn extract_and_validate_meta_request<'a>(
     let skill_dir = ctx.source_root.join(skill_name);
 
     Ok((skill_name, activation_json, skill_dir))
+}
+
+/// Validate a relative Skill id without weakening the ledger's
+/// single-component name contract.
+fn validate_skill_id(skill_id: &str, layout: SkillLayout) -> Result<(), ControlResponse> {
+    let components: Vec<&str> = skill_id.split('/').collect();
+    let valid_depth = match layout {
+        SkillLayout::Flat => components.len() == 1,
+        SkillLayout::Hermes => matches!(components.len(), 1 | 2),
+    };
+    if !valid_depth {
+        return Err(ControlResponse::err(
+            "invalid_skill_name",
+            format!("skill id '{skill_id}' is incompatible with {layout:?} layout"),
+        ));
+    }
+
+    if components
+        .iter()
+        .any(|component| component.starts_with('.'))
+        || components.first() == Some(&"skill-discover")
+    {
+        return Err(ControlResponse::err(
+            "invalid_skill_name",
+            format!("skill id '{skill_id}' refers to a managed/reserved path"),
+        ));
+    }
+
+    for component in components {
+        validate_skill_name_component(component)
+            .map_err(|e| ControlResponse::err("invalid_skill_name", e.to_string()))?;
+    }
+    Ok(())
 }
 
 fn reload_and_emit(
@@ -643,10 +679,13 @@ fn dispatch_meta_write_activation(
         Err(resp) => return resp,
     };
 
-    let source_root = &ctx.as_ref().unwrap().source_root;
-    if let Err(resp) =
-        atomic_write_activation_fd(source_root, skill_name, activation_json.as_bytes())
-    {
+    let context = ctx.as_ref().unwrap();
+    if let Err(resp) = atomic_write_activation_fd(
+        &context.source_root,
+        skill_name,
+        context.layout,
+        activation_json.as_bytes(),
+    ) {
         return resp;
     }
 
@@ -661,7 +700,8 @@ fn dispatch_meta_write_activation(
 
 /// Fully fd-anchored atomic activation write.
 ///
-/// Opens `source_root` → `openat(skill_name, O_NOFOLLOW|O_DIRECTORY)` →
+/// Opens `source_root` → each Skill-id component with
+/// `openat(O_NOFOLLOW|O_DIRECTORY)` →
 /// `mkdirat(.skill-meta)` → `openat(.skill-meta, O_NOFOLLOW|O_DIRECTORY)` →
 /// `openat(tmp, O_CREAT|O_EXCL)` → write+fsync → `renameat(tmp, activation.json)` →
 /// fsync dir.
@@ -672,17 +712,18 @@ fn dispatch_meta_write_activation(
 fn atomic_write_activation_fd(
     source_root: &Path,
     skill_name: &str,
+    layout: SkillLayout,
     json_bytes: &[u8],
 ) -> Result<(), ControlResponse> {
     use std::ffi::CString;
     use std::os::unix::io::FromRawFd;
 
-    let (_source_guard, skill_guard) = open_skill_dir_nofollow(source_root, skill_name)?;
-    let skill_fd = skill_guard.0;
+    let skill_guard = open_skill_dir_for_write(source_root, skill_name, layout)?;
+    let skill_fd = skill_guard.as_raw_fd();
 
     // 3. Ensure .skill-meta exists via mkdirat. EEXIST is fine.
     let c_meta = CString::new(".skill-meta").unwrap();
-    let rc = unsafe { libc::mkdirat(skill_fd, c_meta.as_ptr(), 0o755) };
+    let rc = unsafe { libc::mkdirat(skill_fd, c_meta.as_ptr(), 0o700) };
     if rc != 0 {
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() != Some(libc::EEXIST) {
@@ -709,6 +750,14 @@ fn atomic_write_activation_fd(
         ));
     }
     let meta_dir_file = unsafe { std::fs::File::from_raw_fd(meta_fd) };
+    let rc = unsafe { libc::fchmod(meta_fd, 0o700) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        return Err(ControlResponse::err(
+            "write_failed",
+            format!("failed to secure .skill-meta permissions: {e}"),
+        ));
+    }
 
     // 5. Create temp file via openat on meta_fd.
     let tmp_name = format!(
@@ -728,7 +777,7 @@ fn atomic_write_activation_fd(
             meta_fd,
             c_tmp.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-            0o644,
+            0o600,
         )
     };
     if tmp_fd < 0 {
@@ -771,104 +820,76 @@ fn atomic_write_activation_fd(
     Ok(())
 }
 
-/// RAII guard that closes a raw fd on drop.
-struct FdGuard(libc::c_int);
-
-impl Drop for FdGuard {
-    fn drop(&mut self) {
-        if self.0 >= 0 {
-            unsafe { libc::close(self.0) };
-        }
-    }
-}
-
-/// Open the source root as a directory fd, then open the skill
-/// directory relative to it with `O_NOFOLLOW|O_DIRECTORY`.
-///
-/// Returns (source_guard, skill_guard) on success. On error, returns
-/// a structured `ControlResponse` distinguishing symlinks, missing
-/// directories, and other failures.
-fn open_skill_dir_nofollow(
+/// Resolve the write target through the shared fd-anchored Skill boundary.
+fn open_skill_dir_for_write(
     source_root: &Path,
     skill_name: &str,
-) -> Result<(FdGuard, FdGuard), ControlResponse> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    layout: SkillLayout,
+) -> Result<VerifiedSkillDir, ControlResponse> {
+    let components: Vec<_> = skill_name.split('/').collect();
+    open_verified_skill_dir(source_root, layout, &components)
+        .map_err(|error| map_skill_dir_error_for_write(error, skill_name, layout))
+}
 
-    let c_source = CString::new(source_root.as_os_str().as_bytes())
-        .map_err(|_| ControlResponse::err("write_failed", "source root path contains NUL"))?;
-    let source_fd = unsafe {
-        libc::open(
-            c_source.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if source_fd < 0 {
-        let e = std::io::Error::last_os_error();
-        return Err(ControlResponse::err(
+fn map_skill_dir_error_for_write(
+    error: SkillDirError,
+    skill_name: &str,
+    layout: SkillLayout,
+) -> ControlResponse {
+    match error {
+        SkillDirError::InvalidDepth => ControlResponse::err(
+            "invalid_skill_name",
+            format!("skill id '{skill_name}' is incompatible with {layout:?} layout"),
+        ),
+        SkillDirError::RootPathContainsNul => {
+            ControlResponse::err("write_failed", "source root path contains NUL")
+        }
+        SkillDirError::RootOpen(error) => ControlResponse::err(
             "write_failed",
-            format!("failed to open source root: {e}"),
-        ));
-    }
-    let source_guard = FdGuard(source_fd);
-
-    let c_skill = CString::new(skill_name.as_bytes())
-        .map_err(|_| ControlResponse::err("write_failed", "skill name contains NUL"))?;
-    let skill_fd = unsafe {
-        libc::openat(
-            source_fd,
-            c_skill.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if skill_fd < 0 {
-        let e = std::io::Error::last_os_error();
-        let errno = e.raw_os_error().unwrap_or(0);
-
-        // O_NOFOLLOW on a symlink returns ELOOP on some kernels,
-        // ENOTDIR on others (when combined with O_DIRECTORY). Use
-        // fstatat to distinguish "is a symlink" from "truly not a
-        // directory" so we return the right error code.
-        if errno == libc::ELOOP {
-            return Err(ControlResponse::err(
-                "invalid_skill_name",
-                format!("skill directory '{skill_name}' is a symlink; refusing to follow"),
-            ));
+            format!("failed to open source root: {error}"),
+        ),
+        SkillDirError::ComponentContainsNul => {
+            ControlResponse::err("write_failed", "skill name contains NUL")
         }
-        if errno == libc::ENOTDIR {
-            let mut st: libc::stat = unsafe { std::mem::zeroed() };
-            let rc = unsafe {
-                libc::fstatat(
-                    source_fd,
-                    c_skill.as_ptr(),
-                    &mut st,
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-                return Err(ControlResponse::err(
-                    "invalid_skill_name",
-                    format!("skill directory '{skill_name}' is a symlink; refusing to follow"),
-                ));
-            }
-            return Err(ControlResponse::err(
-                "skill_not_found",
-                format!("skill directory '{skill_name}' is not a directory"),
-            ));
-        }
-        if errno == libc::ENOENT {
-            return Err(ControlResponse::err(
-                "skill_not_found",
-                format!("skill directory '{skill_name}' does not exist"),
-            ));
-        }
-        return Err(ControlResponse::err(
+        SkillDirError::ComponentSymlink { component } => ControlResponse::err(
+            "invalid_skill_name",
+            format!(
+                "skill path component '{component}' in '{skill_name}' is a symlink; refusing to follow"
+            ),
+        ),
+        SkillDirError::ComponentMissing { component } => ControlResponse::err(
+            "skill_not_found",
+            format!("skill path component '{component}' in '{skill_name}' does not exist"),
+        ),
+        SkillDirError::ComponentNotDirectory { component } => ControlResponse::err(
+            "skill_not_found",
+            format!("skill path component '{component}' in '{skill_name}' is not a directory"),
+        ),
+        SkillDirError::ComponentOpen { component, source } => ControlResponse::err(
             "write_failed",
-            format!("failed to open skill directory '{skill_name}': {e}"),
-        ));
+            format!(
+                "failed to open skill path component '{component}' in '{skill_name}': {source}"
+            ),
+        ),
+        SkillDirError::NestedBelowTopLevelSkill { parent, child } => ControlResponse::err(
+            "invalid_skill_layout",
+            format!(
+                "'{parent}' is a top-level skill, not a category; '{child}' is a subdirectory, not a nested Skill"
+            ),
+        ),
+        SkillDirError::MarkerInspect(error) => ControlResponse::err(
+            "write_failed",
+            format!("failed to inspect SKILL.md: {error}"),
+        ),
+        SkillDirError::MissingMarker => ControlResponse::err(
+            "invalid_skill_layout",
+            format!("'{skill_name}' has no regular SKILL.md and is not a Skill"),
+        ),
+        SkillDirError::Identity(error) => ControlResponse::err(
+            "write_failed",
+            format!("failed to stat skill directory: {error}"),
+        ),
     }
-
-    Ok((source_guard, FdGuard(skill_fd)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -885,8 +906,13 @@ fn dispatch_meta_set_activation_xattr(
         Err(resp) => return resp,
     };
 
-    let source_root = &ctx.as_ref().unwrap().source_root;
-    if let Err(resp) = set_activation_xattr_fd(source_root, skill_name, &activation_json) {
+    let context = ctx.as_ref().unwrap();
+    if let Err(resp) = set_activation_xattr_fd(
+        &context.source_root,
+        skill_name,
+        context.layout,
+        &activation_json,
+    ) {
         return resp;
     }
 
@@ -894,17 +920,18 @@ fn dispatch_meta_set_activation_xattr(
     ControlResponse::ok(result)
 }
 
-/// Fd-anchored xattr write: open source_root → openat(skill_name,
-/// O_NOFOLLOW|O_DIRECTORY) → fsetxattr on the verified fd.
+/// Fd-anchored xattr write: open source_root → each Skill-id component
+/// with `openat(O_NOFOLLOW|O_DIRECTORY)` → fsetxattr on the verified fd.
 fn set_activation_xattr_fd(
     source_root: &Path,
     skill_name: &str,
+    layout: SkillLayout,
     json_str: &str,
 ) -> Result<(), ControlResponse> {
     use std::ffi::CString;
 
-    let (_source_guard, skill_guard) = open_skill_dir_nofollow(source_root, skill_name)?;
-    let skill_fd = skill_guard.0;
+    let skill_guard = open_skill_dir_for_write(source_root, skill_name, layout)?;
+    let skill_fd = skill_guard.as_raw_fd();
 
     let c_name = CString::new(ACTIVATION_XATTR)
         .map_err(|_| ControlResponse::err("write_failed", "xattr name contains NUL"))?;
@@ -1229,6 +1256,7 @@ fn resolve_socket_liveness(
 
 /// One non-blocking `connect(2)` attempt; see [`probe_socket_liveness`].
 fn probe_socket_liveness_once(path: &Path) -> ProbeOnce {
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
 
     let bytes = path.as_os_str().as_bytes();
@@ -1255,7 +1283,8 @@ fn probe_socket_liveness_once(path: &Path) -> ProbeOnce {
     if fd < 0 {
         return ProbeOnce::Ambiguous(std::io::Error::last_os_error());
     }
-    let _guard = FdGuard(fd);
+    // SAFETY: `socket` returned a new fd and ownership is transferred once.
+    let _guard = unsafe { OwnedFd::from_raw_fd(fd) };
 
     let rc = unsafe {
         libc::connect(
@@ -1530,14 +1559,63 @@ fn socket_identity(path: &Path) -> Option<FileId> {
     })
 }
 
+fn remove_socket_if_identity_matches(path: &Path, identity: Option<FileId>) {
+    if identity.is_some() && identity == socket_identity(path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Removes a newly bound socket if startup exits before ownership transfers
+/// to [`ControlSocketHandle`]. Identity matching protects replacements.
+struct BoundSocketGuard {
+    socket_path: PathBuf,
+    bound_identity: Option<FileId>,
+    armed: bool,
+}
+
+impl BoundSocketGuard {
+    fn new(socket_path: PathBuf) -> Self {
+        let bound_identity = socket_identity(&socket_path);
+        Self {
+            socket_path,
+            bound_identity,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) -> Option<FileId> {
+        self.armed = false;
+        self.bound_identity
+    }
+}
+
+impl Drop for BoundSocketGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_socket_if_identity_matches(&self.socket_path, self.bound_identity);
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Server
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct ControlSocketServer {
-    config: ControlSocketConfig,
+    socket_path: PathBuf,
+    authentication: ControlSocketAuthentication,
     context: Option<Arc<ControlSocketContext>>,
     shutdown: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+enum ControlSocketAuthentication {
+    Executable(TrustedPeerConfig),
+    Hmac {
+        secret: SharedSecret,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    },
 }
 
 /// Handle returned to the caller for shutdown coordination.
@@ -1576,12 +1654,7 @@ impl ControlSocketHandle {
 
         // Only remove the socket if it is still the exact object we bound.
         // If the path was replaced by another socket or object, leave it.
-        match (self.bound_identity, socket_identity(&self.socket_path)) {
-            (Some(bound), Some(current)) if bound == current => {
-                let _ = std::fs::remove_file(&self.socket_path);
-            }
-            _ => {}
-        }
+        remove_socket_if_identity_matches(&self.socket_path, self.bound_identity);
     }
 }
 
@@ -1598,10 +1671,28 @@ impl Drop for ControlSocketHandle {
 impl ControlSocketServer {
     pub fn new(config: ControlSocketConfig) -> Self {
         Self {
-            config,
+            socket_path: config.socket_path,
+            authentication: ControlSocketAuthentication::Executable(config.trusted_peer),
             context: None,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Builds a server using shared-key authentication without consulting
+    /// the peer executable across process or mount namespaces.
+    pub fn new_hmac(
+        socket_path: PathBuf,
+        key_file: &Path,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let secret = SharedSecret::load(key_file)?;
+        Ok(Self {
+            socket_path,
+            authentication: ControlSocketAuthentication::Hmac { secret, uid, gid },
+            context: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub fn with_context(mut self, context: ControlSocketContext) -> Self {
@@ -1612,54 +1703,79 @@ impl ControlSocketServer {
     /// Start the server on a dedicated thread. Returns a handle for
     /// shutdown coordination.
     pub fn start(self) -> Result<ControlSocketHandle, Box<dyn std::error::Error>> {
+        self.start_with_listener_setup(|listener| listener.set_nonblocking(true))
+    }
+
+    fn start_with_listener_setup<F>(
+        self,
+        setup_listener: F,
+    ) -> Result<ControlSocketHandle, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&UnixListener) -> std::io::Result<()>,
+    {
         // Secure socket parent directory to 0o700 before bind to
         // eliminate the bind-to-chmod permission window. Runs before
         // the lifecycle lock so that create_dir_all provides the parent
         // the lock file lives in.
-        secure_socket_parent(&self.config.socket_path)?;
+        secure_socket_parent(&self.socket_path)?;
 
         // Acquire the non-blocking lifecycle lock before touching the
         // socket path. A second instance targeting the same endpoint
         // fails here instead of unlinking a live socket.
-        let lifecycle_lock = acquire_lifecycle_lock(&self.config.socket_path)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.socket_path)?;
 
         // Reclaim only a confirmed-stale, owned socket (checked while the
         // lock is held). Fails closed on non-sockets, wrong owner, or a
         // live listener.
-        preflight_socket_path(&self.config.socket_path)?;
+        preflight_socket_path(&self.socket_path)?;
 
-        let listener = UnixListener::bind(&self.config.socket_path)?;
+        let listener = UnixListener::bind(&self.socket_path)?;
+        let bound_socket_guard = BoundSocketGuard::new(self.socket_path.clone());
+        setup_listener(&listener)?;
 
         // Set socket file permissions to 0o600.
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&self.config.socket_path, perms)?;
+            std::fs::set_permissions(&self.socket_path, perms)?;
         }
 
-        // Record the bound socket identity so shutdown only removes the
-        // exact object we created, never a replacement at the same path.
-        let bound_identity = socket_identity(&self.config.socket_path);
-
         let shutdown = self.shutdown.clone();
-        let config = self.config.clone();
+        let authentication = self.authentication.clone();
         let context = self.context.clone();
-        let socket_path = self.config.socket_path.clone();
+        let socket_path = self.socket_path.clone();
 
-        info!(
-            socket = %socket_path.display(),
-            trusted_peer_exe = %config.trusted_peer.exe_path.display(),
-            trusted_peer_file_id = %config.trusted_peer.exe_file_id,
-            "control socket server starting"
-        );
+        match &authentication {
+            ControlSocketAuthentication::Executable(peer) => info!(
+                socket = %socket_path.display(),
+                trusted_peer_exe = %peer.exe_path.display(),
+                trusted_peer_file_id = %peer.exe_file_id,
+                auth_mode = "executable",
+                "control socket server starting"
+            ),
+            ControlSocketAuthentication::Hmac { .. } => info!(
+                socket = %socket_path.display(),
+                auth_mode = "hmac-sha256",
+                "control socket server starting"
+            ),
+        }
 
         let shutdown_for_thread = shutdown.clone();
         let thread = std::thread::Builder::new()
             .name("skillfs-control-socket".to_string())
             .spawn(move || {
-                run_server_loop(&listener, &config, context.as_deref(), &shutdown_for_thread);
+                run_server_loop(
+                    &listener,
+                    &authentication,
+                    context.as_deref(),
+                    &shutdown_for_thread,
+                );
             })?;
+
+        // Ownership transfers to the handle only after every fallible
+        // startup step has completed.
+        let bound_identity = bound_socket_guard.disarm();
 
         Ok(ControlSocketHandle {
             socket_path,
@@ -1677,7 +1793,7 @@ const ACCEPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 fn run_server_loop(
     listener: &UnixListener,
-    config: &ControlSocketConfig,
+    authentication: &ControlSocketAuthentication,
     ctx: Option<&ControlSocketContext>,
     shutdown: &AtomicBool,
 ) {
@@ -1686,17 +1802,13 @@ fn run_server_loop(
     // another object (connecting to the path to unblock a blocking
     // accept would not work in that case). Connections are still handled
     // one at a time on this single thread — no thread-per-request.
-    listener
-        .set_nonblocking(true)
-        .unwrap_or_else(|e| warn!("failed to set listener non-blocking: {e}"));
-
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _addr)) => {
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                handle_connection(stream, config, ctx);
+                handle_connection(stream, authentication, ctx);
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(ACCEPT_POLL_INTERVAL);
@@ -1722,76 +1834,118 @@ const CONNECTION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const MAX_CONTROL_REQUEST_BYTES: u64 = 64 * 1024;
 
 fn handle_connection(
-    stream: UnixStream,
-    config: &ControlSocketConfig,
+    mut stream: UnixStream,
+    authentication: &ControlSocketAuthentication,
     ctx: Option<&ControlSocketContext>,
 ) {
     // The listener is non-blocking; ensure the accepted stream is blocking
     // so the read timeout governs the per-connection hold time.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECTION_READ_TIMEOUT));
 
-    let peer_identity = match identify_peer(&stream) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("failed to identify peer: {e}");
-            let resp = ControlResponse::err("peer_identification_failed", e.to_string());
-            let _ = send_response(&stream, &resp);
-            return;
+    let (credentials, authenticated_session) = match authentication {
+        ControlSocketAuthentication::Executable(config) => {
+            let peer_identity = match identify_peer(&stream) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!("failed to identify peer executable: {e}");
+                    let resp = ControlResponse::err("peer_identification_failed", e.to_string());
+                    let _ = send_response(&mut stream, &resp, None);
+                    return;
+                }
+            };
+            let verify = verify_peer(config, &peer_identity);
+            if !verify.is_accepted() {
+                let msg = verify
+                    .denial_message()
+                    .unwrap_or_else(|| "peer verification failed".to_string());
+                warn!(pid = peer_identity.credentials.pid, reason = %msg, "control socket peer rejected");
+                let resp = ControlResponse::err("permission_denied", msg);
+                let _ = send_response(&mut stream, &resp, None);
+                return;
+            }
+            (peer_identity.credentials, None)
+        }
+        ControlSocketAuthentication::Hmac { secret, uid, gid } => {
+            let credentials = match get_peer_credentials(&stream) {
+                Ok(credentials) => credentials,
+                Err(e) => {
+                    warn!("failed to identify HMAC peer credentials: {e}");
+                    return;
+                }
+            };
+            if uid.is_some_and(|expected| credentials.uid != expected)
+                || gid.is_some_and(|expected| credentials.gid != expected)
+            {
+                warn!(
+                    pid = credentials.pid,
+                    "control socket peer credentials rejected"
+                );
+                return;
+            }
+            let session = match authenticate_server(
+                &mut stream,
+                secret,
+                CONTROL_CLIENT_DOMAIN,
+                CONTROL_SERVER_DOMAIN,
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    warn!(pid = credentials.pid, reason = %error, "control socket HMAC peer rejected");
+                    return;
+                }
+            };
+            (credentials, Some(session))
         }
     };
 
-    debug!(
-        pid = peer_identity.credentials.pid,
-        uid = peer_identity.credentials.uid,
-        gid = peer_identity.credentials.gid,
-        exe = ?peer_identity.exe_path,
-        "control socket peer connected"
-    );
+    debug!(pid = credentials.pid, "control socket peer accepted");
 
-    let verify = verify_peer(&config.trusted_peer, &peer_identity);
-    if !verify.is_accepted() {
-        let msg = verify
-            .denial_message()
-            .unwrap_or_else(|| "peer verification failed".to_string());
-        warn!(
-            pid = peer_identity.credentials.pid,
-            reason = %msg,
-            "control socket peer rejected"
-        );
-        let resp = ControlResponse::err("permission_denied", msg);
-        let _ = send_response(&stream, &resp);
-        return;
-    }
-
-    debug!(
-        pid = peer_identity.credentials.pid,
-        "control socket peer accepted"
-    );
-
-    let reader = BufReader::new(&stream);
-    let mut limited = reader.take(MAX_CONTROL_REQUEST_BYTES + 1);
-    let mut line = String::new();
-    match limited.read_line(&mut line) {
-        Ok(0) => return,
-        Ok(n) if n as u64 > MAX_CONTROL_REQUEST_BYTES => {
-            warn!(
-                pid = peer_identity.credentials.pid,
-                "control socket request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"
-            );
-            let resp = ControlResponse::err(
-                "invalid_request",
-                format!("request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"),
-            );
-            let _ = send_response(&stream, &resp);
-            return;
+    let line = if let Some(session) = &authenticated_session {
+        match session.read_frame(
+            &mut stream,
+            FrameSender::Client,
+            MAX_CONTROL_REQUEST_BYTES as usize,
+        ) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(line) => line,
+                Err(error) => {
+                    debug!("control socket request is not UTF-8: {error}");
+                    return;
+                }
+            },
+            Err(error) => {
+                warn!(pid = credentials.pid, reason = %error, "control socket business frame rejected");
+                return;
+            }
         }
-        Ok(_) => {}
-        Err(e) => {
-            debug!("control socket read error: {e}");
-            return;
+    } else {
+        let reader = BufReader::new(&stream);
+        let mut limited = reader.take(MAX_CONTROL_REQUEST_BYTES + 1);
+        let mut line = String::new();
+        match limited.read_line(&mut line) {
+            Ok(0) => return,
+            Ok(n) if n as u64 > MAX_CONTROL_REQUEST_BYTES => {
+                warn!(
+                    pid = credentials.pid,
+                    "control socket request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"
+                );
+                let resp = ControlResponse::err(
+                    "invalid_request",
+                    format!("request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"),
+                );
+                let _ = send_response(&mut stream, &resp, None);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                debug!("control socket read error: {e}");
+                return;
+            }
         }
-    }
+        line
+    };
 
     if line.trim().is_empty() {
         return;
@@ -1802,16 +1956,23 @@ fn handle_connection(
         Err(err_resp) => err_resp,
     };
 
-    let _ = send_response(&stream, &resp);
+    let _ = send_response(&mut stream, &resp, authenticated_session.as_ref());
 }
 
-fn send_response(stream: &UnixStream, resp: &ControlResponse) -> std::io::Result<()> {
-    let mut writer = stream;
-    let json = serde_json::to_string(resp)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writer.write_all(json.as_bytes())?;
-    writer.write_all(b"\n")?;
-    writer.flush()
+fn send_response(
+    stream: &mut UnixStream,
+    resp: &ControlResponse,
+    session: Option<&AuthenticatedSession>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_vec(resp)?;
+    if let Some(session) = session {
+        session.write_frame(stream, FrameSender::Server, &json)?;
+    } else {
+        stream.write_all(&json)?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2000,13 +2161,53 @@ mod tests {
     // ── Meta write dispatch (unit) ─────────────────────────────────────
 
     fn test_ctx(source_root: &Path) -> ControlSocketContext {
+        test_ctx_with_layout(source_root, SkillLayout::Flat)
+    }
+
+    fn test_ctx_with_layout(source_root: &Path, layout: SkillLayout) -> ControlSocketContext {
         ControlSocketContext {
             canonical_root: source_root.to_path_buf(),
             source_root: source_root.to_path_buf(),
-            layout: SkillLayout::Flat,
+            layout,
             resolver: Some(Arc::new(ActiveSkillResolver::new(source_root))),
             protocol_event_writer: None,
         }
+    }
+
+    fn seed_activation_skill(source_root: &Path, skill_id: &str) -> PathBuf {
+        let skill_dir = source_root.join(skill_id);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
+        skill_dir
+    }
+
+    fn assert_flat_write_resolve_reject(source_root: &Path, skill_name: &str) {
+        let skill_dir = source_root.join(skill_name);
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": skill_name,
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx(source_root);
+
+        let write_resp = dispatch_request(&req, &raw, Some(&ctx));
+        let resolve_error = super::super::resolver::resolve_live_source(
+            source_root,
+            source_root,
+            SkillLayout::Flat,
+            skill_dir.to_str().unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(!write_resp.ok);
+        assert_eq!(write_resp.error.as_ref().unwrap().code, resolve_error.code);
+        assert_eq!(resolve_error.code, "invalid_skill_layout");
+        assert!(!skill_dir.join(".skill-meta").exists());
     }
 
     #[test]
@@ -2082,6 +2283,339 @@ mod tests {
         let resp = dispatch_request(&req, &raw, Some(&ctx));
         assert!(!resp.ok);
         assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_name");
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_nested_skill_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("category/skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
+
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "category/skill",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(
+            resp.ok,
+            "expected nested activation write to succeed: {resp:?}"
+        );
+        assert_eq!(
+            resp.result
+                .as_ref()
+                .and_then(|result| result["outcome"].as_str()),
+            Some("updated")
+        );
+        assert!(skill_dir.join(".skill-meta/activation.json").is_file());
+        assert!(matches!(
+            ctx.resolver
+                .as_ref()
+                .and_then(|resolver| resolver.get("category/skill")),
+            Some(ActiveTarget::Hidden { .. })
+        ));
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_third_level_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "a/b/c",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_name");
+        assert!(!dir.path().join("a/b/c/.skill-meta").exists());
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_category_symlink_rejected() {
+        let source = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_skill = outside.path().join("skill");
+        std::fs::create_dir(&outside_skill).unwrap();
+        std::os::unix::fs::symlink(outside.path(), source.path().join("category")).unwrap();
+
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "category/skill",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(source.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_name");
+        assert!(!outside_skill.join(".skill-meta").exists());
+    }
+
+    #[test]
+    fn meta_set_xattr_hermes_nested_skill_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("category/skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.setActivationXattr",
+            "skillName": "category/skill",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.setActivationXattr".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+        if resp.error.as_ref().map(|error| error.code.as_str()) == Some("xattr_not_supported") {
+            eprintln!("SKIP: temp filesystem does not support user xattrs");
+            return;
+        }
+
+        assert!(resp.ok, "expected nested xattr write to succeed: {resp:?}");
+        match super::super::activation::read_activation_xattr(&skill_dir) {
+            super::super::activation::XattrReadOutcome::Present(value) => {
+                let parsed: serde_json::Value = serde_json::from_str(&value).unwrap();
+                assert_eq!(parsed["schemaVersion"], 1);
+                assert!(parsed["target"].is_null());
+            }
+            other => panic!("expected activation xattr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_missing_marker_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("category/ordinary");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "category/ordinary",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_layout");
+        assert!(!skill_dir.join(".skill-meta").exists());
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_top_skill_subdir_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let top_skill = dir.path().join("top");
+        let nested_dir = top_skill.join("subdir");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(top_skill.join("SKILL.md"), "# Top Skill\n").unwrap();
+        std::fs::write(nested_dir.join("SKILL.md"), "# Nested marker\n").unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "top/subdir",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_layout");
+        assert!(!nested_dir.join(".skill-meta").exists());
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_symlink_marker_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::NamedTempFile::new().unwrap();
+        let skill_dir = dir.path().join("category/skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::os::unix::fs::symlink(external.path(), skill_dir.join("SKILL.md")).unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "category/skill",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_layout");
+        assert!(!skill_dir.join(".skill-meta").exists());
+    }
+
+    #[test]
+    fn meta_set_xattr_hermes_missing_marker_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("category/ordinary");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.setActivationXattr",
+            "skillName": "category/ordinary",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.setActivationXattr".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_layout");
+    }
+
+    #[test]
+    fn meta_write_activation_hermes_reserved_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".hub/skill")).unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": ".hub/skill",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx_with_layout(dir.path(), SkillLayout::Hermes);
+
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_name");
+        assert!(!dir.path().join(".hub/skill/.skill-meta").exists());
+    }
+
+    #[test]
+    fn meta_write_activation_flat_reserved_paths_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        for skill_name in [".hub", "skill-discover"] {
+            let skill_dir = seed_activation_skill(dir.path(), skill_name);
+            let raw = serde_json::json!({
+                "schemaVersion": "1",
+                "method": "meta.writeActivation",
+                "skillName": skill_name,
+                "activation": {"schemaVersion": 1, "target": null}
+            });
+            let req = ControlRequest {
+                schema_version: "1".to_string(),
+                method: "meta.writeActivation".to_string(),
+            };
+            let ctx = test_ctx(dir.path());
+
+            let resp = dispatch_request(&req, &raw, Some(&ctx));
+
+            assert!(!resp.ok, "{skill_name} must remain reserved");
+            assert_eq!(resp.error.as_ref().unwrap().code, "invalid_skill_name");
+            assert!(!skill_dir.join(".skill-meta").exists());
+        }
+    }
+
+    #[test]
+    fn meta_write_activation_flat_missing_marker_matches_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("ordinary-directory");
+        std::fs::create_dir(&skill_dir).unwrap();
+
+        assert_flat_write_resolve_reject(dir.path(), "ordinary-directory");
+    }
+
+    #[test]
+    fn meta_write_activation_flat_symlink_marker_matches_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::NamedTempFile::new().unwrap();
+        let skill_dir = dir.path().join("symlink-marker");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::os::unix::fs::symlink(external.path(), skill_dir.join("SKILL.md")).unwrap();
+
+        assert_flat_write_resolve_reject(dir.path(), "symlink-marker");
+    }
+
+    #[test]
+    fn shared_fd_resolution_preserves_protocol_error_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_path = dir.path().join("not-a-directory");
+        std::fs::write(&skill_path, "ordinary file").unwrap();
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "meta.writeActivation",
+            "skillName": "not-a-directory",
+            "activation": {"schemaVersion": 1, "target": null}
+        });
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "meta.writeActivation".to_string(),
+        };
+        let ctx = test_ctx(dir.path());
+
+        let write_error = dispatch_request(&req, &raw, Some(&ctx))
+            .error
+            .expect("write must reject a non-directory Skill path");
+        let resolve_error = super::super::resolver::resolve_live_source(
+            dir.path(),
+            dir.path(),
+            SkillLayout::Flat,
+            skill_path.to_str().unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(write_error.code, "skill_not_found");
+        assert_eq!(
+            write_error.message,
+            "skill path component 'not-a-directory' in 'not-a-directory' is not a directory"
+        );
+        assert_eq!(resolve_error.code, "invalid_skill_layout");
+        assert_eq!(
+            resolve_error.message,
+            "skill path component 'not-a-directory' is not a directory"
+        );
     }
 
     #[test]
@@ -2310,9 +2844,17 @@ mod tests {
 
     #[test]
     fn meta_write_activation_success_writes_file() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let skill_dir = dir.path().join("alpha");
-        std::fs::create_dir(&skill_dir).unwrap();
+        let meta_dir = skill_dir.join(".skill-meta");
+        let activation_path = meta_dir.join("activation.json");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
+        std::fs::write(&activation_path, "old").unwrap();
+        std::fs::set_permissions(&meta_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&activation_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let raw = serde_json::json!({
             "schemaVersion": "1",
@@ -2328,18 +2870,24 @@ mod tests {
         let resp = dispatch_request(&req, &raw, Some(&ctx));
         assert!(resp.ok, "expected ok, got: {resp:?}");
 
-        let written =
-            std::fs::read_to_string(skill_dir.join(".skill-meta/activation.json")).unwrap();
+        let written = std::fs::read_to_string(&activation_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(parsed["schemaVersion"], 1);
         assert!(parsed["target"].is_null());
+        let meta_mode = std::fs::metadata(&meta_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(meta_mode, 0o700, ".skill-meta must be owner-only");
+        let mode = std::fs::metadata(&activation_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "activation.json must be owner-only");
     }
 
     #[test]
     fn meta_write_activation_success_updates_resolver() {
         let dir = tempfile::tempdir().unwrap();
-        let skill_dir = dir.path().join("alpha");
-        std::fs::create_dir(&skill_dir).unwrap();
+        seed_activation_skill(dir.path(), "alpha");
 
         let resolver = Arc::new(ActiveSkillResolver::new(dir.path()));
         let ctx = ControlSocketContext {
@@ -2374,6 +2922,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let skill_dir = dir.path().join("alpha");
         std::fs::create_dir_all(skill_dir.join(".skill-meta/versions/v000001.snapshot")).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
 
         let resolver = Arc::new(ActiveSkillResolver::new(dir.path()));
         let ctx = ControlSocketContext {
@@ -3133,6 +3682,107 @@ mod tests {
             response
         }
 
+        fn write_key(path: &Path, byte: u8) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(path, [byte; 32]).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        fn hmac_connect_and_send(socket_path: &Path, key_path: &Path, request: &str) -> String {
+            let secret = SharedSecret::load(key_path).unwrap();
+            let mut stream = UnixStream::connect(socket_path).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let session = authenticate_client(
+                &mut stream,
+                &secret,
+                CONTROL_CLIENT_DOMAIN,
+                CONTROL_SERVER_DOMAIN,
+            )
+            .unwrap();
+            session
+                .write_frame(&mut stream, FrameSender::Client, request.as_bytes())
+                .unwrap();
+            let response = session
+                .read_frame(
+                    &mut stream,
+                    FrameSender::Server,
+                    MAX_CONTROL_REQUEST_BYTES as usize,
+                )
+                .unwrap();
+            String::from_utf8(response).unwrap()
+        }
+
+        #[test]
+        fn hmac_server_authenticates_before_dispatch() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let key_path = dir.path().join("key");
+            write_key(&key_path, 7);
+            let handle = ControlSocketServer::new_hmac(
+                socket_path.clone(),
+                &key_path,
+                Some(unsafe { libc::geteuid() }),
+                None,
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+
+            let response = hmac_connect_and_send(
+                &socket_path,
+                &key_path,
+                r#"{"schemaVersion":"1","method":"ping"}"#,
+            );
+            let response: ControlResponse = serde_json::from_str(&response).unwrap();
+            assert!(response.ok);
+            assert_eq!(response.result.unwrap()["pong"], true);
+            handle.shutdown();
+        }
+
+        #[test]
+        fn hmac_server_rejects_plain_or_wrong_key_without_dispatch() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let key_path = dir.path().join("key");
+            let wrong_path = dir.path().join("wrong-key");
+            write_key(&key_path, 7);
+            write_key(&wrong_path, 8);
+            let handle = ControlSocketServer::new_hmac(socket_path.clone(), &key_path, None, None)
+                .unwrap()
+                .start()
+                .unwrap();
+
+            let mut plain = UnixStream::connect(&socket_path).unwrap();
+            plain
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            plain
+                .write_all(b"{\"schemaVersion\":\"1\",\"method\":\"ping\"}\n")
+                .unwrap();
+            let mut response = String::new();
+            let read = BufReader::new(&plain).read_line(&mut response).unwrap();
+            assert_eq!(read, 0);
+            assert!(response.is_empty());
+
+            let wrong = SharedSecret::load(&wrong_path).unwrap();
+            let mut stream = UnixStream::connect(&socket_path).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            assert!(
+                authenticate_client(
+                    &mut stream,
+                    &wrong,
+                    CONTROL_CLIENT_DOMAIN,
+                    CONTROL_SERVER_DOMAIN,
+                )
+                .is_err()
+            );
+            handle.shutdown();
+        }
+
         #[test]
         fn server_ping_returns_pong() {
             let dir = tempfile::tempdir().unwrap();
@@ -3518,6 +4168,14 @@ mod tests {
             dir: &Path,
             source_root: &Path,
         ) -> (PathBuf, ControlSocketHandle) {
+            start_server_with_context_and_layout(dir, source_root, SkillLayout::Flat)
+        }
+
+        fn start_server_with_context_and_layout(
+            dir: &Path,
+            source_root: &Path,
+            layout: SkillLayout,
+        ) -> (PathBuf, ControlSocketHandle) {
             let socket_path = dir.join("test.sock");
             let resolver = Arc::new(ActiveSkillResolver::new(source_root));
             let writer =
@@ -3525,7 +4183,7 @@ mod tests {
             let ctx = ControlSocketContext {
                 canonical_root: source_root.to_path_buf(),
                 source_root: source_root.to_path_buf(),
-                layout: SkillLayout::Flat,
+                layout,
                 resolver: Some(resolver),
                 protocol_event_writer: Some(writer),
             };
@@ -3539,11 +4197,45 @@ mod tests {
         }
 
         #[test]
+        fn server_writes_hermes_nested_activation() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let skill_dir = source.path().join("apple/apple-notes");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), "# Apple Notes\n").unwrap();
+            let (socket_path, handle) = start_server_with_context_and_layout(
+                dir.path(),
+                source.path(),
+                SkillLayout::Hermes,
+            );
+            let req = serde_json::json!({
+                "schemaVersion": "1",
+                "method": "meta.writeActivation",
+                "skillName": "apple/apple-notes",
+                "activation": {"schemaVersion": 1, "target": null}
+            });
+
+            let response = connect_and_send(&socket_path, &req.to_string());
+            let response: ControlResponse = serde_json::from_str(&response).unwrap();
+
+            assert!(response.ok, "expected ok, got: {response:?}");
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result["outcome"].as_str()),
+                Some("updated")
+            );
+            assert!(skill_dir.join(".skill-meta/activation.json").is_file());
+            handle.shutdown();
+        }
+
+        #[test]
         fn server_meta_write_activation_writes_file() {
             let dir = tempfile::tempdir().unwrap();
             let source = tempfile::tempdir().unwrap();
+            seed_skill_dir(source.path(), "demo-weather");
             let skill_dir = source.path().join("demo-weather");
-            std::fs::create_dir(&skill_dir).unwrap();
 
             let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
 
@@ -3573,6 +4265,7 @@ mod tests {
             let skill_dir = source.path().join("demo-weather");
             std::fs::create_dir_all(skill_dir.join(".skill-meta/versions/v000001.snapshot"))
                 .unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
 
             let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
 
@@ -3736,8 +4429,8 @@ mod tests {
         fn server_meta_write_activation_no_partial_json() {
             let dir = tempfile::tempdir().unwrap();
             let source = tempfile::tempdir().unwrap();
+            seed_skill_dir(source.path(), "alpha");
             let skill_dir = source.path().join("alpha");
-            std::fs::create_dir(&skill_dir).unwrap();
 
             let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
 
@@ -3777,8 +4470,7 @@ mod tests {
         fn server_meta_write_without_trusted_writer_exe_works() {
             let dir = tempfile::tempdir().unwrap();
             let source = tempfile::tempdir().unwrap();
-            let skill_dir = source.path().join("alpha");
-            std::fs::create_dir(&skill_dir).unwrap();
+            seed_skill_dir(source.path(), "alpha");
 
             let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
 
@@ -3812,6 +4504,7 @@ mod tests {
             };
             let skill_dir = source.path().join("alpha");
             std::fs::create_dir(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
 
             let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
 
@@ -4290,6 +4983,33 @@ mod tests {
                 connect_and_send(&socket_path, r#"{"schemaVersion":"1","method":"ping"}"#);
             assert!(resp_str.contains("\"ok\":true"));
 
+            handle.shutdown();
+        }
+
+        #[test]
+        fn listener_setup_failure_cleans_socket_and_releases_lock() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let result = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start_with_listener_setup(|_| {
+                Err(std::io::Error::other("injected listener setup failure"))
+            });
+
+            assert!(result.is_err());
+            assert!(
+                !socket_path.exists(),
+                "failed startup must remove its socket"
+            );
+
+            let handle = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .expect("failed startup must release the lifecycle lock");
             handle.shutdown();
         }
 

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, timeout_at, Duration, Instant};
 
 use crate::cli::{McpArgs, McpCommand};
 use crate::config::{CoreConfig, McpServerConfig};
@@ -22,15 +22,17 @@ use super::{Tool, ToolContext, ToolKind, ToolRegistry, ToolResult};
 
 const CLIENT_NAME: &str = "cosh-ng";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
-pub(super) const HTTP_MCP_PROTOCOL_VERSION: &str = "2025-11-25";
-const HTTP_MCP_COMPATIBLE_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+pub(super) const HTTP_MCP_PROTOCOL_VERSION: &str = MCP_PROTOCOL_VERSION;
+const MCP_COMPATIBLE_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_TOOL_NAME_LEN: usize = 64;
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_LIST_PAGES: usize = 100;
 const MAX_DISCOVERED_TOOLS: usize = 1_000;
 const MAX_DISCOVERED_TOOL_BYTES: usize = 1024 * 1024;
+const DEFAULT_TASK_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_TASK_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(super) fn initialize_params(protocol_version: &str) -> Value {
     json!({
@@ -283,6 +285,7 @@ pub async fn register_configured_tools(
                         remote_name: tool.name,
                         description: tool.description,
                         input_schema: tool.input_schema,
+                        task_required: tool.task_required,
                         client: Arc::clone(&client),
                     }));
                 }
@@ -327,6 +330,7 @@ struct DiscoveredTool {
     name: String,
     description: String,
     input_schema: Value,
+    task_required: bool,
 }
 
 struct McpTool {
@@ -334,6 +338,7 @@ struct McpTool {
     remote_name: String,
     description: String,
     input_schema: Value,
+    task_required: bool,
     client: Arc<McpClient>,
 }
 
@@ -356,7 +361,11 @@ impl Tool for McpTool {
     }
 
     async fn invoke(&self, params: Value, _ctx: &ToolContext) -> Result<ToolResult, String> {
-        self.client.call_tool(&self.remote_name, params).await
+        if self.task_required {
+            self.client.call_task_tool(&self.remote_name, params).await
+        } else {
+            self.client.call_tool(&self.remote_name, params).await
+        }
     }
 }
 
@@ -365,6 +374,7 @@ struct McpClient {
     timeout: Duration,
     startup_timeout: Duration,
     protocol_version: Mutex<String>,
+    supports_tool_tasks: Mutex<bool>,
     connection: Mutex<McpConnection>,
 }
 
@@ -395,7 +405,7 @@ impl McpClient {
                     config.oauth.resource.as_deref(),
                     workspace_root.to_path_buf(),
                 )?),
-                HTTP_MCP_PROTOCOL_VERSION,
+                MCP_PROTOCOL_VERSION,
             ),
             (None, true) => return Err("MCP command or url must be configured".to_string()),
             (None, false) => (
@@ -410,6 +420,7 @@ impl McpClient {
             timeout: Duration::from_millis(config.timeout_ms),
             startup_timeout: Duration::from_millis(config.startup_timeout_ms),
             protocol_version: Mutex::new(protocol_version.to_string()),
+            supports_tool_tasks: Mutex::new(false),
             connection: Mutex::new(connection),
         };
 
@@ -470,6 +481,8 @@ impl McpClient {
                 self.server_name
             ));
         }
+        *self.supports_tool_tasks.lock().await =
+            server_supports_tool_tasks(protocol_version, &result);
         self.notify_once("notifications/initialized", json!({}))
             .await
     }
@@ -520,10 +533,12 @@ impl McpClient {
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+                let task_required = tool_requires_task(raw_tool);
                 tools.push(DiscoveredTool {
                     name: name.to_string(),
                     description: format!("{description} (from {} MCP server)", self.server_name),
                     input_schema,
+                    task_required,
                 });
             }
 
@@ -558,6 +573,135 @@ impl McpClient {
             )
             .await?;
         Ok(format_tool_result(&result))
+    }
+
+    async fn call_task_tool(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<ToolResult, String> {
+        if !*self.supports_tool_tasks.lock().await {
+            return Err(format!(
+                "MCP tool '{tool_name}' requires task execution, but server {} does not support \
+                 task-augmented tools/call in the negotiated MCP session",
+                self.server_name
+            ));
+        }
+
+        let result = self
+            .request(
+                "tools/call",
+                json!({ "name": tool_name, "arguments": arguments, "task": {} }),
+            )
+            .await?;
+        let task_id = result
+            .pointer("/task/taskId")
+            .and_then(Value::as_str)
+            .filter(|task_id| !task_id.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "MCP task response for tool '{tool_name}' from server {} has no task.taskId",
+                    self.server_name
+                )
+            })?
+            .to_string();
+        self.wait_for_task(&task_id, &result["task"], tool_name)
+            .await?;
+        let result = self
+            .request("tasks/result", json!({ "taskId": task_id }))
+            .await?;
+        Ok(format_tool_result(&result))
+    }
+
+    async fn wait_for_task(
+        &self,
+        task_id: &str,
+        initial_task: &Value,
+        tool_name: &str,
+    ) -> Result<(), String> {
+        let ttl = match initial_task.get("ttl") {
+            Some(Value::Null) => None,
+            Some(ttl) => Some(Duration::from_millis(ttl.as_u64().ok_or_else(|| {
+                format!(
+                    "MCP task '{task_id}' for tool '{tool_name}' from server {} has invalid ttl",
+                    self.server_name
+                )
+            })?)),
+            None => {
+                return Err(format!(
+                    "MCP task '{task_id}' for tool '{tool_name}' from server {} has no ttl",
+                    self.server_name
+                ));
+            }
+        };
+        // Measure from receipt to avoid relying on clock synchronization with the server.
+        let deadline = match ttl {
+            Some(ttl) => Some(Instant::now().checked_add(ttl).ok_or_else(|| {
+                format!(
+                    "MCP task '{task_id}' for tool '{tool_name}' from server {} has ttl too large",
+                    self.server_name
+                )
+            })?),
+            None => None,
+        };
+        let ttl_expired = || {
+            format!(
+                "MCP task '{task_id}' for tool '{tool_name}' on server {} exceeded its ttl",
+                self.server_name
+            )
+        };
+        let mut task = initial_task.clone();
+        loop {
+            let status = task.get("status").and_then(Value::as_str).ok_or_else(|| {
+                format!(
+                    "MCP task '{task_id}' for tool '{tool_name}' from server {} has no status",
+                    self.server_name
+                )
+            })?;
+            match status {
+                "completed" => return Ok(()),
+                "working" => {}
+                "failed" | "cancelled" | "input_required" => {
+                    let message = task
+                        .get("statusMessage")
+                        .and_then(Value::as_str)
+                        .filter(|message| !message.is_empty())
+                        .map(|message| format!(": {message}"))
+                        .unwrap_or_default();
+                    return Err(format!(
+                        "MCP task '{task_id}' for tool '{tool_name}' on server {} reached status \
+                         '{status}'{message}",
+                        self.server_name
+                    ));
+                }
+                other => {
+                    return Err(format!(
+                        "MCP task '{task_id}' for tool '{tool_name}' from server {} has unknown \
+                         status '{other}'",
+                        self.server_name
+                    ));
+                }
+            }
+
+            let poll_interval = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(ttl_expired());
+                    }
+                    task_poll_interval(&task).min(remaining)
+                }
+                None => task_poll_interval(&task),
+            };
+            sleep(poll_interval).await;
+            let request = self.request("tasks/get", json!({ "taskId": task_id }));
+            task = match deadline {
+                Some(deadline) => timeout_at(deadline, request)
+                    .await
+                    .map_err(|_| ttl_expired())??,
+                None => request.await?,
+            };
+        }
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -638,10 +782,32 @@ impl McpClient {
     }
 }
 
+fn tool_requires_task(tool: &Value) -> bool {
+    tool.pointer("/execution/taskSupport")
+        .and_then(Value::as_str)
+        == Some("required")
+}
+
+fn server_supports_tool_tasks(protocol_version: &str, initialize_result: &Value) -> bool {
+    protocol_version == MCP_PROTOCOL_VERSION
+        && initialize_result
+            .pointer("/capabilities/tasks/requests/tools/call")
+            .is_some_and(Value::is_object)
+}
+
+fn task_poll_interval(task: &Value) -> Duration {
+    task.get("pollInterval")
+        .and_then(Value::as_u64)
+        .filter(|interval| *interval > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_TASK_POLL_INTERVAL)
+        .min(MAX_TASK_POLL_INTERVAL)
+}
+
 fn supports_protocol_version(requested: &str, negotiated: &str) -> bool {
     negotiated == requested
-        || (requested == HTTP_MCP_PROTOCOL_VERSION
-            && HTTP_MCP_COMPATIBLE_PROTOCOL_VERSIONS.contains(&negotiated))
+        || (requested == MCP_PROTOCOL_VERSION
+            && MCP_COMPATIBLE_PROTOCOL_VERSIONS.contains(&negotiated))
 }
 
 enum McpConnection {
@@ -1042,38 +1208,77 @@ mod tests {
     }
 
     #[test]
-    fn accepts_known_http_protocol_versions() {
-        for version in HTTP_MCP_COMPATIBLE_PROTOCOL_VERSIONS {
-            assert!(supports_protocol_version(
-                HTTP_MCP_PROTOCOL_VERSION,
-                version
-            ));
+    fn accepts_known_protocol_versions() {
+        for version in MCP_COMPATIBLE_PROTOCOL_VERSIONS {
+            assert!(supports_protocol_version(MCP_PROTOCOL_VERSION, version));
         }
         assert!(!supports_protocol_version(
-            HTTP_MCP_PROTOCOL_VERSION,
+            MCP_PROTOCOL_VERSION,
             "2099-01-01"
         ));
-        assert!(!supports_protocol_version(
-            MCP_PROTOCOL_VERSION,
-            "2024-11-05"
-        ));
         assert!(supports_protocol_version(
-            HTTP_MCP_PROTOCOL_VERSION,
+            MCP_PROTOCOL_VERSION,
             "2024-11-05"
         ));
     }
 
     #[test]
     fn initialize_params_include_required_client_fields() {
-        let params = initialize_params(HTTP_MCP_PROTOCOL_VERSION);
+        let params = initialize_params(MCP_PROTOCOL_VERSION);
         assert_eq!(
             params["protocolVersion"],
-            Value::String(HTTP_MCP_PROTOCOL_VERSION.to_string())
+            Value::String(MCP_PROTOCOL_VERSION.to_string())
         );
         assert!(params["capabilities"].is_object());
         assert!(params["capabilities"]["roots"].is_object());
+        assert!(params["capabilities"].get("tasks").is_none());
+        assert!(params["capabilities"].get("taskSupport").is_none());
         assert!(params["clientInfo"]["name"].is_string());
         assert!(params["clientInfo"]["version"].is_string());
+    }
+
+    #[test]
+    fn only_required_tools_use_tasks() {
+        assert!(tool_requires_task(&json!({
+            "execution": { "taskSupport": "required" }
+        })));
+        for task_support in ["optional", "forbidden", "unknown"] {
+            assert!(!tool_requires_task(&json!({
+                "execution": { "taskSupport": task_support }
+            })));
+        }
+        assert!(!tool_requires_task(&json!({})));
+    }
+
+    #[test]
+    fn task_capability_requires_current_protocol_and_object_leaf() {
+        let mut result = json!({
+            "capabilities": { "tasks": { "requests": { "tools": { "call": {} } } } }
+        });
+        assert!(server_supports_tool_tasks(MCP_PROTOCOL_VERSION, &result));
+        assert!(!server_supports_tool_tasks("2025-06-18", &result));
+
+        for invalid_leaf in [Value::Null, json!("supported")] {
+            result["capabilities"]["tasks"]["requests"]["tools"]["call"] = invalid_leaf;
+            assert!(!server_supports_tool_tasks(MCP_PROTOCOL_VERSION, &result));
+        }
+    }
+
+    #[test]
+    fn task_poll_interval_uses_server_hint_or_safe_default() {
+        assert_eq!(
+            task_poll_interval(&json!({ "pollInterval": 25 })),
+            Duration::from_millis(25)
+        );
+        assert_eq!(
+            task_poll_interval(&json!({ "pollInterval": 3_600_000 })),
+            MAX_TASK_POLL_INTERVAL
+        );
+        assert_eq!(task_poll_interval(&json!({})), DEFAULT_TASK_POLL_INTERVAL);
+        assert_eq!(
+            task_poll_interval(&json!({ "pollInterval": 0 })),
+            DEFAULT_TASK_POLL_INTERVAL
+        );
     }
 
     #[test]
@@ -1201,12 +1406,19 @@ done
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
+      case "$line" in
+        *'"protocolVersion":"2025-11-25"'*) ;;
+        *) exit 1 ;;
+      esac
       printf '%s\n' '[{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1.0"}}}]'
       ;;
     *'"method":"tools/list"'*)
       printf '%s\n' '[{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo input","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}}]}}]'
       ;;
     *'"method":"tools/call"'*)
+      case "$line" in
+        *'"task"'*) exit 1 ;;
+      esac
       printf '%s\n' '[{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"called"}]}}]'
       ;;
   esac
@@ -1228,6 +1440,233 @@ done
             .unwrap();
         assert_eq!(result.output, "called");
         assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn invokes_required_tool_as_task_and_gets_result() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"tasks":{"requests":{"tools":{"call":{}}}}}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"research","inputSchema":{"type":"object"},"execution":{"taskSupport":"required"}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      case "$line" in
+        *'"task":{}'*) ;;
+        *) exit 1 ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"task":{"taskId":"task-1","status":"working","createdAt":"2026-01-01T00:00:00Z","lastUpdatedAt":"2026-01-01T00:00:00Z","ttl":60000,"pollInterval":1}}}'
+      ;;
+    *'"method":"tasks/get"'*)
+      case "$line" in
+        *'"taskId":"task-1"'*) ;;
+        *) exit 1 ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"taskId":"task-1","status":"completed","createdAt":"2026-01-01T00:00:00Z","lastUpdatedAt":"2026-01-01T00:00:01Z","ttl":60000,"pollInterval":1}}'
+      ;;
+    *'"method":"tasks/result"'*)
+      case "$line" in
+        *'"taskId":"task-1"'*) ;;
+        *) exit 1 ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"research complete"}]}}'
+      ;;
+  esac
+done
+"#,
+        );
+        let workspace = PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
+
+        let discovered = tools.into_iter().next().expect("required MCP tool");
+        assert!(discovered.task_required);
+        let tool = McpTool {
+            exposed_name: exposed_tool_name("fake", &discovered.name),
+            remote_name: discovered.name,
+            description: discovered.description,
+            input_schema: discovered.input_schema,
+            task_required: discovered.task_required,
+            client: Arc::new(client),
+        };
+        let result = tool.invoke(json!({}), &test_context()).await.unwrap();
+
+        assert_eq!(result.output, "research complete");
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn stops_polling_when_task_ttl_expires() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"tasks":{"requests":{"tools":{"call":{}}}}}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"research","inputSchema":{"type":"object"},"execution":{"taskSupport":"required"}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"task":{"taskId":"task-1","status":"working","createdAt":"2026-01-01T00:00:00Z","lastUpdatedAt":"2026-01-01T00:00:00Z","ttl":20,"pollInterval":3600000}}}'
+      ;;
+    *'"method":"tasks/get"'*|*'"method":"tasks/result"'*) exit 1 ;;
+  esac
+done
+"#,
+        );
+        let workspace = PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
+        assert!(tools[0].task_required);
+
+        let started = Instant::now();
+        let error = client
+            .call_task_tool("research", json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("task-1"));
+        assert!(error.contains("exceeded its ttl"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn rejects_required_tool_without_server_task_capability() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"research","inputSchema":{"type":"object"},"execution":{"taskSupport":"required"}}]}}'
+      ;;
+    *'"method":"tools/call"'*) exit 1 ;;
+  esac
+done
+"#,
+        );
+        let workspace = PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
+        assert!(tools[0].task_required);
+
+        let error = client
+            .call_task_tool("research", json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("requires task execution"));
+        assert!(error.contains("does not support task-augmented tools/call"));
+    }
+
+    #[tokio::test]
+    async fn returns_terminal_task_failure_without_fetching_result() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"tasks":{"requests":{"tools":{"call":{}}}}}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"research","inputSchema":{"type":"object"},"execution":{"taskSupport":"required"}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"task":{"taskId":"task-1","status":"failed","statusMessage":"backend unavailable","createdAt":"2026-01-01T00:00:00Z","lastUpdatedAt":"2026-01-01T00:00:01Z","ttl":60000}}}'
+      ;;
+    *'"method":"tasks/get"'*|*'"method":"tasks/result"'*) exit 1 ;;
+  esac
+done
+"#,
+        );
+        let workspace = PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
+        assert!(tools[0].task_required);
+
+        let error = client
+            .call_task_tool("research", json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("reached status 'failed'"));
+        assert!(error.contains("backend unavailable"));
+    }
+
+    #[tokio::test]
+    async fn rejects_task_capability_from_older_protocol() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{},"tasks":{"requests":{"tools":{"call":{}}}}}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"research","inputSchema":{"type":"object"},"execution":{"taskSupport":"required"}}]}}'
+      ;;
+    *'"method":"tools/call"'*) exit 1 ;;
+  esac
+done
+"#,
+        );
+        let workspace = PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
+        assert!(tools[0].task_required);
+
+        let error = client
+            .call_task_tool("research", json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("requires task execution"));
+        assert!(error.contains("does not support task-augmented tools/call"));
+    }
+
+    #[tokio::test]
+    async fn rejects_task_creation_response_without_task_id() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"tasks":{"requests":{"tools":{"call":{}}}}}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"research","inputSchema":{"type":"object"},"execution":{"taskSupport":"required"}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"task":{"status":"working"}}}'
+      ;;
+  esac
+done
+"#,
+        );
+        let workspace = PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
+        assert!(tools[0].task_required);
+
+        let error = client
+            .call_task_tool("research", json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("has no task.taskId"));
     }
 
     #[tokio::test]

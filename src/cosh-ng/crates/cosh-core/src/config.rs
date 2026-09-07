@@ -1,8 +1,78 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Canonical approval policy used at every Core input boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Apply the conservative policy previously exposed as strict or balanced.
+    #[default]
+    Recommend,
+    /// Run eligible local tools and ask before guarded operations.
+    Auto,
+    /// Run registered tools without ordinary approval prompts.
+    Trust,
+}
+
+impl ApprovalMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "recommend" | "balanced" | "strict" | "suggest" => Some(Self::Recommend),
+            "auto" => Some(Self::Auto),
+            "trust" => Some(Self::Trust),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_config(value: &str) -> Self {
+        match Self::parse(value) {
+            Some(mode) => mode,
+            None => {
+                eprintln!("[cosh-core] Warning: invalid approval mode {value:?}; using recommend");
+                Self::Recommend
+            }
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Recommend => "recommend",
+            Self::Auto => "auto",
+            Self::Trust => "trust",
+        }
+    }
+}
+
+impl fmt::Display for ApprovalMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+impl FromStr for ApprovalMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value).ok_or_else(|| {
+            format!("invalid approval mode {value:?}; expected recommend, auto, or trust")
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovalMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CoreConfig {
@@ -65,8 +135,8 @@ pub struct ProviderConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
-    #[serde(default = "default_approval_mode")]
-    pub approval_mode: String,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
     #[serde(default = "default_session_token_limit")]
@@ -81,7 +151,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            approval_mode: default_approval_mode(),
+            approval_mode: ApprovalMode::default(),
             max_turns: default_max_turns(),
             session_token_limit: default_session_token_limit(),
             max_tool_calls_per_turn: default_max_tool_calls(),
@@ -90,9 +160,6 @@ impl Default for AgentConfig {
     }
 }
 
-fn default_approval_mode() -> String {
-    "balanced".to_string()
-}
 fn default_max_turns() -> u32 {
     50
 }
@@ -107,6 +174,13 @@ fn default_max_tool_calls() -> u32 {
 pub struct HooksConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Last explicit value applied by a trusted configuration layer.
+    ///
+    /// This distinguishes the default `false` from a system/user-requested
+    /// disable so installed extensions can auto-enable hooks without allowing
+    /// untrusted project configuration to override the kill switch.
+    #[serde(skip)]
+    pub(crate) enabled_override: Option<bool>,
     #[serde(default, rename = "PreToolUse")]
     pub pre_tool_use: Vec<HookDefinition>,
     #[serde(default, rename = "PostToolUse")]
@@ -136,6 +210,10 @@ pub struct HookDefinition {
     pub timeout: Option<u64>,
     #[serde(default)]
     pub sequential: Option<bool>,
+    /// Allow this hook to fail open. The default is fail closed because a
+    /// PreToolUse hook failure must never silently authorize a tool call.
+    #[serde(default)]
+    pub fail_open: bool,
     /// Environment variables injected into this hook's child process only.
     /// The child inherits the parent environment first, so an entry here
     /// overrides an inherited value of the same name. The host never calls
@@ -557,7 +635,7 @@ fn apply_user_layer(config: &mut CoreConfig, layer: &PartialCoreConfig) {
     if let Some(ref mcp) = layer.mcp {
         config.mcp.servers.extend(mcp.servers.clone());
     }
-    apply_common_layers(config, layer);
+    apply_common_layers(config, layer, true);
 }
 
 fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path: &std::path::Path) {
@@ -582,7 +660,7 @@ fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path:
             path.display()
         );
     }
-    apply_common_layers(config, layer);
+    apply_common_layers(config, layer, false);
 }
 
 fn apply_ai_preferences(ai: &mut AiConfig, layer: &PartialAiConfig) {
@@ -597,12 +675,16 @@ fn apply_ai_preferences(ai: &mut AiConfig, layer: &PartialAiConfig) {
     }
 }
 
-fn apply_common_layers(config: &mut CoreConfig, layer: &PartialCoreConfig) {
+fn apply_common_layers(
+    config: &mut CoreConfig,
+    layer: &PartialCoreConfig,
+    hooks_can_control_extensions: bool,
+) {
     if let Some(ref agent) = layer.agent {
         apply_agent_layer(&mut config.agent, agent);
     }
     if let Some(ref hooks) = layer.hooks {
-        apply_hooks_layer(&mut config.hooks, hooks);
+        apply_hooks_layer(&mut config.hooks, hooks, hooks_can_control_extensions);
     }
     if let Some(ref skills) = layer.skills {
         apply_skills_layer(&mut config.skills, skills);
@@ -617,7 +699,7 @@ fn apply_common_layers(config: &mut CoreConfig, layer: &PartialCoreConfig) {
 
 fn apply_agent_layer(config: &mut AgentConfig, layer: &PartialAgentConfig) {
     if let Some(ref value) = layer.approval_mode {
-        config.approval_mode = value.clone();
+        config.approval_mode = ApprovalMode::from_config(value);
     }
     if let Some(value) = layer.max_turns {
         config.max_turns = value;
@@ -633,9 +715,16 @@ fn apply_agent_layer(config: &mut AgentConfig, layer: &PartialAgentConfig) {
     }
 }
 
-fn apply_hooks_layer(config: &mut HooksConfig, layer: &PartialHooksConfig) {
+fn apply_hooks_layer(
+    config: &mut HooksConfig,
+    layer: &PartialHooksConfig,
+    can_control_extensions: bool,
+) {
     if let Some(value) = layer.enabled {
         config.enabled = value;
+        if can_control_extensions {
+            config.enabled_override = Some(value);
+        }
     }
     if let Some(ref value) = layer.pre_tool_use {
         config.pre_tool_use = value.clone();
@@ -753,8 +842,29 @@ impl CoreConfig {
         config
     }
 
+    /// Loads provider credentials for Gateway brokered mode without migration.
+    ///
+    /// The launch profile is already fixed before this method is called. It
+    /// deliberately excludes the project layer and clears every local runtime
+    /// contribution so startup cannot run hooks, skills, MCP, or registry
+    /// migration before the private v3 handshake.
+    pub(crate) fn load_gateway_brokered() -> Self {
+        let user_path = config_dir().join("config.toml");
+        let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
+        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None);
+        config.apply_env_overrides();
+        config.apply_bare_isolation();
+        config.mcp = McpConfig::default();
+        config.agent.allowed_tools.clear();
+        config.agent.approval_mode = ApprovalMode::Recommend;
+        config
+    }
+
     fn apply_bare_isolation(&mut self) {
-        self.hooks = HooksConfig::default();
+        self.hooks = HooksConfig {
+            enabled_override: Some(false),
+            ..Default::default()
+        };
         self.skills = SkillsConfig::default();
         self.session.auto_persist = false;
     }
@@ -800,7 +910,7 @@ impl CoreConfig {
 
     fn apply_env_overrides(&mut self) {
         if let Ok(val) = std::env::var("COSH_APPROVAL_MODE") {
-            self.agent.approval_mode = val;
+            self.agent.approval_mode = ApprovalMode::from_config(&val);
         }
         if let Ok(val) = std::env::var("COSH_MODEL") {
             self.ai.active_model = Some(val);
@@ -1056,11 +1166,77 @@ mod tests {
     #[test]
     fn default_config() {
         let config = CoreConfig::default();
-        assert_eq!(config.agent.approval_mode, "balanced");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
         assert_eq!(config.agent.max_turns, 50);
         assert_eq!(config.agent.session_token_limit, 128_000);
         assert_eq!(config.agent.max_tool_calls_per_turn, 10);
         assert!(config.session.auto_persist);
+        assert_eq!(config.hooks.enabled_override, None);
+    }
+
+    #[test]
+    fn layered_hooks_enabled_tracks_explicit_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, "[hooks]\nenabled = false\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user), None);
+
+        assert!(!config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, Some(false));
+    }
+
+    #[test]
+    fn project_hooks_disable_cannot_control_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project.toml");
+        std::fs::write(&project, "[hooks]\nenabled = false\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, None, Some(&project));
+
+        assert!(!config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, None);
+    }
+
+    #[test]
+    fn project_hooks_enable_cannot_override_trusted_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(&user, "[hooks]\nenabled = false\n").unwrap();
+        std::fs::write(&project, "[hooks]\nenabled = true\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user), Some(&project));
+
+        assert!(config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, Some(false));
+    }
+
+    #[test]
+    fn approval_mode_normalizes_legacy_aliases() {
+        for value in ["recommend", "balanced", "strict", "suggest"] {
+            assert_eq!(ApprovalMode::parse(value), Some(ApprovalMode::Recommend));
+        }
+        assert_eq!(ApprovalMode::parse("auto"), Some(ApprovalMode::Auto));
+        assert_eq!(ApprovalMode::parse("trust"), Some(ApprovalMode::Trust));
+        assert_eq!(ApprovalMode::parse("invalid"), None);
+        assert_eq!(
+            ApprovalMode::from_config("invalid"),
+            ApprovalMode::Recommend
+        );
+    }
+
+    #[test]
+    fn layered_invalid_approval_mode_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system.toml");
+        let user = dir.path().join("user.toml");
+        std::fs::write(&system, "[agent]\napproval_mode = \"trust\"\n").unwrap();
+        std::fs::write(&user, "[agent]\napproval_mode = \"invalid\"\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(Some(&system), Some(&user), None);
+
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
     }
 
     #[test]
@@ -1093,7 +1269,7 @@ max_tool_calls_per_turn = 20
         assert_eq!(qwen.base_url.as_deref(), Some("https://example.com/v1"));
         assert_eq!(qwen.api_key.as_deref(), Some("sk-test"));
 
-        assert_eq!(config.agent.approval_mode, "trust");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Trust);
         assert_eq!(config.agent.max_turns, 50);
     }
 
@@ -1408,7 +1584,7 @@ model = "qwen-max"
 active_model = "test-model"
 "#;
         let config: CoreConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.agent.approval_mode, "balanced");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
         assert_eq!(config.agent.max_turns, 50);
         assert!(config.ai.providers.is_empty());
     }
@@ -1427,10 +1603,23 @@ active_model = "test-model"
         let mut config = CoreConfig::default();
         config.apply_env_overrides();
 
-        assert_eq!(config.agent.approval_mode, "trust");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Trust);
         assert_eq!(config.ai.active_model.as_deref(), Some("gpt-4"));
         assert_eq!(config.agent.max_turns, 75);
         assert_eq!(config.ai.output_language.as_deref(), Some("zh-CN"));
+
+        // Legacy aliases are accepted but are normalized before use.
+        std::env::set_var("COSH_APPROVAL_MODE", "balanced");
+        let mut alias_config = CoreConfig::default();
+        alias_config.apply_env_overrides();
+        assert_eq!(alias_config.agent.approval_mode, ApprovalMode::Recommend);
+
+        // An invalid override must tighten a previously trusted config.
+        std::env::set_var("COSH_APPROVAL_MODE", "invalid");
+        let mut invalid_config = CoreConfig::default();
+        invalid_config.agent.approval_mode = ApprovalMode::Trust;
+        invalid_config.apply_env_overrides();
+        assert_eq!(invalid_config.agent.approval_mode, ApprovalMode::Recommend);
 
         // Phase 2: invalid max_turns — should be ignored
         std::env::set_var("COSH_MAX_TURNS", "not-a-number");
@@ -1523,6 +1712,7 @@ active_model = "project-model"
         assert_eq!(config.ai.active_model.as_deref(), Some("user-model"));
         assert_eq!(config.resolve_provider().api_key, "sk-user");
         assert!(!config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, Some(false));
         assert!(!config.skills.enabled);
         assert!(config.skills.custom_paths.is_empty());
         assert!(!config.session.auto_persist);

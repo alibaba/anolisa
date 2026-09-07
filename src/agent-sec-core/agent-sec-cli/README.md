@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.3.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-green.svg)](../CHANGELOG.md)
 
 **Agent Security Core CLI** is a comprehensive security toolkit for AI Agents, providing system hardening, sandbox isolation, asset integrity verification, and security event tracking.
 
@@ -105,7 +105,25 @@ agent-sec-cli summary --hours 72 --format json
 # Observability record ingestion
 agent-sec-cli observability record --format json --stdin < record.json
 agent-sec-cli observability schema
+
+# Agent plugin capability configuration view
+agent-sec-cli capabilities
+agent-sec-cli capabilities --agent openclaw --capability code-scan --output json
 ```
+
+### Agent Plugin Capability View
+
+`agent-sec-cli capabilities` prints the hook capability view derived from environment variables visible to the current CLI process. It does not read OpenClaw, Hermes, or other Agent configuration files, and it does not resolve Agent home directories.
+
+Run it from the same shell/container/service environment that starts the target Agent when you want the closest approximation. Even then, the output is not proof that hooks are loaded, registered, or currently effective in the target Agent process; Agent config values such as enabled flags, policies, and timeouts can still make runtime behavior differ from this view.
+
+Supported capability filters are fixed to `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs are not accepted as aliases.
+
+For `observability`, the view applies the shared `OBSERVABILITY_TIMEOUT` environment semantics used by all six integrations: the default is `5` seconds, invalid or non-positive values fall back to `5`, and larger values are capped at `5`. Hermes configuration can still select a lower runtime timeout when the environment variable is absent, which remains outside this environment-only view.
+
+Table output is limited to the stable user-facing columns `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`. JSON output uses the same user-facing fields plus sanitized `env` entries with `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
+
+For `prompt-scan`, the `env` entries also carry `PROMPT_SCANNER_L2_MODEL`, the L2 backend shared by all six integrations: no hook reads it itself, but each one shells out to `scan-prompt`, which resolves it. Because a model name is only meaningful verbatim, it is the one entry reported case-preserved (escaped and length-capped) instead of as a normalized keyword. The reported `default` comes from the native scanner engine (`scanner_engine_info`), so the view never carries a second copy of the backend list; before the extension is built it degrades to an empty default. A backend the engine does not support is reported as configured plus a diagnostic rather than replaced by the default, because the engine rejects it at construction and the scan then fails. It has no table column, so use `--capability prompt-scan --output json` to read it.
 
 ### Observability Records
 
@@ -194,7 +212,10 @@ agent_sec_cli/
         ├── sandbox.py         # Sandbox backend
         ├── asset_verify.py    # Verification backend
         ├── summary.py         # Event summary backend
-        └── intent.py          # Intent analysis (future)
+        ├── code_scan.py       # Code scanner backend
+        ├── prompt_scan.py     # Rust-native prompt scanner adapter
+        ├── pii_scan.py        # PII scanner backend
+        └── skill_ledger.py    # Skill Ledger command backend
 ```
 
 ---
@@ -245,14 +266,30 @@ uv run maturin build --release
 
 ### Asset Verification
 
-Edit `asset_verify/config.conf`:
+The packaged `asset_verify/config.conf` contains both supported system discovery roots:
 
 ```ini
 skills_dir = [
     /usr/share/anolisa/skills
-    /opt/custom-skills
+    /usr/local/share/anolisa/skills
 ]
 ```
+
+The first path is used by RPM installations; the second is used by standard ANOLISA raw
+installations. Both are optional. Missing or empty roots are skipped, and roots that resolve to the
+same canonical path are scanned once. The defaults are not derived from a custom installation
+prefix; use `agent-sec-cli verify --skill /path/to/skill` for a relocated Skill.
+
+Normal runs report `verified` when at least one candidate passes and none fail, `failed` when any
+candidate fails, or `no_candidates` when discovery completes without finding a candidate.
+`no_candidates` exits `0` but does not claim that an asset was verified. Configuration, trusted-key,
+canonicalization, and root-enumeration errors exit `1` as operation failures and may omit the
+outcome; the CLI writes those operation errors to standard error. Completed runs print
+`CHECKED`/`PASSED`/`FAILED` counts and finish with `VERIFICATION PASSED`, `VERIFICATION FAILED`, or
+`VERIFICATION SKIPPED: NO CANDIDATE SKILLS`.
+
+Full behavior and topology reference:
+[Asset Verification User Guide](../../../docs/user-guide/en/agent-security/agent-sec-core/asset-verification.md).
 
 ### Security Events
 
@@ -279,6 +316,20 @@ The observability stream uses its own JSONL file, lock file, SQLite database,
 rotation limit, backup count, and 7-day SQLite retention policy; it does not
 write to `security-events.jsonl` or `security-events.db`.
 
+### Local JSONL File Permissions
+
+The local `security-events.jsonl`, `observability.jsonl`, and `cli.jsonl`
+writers create active data files and their advisory lock files with mode
+`0600`, independently of the process umask. Existing active data and lock
+files are tightened to `0600` when a writer opens them. On the first write,
+recognized timestamped backups retained from older releases are also tightened
+to `0600`; backups created by the current writer inherit the tightened mode.
+
+Unprivileged direct readers must run as the file-owning user. Operators with
+existing group/other read workflows should move those readers to the owning
+user or a controlled export path instead of broadening the source log
+permissions.
+
 ---
 
 ## Security
@@ -291,6 +342,9 @@ sign-skill.sh /path/to/skill
 
 # Sign all skills in batch
 sign-skill.sh --batch /usr/share/anolisa/skills --force
+
+# Standard ANOLISA raw installation root
+sign-skill.sh --batch /usr/local/share/anolisa/skills --force
 ```
 
 ### Verifying Skills
@@ -299,9 +353,17 @@ sign-skill.sh --batch /usr/share/anolisa/skills --force
 # Verify all configured skills
 agent-sec-cli verify
 
-# Verify with detailed output
-python -m agent_sec_cli.asset_verify.verifier --skill /path/to/skill
+# Verify one Skill without default-root discovery
+agent-sec-cli verify --skill /path/to/skill
 ```
+
+Batch discovery treats each immediate, non-hidden child directory as a candidate. Candidate
+manifest, signature, hash, unexpected-file, and access failures produce the `failed` outcome and
+exit `1`. An existing discovery root that is not a directory or cannot be enumerated is an operation
+error instead. An explicit `--skill` always represents one candidate, so a nonexistent, non-directory,
+unreadable, or invalid path is `failed` with exit `1`, never `no_candidates`. Completed runs expose
+`seccore.asset_outcome = verified|failed|no_candidates` to the sanitized telemetry projection;
+paths are not uploaded.
 
 ---
 
@@ -331,11 +393,12 @@ The `dev-tools/` directory contains developer guides and skills for adding new s
 
 ### Quick Start: Add a New Security Command
 
-Follow the step-by-step guide in [dev-tools/SKILL.md](dev-tools/SKILL.md) to:
+Follow the step-by-step guide in
+[dev-tools/backend-skill/SKILL.md](dev-tools/backend-skill/SKILL.md) to:
 
 1. **Add a CLI subcommand** - Define new command-line interface
 2. **Register a router** - Map action names to backend modules
-3. **Create a backend** - Implement security logic (Python or Rust)
+3. **Create a backend** - Implement security logic in Python or Rust
 4. **Integrate event logging** - Automatic security event tracking
 
 ### Architecture Overview
@@ -369,7 +432,7 @@ Use backend-skill in folder dev-tools to create a new rust backend called crypto
 
 | Resource | Location | Purpose |
 |----------|----------|---------|
-| Extension Guide | `dev-tools/backend-skill/SKILL.md` | Step-by-step tutorial for Rust & Python backends |
+| Extension Guide | `dev-tools/backend-skill/SKILL.md` | Step-by-step tutorial for Rust and Python backends |
 | Backend Templates | `dev-tools/backend-skill/templates/` | Python and Rust backend templates |
 | Backend Examples | `src/agent_sec_cli/security_middleware/backends/` | Reference implementations |
 | CLI Structure | `src/agent_sec_cli/cli.py` | Subcommand patterns |
@@ -391,7 +454,7 @@ We welcome contributions! Please see our [Contributing Guide](https://github.com
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](../LICENSE) file for details.
 
 ---
 

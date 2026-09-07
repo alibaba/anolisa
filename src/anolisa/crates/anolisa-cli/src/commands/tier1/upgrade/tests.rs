@@ -3,6 +3,7 @@
 //! [`PackageTransaction`], so no live rpmdb/dnf is required. The fake records
 //! transaction call order and refuses to be called on the dry-run path.
 
+use super::application::UpgradeChange;
 use super::*;
 
 use anolisa_core::state::InstallMode as StateInstallMode;
@@ -27,6 +28,7 @@ use anolisa_core::transaction::{
 // `Activity` and `ProgressReporter` reach the tests through the module glob
 // (`use super::*`); `NoopReporter` is the only progress item not re-imported by
 // the upgrade module, so it is brought in explicitly here.
+use crate::context::InstallMode;
 use crate::progress::NoopReporter;
 
 // ── fake host ────────────────────────────────────────────────────────────────
@@ -436,6 +438,31 @@ fn user_ctx() -> CliContext {
     )
 }
 
+fn run_typed_upgrade(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    plan: &UpgradePlan,
+    host: &FakeHost,
+    intent: ExecutionIntent,
+    is_root: bool,
+) -> UpgradeApplicationOutcome {
+    application::run_with_dependencies(
+        UpgradeRequest {
+            target: plan.target.as_deref(),
+            intent,
+        },
+        ctx,
+        layout,
+        plan,
+        host,
+        host,
+        is_root,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("typed upgrade outcome")
+}
+
 // ── argument parsing ─────────────────────────────────────────────────────────
 
 #[test]
@@ -464,6 +491,281 @@ fn upgrade_parses_assume_yes_long_and_short() {
             .expect("parse")
             .assume_yes
     );
+}
+
+#[test]
+fn upgrade_maps_dry_run_to_execution_intent() {
+    assert_eq!(execution_intent(true), ExecutionIntent::Plan);
+    assert_eq!(execution_intent(false), ExecutionIntent::Apply);
+}
+
+#[test]
+fn typed_preview_reports_plan_without_side_effects() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = build_plan(
+        Some("agentic_os-latest".to_string()),
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let outcome = run_typed_upgrade(&ctx, &layout, &plan, &host, ExecutionIntent::Plan, false);
+
+    let UpgradeApplicationOutcome::Preview {
+        status,
+        report,
+        warnings,
+    } = outcome
+    else {
+        panic!("plan intent must return a preview");
+    };
+    assert_eq!(status, UpgradePreviewStatus::Completed);
+    assert_eq!(report.updated.len(), 1);
+    assert!(warnings.is_empty());
+    assert!(host.txn_calls().is_empty());
+    assert!(!layout.lock_file.exists());
+    assert!(!layout.state_dir.join("installed.toml").exists());
+    assert!(!layout.central_log.exists());
+}
+
+#[test]
+fn typed_apply_blocked_preserves_reason_without_side_effects() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "mystery",
+            None,
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    let outcome = run_typed_upgrade(&ctx, &layout, &plan, &host, ExecutionIntent::Apply, true);
+
+    let UpgradeApplicationOutcome::Blocked { reason, report } = outcome else {
+        panic!("plan errors must block apply");
+    };
+    assert_eq!(
+        reason,
+        "upgrade plan contains 1 error(s); no action was taken"
+    );
+    assert_eq!(report.errors.len(), 1);
+    assert!(host.txn_calls().is_empty());
+    assert!(!layout.lock_file.exists());
+    assert!(!layout.state_dir.join("installed.toml").exists());
+    assert!(!layout.central_log.exists());
+}
+
+#[test]
+fn typed_noop_apply_has_no_operation_or_change() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let outcome = run_typed_upgrade(&ctx, &layout, &plan, &host, ExecutionIntent::Apply, true);
+
+    let UpgradeApplicationOutcome::Applied { report, outcome } = outcome else {
+        panic!("clean no-op must be an applied outcome");
+    };
+    assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+    assert_eq!(outcome.operation_id(), None);
+    assert!(outcome.changes().is_empty());
+    assert!(outcome.warnings().is_empty());
+    assert!(report.errors.is_empty());
+    assert!(host.txn_calls().is_empty());
+    assert!(!layout.state_dir.join("installed.toml").exists());
+    assert!(!layout.central_log.exists());
+}
+
+#[test]
+fn typed_completed_apply_carries_change_and_persisted_operation() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let outcome = run_typed_upgrade(&ctx, &layout, &plan, &host, ExecutionIntent::Apply, true);
+
+    let UpgradeApplicationOutcome::Applied { report, outcome } = outcome else {
+        panic!("successful apply must return an applied outcome");
+    };
+    assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+    assert_eq!(
+        outcome.changes(),
+        &[UpgradeChange::PackageUpdated {
+            name: "cosh".to_string(),
+            package: "copilot-shell".to_string(),
+        }]
+    );
+    assert!(outcome.warnings().is_empty());
+    assert!(report.errors.is_empty());
+    let store = load_store(&layout);
+    assert_eq!(
+        outcome.operation_id(),
+        store
+            .operations
+            .last()
+            .map(|operation| operation.id.as_str())
+    );
+}
+
+#[test]
+fn typed_partial_keeps_terminal_reason_separate_from_warning() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let mut host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    host.fail_origin.insert("copilot-shell".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[
+            component_check(
+                "cosh",
+                Some("copilot-shell"),
+                Some("rpm-managed"),
+                Some("1.0.0-1.al4"),
+                Some("1.1.0-1.al4"),
+                ACTION_UPDATE,
+                None,
+            ),
+            component_check(
+                "sec-core",
+                Some("agent-sec-core"),
+                Some("rpm-managed"),
+                Some("1.0.0-1.al4"),
+                Some("1.1.0-1.al4"),
+                ACTION_UPDATE,
+                None,
+            ),
+        ],
+    );
+
+    let outcome = run_typed_upgrade(&ctx, &layout, &plan, &host, ExecutionIntent::Apply, true);
+
+    let UpgradeApplicationOutcome::Applied { report, outcome } = outcome else {
+        panic!("mixed apply must return an applied outcome");
+    };
+    let CommandOutcomeStatus::Partial { reason } = outcome.status() else {
+        panic!("mixed success and error must be partial");
+    };
+    assert_eq!(
+        reason,
+        "upgrade completed with 1 item error(s); reconciliation is required"
+    );
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(outcome.changes().len(), 1);
+    assert_eq!(outcome.warnings().len(), 1);
+    assert!(outcome.warnings()[0].contains("source repo"));
+    assert_ne!(outcome.warnings()[0], *reason);
+    assert!(outcome.operation_id().is_some());
+}
+
+#[test]
+fn typed_failed_apply_carries_reason_without_fabricating_changes() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "sec-core",
+            "agent-sec-core",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let mut host = FakeHost::default().with_installed(
+        "agent-sec-core",
+        info("agent-sec-core", "1.0.0", Some("1.al4")),
+    );
+    host.fail_update.insert("agent-sec-core".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "sec-core",
+            Some("agent-sec-core"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let outcome = run_typed_upgrade(&ctx, &layout, &plan, &host, ExecutionIntent::Apply, true);
+
+    let UpgradeApplicationOutcome::Applied { report, outcome } = outcome else {
+        panic!("failed transaction must return an applied outcome");
+    };
+    assert_eq!(
+        outcome.status(),
+        &CommandOutcomeStatus::Failed {
+            reason: "upgrade failed with 1 item error(s)".to_string(),
+        }
+    );
+    assert_eq!(report.errors.len(), 1);
+    assert!(outcome.changes().is_empty());
+    assert!(outcome.warnings().is_empty());
+    assert!(outcome.operation_id().is_some());
 }
 
 // ── mode / privilege gating ──────────────────────────────────────────────────

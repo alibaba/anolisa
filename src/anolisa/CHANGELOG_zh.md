@@ -9,6 +9,240 @@
 
 ## [未发布]
 
+## [0.3.10] - 2026-09-06
+
+### 新增
+
+- 现在可通过 `anolisa adapter` 发现、启用、查看和禁用 QwenPaw 插件适配器。
+  安装包含 QwenPaw 适配器包的 Tokenless 后，可使用
+  `anolisa adapter enable tokenless qwenpaw` 启用。安装和移除均调用 QwenPaw
+  CLI，并校验操作后的插件文件；移除失败时保留插件目录和操作凭据以便重试，
+  清理时使用启用时记录的工作目录
+  ([#3075](https://github.com/alibaba/anolisa/pull/3075))。
+
+### 修复
+
+- `anolisa logs --limit N` 现在按追加顺序选取最近 N 条匹配记录，并在结果中
+  将较早的记录排在前面，不再返回最早的匹配记录。因此，默认 50 条的限制在日志
+  增长后仍会显示近期活动；扫描已有日志时也不再阻塞新记录的追加
+  ([#2618](https://github.com/alibaba/anolisa/pull/2618))。
+
+## [0.3.9] - 2026-09-02
+
+### 新增
+
+- 已应用和失败的 `anolisa update self` 操作现会连同版本与应用模式上下文写入
+  中央操作日志。管理员可通过 `anolisa logs` 审计这些操作；生成的 bug report
+  仅包含失败记录，并会从已处理的更新 URL 中移除 credential；preview 与已是
+  最新版本的 no-op 仍不会写入日志
+  ([#2994](https://github.com/alibaba/anolisa/pull/2994))。
+
+### 变更
+
+- 新提供的 Raw repository 配置不再声明未使用的 `cache_ttl_secs` 和
+  `offline_fallback` setting。包含任一字段的现有配置仍保持兼容；Raw resolution
+  会继续获取当前 distribution index，并在 index 不可用时失败
+  ([#3002](https://github.com/alibaba/anolisa/pull/3002))。
+
+### 修复
+
+- 全局与命令级 sandbox uninstall dry-run 现都会显示计划中的 package 变更而不
+  实际应用；system mode 的 Telemetry mutation preview 会在权限检查或产生副作用
+  前返回
+  ([#2922](https://github.com/alibaba/anolisa/pull/2922)、
+  [#2926](https://github.com/alibaba/anolisa/pull/2926))。
+- 没有 preview 实现的命令现会在 dispatch 前拒绝全局 `--dry-run`。Sandbox
+  remove、kernel install 和 security install 会以 `INVALID_ARGUMENT` 拒绝两种
+  dry-run 写法，并确认没有执行任何操作，不再进入 mutation、权限检查或
+  not-implemented 路径
+  ([#2952](https://github.com/alibaba/anolisa/pull/2952)、
+  [#2957](https://github.com/alibaba/anolisa/pull/2957)、
+  [#2961](https://github.com/alibaba/anolisa/pull/2961))。
+- 独立安装器现会检测 PATH 是否仍将 `anolisa` 解析到另一份安装，报告新旧路径
+  与版本，并提供可直接执行的 PATH 修复命令或对应的 npm/Homebrew 卸载命令，
+  不再输出无条件的成功提示
+  ([#2944](https://github.com/alibaba/anolisa/pull/2944))。
+
+## [0.3.8] - 2026-08-26
+
+### 新增
+
+- 带 tag 的 ANOLISA Release 现会提供经过验证的 Linux x64、Linux arm64 和
+  macOS arm64 CLI 预编译归档。用户可直接从 GitHub Release 下载各受支持 target
+  的独立 binary 归档
+  ([#2883](https://github.com/alibaba/anolisa/pull/2883))。
+
+### 修复
+
+- Raw 安装现会在渲染 file content 时保留供 shell 与 systemd 消费的 `${VAR}`
+  reference，同时继续展开嵌套的 ANOLISA layout placeholder，并拒绝 destination
+  path 中的 environment reference。`anolisa install cosh-ng --backend raw` 现可安装
+  gateway service template，不再将其由 `EnvironmentFile=` 提供的 workspace
+  reference 误判为 unknown placeholder
+  ([#2903](https://github.com/alibaba/anolisa/pull/2903))。
+
+## [0.3.7] - 2026-08-25
+
+### 变更
+
+- 源码构建与 RPM 构建现要求 Rust 1.93，rustup toolchain 固定为 1.93.1，
+  Cargo dependency resolution 同时受声明的 MSRV 约束。构建者可使用
+  Alibaba Cloud Linux 4 打包的最新 compiler，且 Cargo 不会选择超出受支持
+  compiler 的 dependency；更早的 Rust toolchain 需要升级
+  ([#2810](https://github.com/alibaba/anolisa/pull/2810))。
+
+### 修复
+
+- `anolisa --dry-run restart <component>` 现会列出将要重启的 unit，但不会调用
+  `systemctl daemon-reload` 或 `systemctl restart`。System mode 预览会读取已记录
+  状态而不获取 exclusive install lock，因此不再要求对 state root 拥有写权限
+  ([#2774](https://github.com/alibaba/anolisa/pull/2774))。
+
+## [0.3.6] - 2026-08-22
+
+### 修复
+
+- `anolisa --quiet adapter scan` 和 `anolisa --quiet adapter status` 现会
+  抑制所有非错误的人类可读输出，包括空状态提示与结果表格；`--json` 仍会输出
+  标准响应封装。Agent 可依赖 quiet 模式的 adapter 检查不产生人类可读输出
+  ([#2752](https://github.com/alibaba/anolisa/pull/2752))。
+- `anolisa --dry-run forget <component>` 现会与真实执行一样，以
+  `INVALID_ARGUMENT`、退出码 2 和 `adapter disable` 指引，拒绝仍有已启用
+  adapter 的 component。预览不再误报无法执行的 forget 会成功，同时仍会忽略
+  无关 component 的 adapter receipt
+  ([#2762](https://github.com/alibaba/anolisa/pull/2762))。
+
+## [0.3.5] - 2026-08-20
+
+### 修复
+
+- 卸载声明 bare systemd service template 的组件时，ANOLISA 现会通过
+  `name@*.service` 停止所有已加载实例，再禁用声明的 `name@.service` template。
+  基于 template 的 service 不会在 `anolisa uninstall` 后继续运行；单个实例停止
+  失败仍会以 warning 呈现，而不会阻止后续清理
+  ([#2603](https://github.com/alibaba/anolisa/pull/2603))。
+
+## [0.3.4] - 2026-08-19
+
+### 变更
+
+- 面向组件的命令现将 repository component index 作为 local state 中不存在的
+  名称的唯一身份权威。已安装和 recovery identity 在离线时仍可使用；不支持的
+  名称返回 `INVALID_ARGUMENT`，index 不可用返回 `EXECUTION_FAILED`，而
+  `NOT_INSTALLED` 现可明确表示受支持的组件尚未安装。`--repo` override 同时决定
+  整个 invocation 的 identity 与 package selection，因此 site-local package
+  mapping 和 RPM `Provides` metadata 不再能创建 index 未识别的组件名称
+  ([#2637](https://github.com/alibaba/anolisa/pull/2637))。
+
+### 修复
+
+- 本地 Raw repository index 缺失时，错误信息现会指出 active repository 来自
+  具体的 `repo.toml` path 还是一次性的 `--repo` override，并提供对应的 recovery
+  guidance。用户无需再猜测缺失 repository 由哪个配置来源指定
+  ([#2650](https://github.com/alibaba/anolisa/pull/2650))。
+
+## [0.3.3] - 2026-08-18
+
+### 新增
+
+- Telemetry instance snapshot 现会将检测到的 Docker、Podman、containerd、
+  Kubernetes cgroup 或 LXC runtime 写入 `instance.container`，bare-metal host
+  则省略该字段。这为下游 deployment statistics 与 troubleshooting 提供
+  container-aware signal，同时不会采集 container 或 pod identity
+  ([#2642](https://github.com/alibaba/anolisa/pull/2642))。
+
+### 变更
+
+- `anolisa status <component>` 现会依据 component index 验证新 target、解析
+  package alias，并为不支持的名称提示 `anolisa list`，同时将 telemetry service
+  target 引导至 `anolisa telemetry status`。Repository metadata 不可用时，仍可
+  检查已精确记录的 installed identity
+  ([#2626](https://github.com/alibaba/anolisa/pull/2626))。
+
+### 修复
+
+- Raw adapter bundle 安装现会保留 archive 中每个 file 的 mode，并记录 effective
+  mode 供 integrity check 使用。Framework hook 与 script 不再统一按 data file
+  安装，可继续保留 executable bit
+  ([#2619](https://github.com/alibaba/anolisa/pull/2619))。
+
+## [0.3.2] - 2026-08-17
+
+### 新增
+
+- ANOLISA 现为 plugin bundle 提供原生 DSH adapter driver。
+  `anolisa adapter enable <component> dsh --profile <name>` 支持重复指定
+  profile、验证 bundle identity、将 profile 变更委托给 DSH，并记录 enable
+  时的 DSH home，使 status、disable 和 re-enable 在 `DSH_HOME` 或 working
+  directory 变化后仍针对相同 profile。降级到更早的 ANOLISA release 前需先
+  disable DSH adapter
+  ([#2580](https://github.com/alibaba/anolisa/pull/2580))。
+- `anolisa logs --level <LEVEL>` 现为已有 `--severity` option 的可见别名，
+  使用相同的 validation 和 filtering behavior，同时 `severity` 仍为 canonical
+  JSON field
+  ([#2558](https://github.com/alibaba/anolisa/pull/2558))。
+
+### 变更
+
+- `anolisa list` 和 `anolisa install --all` 现依据 schema v2
+  `components-v2.toml` 中精确的 OS 与 architecture target 判断 component
+  availability。JSON output 以 `targets` 和 `target_available` 取代
+  `platforms` 和 `platform_available`；repository publisher 必须在保持 v1
+  index 不变的同时部署 v2 index
+  ([#2533](https://github.com/alibaba/anolisa/pull/2533))。
+
+### 修复
+
+- `anolisa --dry-run install` 现优先读取 resolved Raw artifact 旁的
+  `meta.toml`，仅在该 sibling file 不存在时回退到 version-level metadata。
+  Preview 现会验证所选 target 的 contract，并拒绝损坏的已发布 metadata，
+  不再掩盖错误，同时仍不会下载 artifact
+  ([#2551](https://github.com/alibaba/anolisa/pull/2551))。
+- System-helper status 现会在 `systemctl` 无法启动时报告 `unknown`，仅在 unit
+  的实际状态为 failed 时报告 `failed`
+  ([#2604](https://github.com/alibaba/anolisa/pull/2604))。
+
+## [0.3.1] - 2026-08-13
+
+### 修复
+
+- Adapter discovery 现会忽略未声明的共享 resource directory，除非 contract、
+  receipt 或内置 framework driver 将其识别为实际 adapter。Tokenless common hook
+  等共享 asset 不再于 adapter scan 和 status output 中显示为不支持的 framework
+  ([#2502](https://github.com/alibaba/anolisa/pull/2502))。
+
+## [0.3.0] - 2026-08-12
+
+### 修复
+
+- Adapter enable、status 和 update 现基于 ANOLISA-owned Raw file 或 native
+  package metadata 派生 adapter revision，不再对整个 resource tree 计算 hash。
+  Runtime cache 与其他 unowned file 不再造成错误 drift，也不会被复制到 framework；
+  已变化的 package-owned input 会在 framework mutation 前阻止 enable，metadata
+  不可用时则报告为 `unknown` 状态
+  ([#2419](https://github.com/alibaba/anolisa/pull/2419))。
+- Re-enable adapter 现仅删除旧 receipt 记录的 stale materialized file，保留
+  runtime-created file，通过 `--dry-run` 预览 cleanup，并在 directory-to-file
+  replacement 会丢弃 runtime data 时保留旧 receipt
+  ([#2438](https://github.com/alibaba/anolisa/pull/2438))。
+
+## [0.2.20] - 2026-08-11
+
+### 变更
+
+- `anolisa list` 现显示检测到的 host platform，并在 human-readable output 中以
+  component availability 取代 backend 和 ownership column。不支持当前 host 的
+  component 仍会显示其支持的 platform，且不提供 install action；JSON 新增
+  `platforms` 和 `platform_available`，同时保留 backend 与 ownership metadata
+  ([#2367](https://github.com/alibaba/anolisa/pull/2367))。
+
+### 修复
+
+- npm 安装现由 `@anolisa/cli` 独占公开的 `anolisa` executable。在 npm 10 下，
+  本地安装可稳定创建 `node_modules/.bin/anolisa`，不再因 platform package 参与
+  链接而丢失该 command
+  ([#2345](https://github.com/alibaba/anolisa/pull/2345))。
+
 ## [0.2.19] - 2026-08-10
 
 ### 修复

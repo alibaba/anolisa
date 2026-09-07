@@ -1,26 +1,53 @@
 import type { SecurityContainmentAction } from './apiClient';
+import type { MessageKey } from '../i18n';
 
 export interface ContainmentLifecyclePresentation {
-  label: string;
-  detail: string;
+  labelKey: MessageKey;
+  detailKey: MessageKey;
   style: string;
 }
 
 export function containmentLifecyclePresentation(
   action: SecurityContainmentAction,
-): ContainmentLifecyclePresentation {
+): ContainmentLifecyclePresentation | null {
   switch (action.lifecycle_state) {
     case 'pending':
-      return { label: '等待执行', detail: '策略已提交，等待执行器确认', style: 'bg-amber-100 text-amber-700' };
+      return {
+        labelKey: 'cont.lifecycle.pending.label',
+        detailKey: 'cont.lifecycle.pending.detail',
+        style: 'bg-amber-100 text-amber-700',
+      };
     case 'active':
       return action.blocked_at_ns !== null
-        ? { label: '已遏制', detail: '内核已确认阻断', style: 'bg-red-100 text-red-700' }
-        : { label: '策略生效', detail: '等待首次内核阻断', style: 'bg-blue-100 text-blue-700' };
+        ? {
+            labelKey: 'cont.lifecycle.activeBlocked.label',
+            detailKey: 'cont.lifecycle.activeBlocked.detail',
+            style: 'bg-red-100 text-red-700',
+          }
+        : {
+            labelKey: 'cont.lifecycle.activePending.label',
+            detailKey: 'cont.lifecycle.activePending.detail',
+            style: 'bg-blue-100 text-blue-700',
+          };
     case 'expiring':
-      return { label: '正在解除', detail: '执行器正在清理策略', style: 'bg-amber-100 text-amber-700' };
+      return {
+        labelKey: 'cont.lifecycle.expiring.label',
+        detailKey: 'cont.lifecycle.expiring.detail',
+        style: 'bg-amber-100 text-amber-700',
+      };
     case 'expired':
-      return { label: '已到期', detail: '临时策略已解除', style: 'bg-gray-100 text-gray-700' };
+      return {
+        labelKey: 'cont.lifecycle.expired.label',
+        detailKey: 'cont.lifecycle.expired.detail',
+        style: 'bg-gray-100 text-gray-700',
+      };
     case 'failed':
-      return { label: '执行失败', detail: '可在确认运行状态后重新下发', style: 'bg-red-100 text-red-700' };
+      return {
+        labelKey: 'cont.lifecycle.failed.label',
+        detailKey: 'cont.lifecycle.failed.detail',
+        style: 'bg-red-100 text-red-700',
+      };
+    default:
+      return null;
   }
 }

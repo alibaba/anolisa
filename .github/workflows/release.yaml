@@ -35,6 +35,8 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
       tag: ${{ steps.parse.outputs.tag }}
       archive-sha256: ${{ steps.package-source.outputs.archive-sha256 }}
+      prebuilt-enabled: ${{ steps.plan-prebuilt.outputs.enabled }}
+      prebuilt-matrix: ${{ steps.plan-prebuilt.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,6 +78,14 @@ jobs:
           echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
 
+      - name: Plan precompiled packages
+        id: plan-prebuilt
+        env:
+          COMPONENT: ${{ steps.parse.outputs.component }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/plan_matrix.py \
+            --component "$COMPONENT" >> "$GITHUB_OUTPUT"
+
       - name: Package source archive
         id: package-source
         uses: ./.github/actions/package-source
@@ -95,6 +105,95 @@ jobs:
           artifact-suffix: ''
           retention-days: 28
 
+  build_prebuilt:
+    name: Build precompiled packages
+    needs: package
+    if: needs.package.outputs.prebuilt-enabled == 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package.outputs.prebuilt-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build cosh-ng precompiled package
+        id: cosh-ng-prebuilt
+        if: matrix.component == 'cosh-ng'
+        uses: ./.github/actions/build-cosh-ng-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build Tokenless precompiled package
+        id: tokenless-prebuilt
+        if: matrix.component == 'tokenless'
+        uses: ./.github/actions/build-tokenless-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Build ANOLISA CLI precompiled package
+        id: anolisa-prebuilt
+        if: matrix.component == 'anolisa'
+        uses: ./.github/actions/build-anolisa-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Select precompiled package output
+        id: prebuilt
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+          ANOLISA_DIRECTORY: ${{ steps.anolisa-prebuilt.outputs.artifact-directory }}
+          COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
+          TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+        run: |
+          case "$COMPONENT" in
+            anolisa) ARTIFACT_DIRECTORY="$ANOLISA_DIRECTORY" ;;
+            cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
+            tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
+          esac
+          if [ -z "$ARTIFACT_DIRECTORY" ]; then
+            echo "::error::Missing prebuilt output for $COMPONENT"
+            exit 1
+          fi
+          echo "artifact-directory=$ARTIFACT_DIRECTORY" >> "$GITHUB_OUTPUT"
+
+      - name: Upload precompiled package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.component }}-prebuilt-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.prebuilt.outputs.artifact-directory }}/*
+          if-no-files-found: error
+          retention-days: 28
+
+      - name: Upload Tokenless Python wheels
+        if: matrix.component == 'tokenless'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenless-python-wheels-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.tokenless-prebuilt.outputs.wheel-directory }}/*
+          if-no-files-found: error
+          retention-days: 28
+
   # =========================================================================
   # Step 2: Publish (requires manual approval via GitHub Environment)
   #
@@ -102,13 +201,23 @@ jobs:
   # =========================================================================
   publish:
     name: Publish ${{ needs.package.outputs.tag }}
-    needs: package
+    needs: [package, build_prebuilt]
+    if: >-
+      always() &&
+      needs.package.result == 'success' &&
+      (needs.package.outputs.prebuilt-enabled != 'true' ||
+       needs.build_prebuilt.result == 'success')
+    permissions:
+      contents: write
+      actions: read
     environment: release
     runs-on: anolisa-k8s-amd-release
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download official artifact
         uses: actions/download-artifact@v4
@@ -139,9 +248,48 @@ jobs:
           name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}-vendor
           path: /tmp/archives
 
+      - name: Download precompiled packages
+        if: needs.package.outputs.prebuilt-enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ needs.package.outputs.component }}-prebuilt-${{ needs.package.outputs.version }}-*
+          path: /tmp/prebuilt
+
+      - name: Verify precompiled packages
+        if: needs.package.outputs.prebuilt-enabled == 'true'
+        env:
+          COMPONENT: ${{ needs.package.outputs.component }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/verify-artifacts.py \
+            --directory /tmp/prebuilt \
+            --component "$COMPONENT" \
+            --version "$VERSION" \
+            --layout actions
+
+      - name: Download Tokenless Python wheels
+        if: needs.package.outputs.component == 'tokenless'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tokenless-python-wheels-${{ needs.package.outputs.version }}-*
+          merge-multiple: true
+          path: /tmp/python-wheels
+
+      - name: Verify Tokenless Python wheels
+        if: needs.package.outputs.component == 'tokenless'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 .github/actions/build-tokenless-prebuilt/verify-wheels.py \
+            --directory /tmp/python-wheels \
+            --version "$VERSION" \
+            --layout aggregate \
+            --write-checksums /tmp/python-wheels/SHA256SUMS-python-wheels.txt
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PREBUILT_ENABLED: ${{ needs.package.outputs.prebuilt-enabled }}
         run: |
           COMPONENT="${{ needs.package.outputs.component }}"
           VERSION="${{ needs.package.outputs.version }}"
@@ -175,6 +323,23 @@ jobs:
           VENDOR_ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}-vendor.tar.gz"
           if [ -f "$VENDOR_ARCHIVE" ]; then
             ASSETS+=("$VENDOR_ARCHIVE")
+          fi
+          if [ "$PREBUILT_ENABLED" = "true" ]; then
+            while IFS= read -r asset; do
+              ASSETS+=("$asset")
+            done < <(
+              find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
+                LC_ALL=C sort
+            )
+          fi
+          if [ "$COMPONENT" = tokenless ]; then
+            while IFS= read -r asset; do
+              ASSETS+=("$asset")
+            done < <(
+              find /tmp/python-wheels -maxdepth 1 -type f \
+                \( -name '*.whl' -o -name 'SHA256SUMS-python-wheels.txt' \) \
+                -print | LC_ALL=C sort
+            )
           fi
 
           if gh release view "$TAG" > /dev/null 2>&1; then

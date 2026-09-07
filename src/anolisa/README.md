@@ -33,8 +33,8 @@ anolisa update all
 | `upgrade` | Apply an RPM/system-image upgrade plan (system scope) |
 | `status` | Show component health |
 | `doctor` | Diagnose issues and suggest fixes |
-| `logs` | Query component logs |
-| `restart` | Restart a component service |
+| `logs` | Query component logs (`--severity`, alias `--level`) |
+| `restart` | Restart a component service (`--dry-run` lists units without dispatching) |
 | `repair` | Reconcile state after manual RPM changes |
 | `adopt` | Record an existing system RPM as adopted without default removal authority |
 | `forget` | Drop state record without package operations |
@@ -97,10 +97,15 @@ The lifecycle planner separates ANOLISA-owned files from native-package
 authority and records crash-recovery intent before side effects. Component
 metadata is declared through `component.toml`.
 
+The raw backend re-fetches the distribution index on every resolve and fails
+when the repository is unreachable. Legacy `cache_ttl_secs` and
+`offline_fallback` keys in `repo.toml` are still accepted for compatibility,
+but the current raw backend ignores their values.
+
 ## Requirements
 
 - Linux (x86_64 / aarch64) or macOS (arm64, limited)
-- Rust ≥ 1.88 (for source build)
+- Rust ≥ 1.93 (for source build)
 
 ## License
 

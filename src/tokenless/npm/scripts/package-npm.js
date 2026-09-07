@@ -19,7 +19,7 @@
  *   node npm/scripts/package-npm.js --all               # all supported targets
  *
  * Prerequisites:
- *   - Prebuilt tokenless, rtk, and toon binaries for each selected target
+ *   - Prebuilt tokenless and rtk binaries for each selected target
  *   - npm (the architecture-independent OpenClaw adapter is built here)
  *
  * Output:
@@ -66,7 +66,7 @@ if (!version) {
   process.exit(1);
 }
 
-const BINARIES = ['tokenless', 'rtk', 'toon'];
+const BINARIES = ['tokenless', 'rtk'];
 
 // npm registry every generated manifest and publish command is pinned to.
 // The nested dist/* package roots do NOT inherit npm/.npmrc, so without an
@@ -122,7 +122,7 @@ Target selectors also accept an OS, npm CPU, architecture, or Rust target
 triple and may select more than one matching target.
 
 Prebuilt binaries are read from:
-  target/npm-prebuilt/<target>/{tokenless,rtk,toon}`);
+  target/npm-prebuilt/<target>/{tokenless,rtk}`);
 }
 
 function optionValue(args, index, option) {
@@ -307,13 +307,16 @@ function packagePlatform(target, binaryPaths) {
     chmodSync(destination, 0o755);
   }
 
-  // Build bin map for package.json
-  const binMap = {};
-  for (const bin of Object.keys(binaryPaths)) {
-    binMap[bin] = `bin/${bin}`;
-  }
-
   // Write package.json
+  //
+  // Deliberately declare NO `bin` entries here: the platform packages would
+  // otherwise claim the same `tokenless`/`rtk` bin names as the root
+  // package. When multiple packages in a tree claim the same bin, npm's
+  // reify removes every conflicting `.bin` link instead of picking a
+  // winner, leaving installs without a `tokenless` executable. esbuild ships
+  // its platform packages the same way (binaries in bin/, no bin field); the
+  // root package owns the bin entries and its postinstall links them to
+  // these native binaries.
   const archLabel = target.npm_cpu === 'x64' ? 'x86_64' : 'aarch64';
   const pkgJson = {
     name: pkgName,
@@ -330,7 +333,6 @@ function packagePlatform(target, binaryPaths) {
     // Binaries target *-unknown-linux-gnu — keep musl (Alpine) installs from
     // matching a package whose ELF they cannot run.
     ...(target.npm_os === 'linux' ? { libc: ['glibc'] } : {}),
-    bin: binMap,
     files: ['bin/'],
     preferUnplugged: true,
     publishConfig: PUBLISH_CONFIG,
@@ -357,7 +359,8 @@ function walkFiles(dir, cb) {
  * Build adapter payloads that are not plain source files. The OpenClaw plugin
  * is TypeScript and must be compiled to dist/index.js before it can be
  * installed by openclaw plugins install; a clean Git checkout only contains
- * index.ts. This mirrors the Makefile's build-openclaw-plugin target.
+ * index.ts. The dsh entry is plain ESM, but its package manifest is generated
+ * from the component version and is validated by the same Makefile seam.
  */
 function buildAdapters() {
   const openclawDir = join(tokenlessRoot, 'adapters', 'tokenless', 'openclaw');
@@ -367,14 +370,14 @@ function buildAdapters() {
   // never leak into a published tarball.
   console.log('  Building OpenClaw plugin (TypeScript -> dist/index.js)...');
   try {
-    execSync('make build-openclaw-plugin', {
+    execSync('make build-openclaw-plugin build-dsh-plugin', {
       stdio: 'inherit',
       cwd: tokenlessRoot,
     });
   } catch (err) {
     throw new Error(
-      `OpenClaw plugin build failed. Ensure npm and TypeScript are available. ` +
-      `Build manually with: make -C src/tokenless build-openclaw-plugin`,
+      `Adapter bundle preparation failed. Ensure npm and TypeScript are available. ` +
+      `Build manually with: make -C src/tokenless build-openclaw-plugin build-dsh-plugin`,
     );
   }
 
@@ -382,6 +385,13 @@ function buildAdapters() {
     throw new Error(
       `OpenClaw plugin build did not produce adapters/tokenless/openclaw/dist/index.js`,
     );
+  }
+
+  const dshDir = join(tokenlessRoot, 'adapters', 'tokenless', 'dsh');
+  for (const relative of ['package.json', 'cordis.patch.yml', 'dist/index.js']) {
+    if (!existsSync(join(dshDir, relative))) {
+      throw new Error(`Native dsh adapter bundle is missing adapters/tokenless/dsh/${relative}`);
+    }
   }
 }
 
@@ -393,11 +403,16 @@ function buildAdapters() {
 function copyAdapters(rootPkgDir) {
   const adaptersSrc = join(tokenlessRoot, 'adapters', 'tokenless');
   const adaptersDest = join(rootPkgDir, 'adapters', 'tokenless');
+  const legacyAgentscopeSrc = join(adaptersSrc, 'agentscope');
 
-  console.log('  Bundling framework adapters...');
+  console.log('  Bundling Agent adapters...');
   cpSync(adaptersSrc, adaptersDest, {
     recursive: true,
+    // npm pack omits symlinks; shared hook dispatchers must ship as regular files.
+    dereference: true,
     filter: (src) =>
+      src !== legacyAgentscopeSrc &&
+      !src.startsWith(`${legacyAgentscopeSrc}${sep}`) &&
       !src.split(sep).includes('node_modules') &&
       !src.endsWith(`${sep}package-lock.json`) &&
       !src.endsWith(`${sep}.gitignore`),
@@ -445,7 +460,7 @@ process.exit(1);
     join(rootPkgDir, 'scripts', 'postinstall.js'),
   );
 
-  // Build and bundle framework adapters (hook scripts are plain bash/python
+  // Build and bundle Agent adapters (hook scripts are plain bash/python
   // — OS and architecture independent), so npm installs get adapter
   // integration on macOS and Linux alike. postinstall copies them to the
   // user-level data dir that run-hook.sh already searches

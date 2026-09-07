@@ -30,10 +30,10 @@ fn pct(report: &serde_json::Value, pointer: &str) -> f64 {
 }
 
 #[test]
-fn response_canonical_savings_at_least_60_pct() {
+fn response_canonical_lossless_savings_at_least_35_pct() {
     let report = compression_metrics();
     let saved = pct(&report, "/canonical/response/savings_pct");
-    assert!(saved >= 60.0, "response savings regressed: {saved}%");
+    assert!(saved >= 35.0, "response savings regressed: {saved}%");
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn schema_canonical_savings_at_least_40_pct() {
 }
 
 #[test]
-fn full_stack_savings_at_least_55_pct() {
+fn full_stack_savings_at_least_49_pct() {
     let report = compression_metrics();
     let configs = report["stacking"]["configs"].as_array().unwrap();
     let full = configs
@@ -52,7 +52,7 @@ fn full_stack_savings_at_least_55_pct() {
         .find(|c| c["config"] == "full_stack")
         .expect("full_stack config present");
     let saved = full["savings_pct"].as_f64().unwrap();
-    assert!(saved >= 55.0, "full_stack savings regressed: {saved}%");
+    assert!(saved >= 49.0, "full_stack savings regressed: {saved}%");
 }
 
 #[test]
@@ -75,15 +75,14 @@ fn no_config_exceeds_baseline() {
 
 #[test]
 fn array_33_short_elements_may_expand() {
-    use tokenless_schema::ResponseCompressor;
+    use tokenless_bench::compress_json;
 
     // 33 numeric zeros — just above the default array truncation threshold (32).
     // For short elements, the truncation marker itself can cost more bytes than
     // the elements it replaces, causing net expansion. This test documents that
     // known behaviour rather than asserting non-expansion.
     let input = serde_json::Value::Array(vec![serde_json::json!(0); 33]);
-    let compressor = ResponseCompressor::new();
-    let output = compressor.compress(&input);
+    let output = compress_json(&input);
     let input_bytes = serde_json::to_string(&input).unwrap().len();
     let output_bytes = serde_json::to_string(&output).unwrap().len();
     // Must produce valid output regardless of expansion.

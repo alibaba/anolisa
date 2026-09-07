@@ -30,6 +30,15 @@ pub const INDEXES_DIR: &str = "indexes"; // snapshots indexes directory
 pub const LOCKFILE_NAME: &str = "daemon.lock"; // daemon write lockfile
 pub const POLICY_FILE: &str = "policy.toml";
 
+/// Wire protocol version used by the guarded checkpoint API.
+pub const GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2: u16 = 2;
+
+/// Maximum UTF-8 byte length accepted for a guarded checkpoint identifier.
+pub const GUARDED_CHECKPOINT_ID_MAX_BYTES_V2: usize = 128;
+
+/// Maximum guarded-operation evidence records retained for one workspace.
+pub const GUARDED_CHECKPOINT_EVIDENCE_LIMIT_V2: usize = 256;
+
 /// Snapshot advisory threshold; strict-greater filter shared by daemon and CLI.
 pub const ADVISORY_SNAPSHOT_LIMIT: u32 = 1000;
 
@@ -134,6 +143,27 @@ pub enum Request {
         to: Option<String>,
         num_ancestors: Option<u32>,
     },
+    /// Resolve the daemon's stable identity for a registered workspace path.
+    WorkspaceIdentityV2 {
+        registration_path: String,
+    },
+    /// Create a checkpoint guarded by workspace generation and operation identity.
+    GuardedCheckpointV2 {
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: String,
+        operation_digest: [u8; 32],
+        message: Option<String>,
+        metadata: Option<String>,
+        pin: bool,
+    },
+    /// Query durable evidence for a previously guarded checkpoint operation.
+    CheckpointEvidenceV2 {
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: String,
+        operation_digest: [u8; 32],
+    },
 }
 
 /// Field-level patch op: `Unchanged` (default) / `Set(v)`.
@@ -197,6 +227,17 @@ pub enum Response {
     /// confirm the landed state without a follow-up `Config` round-trip.
     ReloadConfigOk {
         config: ConfigReport,
+        /// Global config the daemon now operates from, as parsed from
+        /// [`CONFIG_FILE_PATH`] *in the daemon's own filesystem* — defaults
+        /// when that file is absent. `None` when the reload did not consult
+        /// the global file at all (per-workspace policy reload).
+        ///
+        /// `config` reports effective runtime values, which cannot expose a
+        /// bootstrap-only setting the daemon has not applied yet; this field
+        /// can. A client that just wrote the file compares it here to detect
+        /// that the daemon reloaded a different file, or none — the case
+        /// where CLI and daemon do not share `/etc/ws-ckpt`.
+        file: Option<FileConfig>,
     },
     CheckpointSkipped {
         reason: String,
@@ -229,6 +270,27 @@ pub enum Response {
         to: String,
         changes: Vec<DiffEntry>,
     },
+    /// Stable identity returned for a registered workspace.
+    WorkspaceIdentityV2Ok {
+        /// Always [`GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2`].
+        protocol_version: u16,
+        ws_id: String,
+        registered_path: String,
+        generation: WorkspaceGenerationTokenV2,
+    },
+    /// Durable evidence that a guarded checkpoint request took effect or was skipped.
+    GuardedCheckpointV2Ok {
+        evidence: GuardedCheckpointEvidenceV2,
+    },
+    /// Durable evidence lookup; absence is represented by `None`, never a rejection.
+    CheckpointEvidenceV2Ok {
+        evidence: Option<GuardedCheckpointEvidenceV2>,
+    },
+    /// A request rejected before backend execution, with known no-checkpoint effect.
+    GuardedCheckpointV2Rejected {
+        code: GuardedCheckpointRejectionCodeV2,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -246,6 +308,142 @@ pub enum ErrorCode {
     DiskSpaceInsufficient,
     CwdOccupied,
     CwdScanFailed,
+}
+
+/// Opaque identity for one live writable-subvolume generation of a workspace.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorkspaceGenerationTokenV2([u8; 32]);
+
+impl WorkspaceGenerationTokenV2 {
+    /// Constructs a generation token from its fixed-width wire representation.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the fixed-width wire representation.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Consumes the token and returns its fixed-width wire representation.
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for WorkspaceGenerationTokenV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkspaceGenerationTokenV2(<opaque>)")
+    }
+}
+
+/// Outcome durably bound to a guarded checkpoint operation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum GuardedCheckpointOutcomeV2 {
+    /// The backend created this snapshot.
+    Created { snapshot_id: String },
+    /// The daemon intentionally skipped backend creation.
+    Skipped { reason: String },
+}
+
+/// Durable proof binding a caller operation to its workspace and checkpoint outcome.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GuardedCheckpointEvidenceV2 {
+    /// Exact daemon workspace identifier used for the operation.
+    pub ws_id: String,
+    /// Verbatim user-facing path stored in the daemon registration.
+    pub registered_path: String,
+    /// Live writable-subvolume generation checked before backend execution.
+    pub generation: WorkspaceGenerationTokenV2,
+    /// Snapshot identifier reserved while this evidence remains retained.
+    pub checkpoint_id: String,
+    /// Caller-defined digest binding the higher-level operation identity.
+    pub operation_digest: [u8; 32],
+    /// Effective UID obtained from the Unix peer credentials.
+    pub caller_uid: u32,
+    /// Durable checkpoint outcome.
+    pub outcome: GuardedCheckpointOutcomeV2,
+}
+
+/// Reasons a guarded request can be rejected before backend execution.
+///
+/// Every variant guarantees that the daemon either did not invoke the backend or
+/// otherwise knows that no checkpoint effect occurred.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedCheckpointRejectionCodeV2 {
+    DaemonNotReady,
+    PeerCredentialsUnavailable,
+    InvalidRegistrationPath,
+    InvalidWorkspaceId,
+    InvalidCheckpointId,
+    InvalidMetadata,
+    WorkspaceNotFound,
+    GenerationMismatch,
+    OperationConflict,
+    WriteLockConflict,
+    CallerMismatch,
+    EvidenceCapacityReached,
+}
+
+/// Validates the canonical `ws-xxxxxx` identifier and optional `-N` collision suffix.
+pub fn validate_workspace_id_v2(ws_id: &str) -> Result<(), String> {
+    let Some(rest) = ws_id.strip_prefix("ws-") else {
+        return Err("workspace id must start with 'ws-'".to_string());
+    };
+    let (base, suffix) = match rest.split_once('-') {
+        Some((base, suffix)) => (base, Some(suffix)),
+        None => (rest, None),
+    };
+    if base.len() != 6
+        || !base
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(
+            "workspace id hash must be exactly six lowercase hexadecimal characters".to_string(),
+        );
+    }
+    if let Some(suffix) = suffix {
+        if suffix.is_empty()
+            || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+            || suffix.starts_with('0')
+            || suffix.parse::<u64>().map_or(true, |value| value < 2)
+        {
+            return Err(
+                "workspace id collision suffix must be a canonical integer of at least 2"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Validates a bounded, non-reserved checkpoint identifier safe as one path component.
+pub fn validate_checkpoint_id_v2(checkpoint_id: &str) -> Result<(), String> {
+    if checkpoint_id.is_empty() {
+        return Err("checkpoint id must not be empty".to_string());
+    }
+    if checkpoint_id == LIVE_CHILD {
+        return Err("checkpoint id is reserved for the live workspace marker".to_string());
+    }
+    if checkpoint_id.len() > GUARDED_CHECKPOINT_ID_MAX_BYTES_V2 {
+        return Err(format!(
+            "checkpoint id exceeds {} bytes",
+            GUARDED_CHECKPOINT_ID_MAX_BYTES_V2
+        ));
+    }
+    if checkpoint_id == "." || checkpoint_id == ".." {
+        return Err("checkpoint id must not be '.' or '..'".to_string());
+    }
+    if !checkpoint_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(
+            "checkpoint id may contain only ASCII letters, digits, '-', '_', and '.'".to_string(),
+        );
+    }
+    Ok(())
 }
 
 // ── Snapshot types ──
@@ -309,6 +507,9 @@ pub struct SnapshotIndex {
     pub snapshots: HashMap<String, SnapshotMeta>,
     #[serde(default)]
     pub head: Option<String>,
+    /// Durable guarded-operation evidence keyed by checkpoint identifier.
+    #[serde(default)]
+    pub governed_evidence: HashMap<String, GuardedCheckpointEvidenceV2>,
 }
 
 impl SnapshotIndex {
@@ -317,6 +518,7 @@ impl SnapshotIndex {
             workspace_path,
             snapshots: HashMap::new(),
             head: None,
+            governed_evidence: HashMap::new(),
         }
     }
 }
@@ -2215,12 +2417,26 @@ mod tests {
                 img_size: 30,
                 img_max_percent: 40.0,
             },
+            file: Some(FileConfig {
+                auto_cleanup: Some(true),
+                auto_cleanup_keep: Some(CleanupRetention::age("30d").unwrap()),
+                ..Default::default()
+            }),
         };
         match round_trip_response(&resp) {
-            Response::ReloadConfigOk { config } => {
+            Response::ReloadConfigOk { config, file } => {
                 assert!(config.auto_cleanup);
                 assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(5));
                 assert_eq!(config.auto_cleanup_interval_secs, 3_600);
+                // Age retention re-derives secs from `raw` over the wire; the
+                // client compares this against the file it wrote, so the
+                // round-trip must preserve it exactly.
+                let file = file.expect("daemon-visible config file");
+                assert_eq!(file.auto_cleanup, Some(true));
+                assert_eq!(
+                    file.auto_cleanup_keep,
+                    Some(CleanupRetention::age("30d").unwrap())
+                );
             }
             _ => panic!("expected ReloadConfigOk variant"),
         }
@@ -2944,5 +3160,192 @@ mod tests {
         assert_eq!(idx.snapshots["k"].parent_id, None);
         assert_eq!(idx.head.as_deref(), Some("m"));
         assert!(idx.snapshots["n"].parent_id.as_deref() == Some("m"));
+    }
+
+    #[test]
+    fn v2_request_discriminants_are_append_only_and_round_trip() {
+        let generation = WorkspaceGenerationTokenV2::from_bytes([0x11; 32]);
+        let requests = [
+            Request::WorkspaceIdentityV2 {
+                registration_path: "/workspace".to_string(),
+            },
+            Request::GuardedCheckpointV2 {
+                ws_id: "ws-abcdef-2".to_string(),
+                expected_generation: generation,
+                checkpoint_id: "turn-42".to_string(),
+                operation_digest: [0x22; 32],
+                message: Some("checkpoint".to_string()),
+                metadata: Some(r#"{"turn":42}"#.to_string()),
+                pin: true,
+            },
+            Request::CheckpointEvidenceV2 {
+                ws_id: "ws-abcdef-2".to_string(),
+                expected_generation: generation,
+                checkpoint_id: "turn-42".to_string(),
+                operation_digest: [0x22; 32],
+            },
+        ];
+
+        for (request, expected_discriminant) in requests.iter().zip(19_u32..=21) {
+            let encoded = bincode::serialize(request).unwrap();
+            assert_eq!(&encoded[..4], &expected_discriminant.to_le_bytes());
+            let decoded: Request = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
+        }
+
+        let legacy = bincode::serialize(&Request::RollbackPreview {
+            workspace: "/workspace".to_string(),
+            to: None,
+            num_ancestors: Some(1),
+        })
+        .unwrap();
+        assert_eq!(&legacy[..4], &18_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn v2_response_discriminants_are_append_only_and_round_trip() {
+        let evidence = GuardedCheckpointEvidenceV2 {
+            ws_id: "ws-abcdef".to_string(),
+            registered_path: "/workspace".to_string(),
+            generation: WorkspaceGenerationTokenV2::from_bytes([0x33; 32]),
+            checkpoint_id: "turn-42".to_string(),
+            operation_digest: [0x44; 32],
+            caller_uid: 1000,
+            outcome: GuardedCheckpointOutcomeV2::Created {
+                snapshot_id: "turn-42".to_string(),
+            },
+        };
+        let responses = [
+            Response::WorkspaceIdentityV2Ok {
+                protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+                ws_id: evidence.ws_id.clone(),
+                registered_path: evidence.registered_path.clone(),
+                generation: evidence.generation,
+            },
+            Response::GuardedCheckpointV2Ok {
+                evidence: evidence.clone(),
+            },
+            Response::CheckpointEvidenceV2Ok {
+                evidence: Some(evidence),
+            },
+            Response::GuardedCheckpointV2Rejected {
+                code: GuardedCheckpointRejectionCodeV2::GenerationMismatch,
+                message: "workspace generation changed".to_string(),
+            },
+        ];
+
+        for (response, expected_discriminant) in responses.iter().zip(17_u32..=20) {
+            let encoded = bincode::serialize(response).unwrap();
+            assert_eq!(&encoded[..4], &expected_discriminant.to_le_bytes());
+            let decoded: Response = bincode::deserialize(&encoded).unwrap();
+            assert_eq!(bincode::serialize(&decoded).unwrap(), encoded);
+        }
+
+        let legacy = bincode::serialize(&Response::RollbackPreviewOk {
+            to: "turn-41".to_string(),
+            changes: vec![],
+        })
+        .unwrap();
+        assert_eq!(&legacy[..4], &16_u32.to_le_bytes());
+        assert_eq!(
+            bincode::serialize(&ErrorCode::CwdScanFailed).unwrap(),
+            12_u32.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn v2_supporting_enum_discriminants_are_frozen() {
+        let rejection_codes = [
+            GuardedCheckpointRejectionCodeV2::DaemonNotReady,
+            GuardedCheckpointRejectionCodeV2::PeerCredentialsUnavailable,
+            GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath,
+            GuardedCheckpointRejectionCodeV2::InvalidWorkspaceId,
+            GuardedCheckpointRejectionCodeV2::InvalidCheckpointId,
+            GuardedCheckpointRejectionCodeV2::InvalidMetadata,
+            GuardedCheckpointRejectionCodeV2::WorkspaceNotFound,
+            GuardedCheckpointRejectionCodeV2::GenerationMismatch,
+            GuardedCheckpointRejectionCodeV2::OperationConflict,
+            GuardedCheckpointRejectionCodeV2::WriteLockConflict,
+            GuardedCheckpointRejectionCodeV2::CallerMismatch,
+            GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached,
+        ];
+        for (code, expected_discriminant) in rejection_codes.iter().zip(0_u32..=11) {
+            assert_eq!(
+                bincode::serialize(code).unwrap(),
+                expected_discriminant.to_le_bytes()
+            );
+        }
+
+        let created = GuardedCheckpointOutcomeV2::Created {
+            snapshot_id: "turn-42".to_string(),
+        };
+        let skipped = GuardedCheckpointOutcomeV2::Skipped {
+            reason: "write lock active".to_string(),
+        };
+        assert_eq!(
+            &bincode::serialize(&created).unwrap()[..4],
+            &0_u32.to_le_bytes()
+        );
+        assert_eq!(
+            &bincode::serialize(&skipped).unwrap()[..4],
+            &1_u32.to_le_bytes()
+        );
+
+        let token = WorkspaceGenerationTokenV2::from_bytes([0x55; 32]);
+        assert_eq!(bincode::serialize(&token).unwrap(), vec![0x55; 32]);
+        assert_eq!(token.into_bytes(), [0x55; 32]);
+    }
+
+    #[test]
+    fn old_snapshot_index_json_loads_with_empty_governed_evidence() {
+        let old_json = r#"{
+            "workspace_path": "/workspace",
+            "snapshots": {},
+            "head": null
+        }"#;
+
+        let index: SnapshotIndex = serde_json::from_str(old_json).unwrap();
+        assert_eq!(index.workspace_path, PathBuf::from("/workspace"));
+        assert!(index.governed_evidence.is_empty());
+    }
+
+    #[test]
+    fn v2_workspace_id_validator_requires_canonical_form() {
+        for valid in ["ws-012abc", "ws-abcdef-2", "ws-abcdef-42"] {
+            assert!(validate_workspace_id_v2(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "abcdef",
+            "ws-abcde",
+            "ws-ABCDEf",
+            "ws-abcdef-0",
+            "ws-abcdef-1",
+            "ws-abcdef-02",
+            "ws-abcdef-2-extra",
+        ] {
+            assert!(validate_workspace_id_v2(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn v2_checkpoint_id_validator_accepts_only_safe_non_reserved_components() {
+        for valid in ["turn-42", "checkpoint_1", "ckpt.2026"] {
+            assert!(validate_checkpoint_id_v2(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "",
+            ".",
+            "..",
+            LIVE_CHILD,
+            "with space",
+            "../escape",
+            "slash/path",
+        ] {
+            assert!(validate_checkpoint_id_v2(invalid).is_err(), "{invalid}");
+        }
+        assert!(validate_checkpoint_id_v2(&"a".repeat(GUARDED_CHECKPOINT_ID_MAX_BYTES_V2)).is_ok());
+        assert!(
+            validate_checkpoint_id_v2(&"a".repeat(GUARDED_CHECKPOINT_ID_MAX_BYTES_V2 + 1)).is_err()
+        );
     }
 }

@@ -17,7 +17,7 @@ import yaml
 from agent_sec_cli.skill_ledger.scanner.names import STATIC_SCANNER_NAME
 
 SCANNER_NAME = STATIC_SCANNER_NAME
-SCANNER_VERSION = "cisco-static-only-0.1.0"
+SCANNER_VERSION = "cisco-static-only-0.1.1"
 SCANNER_SOURCE = "cisco-skill-scanner-static-only"
 
 _SKILL_MANIFEST = "SKILL.md"

@@ -82,7 +82,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::ApprovalShellHandoffValidationEmptyCommand => "Shell handoff command is empty.",
         MessageId::ApprovalShellHandoffValidationMultilineCommand => {
-            "Shell handoff command contains a newline; multiline handoff is not enabled."
+            "Shell handoff command contains an unsupported line break. Only line feeds inside complete single-quoted arguments are allowed."
         }
         MessageId::ApprovalShellHandoffValidationControlCharacter => {
             "Shell handoff command contains a blocked control character."
@@ -191,6 +191,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalTurnExtensionUnavailableTitle => "Cannot continue",
         MessageId::ApprovalTurnExtensionUnavailableBody => {
             "The persisted provider session changed before the extension was approved."
+        }
+        MessageId::ApprovalTrustUnknownToolReason => {
+            "Outside the trusted tool catalog; explicit approval is required in Trust mode"
         }
         _ => return None,
     })

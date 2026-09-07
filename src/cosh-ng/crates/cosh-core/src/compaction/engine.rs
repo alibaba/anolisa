@@ -496,7 +496,7 @@ pub(crate) fn cli_prefix_tokens(config: &CoreConfig, workspace: &std::path::Path
         workspace,
         &[],
         &[],
-        &config.agent.approval_mode,
+        config.agent.approval_mode.label(),
         config.ai.output_language.as_deref(),
     );
     estimate_text_tokens(&system_prompt) + CLI_TOOL_DECLARATION_RESERVE

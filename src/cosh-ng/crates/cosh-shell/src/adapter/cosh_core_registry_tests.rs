@@ -3,7 +3,7 @@ use serde_json::Value;
 use super::cosh_core::CoshCoreAdapter;
 use super::cosh_core_registry::{
     extension_mutation_requires_reload, registry_timeout, RegistryQueryError,
-    REGISTRY_MUTATION_TIMEOUT, REGISTRY_READ_TIMEOUT,
+    AUTH_CONFIGURE_TIMEOUT, REGISTRY_MUTATION_TIMEOUT, REGISTRY_READ_TIMEOUT,
 };
 
 #[test]
@@ -31,6 +31,11 @@ fn candidate_building_mutations_share_the_mutation_timeout() {
         registry_timeout("extensions", "list"),
         REGISTRY_READ_TIMEOUT
     );
+    assert_eq!(
+        registry_timeout("auth", "configure"),
+        AUTH_CONFIGURE_TIMEOUT
+    );
+    assert!(AUTH_CONFIGURE_TIMEOUT > std::time::Duration::from_secs(8));
 }
 
 fn test_adapter_with_program(program: &str) -> CoshCoreAdapter {
@@ -123,9 +128,36 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
 
     assert_eq!(
         result,
-        Err(RegistryQueryError::Response(
-            "candidate validation failed".to_string()
-        ))
+        Err(RegistryQueryError::Response {
+            message: "candidate validation failed".to_string(),
+            code: None,
+        })
+    );
+}
+
+#[test]
+fn registry_query_preserves_structured_auth_error_code() {
+    let script = write_mock_script(
+        "classified-auth-failure",
+        r#"read REQUEST
+printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":false,"data":{"error_code":"invalid_credentials"},"error":"The API key was rejected."}'
+"#,
+    );
+
+    let adapter = test_adapter_with_program(&script.to_string_lossy());
+    let result = adapter.registry_query_classified(
+        "auth",
+        "configure",
+        serde_json::json!({"provider_id": "test"}),
+    );
+    let _ = std::fs::remove_file(&script);
+
+    assert_eq!(
+        result,
+        Err(RegistryQueryError::Response {
+            message: "The API key was rejected.".to_string(),
+            code: Some("invalid_credentials".to_string()),
+        })
     );
 }
 

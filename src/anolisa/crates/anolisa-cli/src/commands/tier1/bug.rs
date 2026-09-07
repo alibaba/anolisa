@@ -18,6 +18,26 @@ const ISSUE_URL: &str = "https://github.com/alibaba/anolisa/issues/new?template=
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 
+/// Detail fields a record may carry out of the machine in a bug bundle.
+///
+/// An allowlist rather than a filter. `details` is free-form and a command
+/// attaches whatever it finds useful — a failed hook parks up to 4 KiB of raw
+/// subprocess stderr under `stderr_tail`, which no keyword scan can be trusted
+/// to clean, since a bare `Bearer` value or a PEM block has no `key=value`
+/// shape to catch. A bundle is written to be pasted into a public issue, so a
+/// field travels only once it is known to be structured and bounded, and
+/// anything new stays behind until it is listed here.
+const EXPORTABLE_DETAIL_KEYS: &[&str] = &[
+    "apply_mode",
+    "current_version",
+    "endpoint",
+    "latest_version",
+    "package",
+    "rpm_version_after",
+    "rpm_version_before",
+    "updated",
+];
+
 #[derive(Parser)]
 pub struct BugArgs {
     /// Limit the report to one component.
@@ -69,6 +89,8 @@ struct RecentLogSummary {
     objects: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -107,12 +129,14 @@ fn build_payload(
     ctx: &CliContext,
 ) -> Result<BugReportPayload, CliError> {
     let environment = collect_environment(ctx);
-    // Resolve component alias before filtering state and logs.
-    let resolved = component.map(|name| {
-        let state = common::load_state_store(ctx, COMMAND)
-            .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
-        common::lookup_component_name_in_store(name, &state, ctx, COMMAND)
-    });
+    // Resolve the component identity before filtering state and logs.
+    let resolved = component
+        .map(|name| {
+            let state = common::load_state_store(ctx, COMMAND)
+                .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
+            common::lookup_component_name_in_store(name, &state, ctx, COMMAND)
+        })
+        .transpose()?;
     let components = collect_components(resolved.as_deref(), ctx)?;
     let recent_logs = collect_recent_logs(resolved.as_deref(), limit, ctx)?;
     let markdown = render_markdown(&environment, &components, &recent_logs);
@@ -251,7 +275,36 @@ fn summarize_log(record: LogRecord) -> RecentLogSummary {
             .into_iter()
             .map(|v| redact_sensitive(&v))
             .collect(),
+        details: redact_details(record.details),
     }
+}
+
+/// Carry a record's `details` into the bundle under the same redaction as every
+/// other field.
+///
+/// Without this the structured diagnostics a command attaches — the versions
+/// and endpoint a failed self-update records, say — are selected into the
+/// bundle and then dropped on the way out, which is the one place they were
+/// meant to be read.
+fn redact_details(value: serde_json::Value) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(fields) = value else {
+        return None;
+    };
+    let kept: serde_json::Map<String, serde_json::Value> = fields
+        .into_iter()
+        .filter(|(key, _)| EXPORTABLE_DETAIL_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| match value {
+            serde_json::Value::String(text) => {
+                (key, serde_json::Value::String(redact_sensitive(&text)))
+            }
+            other => (key, other),
+        })
+        .collect();
+
+    if kept.is_empty() {
+        return None;
+    }
+    Some(serde_json::Value::Object(kept))
 }
 
 fn render_markdown(
@@ -308,6 +361,9 @@ fn render_markdown(
             }
             if !log.warnings.is_empty() {
                 out.push_str(&format!("  - warnings: {}\n", log.warnings.join("; ")));
+            }
+            if let Some(details) = &log.details {
+                out.push_str(&format!("  - details: {details}\n"));
             }
         }
     }
@@ -603,6 +659,98 @@ mod tests {
 
         assert!(markdown.contains("token=<redacted>"));
         assert!(!markdown.contains("super-secret"));
+    }
+
+    /// The structured failure context is the reason a failed operation is worth
+    /// recording, and the bundle is where it gets read. Asserted on a real
+    /// payload: the record goes through the log file, the query, the summary,
+    /// and the renderer.
+    #[test]
+    fn bug_payload_carries_redacted_log_details() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = crate::test_support::context_for_root(
+            tmp.path(),
+            crate::context::InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+            crate::test_support::TestContextOptions {
+                quiet: false,
+                no_color: false,
+                ..Default::default()
+            },
+        );
+
+        let mut record = log_record("2026-06-01T10:00:00Z", "self-update failed");
+        record.details = serde_json::json!({
+            "current_version": "0.3.7",
+            "latest_version": "0.3.8",
+            "apply_mode": "rpm-package",
+            "endpoint": "https://mirror.invalid",
+            "access_key": "must-not-appear",
+        });
+        let layout = common::resolve_layout(&ctx);
+        CentralLog::open(layout.central_log.clone())
+            .append(&record)
+            .expect("append");
+
+        let logs = collect_recent_logs(None, DEFAULT_LIMIT, &ctx).expect("query");
+        let details = logs[0]
+            .details
+            .as_ref()
+            .expect("details must reach the bundle");
+
+        assert_eq!(details["latest_version"], "0.3.8");
+        assert_eq!(details["apply_mode"], "rpm-package");
+        assert_eq!(details["endpoint"], "https://mirror.invalid");
+        assert!(
+            details.get("access_key").is_none(),
+            "a field outside the allowlist must not travel: {details}"
+        );
+
+        let markdown = render_markdown(&collect_environment(&ctx), &[], &logs);
+        assert!(markdown.contains("latest_version"), "{markdown}");
+        assert!(!markdown.contains("must-not-appear"), "{markdown}");
+    }
+
+    /// A failed hook parks raw subprocess stderr in `details.stderr_tail`, and
+    /// the keyword scan cannot clean it: a bare `Bearer` value and a PEM block
+    /// have no `key=value` shape to catch. Carrying details must not be what
+    /// first lets that out of the machine.
+    #[test]
+    fn free_form_details_stay_out_of_the_bundle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = crate::test_support::context_for_root(
+            tmp.path(),
+            crate::context::InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+            crate::test_support::TestContextOptions {
+                quiet: false,
+                no_color: false,
+                ..Default::default()
+            },
+        );
+
+        let mut record = log_record("2026-06-01T10:00:00Z", "hook failed");
+        record.details = serde_json::json!({
+            "phase": "post-install",
+            "exit_code": 1,
+            "stderr_tail": "curl: Authorization: Bearer eyJhbGciOi.LEAKED\n\
+                            -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlLEAKED\n",
+        });
+        let layout = common::resolve_layout(&ctx);
+        CentralLog::open(layout.central_log.clone())
+            .append(&record)
+            .expect("append");
+
+        let logs = collect_recent_logs(None, DEFAULT_LIMIT, &ctx).expect("query");
+        assert!(
+            logs[0].details.is_none(),
+            "no field of a hook record is exportable: {:?}",
+            logs[0].details
+        );
+
+        let markdown = render_markdown(&collect_environment(&ctx), &[], &logs);
+        assert!(!markdown.contains("LEAKED"), "{markdown}");
+        assert!(!markdown.contains("stderr_tail"), "{markdown}");
     }
 
     #[test]

@@ -207,3 +207,15 @@ macro_rules! input_wait_hint_ids {
         );
     };
 }
+
+// Trust-catalog feedback is appended after the Agent Composer segment so
+// every pre-existing MessageId discriminant remains stable.
+macro_rules! approval_trust_catalog_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            ApprovalTrustUnknownToolReason,
+        );
+    };
+}

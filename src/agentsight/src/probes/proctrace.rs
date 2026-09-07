@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use super::pidns::observer_in_init_pidns;
+use super::pidns::proc_root_is_init_pidns;
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -412,7 +412,7 @@ impl ProcTrace {
 
         // Tell BPF which namespace to report event pids in. proctrace itself
         // reports host pids, but it shares common.h's is_pid_traced() gate.
-        open_skel.rodata_mut().observer_pidns_is_init = observer_in_init_pidns();
+        open_skel.rodata_mut().observer_pidns_is_init = proc_root_is_init_pidns();
 
         // Detect cgroup v2 unified hierarchy and pass to BPF via rodata.
         // When true, get_cgroup_id_compat() uses bpf_get_current_cgroup_id() directly.

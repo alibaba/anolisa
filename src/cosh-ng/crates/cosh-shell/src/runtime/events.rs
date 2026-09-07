@@ -9,45 +9,53 @@ impl ShellEventCursor {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ShellEventBatch {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShellEventBatch<'a> {
     pub(crate) from: ShellEventCursor,
     pub(crate) to: ShellEventCursor,
-    pub(crate) events: Vec<ShellEvent>,
+    pub(crate) events: &'a [ShellEvent],
 }
 
-impl ShellEventBatch {
+impl ShellEventBatch<'_> {
     pub(crate) fn global_index(&self, local_index: usize) -> usize {
         self.from.position() + local_index
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ShellEventSnapshot {
-    events: Vec<ShellEvent>,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShellEventSnapshot<'a> {
+    base: usize,
+    events: &'a [ShellEvent],
 }
 
-impl ShellEventSnapshot {
-    pub(crate) fn new(events: &[ShellEvent]) -> Self {
-        Self {
-            events: events.to_vec(),
-        }
+impl<'a> ShellEventSnapshot<'a> {
+    #[cfg(test)]
+    pub(crate) fn new(events: &'a [ShellEvent]) -> Self {
+        Self { base: 0, events }
+    }
+
+    pub(crate) fn with_base(base: usize, events: &'a [ShellEvent]) -> Self {
+        Self { base, events }
+    }
+
+    pub(crate) fn base(&self) -> usize {
+        self.base
     }
 
     pub(crate) fn events(&self) -> &[ShellEvent] {
-        &self.events
+        self.events
     }
 
     pub(crate) fn cursor(&self) -> ShellEventCursor {
-        ShellEventCursor(self.events.len())
+        ShellEventCursor(self.base.saturating_add(self.events.len()))
     }
 
-    pub(crate) fn batch_since(&self, cursor: ShellEventCursor) -> ShellEventBatch {
-        let from = cursor.position().min(self.events.len());
+    pub(crate) fn batch_since(&self, cursor: ShellEventCursor) -> ShellEventBatch<'a> {
+        let from = cursor.position().clamp(self.base, self.cursor().position());
         ShellEventBatch {
             from: ShellEventCursor(from),
             to: self.cursor(),
-            events: self.events[from..].to_vec(),
+            events: &self.events[from - self.base..],
         }
     }
 }
@@ -76,14 +84,40 @@ mod tests {
     }
 
     #[test]
-    fn batch_maps_local_to_global_event_index() {
+    fn snapshot_and_batch_borrow_the_event_history() {
         let events = vec![ShellEvent::user_input_intercepted("s", "one")];
+        let snapshot = ShellEventSnapshot::new(&events);
+        let batch = snapshot.batch_since(ShellEventCursor::default());
+
+        assert!(std::ptr::eq(snapshot.events().as_ptr(), events.as_ptr()));
+        assert!(std::ptr::eq(batch.events.as_ptr(), events.as_ptr()));
+    }
+
+    #[test]
+    fn batch_maps_local_to_global_event_index() {
+        let events = [ShellEvent::user_input_intercepted("s", "one")];
         let batch = ShellEventBatch {
             from: ShellEventCursor(7),
             to: ShellEventCursor(8),
-            events,
+            events: &events,
         };
 
         assert_eq!(batch.global_index(0), 7);
+    }
+
+    #[test]
+    fn compacted_snapshot_keeps_absolute_cursor_and_batch_indices() {
+        let events = [
+            ShellEvent::user_input_intercepted("s", "one"),
+            ShellEvent::user_input_intercepted("s", "two"),
+        ];
+        let snapshot = ShellEventSnapshot::with_base(4_096, &events);
+        let batch = snapshot.batch_since(ShellEventCursor(4_097));
+
+        assert_eq!(snapshot.cursor().position(), 4_098);
+        assert_eq!(batch.from.position(), 4_097);
+        assert_eq!(batch.to.position(), 4_098);
+        assert_eq!(batch.global_index(0), 4_097);
+        assert_eq!(batch.events[0].input.as_deref(), Some("two"));
     }
 }

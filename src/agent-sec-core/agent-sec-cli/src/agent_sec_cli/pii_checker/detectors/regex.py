@@ -7,12 +7,15 @@ from agent_sec_cli.pii_checker.models import PiiCategory, PiiSeverity
 from agent_sec_cli.pii_checker.validators import (
     luhn_check,
     validate_cn_id,
+    validate_email,
     validate_jwt,
 )
 
 _CONTEXT_WINDOW_RADIUS = 64
 _CONTEXT_POSITIVE_DELTA = 0.12
 _CONTEXT_NEGATIVE_DELTA = -0.35
+_REMOTE_COMMAND_CONTEXT_LIMIT = 4_096
+_REMOTE_PATH_CONTEXT_LIMIT = 1_024
 _MAX_PRIVATE_KEY_CHARS = 16_384
 _PRIVATE_KEY_EVIDENCE_PLACEHOLDER = "[PRIVATE_KEY_OMITTED]"
 
@@ -44,12 +47,12 @@ BUILTIN_PII_TYPES = frozenset(
 # | api_key prefix patterns             | 0.86 |
 # | generic_secret_field, email         | 0.82 |
 # | phone_cn                            | 0.78 |
-# | reserved .invalid email             | 0.35 |
+# | reserved/remote-identity email      | 0.35 |
 #
 # Context adjustment uses a 64-character window around each match. Security
-# keywords raise credential-like matches by +0.12; fixture/example markers lower
-# likely test data by -0.35. Scanner-level thresholding hides low-confidence
-# findings unless include_low_confidence is enabled.
+# keywords raise matches by +0.12; fixture/example markers lower non-email test
+# data by -0.35. Scanner-level thresholding hides low-confidence findings unless
+# include_low_confidence is enabled.
 _BASE_CONFIDENCE: dict[str, float] = {
     "private_key": 1.0,
     "jwt": 0.94,
@@ -61,7 +64,7 @@ _BASE_CONFIDENCE: dict[str, float] = {
     "generic_secret_field": 0.82,
     "email": 0.82,
     "phone_cn": 0.78,
-    "email_reserved_invalid": 0.35,
+    "email_low_confidence_context": 0.35,
 }
 
 _POSITIVE_CONTEXT = (
@@ -82,6 +85,96 @@ _POSITIVE_CONTEXT = (
     "访问密钥",
 )
 _NEGATIVE_CONTEXT = ("example", "dummy", "test", "sample", ".invalid")
+_RESERVED_EMAIL_DOMAINS = frozenset(
+    {
+        "example",
+        "example.com",
+        "example.net",
+        "example.org",
+        "invalid",
+        "localhost",
+        "test",
+    }
+)
+_REMOTE_EMAIL_URI_RE = re.compile(
+    r"(?<![\w+.-])(?:git\+ssh|ssh|sftp|scp|rsync)://$", re.IGNORECASE
+)
+_REMOTE_COMMAND_OPTIONS_WITH_VALUE = {
+    "ssh": frozenset(
+        {
+            "-B",
+            "-b",
+            "-c",
+            "-D",
+            "-E",
+            "-e",
+            "-F",
+            "-I",
+            "-i",
+            "-J",
+            "-L",
+            "-l",
+            "-m",
+            "-O",
+            "-o",
+            "-P",
+            "-p",
+            "-R",
+            "-S",
+            "-W",
+            "-w",
+        }
+    ),
+    "sftp": frozenset(
+        {
+            "-B",
+            "-b",
+            "-c",
+            "-F",
+            "-i",
+            "-J",
+            "-l",
+            "-o",
+            "-P",
+            "-R",
+            "-S",
+            "-s",
+            "-X",
+        }
+    ),
+}
+_REMOTE_COMMAND_FLAG_OPTIONS = {
+    "ssh": frozenset(
+        {
+            "-4",
+            "-6",
+            "-A",
+            "-a",
+            "-C",
+            "-f",
+            "-G",
+            "-g",
+            "-K",
+            "-k",
+            "-M",
+            "-N",
+            "-n",
+            "-q",
+            "-s",
+            "-T",
+            "-t",
+            "-v",
+            "-X",
+            "-x",
+            "-Y",
+            "-y",
+        }
+    ),
+    "sftp": frozenset(
+        {"-4", "-6", "-A", "-a", "-C", "-f", "-N", "-p", "-q", "-r", "-v"}
+    ),
+}
+_SHELL_COMMAND_SEPARATOR_RE = re.compile(r"[\n;|&]")
 
 _EMAIL_RE = re.compile(
     r"(?<![\w.+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}(?![\w.-])"
@@ -129,6 +222,112 @@ def _score_with_context(text: str, start: int, end: int, base: float) -> float:
     if any(marker in compact_context for marker in _NEGATIVE_CONTEXT):
         score += _CONTEXT_NEGATIVE_DELTA
     return max(0.0, min(1.0, score))
+
+
+def _score_email_with_context(text: str, start: int, end: int, base: float) -> float:
+    """Raise email confidence for security context without fixture-word penalties."""
+    context = _context_window(text, start, end)
+    compact_context = context.replace("-", "_")
+    score = base
+    if any(marker in compact_context for marker in _POSITIVE_CONTEXT):
+        score += _CONTEXT_POSITIVE_DELTA
+    return max(0.0, min(1.0, score))
+
+
+def _is_reserved_email_domain(value: str) -> bool:
+    """Return whether an address uses a reserved example or testing domain."""
+    domain = value.rsplit("@", maxsplit=1)[-1].lower()
+    return any(
+        domain == reserved or domain.endswith(f".{reserved}")
+        for reserved in _RESERVED_EMAIL_DOMAINS
+    )
+
+
+def _is_remote_command_target(command_prefix: str) -> bool:
+    """Return whether the candidate immediately follows SSH/SFTP options."""
+    command_prefix = command_prefix.strip()
+    if not command_prefix:
+        return False
+
+    tokens = command_prefix.split()
+    command = tokens[0].rsplit("/", maxsplit=1)[-1].lower()
+    value_options = _REMOTE_COMMAND_OPTIONS_WITH_VALUE.get(command)
+    flag_options = _REMOTE_COMMAND_FLAG_OPTIONS.get(command)
+    if value_options is None or flag_options is None:
+        return False
+
+    index = 1
+    while index < len(tokens):
+        option = tokens[index]
+        if option == "--":
+            return index == len(tokens) - 1
+        if option in flag_options:
+            index += 1
+            continue
+        if option in value_options:
+            index += 2
+            if index > len(tokens):
+                return False
+            continue
+        if len(option) > 2 and option[:2] in value_options:
+            index += 1
+            continue
+        if (
+            len(option) > 2
+            and option.startswith("-")
+            and all(f"-{flag}" in flag_options for flag in option[1:])
+        ):
+            index += 1
+            continue
+        return False
+    return True
+
+
+def _is_remote_identity_context(
+    text: str, start: int, end: int, command_start: int
+) -> bool:
+    """Return whether an email-shaped value is clearly a remote login identity."""
+    prefix = text[max(0, start - _CONTEXT_WINDOW_RADIUS) : start]
+    if _REMOTE_EMAIL_URI_RE.search(prefix) is not None:
+        return True
+
+    if end + 1 < len(text) and text[end] == ":" and not text[end + 1].isspace():
+        path_start = end + 1
+        path_limit = min(len(text), path_start + _REMOTE_PATH_CONTEXT_LIMIT)
+        remote_path = text[path_start:path_limit].split(maxsplit=1)[0]
+        is_uri = re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", remote_path) is not None
+        if not is_uri and (
+            remote_path.startswith(("/", "~", "./", "../"))
+            or "/" in remote_path
+            or remote_path.endswith(".git")
+        ):
+            return True
+
+    target_start = start
+    opening_quote = (
+        text[start - 1] if start > 0 and text[start - 1] in {'"', "'"} else None
+    )
+    closing_quote = text[end] if end < len(text) and text[end] in {'"', "'"} else None
+    if opening_quote is not None or closing_quote is not None:
+        if opening_quote is None or closing_quote != opening_quote:
+            return False
+        after_quote = end + 1
+        if (
+            after_quote < len(text)
+            and not text[after_quote].isspace()
+            and text[after_quote] not in ";|&"
+        ):
+            return False
+        target_start -= 1
+
+    prefix_start = command_start + 1
+    if (
+        target_start <= prefix_start
+        or not text[target_start - 1].isspace()
+        or target_start - prefix_start > _REMOTE_COMMAND_CONTEXT_LIMIT
+    ):
+        return False
+    return _is_remote_command_target(text[prefix_start:target_start])
 
 
 def _severity_for(pii_type: str) -> tuple[str, str]:
@@ -348,15 +547,32 @@ class RegexPiiDetector:
             )
 
     def _detect_emails(self, text: str, candidates: list[PiiCandidate]) -> None:
+        separator_cursor = 0
+        command_start = -1
         for match in _EMAIL_RE.finditer(text):
+            for separator in _SHELL_COMMAND_SEPARATOR_RE.finditer(
+                text, separator_cursor, match.start()
+            ):
+                command_start = separator.start()
+            separator_cursor = match.end()
+
             value = match.group(0)
+            if not validate_email(value):
+                continue
+
             base = _BASE_CONFIDENCE["email"]
-            if value.lower().endswith(".invalid"):
-                base = _BASE_CONFIDENCE["email_reserved_invalid"]
+            metadata = {"validator": "email_syntax"}
+            if _is_remote_identity_context(text, *match.span(), command_start):
+                base = _BASE_CONFIDENCE["email_low_confidence_context"]
+                metadata["context"] = "remote_identity"
+            elif _is_reserved_email_domain(value):
+                base = _BASE_CONFIDENCE["email_low_confidence_context"]
+                metadata["context"] = "reserved_domain"
             self._add_candidate(
                 candidates,
                 pii_type="email",
                 value=value,
                 span=match.span(),
-                confidence=_score_with_context(text, *match.span(), base),
+                confidence=_score_email_with_context(text, *match.span(), base),
+                metadata=metadata,
             )

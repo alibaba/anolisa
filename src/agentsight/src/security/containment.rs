@@ -238,7 +238,11 @@ impl ContainmentCoordinator {
     ) -> Result<ContainmentAction, ContainmentError> {
         validate_duration(request.duration_secs)?;
         let requested_by = validate_requested_by(requested_by)?;
-        let detail = self.case_detail(case_id)?;
+        // Idempotent replay must run before the eligibility gate: activating a
+        // containment auto-resolves its case, so a repeated request for an
+        // already-live action must be returned as-is rather than rejected for the
+        // now-ineligible (resolved) case. Case eligibility is only required when
+        // creating a brand-new containment below.
         if let Some(existing) = self.store.latest_containment_action(case_id)?
             && live_lifecycle(existing.lifecycle_state)
         {
@@ -251,6 +255,7 @@ impl ContainmentCoordinator {
                 validate_process_identity(existing.root_pid, existing.process_start_time)?;
             return existing_action(existing, &request, process_start_time);
         }
+        let detail = self.case_detail(case_id)?;
         let context = self.context_from_detail(detail)?;
         let process_start_time = if request.root_pid == context.binding.request.root_pid
             && validate_process_identity(

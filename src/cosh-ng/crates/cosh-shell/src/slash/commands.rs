@@ -10,10 +10,11 @@ use crate::slash::mcp::render_mcp_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };
+use crate::slash::panel::render_notice_panel;
 use crate::slash::parser::SlashCommand;
 use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
-use crate::slash::skills::render_skills_command;
+use crate::slash::skills::{completion_skill_names, render_skills_command};
 use crate::slash::status::{render_stats_command, render_status_command};
 
 pub(super) fn render_slash_command<W: Write>(
@@ -25,6 +26,23 @@ pub(super) fn render_slash_command<W: Write>(
     shell_cwd: Option<&str>,
     output: &mut W,
 ) -> std::io::Result<bool> {
+    // Propagate the shell cwd to the adapter so registry queries
+    // (skills/hooks/extensions) spawn cosh-core with the correct
+    // --workspace and discover project-level skills and hooks.
+    // The Rust intercept path (zsh, or bash with
+    // COSH_SLASH_VIA_SHELL=0) creates events with cwd=None because
+    // the input never reaches the shell; fall back to the last
+    // ShellReady cwd tracked by the dispatcher so registry queries
+    // still resolve the correct project root. If both sources are
+    // unavailable the cached cwd may be stale (e.g. a `cd` whose OSC
+    // 1337 markers were lost), so clear it rather than forwarding the
+    // old project root.
+    if let AdapterInstance::CoshCore(cosh_core) = adapter {
+        match shell_cwd.or(state.shell_prompt_cwd.as_deref()) {
+            Some(cwd) => cosh_core.set_shell_cwd(Some(cwd)),
+            None => cosh_core.clear_shell_cwd(),
+        }
+    }
     match command {
         SlashCommand::Noop => Ok(true),
         SlashCommand::Auth => {
@@ -39,15 +57,43 @@ pub(super) fn render_slash_command<W: Write>(
             render_help(state, output)?;
             Ok(true)
         }
-        SlashCommand::Draft => {
-            // #1932: terminal-agnostic entry into multi-line composition;
-            // the pending card capture picks the draft up right after.
-            crate::runtime::prompt_draft::open_prompt_draft(state, output, String::new(), false)?;
-            Ok(true)
+        SlashCommand::Agent => {
+            let Some((workspace_cwd, skill_names)) =
+                agent_composer_context(adapter, state, shell_cwd)
+            else {
+                render_notice_panel(
+                    output,
+                    state.i18n().t(MessageId::AgentComposerTitle),
+                    vec![state
+                        .i18n()
+                        .t(MessageId::SlashRegistryUnavailable)
+                        .to_string()],
+                    None,
+                )?;
+                return Ok(true);
+            };
+            crate::runtime::prompt_draft::open_agent_composer(
+                state,
+                output,
+                adapter.name(),
+                workspace_cwd.as_deref(),
+                skill_names,
+            )?;
+            // The draft capture owns the terminal until submit/cancel. A
+            // restored PTY prompt would sit below the card and corrupt the
+            // cursor origin used for every in-place redraw.
+            Ok(false)
         }
         SlashCommand::Hooks(sub, arg, extra) => {
             render_hooks_command(sub, arg, extra, blocks, adapter, state, output)?;
-            Ok(true)
+            // When a hook id collides between shell and agent layers, the
+            // disambiguation panel is now active; withhold the PTY prompt
+            // until the user picks a layer.
+            if crate::slash::hooks::has_pending_hook_action(state) {
+                Ok(false)
+            } else {
+                Ok(true)
+            }
         }
         SlashCommand::Mode(arg, sub, confirm) => {
             render_mode_command(arg, sub, confirm, state, output)
@@ -105,4 +151,23 @@ pub(super) fn render_slash_command<W: Write>(
             Ok(true)
         }
     }
+}
+
+fn agent_composer_context(
+    adapter: &AdapterInstance,
+    state: &InlineState,
+    shell_cwd: Option<&str>,
+) -> Option<(Option<String>, Vec<String>)> {
+    let skill_names = match adapter {
+        AdapterInstance::CoshCore(cosh_core) => cosh_core
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .map(|data| completion_skill_names(&data))
+            .unwrap_or_default(),
+        AdapterInstance::Fake(_) => Vec::new(),
+        _ => return None,
+    };
+    let workspace_cwd = shell_cwd
+        .map(str::to_string)
+        .or_else(|| state.shell_prompt_cwd.clone());
+    Some((workspace_cwd, skill_names))
 }

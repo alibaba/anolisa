@@ -42,3 +42,7 @@ input_wait_timeout_secs = 120
 ```
 
 `trusted_commands`只匹配精确trust key，不按任意命令片段匹配，也不能绕过无法恢复命令的安全门禁。环境变量覆盖见[配置](../configuration.md)。
+
+配置和环境变量也兼容旧值 `balanced`、`suggest` 和 `strict`，并按
+`recommend` 处理。非法值会安全回退到 `recommend`；`/mode` 只接受三个
+canonical 名称。

@@ -276,8 +276,8 @@ fn map_approval_mode(mode: &str) -> &str {
     match mode {
         "YOLO" | "yolo" => "trust",
         "AUTO_EDIT" | "auto_edit" => "auto",
-        "PLAN" | "plan" => "strict",
-        _ => "balanced",
+        "PLAN" | "plan" => "recommend",
+        _ => "recommend",
     }
 }
 
@@ -366,6 +366,7 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ApprovalMode;
 
     #[test]
     fn plaintext_passthrough() {
@@ -406,12 +407,12 @@ mod tests {
 
     #[test]
     fn approval_mode_mapping() {
-        assert_eq!(map_approval_mode("DEFAULT"), "balanced");
+        assert_eq!(map_approval_mode("DEFAULT"), "recommend");
         assert_eq!(map_approval_mode("YOLO"), "trust");
         assert_eq!(map_approval_mode("yolo"), "trust");
         assert_eq!(map_approval_mode("AUTO_EDIT"), "auto");
-        assert_eq!(map_approval_mode("PLAN"), "strict");
-        assert_eq!(map_approval_mode("unknown"), "balanced");
+        assert_eq!(map_approval_mode("PLAN"), "recommend");
+        assert_eq!(map_approval_mode("unknown"), "recommend");
     }
 
     #[test]
@@ -427,7 +428,7 @@ mod tests {
             active_model: "qwen3-plus",
             session_token_limit: Some(128000),
             max_turns: Some(30),
-            approval_mode: Some("balanced"),
+            approval_mode: Some("recommend"),
             output_language: Some("zh-CN"),
         });
 
@@ -437,7 +438,7 @@ mod tests {
         assert_eq!(config.ai.output_language.as_deref(), Some("zh-CN"));
         assert_eq!(config.agent.session_token_limit, 128000);
         assert_eq!(config.agent.max_turns, 30);
-        assert_eq!(config.agent.approval_mode, "balanced");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
 
         let provider = config.ai.providers.get("default").unwrap();
         assert_eq!(
@@ -538,7 +539,7 @@ api_key = "sk-current"
         let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
 
         assert_eq!(config.ai.active_model.as_deref(), Some("test-model"));
-        assert_eq!(config.agent.approval_mode, "trust");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Trust);
         assert_eq!(config.agent.max_turns, 15);
         assert_eq!(config.agent.session_token_limit, 64000);
         assert_eq!(config.ai.output_language.as_deref(), Some("en"));

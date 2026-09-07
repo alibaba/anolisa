@@ -76,13 +76,16 @@ fn candidates_provides_multiple_is_ambiguous() {
 }
 
 #[test]
-fn candidates_package_name_uses_package_own_provides() {
+fn candidates_package_name_own_provides_cannot_create_identity() {
+    // A bare package name whose RPM declares `anolisa-component(cosh)` no
+    // longer resolves at the package layer: identity comes from state or the
+    // component index before the candidate chain runs (issue #2630).
     let q = FakeQuery {
         available_package_provides: vec![package_component_provide("copilot-shell", "cosh")],
         ..Default::default()
     };
     let got = rpm_package_candidates(None, None, &q, "copilot-shell").unwrap();
-    assert_eq!(got, vec![target("cosh", "copilot-shell")]);
+    assert!(got.is_empty());
 }
 
 #[test]
@@ -568,6 +571,284 @@ fn pending_journal_blocks_install_before_dnf() {
     }
 }
 
+/// A journal-claimed identity precedes index validation for install: with no
+/// reachable component index at all, an interrupted install still reaches
+/// its recovery guidance instead of failing identity validation
+/// (issue #2630). Covers both journal generations — a modern
+/// subject-attributed journal and a legacy subject-less one whose
+/// `rpm-state` step names the component.
+#[test]
+fn pending_journal_identity_precedes_index_validation_for_install() {
+    for legacy in [true, false] {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        let layout = FsLayout::system(Some(prefix.clone()));
+        std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+        // The configured repository publishes no component index.
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"file://{}\"\n",
+                prefix.join("no-such-repo/v1").display()
+            ),
+        )
+        .expect("write repo.toml");
+        let state_path = layout.state_dir.join("installed.toml");
+        if legacy {
+            rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+                .expect("begin legacy pending install");
+        } else {
+            Transaction::begin_with_subject(
+                "install",
+                Some("cosh"),
+                state_path,
+                &rpm_install::journal_dir(&layout),
+            )
+            .expect("begin subject journal");
+        }
+
+        let err = handle_with_fake_rpm(args("cosh"), &ctx_with_prefix(false, Some(prefix)))
+            .expect_err("the pending journal must block the install");
+        assert!(
+            err.reason().contains("pending recovery") && err.reason().contains("repair cosh"),
+            "the journal recovery guidance must win (legacy: {legacy}): {}",
+            err.reason()
+        );
+        assert!(
+            !err.reason().contains("component index"),
+            "identity validation must not fire before the journal claim (legacy: {legacy}): {}",
+            err.reason()
+        );
+    }
+}
+
+/// With a raw-only repo.toml, `install --backend rpm --repo <URL>` succeeds
+/// end to end: the override repository is the identity, package, and DNF
+/// source authority for the invocation, so the configured-rpm-backend guard
+/// does not apply (issue #2630).
+#[test]
+fn rpm_override_replaces_the_missing_rpm_backend_configuration() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let prefix = tmp.path().to_path_buf();
+    let layout = FsLayout::system(Some(prefix.clone()));
+    std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+    // repo.toml configures only the raw backend, whose index lists nothing.
+    let default_v1 = layout.etc_dir.join("default-index").join("v1");
+    write_component_index_v2(&default_v1, &[]);
+    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"file://{}\"\n",
+            default_v1.display()
+        ),
+    )
+    .expect("write repo.toml");
+    // The override repository publishes cosh with its rpm package mapping.
+    let override_v1 = prefix.join("override").join("v1");
+    std::fs::create_dir_all(&override_v1).expect("override repo");
+    let env = anolisa_env::EnvService::detect();
+    std::fs::write(
+        override_v1.join("components-v2.toml"),
+        format!(
+            r#"schema_version = 2
+
+[[components]]
+name = "cosh"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ),
+    )
+    .expect("override component index");
+
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let mut a = args("cosh");
+    a.backend = Some("rpm".to_string());
+    a.repo = Some(format!("file://{}", override_v1.display()));
+    let ctx = ctx_with_prefix(false, Some(prefix));
+
+    let outcome = install_component_with_deps("cosh", &a, &ctx, &fake, &fake, true)
+        .expect("delegated install via the override repository");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1, "dnf install must run once");
+
+    let store = load_store(&ctx);
+    let record = store
+        .find(ObjectKind::Component, "cosh")
+        .expect("component recorded");
+    match &record.binding {
+        ProviderBinding::Delegated { package, .. } => {
+            assert_eq!(package.resolved_name(), Some("copilot-shell"));
+        }
+        other => panic!("expected a delegated binding, got {other:?}"),
+    }
+}
+
+/// `install --all --backend rpm --repo <URL>` enumerates the override index
+/// even when repo.toml configures no rpm backend: the backend name only
+/// filters index rows once an override pins the repository.
+#[test]
+fn resolve_all_components_with_override_skips_backend_configuration() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let prefix = tmp.path().to_path_buf();
+    let layout = FsLayout::system(Some(prefix.clone()));
+    std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+    let default_v1 = layout.etc_dir.join("default-index").join("v1");
+    write_component_index_v2(&default_v1, &[]);
+    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"file://{}\"\n",
+            default_v1.display()
+        ),
+    )
+    .expect("write repo.toml");
+    let override_v1 = prefix.join("override").join("v1");
+    std::fs::create_dir_all(&override_v1).expect("override repo");
+    let env = anolisa_env::EnvService::detect();
+    std::fs::write(
+        override_v1.join("components-v2.toml"),
+        format!(
+            r#"schema_version = 2
+
+[[components]]
+name = "cosh"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ),
+    )
+    .expect("override component index");
+    let ctx = ctx_with_prefix(false, Some(prefix));
+
+    let names = crate::commands::tier1::install::resolve_all_components(
+        &ctx,
+        Some("rpm"),
+        Some(&format!("file://{}", override_v1.display())),
+    )
+    .expect("the override enumeration must not require a configured rpm backend");
+    assert_eq!(names, vec!["cosh".to_string()]);
+
+    // A `--repo` override waives only the configured-in-repo.toml
+    // requirement, not name validation: an unknown backend is the same
+    // INVALID_ARGUMENT the single-component path reports, never a
+    // successful empty batch.
+    let err = crate::commands::tier1::install::resolve_all_components(
+        &ctx,
+        Some("pip"),
+        Some(&format!("file://{}", override_v1.display())),
+    )
+    .expect_err("an unknown backend must be refused even with an override");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason().contains("unknown backend 'pip'"),
+        "must name the unknown backend: {}",
+        err.reason()
+    );
+}
+
+/// Historical state evidence that is not an exact component identity must
+/// not authorize an install once the component index cannot vouch for the
+/// name (issue #2630): a terminal journal left behind by a finished
+/// operation and a dropped legacy capability record both fail identity
+/// validation instead of reaching package resolution. Their names stay
+/// addressable on the mutation paths, which own the recovery and migration
+/// guidance.
+#[test]
+fn historical_state_evidence_does_not_authorize_install_identity() {
+    for fixture in ["terminal-journal", "dropped-capability"] {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        let layout = FsLayout::system(Some(prefix.clone()));
+        std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+        // The configured repository publishes no component index.
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"file://{}\"\n",
+                prefix.join("no-such-repo/v1").display()
+            ),
+        )
+        .expect("write repo.toml");
+        let state_path = layout.state_dir.join("installed.toml");
+        match fixture {
+            "terminal-journal" => {
+                let mut journal = Transaction::begin_with_subject(
+                    "install",
+                    Some("ghost"),
+                    state_path,
+                    &rpm_install::journal_dir(&layout),
+                )
+                .expect("begin subject journal");
+                journal
+                    .finish(TransactionOutcomeStatus::Failed)
+                    .expect("finish journal");
+            }
+            _ => {
+                // A legacy `kind = "capability"` row is dropped by the state
+                // migration on load; the dropped name must not pin the
+                // install identity.
+                let mut state = InstalledState {
+                    install_mode: StateInstallMode::System,
+                    prefix: layout.prefix.clone(),
+                    ..Default::default()
+                };
+                state.upsert_object(InstalledObject {
+                    kind: ObjectKind::Capability,
+                    name: "ghost".to_string(),
+                    version: "0.1.0".to_string(),
+                    status: ObjectStatus::Installed,
+                    manifest_digest: None,
+                    distribution_source: None,
+                    raw_package: None,
+                    install_backend: None,
+                    ownership: None,
+                    rpm_metadata: None,
+                    installed_at: "2026-06-01T10:00:00Z".to_string(),
+                    last_operation_id: None,
+                    managed: true,
+                    adopted: false,
+                    subscription_scope: Default::default(),
+                    enabled_features: Vec::new(),
+                    component_refs: Vec::new(),
+                    files: Vec::new(),
+                    external_modified_files: Vec::new(),
+                    services: Vec::new(),
+                    health: Vec::new(),
+                    provisioned_packages: Vec::new(),
+                });
+                state.save(&state_path).expect("seed legacy state");
+            }
+        }
+
+        let err = handle_with_fake_rpm(args("ghost"), &ctx_with_prefix(false, Some(prefix)))
+            .expect_err("historical evidence must not authorize the identity");
+        assert_eq!(err.code(), "EXECUTION_FAILED", "fixture: {fixture}");
+        assert!(
+            err.reason().contains("component index is unavailable"),
+            "identity validation must reject the name (fixture: {fixture}): {}",
+            err.reason()
+        );
+    }
+}
+
 #[test]
 fn pending_journal_injected_after_install_preflight_blocks_locked_execution() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
@@ -868,7 +1149,7 @@ fn explicit_rpm_with_ambiguous_candidates_is_invalid_argument() {
 }
 
 #[test]
-fn explicit_rpm_not_an_anolisa_component_is_invalid_argument() {
+fn explicit_rpm_unsupported_component_is_invalid_argument() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let q = FakeQuery::default();
     let mut a = args("random-package");
@@ -877,7 +1158,8 @@ fn explicit_rpm_not_an_anolisa_component_is_invalid_argument() {
         .expect_err("no component identity → refuse");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(
-        err.reason().contains("not an ANOLISA RPM component"),
+        err.reason()
+            .contains("unsupported component 'random-package'"),
         "got: {}",
         err.reason()
     );
@@ -1003,6 +1285,8 @@ fn system_ctx_with_rpm_package_map(pairs: &[(&str, &str)]) -> (tempfile::TempDir
     let layout = FsLayout::system(Some(prefix.clone()));
     std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
     std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+    let v1 = layout.etc_dir.join("test-index-repo").join("v1");
+    write_component_index_v2(&v1, TEST_INDEX_COMPONENTS);
     let map = pairs
         .iter()
         .map(|(component, package)| format!("{component} = \"{package}\""))
@@ -1015,7 +1299,7 @@ fn system_ctx_with_rpm_package_map(pairs: &[(&str, &str)]) -> (tempfile::TempDir
 default_backend = "raw"
 
 [backends.raw]
-base_url = "https://example.com/anolisa"
+base_url = "file://{}"
 
 [backends.rpm]
 base_url = "https://repo.example/anolisa"
@@ -1023,7 +1307,8 @@ gpgcheck = false
 
 [backends.rpm.package_map]
 {map}
-"#
+"#,
+            v1.display()
         ),
     )
     .expect("write repo.toml");

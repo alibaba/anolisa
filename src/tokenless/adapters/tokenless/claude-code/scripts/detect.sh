@@ -16,6 +16,33 @@ PLUGIN_SRC="$ADAPTER_DIR/claude-code"
 CLAUDE_BIN="${CLAUDE_BIN:-}"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
+# First-run settling retries: right after provisioning, the claude binary or
+# the plugin registry may be transiently invisible on the very first detect.sh
+# execution (filesystem/PATH init timing race). settle() only retries checks
+# that report a retryable failure (exit status 1); checks that succeed or
+# report a definitive result return immediately, so steady-state runs stay
+# fast.
+DETECT_RETRIES="${TOKENLESS_DETECT_RETRIES:-3}"
+DETECT_RETRY_DELAY="${TOKENLESS_DETECT_RETRY_DELAY:-1}"
+
+# settle <cmd...> — run cmd once; if it reports a retryable failure (exit
+# status 1), sleep DETECT_RETRY_DELAY and retry, up to DETECT_RETRIES retries
+# (that is, at most 1 + DETECT_RETRIES attempts in total). Exit status 0 is
+# success. Any other exit status is a definitive result and is returned
+# immediately without further retries. Returns the final exit status.
+# Callers must therefore reserve exit status 1 for conditions that a retry
+# may still resolve.
+settle() {
+    local retry=0 rc=0
+    "$@"; rc=$?
+    while [ "$rc" -eq 1 ] && [ "$retry" -lt "$DETECT_RETRIES" ]; do
+        retry=$((retry + 1))
+        sleep "$DETECT_RETRY_DELAY"
+        "$@"; rc=$?
+    done
+    return "$rc"
+}
+
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
 
@@ -24,8 +51,17 @@ INSTALL_MISSING=()
 note_prereq_missing()  { PREREQ_MISSING+=("$1"); }
 note_install_missing() { INSTALL_MISSING+=("$1"); }
 
-if [ -z "$CLAUDE_BIN" ]; then
+find_claude_bin() {
     CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+    [ -n "$CLAUDE_BIN" ]
+}
+
+if [ -z "$CLAUDE_BIN" ]; then
+    # PATH/filesystem may still be settling right after install; re-check
+    # briefly before declaring the CLI missing. A genuinely absent CLI cannot
+    # be distinguished from that settling race, so it spends one retry budget
+    # (set TOKENLESS_DETECT_RETRIES=0 to opt out).
+    settle find_claude_bin || true
 fi
 
 line "${AGENT} detect"
@@ -38,7 +74,10 @@ else
 fi
 
 # Informational only: claude creates ~/.claude on first run; absence is
-# not a prerequisite failure.
+# not a prerequisite failure. Check once, without settling retries: nothing in
+# this script creates the directory before `claude plugin list` runs, and that
+# call carries its own retry budget and initializes ~/.claude itself, so
+# retrying this probe would only delay the report.
 if [ -d "$HOME/.claude" ]; then
     field "claude config dir" "present ($HOME/.claude)"
 else
@@ -58,8 +97,30 @@ else
     field "plugin.json"       "missing (run: make stamp-adapter-templates)"
 fi
 
+# claude_plugin_listed — probe the plugin registry, using the settle()
+# exit-status contract: 0 = plugin listed; 1 = `claude plugin list` itself
+# failed (the CLI may still be initializing ~/.claude on first run, so a
+# retry may still succeed); 2 = `plugin list` ran successfully but did not
+# list the plugin. That is a definitive absent result — no retry can change
+# it — so settle() must return immediately instead of sleeping out the
+# retry budget and invoking the CLI DETECT_RETRIES + 1 times.
+claude_plugin_listed() {
+    local listing
+    if ! listing="$("$CLAUDE_BIN" plugin list 2>&1)"; then
+        return 1
+    fi
+    if printf '%s\n' "$listing" | grep -qF "$PLUGIN_ID"; then
+        return 0
+    fi
+    return 2
+}
+
 if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
-    if "$CLAUDE_BIN" plugin list 2>&1 | grep -qF "$PLUGIN_ID"; then
+    # First-run race: `claude plugin list` may transiently fail while the CLI
+    # initializes ~/.claude; settle() retries while that failure (status 1)
+    # persists. A successful list that simply omits the plugin is definitive
+    # (status 2) and is reported as "not installed" without further retries.
+    if settle claude_plugin_listed; then
         field "plugin install"    "installed ($PLUGIN_ID)"
     else
         field "plugin install"    "not installed"

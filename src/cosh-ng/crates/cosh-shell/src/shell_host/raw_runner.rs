@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -8,22 +9,35 @@ use std::time::{Duration, Instant};
 
 use nix::libc;
 
-use crate::input::InputClassifier;
+use crate::input::{AssistanceControl, InputClassifier};
 use crate::raw_input::{
-    spawn_raw_action_relay, spawn_raw_input_relay, MainPromptGate, RawInputEvent, RawInputMode,
-    RawObserverAction, RawRelayAction, UserPtyInputGeneration,
+    spawn_raw_action_relay_with_wake, spawn_raw_input_relay_with_wake, MainPromptGate,
+    RawInputEvent, RawInputMode, RawInputShellRoute, RawObserverAction, RawRelayAction,
+    UserPtyInputGeneration,
 };
 use crate::types::ShellEvent;
 
-use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
-use super::io_loop::{read_until_streaming, wait_child_preserving_signal};
+use super::bootstrap::{assistance_state_file, start_bash_session, start_zsh_session, PtySession};
+use super::io_loop::{read_until_streaming_with_presentation, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
-use super::model::{ShellHostConfig, ShellHostOutput};
+use super::model::{ShellEventView, ShellHostConfig, ShellHostOutput};
+use super::prompt_presentation::PromptPresentation;
 use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
-mod raw_mode_guard;
+mod interactive;
+pub(super) mod raw_mode_guard;
+mod wake;
 
-use raw_mode_guard::{reopen_stdout_blocking, RawModeGuard};
+pub use interactive::{
+    run_raw_interactive_bash, run_raw_interactive_bash_with_observer,
+    run_raw_interactive_bash_with_output_control, run_raw_interactive_zsh_with_output_control,
+};
+pub(crate) use interactive::{
+    run_raw_interactive_bash_with_event_view, run_raw_interactive_zsh_with_event_view,
+};
+#[cfg(test)]
+use raw_mode_guard::RawModeGuard;
+use wake::{notify_relay, RelayWake};
 
 pub fn run_raw_relay_bash<R, W>(
     config: &ShellHostConfig,
@@ -66,6 +80,28 @@ where
     W: Write,
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
+    let mut event_observer = event_observer;
+    run_raw_relay_bash_with_output_control_and_input_fd(
+        config,
+        input,
+        output,
+        move |view, output| event_observer(view.events(), output),
+        None,
+    )
+}
+
+fn run_raw_relay_bash_with_output_control_and_input_fd<R, W, F>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+    event_observer: F,
+    input_fd: Option<RawFd>,
+) -> io::Result<ShellHostOutput>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
+{
     run_raw_relay_with_driver(
         config,
         start_bash_session,
@@ -73,17 +109,25 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        config.slash_via_shell,
-        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
-            spawn_raw_input_relay(
+        true,
+        |master,
+         _,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         shell_route,
+         wake| {
+            spawn_raw_input_relay_with_wake(
                 input,
                 master,
                 input_events,
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
+                input_fd,
+                Some(wake),
             )
         },
     )
@@ -100,6 +144,28 @@ where
     W: Write,
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
+    let mut event_observer = event_observer;
+    run_raw_relay_zsh_with_output_control_and_input_fd(
+        config,
+        input,
+        output,
+        move |view, output| event_observer(view.events(), output),
+        None,
+    )
+}
+
+fn run_raw_relay_zsh_with_output_control_and_input_fd<R, W, F>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+    event_observer: F,
+    input_fd: Option<RawFd>,
+) -> io::Result<ShellHostOutput>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
+{
     run_raw_relay_with_driver(
         config,
         start_zsh_session,
@@ -108,16 +174,24 @@ where
         config.input_classifier.clone(),
         None,
         false,
-        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
-            spawn_raw_input_relay(
+        |master,
+         _,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         shell_route,
+         wake| {
+            spawn_raw_input_relay_with_wake(
                 input,
                 master,
                 input_events,
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
+                input_fd,
+                Some(wake),
             )
         },
     )
@@ -156,9 +230,9 @@ where
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed| {
-            spawn_raw_action_relay(
+         shell_route,
+         wake| {
+            spawn_raw_action_relay_with_wake(
                 actions,
                 master,
                 child_pid,
@@ -166,8 +240,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
+                Some(wake),
             )
         },
     )
@@ -188,22 +262,22 @@ where
         config,
         start_bash_session,
         output,
-        move |events, output| {
-            event_observer(events, output)?;
+        move |view, output| {
+            event_observer(view.events(), output)?;
             Ok(RawObserverAction::Continue)
         },
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        config.slash_via_shell,
+        true,
         |master,
          child_pid,
          input_events,
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed| {
-            spawn_raw_action_relay(
+         shell_route,
+         wake| {
+            spawn_raw_action_relay_with_wake(
                 actions,
                 master,
                 child_pid,
@@ -211,8 +285,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
+                Some(wake),
             )
         },
     )
@@ -228,23 +302,24 @@ where
     W: Write,
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
+    let mut event_observer = event_observer;
     run_raw_relay_with_driver(
         config,
         start_bash_session,
         output,
-        event_observer,
+        move |view, output| event_observer(view.events(), output),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        config.slash_via_shell,
+        true,
         |master,
          child_pid,
          input_events,
          input_classifier,
          input_mode,
          input_generation,
-         gate,
-         routed| {
-            spawn_raw_action_relay(
+         shell_route,
+         wake| {
+            spawn_raw_action_relay_with_wake(
                 actions,
                 master,
                 child_pid,
@@ -252,8 +327,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
-                gate,
-                routed,
+                shell_route,
+                Some(wake),
             )
         },
     )
@@ -266,12 +341,12 @@ fn run_raw_relay_with_driver<W, F, D>(
     mut event_observer: F,
     input_classifier: InputClassifier,
     action_watchdog: Option<Duration>,
-    slash_via_shell: bool,
+    bounded_bash_handoff: bool,
     spawn_driver: D,
 ) -> io::Result<ShellHostOutput>
 where
     W: Write,
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
     D: FnOnce(
         File,
         u32,
@@ -279,50 +354,89 @@ where
         InputClassifier,
         Arc<Mutex<RawInputMode>>,
         UserPtyInputGeneration,
-        MainPromptGate,
-        bool,
+        RawInputShellRoute,
+        UnixStream,
     ) -> JoinHandle<io::Result<()>>,
 {
+    let assistance_control = config.integration.uses_markers().then(|| {
+        config
+            .assistance_control
+            .clone()
+            .unwrap_or_else(|| AssistanceControl::enabled(assistance_state_file(config)))
+    });
+    let input_classifier = match assistance_control.as_ref() {
+        Some(control) => input_classifier.with_assistance_control(control.clone()),
+        None => input_classifier,
+    };
     let mut session = start_session(config)?;
-
-    read_until_streaming(
-        &mut session.master,
-        &mut session.child,
-        &mut session.parser,
-        &mut output,
-        Duration::from_secs(5),
-        |parser| {
-            if config.native_mode {
-                parser.precmd_count() >= 1
-            } else {
-                parser.prompt_count(config.prompt.as_bytes()) >= 1
-            }
-        },
-    )?;
-
-    let input_master = session.master.try_clone()?;
-    let (input_event_sender, input_event_receiver) = mpsc::channel();
-    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
-    let input_generation = UserPtyInputGeneration::default();
-    // #1721 D16: prompt_ready raises the gate on the output side; submits
-    // and preexec lower it, keeping CJK drafts off PS2/heredoc continuations.
+    session.parser.set_prompt_cwd(input_classifier.prompt_cwd());
+    session
+        .parser
+        .set_shell_path_command_names(input_classifier.shell_path_command_names());
+    let mut prompt_presentation = PromptPresentation::new(config.integration.uses_markers());
+    // Attach the gate before startup output consumes the first prompt_ready marker.
     let main_prompt_gate = MainPromptGate::default();
     session
         .parser
         .set_main_prompt_gate(main_prompt_gate.clone());
-    // Slash-via-shell routing (issue #1718) needs a markered native session
-    // so the prompt gate can prove bash is at its prompt; everything else
-    // keeps the Rust intercept path.
-    let slash_route_enabled = slash_via_shell && config.native_mode;
+    let input_generation = UserPtyInputGeneration::default();
+    session
+        .parser
+        .set_prompt_epoch_exchange(input_generation.prompt_epoch_exchange());
+    if let Some(control) = assistance_control.as_ref() {
+        session.parser.set_assistance_control(control.clone());
+        prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
+    }
+    if config.integration.uses_markers() {
+        read_until_streaming_with_presentation(
+            &mut session.master,
+            &mut session.child,
+            &mut session.parser,
+            &mut output,
+            &mut prompt_presentation,
+            Duration::from_secs(5),
+            |parser| {
+                if config.native_mode {
+                    parser.precmd_count() >= 1
+                } else {
+                    parser.prompt_count(config.prompt.as_bytes()) >= 1
+                }
+            },
+        )?;
+    }
+    let input_master = session.master.try_clone()?;
+    let (input_event_sender, input_event_receiver) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    // #1721/#1718: prompt_ready raises the gated route; submits lower it.
+    let slash_route_enabled = bounded_bash_handoff
+        && config.integration.uses_markers()
+        && config.slash_via_shell
+        && config.native_mode;
+    session.parser.publish_quiescent_prompt_snapshot();
+    let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
+        RelayWake::new()?.into_parts();
+    // Keep the channel open after the driver and completion notifier exit;
+    // otherwise POLLHUP would keep the relay readable until the child exits.
+    let _wake_keepalive = wake_writer.try_clone()?;
+    let mut completion_wake = wake_writer.try_clone()?;
     let driver_thread = spawn_driver(
         input_master,
         session.child.id(),
         input_event_sender,
-        input_classifier,
+        input_classifier
+            .with_shell_passthrough(!config.integration.uses_markers())
+            .with_bash_readline_history_privacy(
+                bounded_bash_handoff && config.integration.uses_markers(),
+            )
+            .with_bash_slash_submission_guard(slash_route_enabled),
         Arc::clone(&input_mode),
         input_generation.clone(),
-        main_prompt_gate,
-        slash_route_enabled,
+        RawInputShellRoute::new(
+            main_prompt_gate,
+            slash_route_enabled,
+            session.zsh_path_prompt_buffering.take(),
+        ),
+        wake_writer,
     );
     let (driver_completion_sender, driver_completion_receiver) = mpsc::channel();
     thread::spawn(move || {
@@ -333,10 +447,11 @@ where
             result,
             completed_at: Instant::now(),
         });
+        notify_relay(&mut completion_wake);
     });
     let watchdog = action_watchdog.map(RawActionWatchdog::new);
     let mut last_winsize = config.winsize;
-    let relay_prompt = if config.native_mode {
+    let relay_prompt = if config.native_mode || !config.integration.uses_markers() {
         ""
     } else {
         &config.prompt
@@ -346,83 +461,44 @@ where
         &session.terminal,
         &mut session.child,
         &mut session.parser,
+        &mut prompt_presentation,
         &mut output,
         &mut event_observer,
         &input_event_receiver,
         &driver_completion_receiver,
+        &mut wake_reader,
+        &mut resize_reader,
         &input_mode,
         &input_generation,
         &mut last_winsize,
         relay_prompt,
         &session.recovery_request_file,
         &session.handoff_request_file,
+        bounded_bash_handoff,
         watchdog.as_ref(),
         &config.input_wait_status,
         &crate::i18n::I18n::new(config.hint_language),
         config.input_wait_timeout_secs,
+        config.hint_card_renderer.as_ref(),
     )?;
-    let display_start = session.parser.display.len();
-    session.parser.flush_pending();
-    output.write_all(&session.parser.display[display_start..])?;
+    let display_start = session.parser.display_position();
+    session.parser.flush_pending()?;
+    prompt_presentation.observe(&mut session.parser);
+    prompt_presentation.write_range(
+        &session.parser,
+        display_start,
+        session.parser.display_position(),
+        &mut output,
+    )?;
     output.flush()?;
 
     let exit_status = wait_child_preserving_signal(&mut session.child, eof_shutdown)?;
     push_shell_exited_event(&mut session.parser, config, exit_status)?;
-    event_observer(&session.parser.events, &mut output)?;
+    session
+        .parser
+        .observe_events(&mut output, &mut event_observer)?;
     output.flush()?;
     build_shell_host_output(config, session.parser, exit_status)
-}
-
-pub fn run_raw_interactive_bash(config: &ShellHostConfig) -> io::Result<ShellHostOutput> {
-    let _raw_mode = RawModeGuard::activate_stdin()?;
-    reopen_stdout_blocking()?;
-    run_raw_relay_bash(config, std::io::stdin(), std::io::stdout())
-}
-
-pub fn run_raw_interactive_bash_with_observer<F>(
-    config: &ShellHostConfig,
-    event_observer: F,
-) -> io::Result<ShellHostOutput>
-where
-    F: FnMut(&[ShellEvent], &mut std::io::Stdout) -> io::Result<()>,
-{
-    let _raw_mode = RawModeGuard::activate_stdin()?;
-    reopen_stdout_blocking()?;
-    run_raw_relay_bash_with_observer(config, std::io::stdin(), std::io::stdout(), event_observer)
-}
-
-pub fn run_raw_interactive_bash_with_output_control<F>(
-    config: &ShellHostConfig,
-    event_observer: F,
-) -> io::Result<ShellHostOutput>
-where
-    F: FnMut(&[ShellEvent], &mut std::io::Stdout) -> io::Result<RawObserverAction>,
-{
-    let _raw_mode = RawModeGuard::activate_stdin()?;
-    reopen_stdout_blocking()?;
-    run_raw_relay_bash_with_output_control(
-        config,
-        std::io::stdin(),
-        std::io::stdout(),
-        event_observer,
-    )
-}
-
-pub fn run_raw_interactive_zsh_with_output_control<F>(
-    config: &ShellHostConfig,
-    event_observer: F,
-) -> io::Result<ShellHostOutput>
-where
-    F: FnMut(&[ShellEvent], &mut std::io::Stdout) -> io::Result<RawObserverAction>,
-{
-    let _raw_mode = RawModeGuard::activate_stdin()?;
-    reopen_stdout_blocking()?;
-    run_raw_relay_zsh_with_output_control(
-        config,
-        std::io::stdin(),
-        std::io::stdout(),
-        event_observer,
-    )
 }
 
 #[cfg(test)]

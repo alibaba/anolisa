@@ -18,8 +18,11 @@ mod evidence_requests_tests;
 pub(crate) mod evidence_state;
 pub(crate) mod hooks;
 pub(crate) mod insight;
+pub(crate) mod invocation;
 pub(crate) mod logging;
 pub(crate) mod mode;
+#[cfg(test)]
+mod mode_tests;
 #[cfg(test)]
 mod mvp_loop_tests;
 pub(crate) mod prelude;

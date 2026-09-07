@@ -10,7 +10,8 @@
 
 import React from 'react';
 import type { InterruptionSeverity, InterruptionTypeDetail } from '../utils/apiClient';
-import { INTERRUPTION_TYPE_CN } from '../utils/apiClient';
+import { useI18n, interruptionTypeKey } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 const SEVERITY_STYLES: Record<InterruptionSeverity, string> = {
   critical: 'bg-red-600 text-white',
@@ -19,21 +20,34 @@ const SEVERITY_STYLES: Record<InterruptionSeverity, string> = {
   low:      'bg-blue-400 text-white',
 };
 
-const SEVERITY_LABEL: Record<InterruptionSeverity, string> = {
-  critical: '严重',
-  high:     '重要',
-  medium:   '中等',
-  low:      '轻微',
+const SEVERITY_LABEL_KEY: Record<InterruptionSeverity, MessageKey> = {
+  critical: 'common.critical',
+  high:     'common.high',
+  medium:   'common.medium',
+  low:      'common.low',
 };
 
 const SEVERITY_ORDER: InterruptionSeverity[] = ['critical', 'high', 'medium', 'low'];
 
+/** Returns the localized label for a severity level. */
+function severityLabel(sev: InterruptionSeverity, t: (key: MessageKey) => string): string {
+  return t(SEVERITY_LABEL_KEY[sev]) ?? sev;
+}
+
 /** Build tooltip lines from type details for a given severity. */
-function buildTypeTooltipLines(types: InterruptionTypeDetail[], severity: string): string[] {
+function buildTypeTooltipLines(
+  types: InterruptionTypeDetail[],
+  severity: string,
+  t: (key: MessageKey, params?: Record<string, string | number>) => string,
+): string[] {
   return types
-    .filter((t) => t.severity === severity)
+    .filter((detail) => detail.severity === severity)
     .sort((a, b) => b.count - a.count)
-    .map((t) => `${INTERRUPTION_TYPE_CN[t.interruption_type] ?? t.interruption_type}: ${t.count} 次`);
+    .map((detail) => {
+      const typeKey = interruptionTypeKey(detail.interruption_type);
+      const typeLabel = typeKey ? t(typeKey) : detail.interruption_type;
+      return t('comp.interrupt.typeCount', { type: typeLabel, count: detail.count });
+    });
 }
 
 /** CSS tooltip positioned above the badge. */
@@ -65,6 +79,8 @@ interface Props {
 }
 
 export const InterruptionBadge: React.FC<Props> = ({ count, severity, bySeverity, types, title, onClick }) => {
+  const { t } = useI18n();
+
   // Detailed mode: render one badge per non-zero severity
   if (bySeverity) {
     const badges = SEVERITY_ORDER
@@ -72,8 +88,8 @@ export const InterruptionBadge: React.FC<Props> = ({ count, severity, bySeverity
       .map((sev) => {
         const cnt = bySeverity[sev];
         const style = SEVERITY_STYLES[sev];
-        const label = SEVERITY_LABEL[sev];
-        const lines = types ? buildTypeTooltipLines(types, sev) : [`${cnt} ${label}`];
+        const label = severityLabel(sev, t);
+        const lines = types ? buildTypeTooltipLines(types, sev, t) : [`${cnt} ${label}`];
         return (
           <span
             key={sev}
@@ -93,7 +109,7 @@ export const InterruptionBadge: React.FC<Props> = ({ count, severity, bySeverity
   if (!count || count === 0) return null;
   const sev = severity ?? 'medium';
   const style = SEVERITY_STYLES[sev] ?? SEVERITY_STYLES.medium;
-  const label = SEVERITY_LABEL[sev] ?? sev.toUpperCase();
+  const label = severityLabel(sev, t);
   const lines = title ? [title] : [`${count} ${label}`];
 
   return (

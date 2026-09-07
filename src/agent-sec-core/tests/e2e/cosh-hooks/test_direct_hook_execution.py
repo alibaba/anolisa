@@ -192,7 +192,7 @@ def test_cosh_code_scanner_mode_never_changes_fixed_ask_behavior(
             },
             "ask",
             "ask",
-            "需要确认",
+            "当前策略要求确认",
         ),
         (
             {
@@ -201,7 +201,7 @@ def test_cosh_code_scanner_mode_never_changes_fixed_ask_behavior(
             },
             "block",
             "block",
-            "本次工具调用已被阻断",
+            "当前策略已阻断本次工具调用",
         ),
         (
             {
@@ -219,7 +219,7 @@ def test_cosh_code_scanner_mode_never_changes_fixed_ask_behavior(
             },
             "block",
             "allow",
-            "fallback 为 warn",
+            "当前环节不支持确认/阻断",
         ),
     ],
 )
@@ -236,17 +236,20 @@ def test_cosh_pii_policy_uses_event_level_decisions(
     output = json.loads(proc.stdout)
     assert output["decision"] == expected_decision
     assert message_fragment in output["reason"]
-    assert "a***@example.com" in output["reason"]
+    assert "高风险敏感信息" in output["reason"]
+    assert "email" not in output["reason"]
+    assert "deny" not in output["reason"]
+    assert "a***@example.com" not in output["reason"]
     assert "alice@example.com" not in output["reason"]
     assert proc.stderr == ""
     assert capture.exists()
     assert "scan-pii" in json.loads(capture.read_text(encoding="utf-8"))["argv"]
 
     if expected_decision in {"ask", "block"}:
-        assert "将继续" not in output["reason"]
+        assert "不会阻断" not in output["reason"]
     else:
-        assert "已被阻断" not in output["reason"]
-        assert "将继续" in output["reason"]
+        assert "已阻断本次" not in output["reason"]
+        assert "本次仅提醒，不会阻断" in output["reason"]
 
     if payload.get("hook_event_name") == "PostToolUse":
         assert "工具已经执行" in output["reason"]

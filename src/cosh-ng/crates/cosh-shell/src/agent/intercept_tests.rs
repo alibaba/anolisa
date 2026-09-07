@@ -36,6 +36,57 @@ fn prompt_ghost_event(message: Option<&str>, input: Option<&str>) -> ShellEvent 
     }
 }
 
+fn path_prompt_event(input: &str, sensitive: bool) -> ShellEvent {
+    let mut event = prompt_ghost_event(Some("input intercepted"), Some(input));
+    event.component = Some("path_prompt".to_string());
+    event.cwd = Some("/repo".to_string());
+    event.routing = sensitive.then_some(crate::types::ShellRoutingMetadata {
+        generation: 0,
+        top_level_missing: false,
+        proven: false,
+        sensitive: true,
+        unsafe_input: false,
+    });
+    event
+}
+
+#[test]
+fn path_prompt_notice_is_stable_and_redacts_sensitive_input() {
+    let state = InlineState::default();
+    let event = path_prompt_event("read ./README.md", false);
+    let request = agent_request_from_intercepted_input(&event, 1, true).expect("plain request");
+    let mut output = Vec::new();
+
+    render_path_prompt_notice(&event, &request, &state, &mut output).expect("plain notice");
+    let rendered = String::from_utf8(output).expect("UTF-8 notice");
+    assert!(rendered.contains("AI request"), "{rendered}");
+    assert!(
+        rendered.contains("Agent input: read ./README.md"),
+        "{rendered}"
+    );
+
+    let secret = "read ./README.md --token ghp_abcdefghijklmnopqrstuvwxyz123456";
+    let event = path_prompt_event(secret, true);
+    let request = agent_request_from_intercepted_input(&event, 2, true).expect("sensitive request");
+    let mut output = Vec::new();
+    render_path_prompt_notice(&event, &request, &state, &mut output).expect("redacted notice");
+    let rendered = String::from_utf8(output).expect("UTF-8 notice");
+    assert!(rendered.contains("Agent input: <redacted>"), "{rendered}");
+    assert!(!rendered.contains("ghp_"), "{rendered}");
+}
+
+#[test]
+fn ordinary_natural_language_does_not_render_path_notice() {
+    let state = InlineState::default();
+    let mut event = path_prompt_event("inspect the current directory", false);
+    event.component = Some("natural_language".to_string());
+    let request = agent_request_from_intercepted_input(&event, 1, true).expect("plain request");
+    let mut output = Vec::new();
+
+    render_path_prompt_notice(&event, &request, &state, &mut output).expect("no notice");
+    assert!(output.is_empty());
+}
+
 fn candidate_event(candidate_id: &str, message: Option<&str>, input: Option<&str>) -> ShellEvent {
     let mut event = prompt_ghost_event(message, input);
     event.component = Some(format!("prompt_ghost:{candidate_id}"));

@@ -174,15 +174,16 @@ fn raw_cli_approved_ssh_tool_receives_foreground_input() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "fake",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"?? stream ssh tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(1_200)),
-            (b"hello-from-user\n".to_vec(), Duration::from_millis(500)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        &[
+            ("cosh-osc$ ", b"?? stream ssh tool approval\n"),
+            ("Approval req-1", b"\n"),
+            ("fake-ssh prompt:", b"hello-from-user\n"),
+            ("fake-ssh received:hello-from-user", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -211,15 +212,16 @@ fn raw_cli_approved_pager_tool_receives_q() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "fake",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"?? stream pager tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(1_200)),
-            (b"q".to_vec(), Duration::from_millis(500)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        &[
+            ("cosh-osc$ ", b"?? stream pager tool approval\n"),
+            ("Approval req-1", b"\n"),
+            ("fake-pager waiting", b"q"),
+            ("fake-pager key:q", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -382,15 +384,16 @@ fn raw_cli_approved_less_tool_hints_before_taking_the_foreground() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "fake",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"?? stream less tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(1_200)),
-            (b"q".to_vec(), Duration::from_millis(700)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        &[
+            ("cosh-osc$ ", b"?? stream less tool approval\n"),
+            ("Approval req-1", b"\n"),
+            ("fake-less waiting", b"q"),
+            ("fake-less key:q", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -419,7 +422,7 @@ fn raw_cli_approved_less_tool_hints_in_zh_language_env() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "fake",
         &[],
         &[
@@ -427,11 +430,12 @@ fn raw_cli_approved_less_tool_hints_in_zh_language_env() {
             ("PATH", &path),
             ("COSH_SHELL_LANG", "zh-CN"),
         ],
-        vec![
-            (b"?? stream less tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(1_200)),
-            (b"q".to_vec(), Duration::from_millis(700)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        &[
+            ("cosh-osc$ ", b"?? stream less tool approval\n"),
+            ("审批 req-1", b"\n"),
+            ("fake-less waiting", b"q"),
+            ("fake-less key:q", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -440,6 +444,8 @@ fn raw_cli_approved_less_tool_hints_in_zh_language_env() {
     assert!(output.contains("键盘输入会直接发送给它"), "{output}");
     assert!(output.contains("通常按 q"), "{output}");
     assert!(!output.contains("Press q to leave a pager"), "{output}");
+    assert!(output.contains("fake-less waiting"), "{output}");
+    assert!(output.contains("fake-less key:q"), "{output}");
     assert_no_pager_transport_leak(&output);
 }
 
@@ -458,7 +464,7 @@ fn raw_cli_user_typed_git_log_keeps_its_own_pager_configuration() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "fake",
         &[],
         &[
@@ -473,15 +479,14 @@ fn raw_cli_user_typed_git_log_keeps_its_own_pager_configuration() {
             ("MANPAGER", RAW_CLI_UNSET_ENV),
             ("SYSTEMD_PAGER", RAW_CLI_UNSET_ENV),
         ],
-        vec![
-            // Wait for the prompt first: input sent before the shell is ready
-            // would be consumed by the pager instead of the command line.
+        &[
             (
-                b"git -c core.pager=fake-pager --paginate log -1 --format=%h\n".to_vec(),
-                Duration::from_millis(1_200),
+                "cosh-osc$ ",
+                b"git -c core.pager=fake-pager --paginate log -1 --format=%h\n",
             ),
-            (b"q\n".to_vec(), Duration::from_millis(2_000)),
-            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+            ("fake-pager waiting", b"q\n"),
+            ("fake-pager released:q", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -500,24 +505,22 @@ fn raw_cli_approved_repl_tool_receives_followup_lines() {
     fs::create_dir_all(&bin_dir).unwrap();
     write_executable(
         &bin_dir.join("fake-repl"),
-        "#!/bin/sh\nprintf 'fake-repl ready\\n'\nIFS= read -r first\nIFS= read -r second\nprintf 'fake-repl lines:%s/%s\\n' \"$first\" \"$second\"\n",
+        "#!/bin/sh\nprintf 'fake-repl ready\\n'\nIFS= read -r first\nprintf 'fake-repl next\\n'\nIFS= read -r second\nprintf 'fake-repl lines:%s/%s\\n' \"$first\" \"$second\"\n",
     );
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_marker_input(
         "fake",
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
-        vec![
-            (b"?? stream repl tool approval\n".to_vec(), Duration::ZERO),
-            (b"\n".to_vec(), Duration::from_millis(1_200)),
-            (
-                b"plain natural language for repl\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b".exit\n".to_vec(), Duration::from_millis(300)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        &[
+            ("cosh-osc$ ", b"?? stream repl tool approval\n"),
+            ("Approval req-1", b"\n"),
+            ("fake-repl ready", b"plain natural language for repl\n"),
+            ("fake-repl next", b".exit\n"),
+            ("fake-repl lines:plain natural language for repl/.exit", b""),
+            ("cosh-osc$ ", b"exit\n"),
         ],
     );
 
@@ -650,4 +653,43 @@ fn raw_cli_user_approved_bash_tool_supports_pipe() {
     assert!(!output.contains("Received approved tool result"));
     assert!(!output.contains("Analysis continued after the approved command"));
     assert!(!output.contains("Thinking...Approval"));
+}
+
+#[test]
+fn raw_cli_user_approved_pipeline_supports_quoted_multiline_script() {
+    assert_user_approved_pipeline_supports_quoted_multiline_script(&[]);
+}
+
+#[test]
+fn raw_cli_zsh_user_approved_pipeline_supports_quoted_multiline_script() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    assert_user_approved_pipeline_supports_quoted_multiline_script(&["--shell", "zsh"]);
+}
+
+fn assert_user_approved_pipeline_supports_quoted_multiline_script(args: &[&str]) {
+    let output = run_raw_cli_with_args_and_delayed_input(
+        "fake",
+        args,
+        vec![
+            (
+                b"?? stream quoted multiline pipeline approval\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+        ],
+    );
+    let normalized = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(
+        output.contains("Preparing a quoted multiline pipeline request before finishing."),
+        "{output}"
+    );
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("Approved req-1"), "{output}");
+    assert!(!output.contains("Blocked req-1"), "{output}");
+    assert!(normalized.contains("\nalpha\nbeta\n"), "{output}");
+    assert!(output.contains("sent to shell"), "{output}");
 }

@@ -8,9 +8,11 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 
 use ws_ckpt_common::backend::*;
-use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
+use ws_ckpt_common::{
+    DaemonConfig, DiffEntry, WorkspaceGenerationTokenV2, WorkspaceInfo, SNAPSHOTS_DIR,
+};
 
-use super::btrfs_common;
+use super::{btrfs_common, btrfs_identity, rollback_recovery};
 use btrfs_common::{backup_path_for, recover_orphan_backup, resolve_symlink_path};
 
 /// Deployment scenario for BtrfsBase backend.
@@ -40,6 +42,12 @@ impl BtrfsBaseBackend {
             snapshots_dir,
             scenario,
         }
+    }
+
+    async fn recover_interrupted_rollbacks(&self) -> anyhow::Result<()> {
+        rollback_recovery::recover_interrupted_rollbacks(&self.data_root)
+            .await
+            .context("failed to recover interrupted BtrfsBase rollback")
     }
 
     /// Internal init implementation; caller wraps with cleanup-on-failure. Sets `*backup_owned` after step 3.
@@ -189,6 +197,10 @@ impl StorageBackend for BtrfsBaseBackend {
 
     fn snapshots_root(&self) -> &Path {
         &self.snapshots_dir
+    }
+
+    async fn live_generation(&self, ws_id: &str) -> anyhow::Result<WorkspaceGenerationTokenV2> {
+        btrfs_identity::live_generation(&self.data_root, ws_id)
     }
 
     async fn init_workspace(
@@ -513,6 +525,8 @@ impl StorageBackend for BtrfsBaseBackend {
                 .await
                 .with_context(|| format!("Failed to ensure directory exists: {:?}", dir))?;
         }
+        // Startup awaits bootstrap before rebuilding workspace watchers.
+        self.recover_interrupted_rollbacks().await?;
         Ok(())
     }
 }
@@ -521,7 +535,7 @@ impl StorageBackend for BtrfsBaseBackend {
 mod tests {
     use super::{BtrfsBaseBackend, BtrfsBaseScenario};
     use ws_ckpt_common::backend::StorageBackend;
-    use ws_ckpt_common::{CleanupRetention, DaemonConfig};
+    use ws_ckpt_common::{CleanupRetention, DaemonConfig, SNAPSHOTS_DIR};
 
     fn dummy_config() -> DaemonConfig {
         DaemonConfig {
@@ -561,5 +575,23 @@ mod tests {
         backend.bootstrap(&dummy_config()).await.unwrap();
         // A second call on existing directories must succeed.
         backend.bootstrap(&dummy_config()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_recovery_scans_backend_data_root_not_config_mount_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = BtrfsBaseBackend::new(tmp.path().to_path_buf(), BtrfsBaseScenario::InPlace);
+        let data_root = tmp.path().join("ws-ckpt-data");
+        tokio::fs::create_dir_all(&data_root).await.unwrap();
+        let candidate = data_root.join("ws-abc123.rollback-tmp");
+        tokio::fs::write(&candidate, b"foreign").await.unwrap();
+        tokio::fs::create_dir_all(data_root.join(SNAPSHOTS_DIR).join("ws-abc123"))
+            .await
+            .unwrap();
+
+        let error = backend.bootstrap(&dummy_config()).await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("ambiguous interrupted rollback"));
+        assert!(candidate.exists(), "unsafe candidate must be preserved");
     }
 }

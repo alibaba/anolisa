@@ -24,7 +24,12 @@ pub(crate) struct ShellAuditRecorder {
     hash_salt: String,
     degraded: bool,
     warning_emitted: bool,
+    // Approvals for which Shell emitted `approval.requested`.
     owned_approvals: std::collections::HashSet<String>,
+    // Approvals for which Shell emitted `approval.resolved`, tracked so an
+    // external owner's `approval.requested` can still receive exactly one
+    // Shell-owned terminal event.
+    resolved_approvals: std::collections::HashSet<String>,
     command_refs: std::collections::HashMap<String, String>,
 }
 
@@ -76,6 +81,7 @@ impl ShellAuditRecorder {
             hash_salt: uuid::Uuid::new_v4().to_string(),
             warning_emitted: false,
             owned_approvals: std::collections::HashSet::new(),
+            resolved_approvals: std::collections::HashSet::new(),
             command_refs: std::collections::HashMap::new(),
         };
         recorder.record_session("session.started", AuditOutcomeStatus::Started);
@@ -97,6 +103,7 @@ impl ShellAuditRecorder {
             degraded: true,
             warning_emitted: false,
             owned_approvals: std::collections::HashSet::new(),
+            resolved_approvals: std::collections::HashSet::new(),
             command_refs: std::collections::HashMap::new(),
         }
     }
@@ -114,6 +121,7 @@ impl ShellAuditRecorder {
             degraded: false,
             warning_emitted: false,
             owned_approvals: std::collections::HashSet::new(),
+            resolved_approvals: std::collections::HashSet::new(),
             command_refs: std::collections::HashMap::new(),
         }
     }
@@ -134,6 +142,21 @@ impl ShellAuditRecorder {
             }
         }
         self.seen_events = events.len();
+    }
+
+    /// Projects an already de-duplicated absolute-cursor event batch.
+    pub(crate) fn observe_shell_event_batch(&mut self, events: &[ShellEvent]) {
+        for event in events {
+            if matches!(
+                event.kind,
+                ShellEventKind::CommandStarted
+                    | ShellEventKind::CommandCompleted
+                    | ShellEventKind::CommandFailed
+            ) {
+                self.record_command(event);
+            }
+        }
+        self.seen_events = self.seen_events.saturating_add(events.len());
     }
 
     /// Returns whether the current session has an unclosed audit gap.
@@ -205,6 +228,8 @@ impl ShellAuditRecorder {
         request: ShellApprovalAuditInput<'_>,
     ) -> Option<String> {
         if request.audit_ref.is_some() {
+            // An external owner already wrote `approval.requested`; preserve
+            // its audit_ref without claiming ownership.
             return request.audit_ref.map(str::to_string);
         }
         let event = AuditEventV1::shell(
@@ -250,7 +275,12 @@ impl ShellAuditRecorder {
         &mut self,
         request: ShellApprovalAuditInput<'_>,
     ) -> Result<Option<String>, String> {
-        if !self.owned_approvals.contains(request.id) {
+        let shell_owned = self.owned_approvals.contains(request.id);
+        let externally_recorded = request.audit_ref.is_some();
+        if !shell_owned && !externally_recorded {
+            return Ok(request.audit_ref.map(str::to_string));
+        }
+        if self.resolved_approvals.contains(request.id) {
             return Ok(request.audit_ref.map(str::to_string));
         }
         let status = match request.status {
@@ -286,6 +316,7 @@ impl ShellAuditRecorder {
             .and_then(|writer| writer.append(&mut event, true));
         match result {
             Ok(()) => {
+                self.resolved_approvals.insert(request.id.to_string());
                 self.degraded = false;
                 Ok(Some(event_id))
             }

@@ -89,6 +89,11 @@ pub struct SideAggregate {
     pub retention_total: usize,
     /// Wilson 95% interval over the pooled retention counts.
     pub retention_ci: (f64, f64),
+    /// Deduplicated descriptions of ground-truth items lost by compression,
+    /// collected over the independent observations. Capped at
+    /// [`Self::RETENTION_MISSING_CAP`] entries to keep the report compact.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub retention_missing: Vec<String>,
     /// Semantic probe score: the share of questions answerable on the original
     /// text that are still answerable after compression. `None` when unprobed
     /// or when the original answered nothing.
@@ -101,6 +106,31 @@ pub struct SideAggregate {
     /// the series — cross-check evidence for the tiktoken headline numbers.
     /// `None` for sides that do not self-report (tokenless/rtk).
     pub hr_tokens_evidence: Option<(u64, u64)>,
+}
+
+impl SideAggregate {
+    /// Maximum number of missing-item descriptions carried into the report.
+    /// Beyond this the list is truncated with a count suffix so the report
+    /// stays compact even on categories with many lost items.
+    pub const RETENTION_MISSING_CAP: usize = 10;
+
+    /// Builds a deduplicated, capped missing-item list from raw failure
+    /// descriptions collected across independent observations.
+    pub fn collect_missing(raw: Vec<String>) -> Vec<String> {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut deduped: Vec<String> = Vec::new();
+        for s in raw {
+            if seen.insert(s.clone()) {
+                deduped.push(s);
+            }
+        }
+        if deduped.len() > Self::RETENTION_MISSING_CAP {
+            let overflow = deduped.len() - Self::RETENTION_MISSING_CAP;
+            deduped.truncate(Self::RETENTION_MISSING_CAP);
+            deduped.push(format!("… and {overflow} more"));
+        }
+        deduped
+    }
 }
 
 /// Paired per-instance compression-rate difference (tokenless − headroom).
@@ -265,12 +295,17 @@ impl Report {
             for (side, agg) in [("tokenless", &cat.tokenless), ("headroom", &cat.headroom)] {
                 let Some(agg) = agg else { continue };
                 if let Some(s) = agg.semantic_score.filter(|s| *s < SEMANTIC_FLOOR) {
-                    findings.push(json!({
+                    let mut finding = json!({
                         "kind": "semantic_flag",
                         "category": cat.category.name(),
                         "side": side,
                         "semantic_score": s,
-                    }));
+                    });
+                    if !agg.retention_missing.is_empty() {
+                        finding["retention_missing"] =
+                            serde_json::to_value(&agg.retention_missing).unwrap();
+                    }
+                    findings.push(finding);
                 }
                 let budget = cat.category.p99_budget_ms();
                 if agg.latency_ms.p99 > budget {
@@ -432,6 +467,38 @@ impl Report {
             }
         }
         md.push('\n');
+
+        // Retention missing items: show exactly which ground-truth facts were
+        // lost, so reviewers can judge whether the drops are cosmetic or
+        // material (error codes, transaction ids, etc.).
+        let has_missing = self.categories.iter().any(|c| {
+            c.tokenless
+                .as_ref()
+                .is_some_and(|a| !a.retention_missing.is_empty())
+                || c.headroom
+                    .as_ref()
+                    .is_some_and(|a| !a.retention_missing.is_empty())
+        });
+        if has_missing {
+            md.push_str("## Retention missing items\n\n");
+            md.push_str(
+                "Ground-truth items lost by compression, per category and side.\n\
+                 Empty means all items were retained.\n\n",
+            );
+            for cat in &self.categories {
+                for (side, agg) in [("tokenless", &cat.tokenless), ("headroom", &cat.headroom)] {
+                    if let Some(a) = agg
+                        && !a.retention_missing.is_empty()
+                    {
+                        md.push_str(&format!("### {} — {}\n\n", cat.category.name(), side));
+                        for item in &a.retention_missing {
+                            md.push_str(&format!("- {item}\n"));
+                        }
+                        md.push('\n');
+                    }
+                }
+            }
+        }
 
         // Non-comparable categories get a named caveat rather than a silently
         // missing gap row.

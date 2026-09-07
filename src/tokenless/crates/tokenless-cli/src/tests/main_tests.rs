@@ -5,7 +5,7 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 fn default_path_resolver(home: &str) -> DatabasePathResolver {
     DatabasePathResolver {
         home: std::sync::OnceLock::from(home.to_string()),
-        data_dir: std::sync::OnceLock::from(Ok(format!("{home}/.tokenless"))),
+        data_dir: std::sync::OnceLock::from(Ok(PathBuf::from(home).join(".tokenless"))),
     }
 }
 
@@ -30,22 +30,22 @@ impl TempDbGuard {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let test_dir = format!("{}/.tokenless-test-{}", home, nanos);
-        let sls_dir = format!("/tmp/tokenless-sls-test-{}", nanos);
+        let test_dir = format!("{home}/.tokenless-test-{nanos}");
+        let sls_dir = format!("/tmp/tokenless-sls-test-{nanos}");
         std::fs::create_dir_all(&test_dir).unwrap();
         std::fs::create_dir_all(&sls_dir).unwrap();
-        let sls_path = format!("{}/tokenless.jsonl", sls_dir);
+        let sls_path = format!("{sls_dir}/tokenless.jsonl");
         // Pre-create the JSONL file so SlsWriter::write can open it.
         std::fs::write(&sls_path, "").unwrap();
         let prev_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
         let prev_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
         let prev_sls_path = std::env::var_os("TOKENLESS_SLS_PATH");
         unsafe {
-            std::env::set_var("TOKENLESS_STATS_DB", format!("{}/stats.db", test_dir));
-            std::env::set_var("TOKENLESS_STASH_DB", format!("{}/stash.db", test_dir));
+            std::env::set_var("TOKENLESS_STATS_DB", format!("{test_dir}/stats.db"));
+            std::env::set_var("TOKENLESS_STASH_DB", format!("{test_dir}/stash.db"));
             std::env::set_var("TOKENLESS_SLS_PATH", &sls_path);
         }
-        let stash_db_path = format!("{}/stash.db", test_dir);
+        let stash_db_path = format!("{test_dir}/stash.db");
         Some(TempDbGuard {
             _lock: lock,
             test_dir,
@@ -60,6 +60,70 @@ impl TempDbGuard {
     /// Returns the temp stash DB path, useful for override-path tests.
     fn stash_db_path(&self) -> &str {
         &self.stash_db_path
+    }
+}
+
+struct PersistConfigGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    prev_stats: Option<std::ffi::OsString>,
+    prev_sls: Option<std::ffi::OsString>,
+    prev_compression: Option<std::ffi::OsString>,
+}
+
+impl PersistConfigGuard {
+    fn with_file_and_env(
+        file_json: &str,
+        stats_env: &str,
+        sls_env: &str,
+        compression_env: &str,
+    ) -> Self {
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, file_json).unwrap();
+        TokenlessConfig::override_config_path_for_tests(Some(path.clone()));
+        let prev_stats = std::env::var_os("TOKENLESS_STATS_ENABLED");
+        let prev_sls = std::env::var_os("TOKENLESS_SLS_ENABLED");
+        let prev_compression = std::env::var_os("TOKENLESS_COMPRESSION_ENABLED");
+        unsafe {
+            std::env::set_var("TOKENLESS_STATS_ENABLED", stats_env);
+            std::env::set_var("TOKENLESS_SLS_ENABLED", sls_env);
+            std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", compression_env);
+        }
+        Self {
+            _lock: lock,
+            _dir: dir,
+            path,
+            prev_stats,
+            prev_sls,
+            prev_compression,
+        }
+    }
+
+    fn read_persisted(&self) -> TokenlessConfig {
+        serde_json::from_str(&std::fs::read_to_string(&self.path).unwrap()).unwrap()
+    }
+}
+
+impl Drop for PersistConfigGuard {
+    fn drop(&mut self) {
+        TokenlessConfig::override_config_path_for_tests(None);
+        unsafe {
+            match &self.prev_stats {
+                Some(v) => std::env::set_var("TOKENLESS_STATS_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_STATS_ENABLED"),
+            }
+            match &self.prev_sls {
+                Some(v) => std::env::set_var("TOKENLESS_SLS_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_SLS_ENABLED"),
+            }
+            match &self.prev_compression {
+                Some(v) => std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED"),
+            }
+        }
     }
 }
 
@@ -101,11 +165,9 @@ fn temp_subdir(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn validate_db_path_rejects_empty_home() {
-    // No trusted home anchor means starts_with("") would match
-    // any path, so the function must short-circuit to rejection.
-    let err = validate_db_path("/tmp/whatever.db", "").unwrap_err();
-    assert!(err.contains("no trusted home"));
+fn validate_db_path_rejects_without_trusted_root() {
+    let err = validate_db_path(Path::new("/tmp/whatever.db"), "", None).unwrap_err();
+    assert!(err.contains("no trusted root"));
 }
 
 #[test]
@@ -113,14 +175,18 @@ fn validate_db_path_accepts_path_inside_home() {
     let home = temp_subdir("inside");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     let inner = canon_home.join("stats.db");
-    let result =
-        validate_db_path(inner.to_str().unwrap(), canon_home.to_str().unwrap()).unwrap();
-    assert_eq!(result, inner.to_str().unwrap());
+    let result = validate_db_path(
+        &inner,
+        canon_home.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result, inner);
     std::fs::remove_dir_all(&home).ok();
 }
 
 #[test]
-fn validate_db_path_rejects_path_outside_home() {
+fn validate_db_path_rejects_path_outside_trusted_roots() {
     let home = temp_subdir("outside-home");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     // Pick a known-existing directory that is NOT under home.
@@ -129,8 +195,13 @@ fn validate_db_path_rejects_path_outside_home() {
         std::fs::remove_dir_all(&home).ok();
         return;
     }
-    let err = validate_db_path("/etc/hosts", canon_home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("outside home"));
+    let err = validate_db_path(
+        Path::new("/etc/hosts"),
+        canon_home.to_str().unwrap(),
+        None,
+    )
+    .unwrap_err();
+    assert!(err.contains("outside the trusted home and data directory"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -141,12 +212,16 @@ fn validate_db_path_rejects_parent_dir_bypass_with_existing_parent() {
     let home = temp_subdir("pd-existing");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     let escape = canon_home.join("foo/../../etc/evil.db");
-    let err =
-        validate_db_path(escape.to_str().unwrap(), canon_home.to_str().unwrap()).unwrap_err();
+    let err = validate_db_path(
+        &escape,
+        canon_home.to_str().unwrap(),
+        None,
+    )
+    .unwrap_err();
     // Either "outside home" (parent canonicalized away from home) or
     // "cannot be resolved" (parent itself unreachable). Both are valid
     // rejections — what matters is no Ok return.
-    assert!(err.contains("outside home") || err.contains("cannot be resolved"));
+    assert!(err.contains("parent traversal"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -160,11 +235,10 @@ fn validate_db_path_canonicalizes_home_with_symlink_prefix() {
     // informational there but real coverage on macOS.
     let home = temp_subdir("sym-prefix");
     let inner = home.join("stats.db");
-    let result = validate_db_path(inner.to_str().unwrap(), home.to_str().unwrap());
+    let result = validate_db_path(&inner, home.to_str().unwrap(), None);
     assert!(
         result.is_ok(),
-        "raw (non-canonical) home should be accepted after internal canonicalization: {:?}",
-        result
+        "raw (non-canonical) home should be accepted after internal canonicalization: {result:?}"
     );
     std::fs::remove_dir_all(&home).ok();
 }
@@ -177,11 +251,14 @@ fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
     let home = temp_subdir("pd-nonexistent");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     let escape = canon_home.join("does-not-exist-xyz/../../etc/evil.db");
-    let result = validate_db_path(escape.to_str().unwrap(), canon_home.to_str().unwrap());
+    let result = validate_db_path(
+        &escape,
+        canon_home.to_str().unwrap(),
+        None,
+    );
     assert!(
         result.is_err(),
-        "ParentDir bypass via nonexistent intermediate must be rejected; got {:?}",
-        result
+        "ParentDir bypass via nonexistent intermediate must be rejected; got {result:?}"
     );
     std::fs::remove_dir_all(&home).ok();
 }
@@ -190,40 +267,34 @@ fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
 fn validate_data_dir_path_accepts_nonexistent_descendant() {
     let home = temp_subdir("data-dir-home");
     let candidate = home.join("nested/data");
-    let result =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap();
-    assert_eq!(result, candidate.to_str().unwrap());
+    let result = tokenless_stats::validate_data_dir(&candidate).unwrap();
+    assert_eq!(result, candidate);
     std::fs::remove_dir_all(&home).ok();
 }
 
 #[test]
-fn get_data_dir_rejects_empty_home() {
-    let err = get_data_dir("").unwrap_err();
-    assert!(err.contains("no trusted home"));
-}
-
-#[test]
-fn validate_data_dir_path_rejects_outside_home() {
+fn validate_data_dir_path_accepts_outside_home() {
     let home = temp_subdir("data-dir-outside-home");
     let outside = temp_subdir("data-dir-outside-candidate");
-    let err =
-        validate_data_dir_path(outside.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("outside home"));
+    let resolved = tokenless_stats::resolve_data_dir(
+        Some(home.as_path()),
+        outside.to_str(),
+    )
+    .unwrap();
+    assert_eq!(resolved, outside.canonicalize().unwrap());
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&outside).ok();
 }
 
 #[test]
 fn validate_data_dir_path_rejects_relative_path() {
-    let home = temp_subdir("data-dir-relative");
-    let err = validate_data_dir_path("relative/data", home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("not absolute"));
-    std::fs::remove_dir_all(&home).ok();
+    let error = tokenless_stats::validate_data_dir(Path::new("relative/data")).unwrap_err();
+    assert!(error.to_string().contains("not absolute"));
 }
 
 #[cfg(unix)]
 #[test]
-fn validate_data_dir_path_rejects_symlink_escape() {
+fn validate_data_dir_path_canonicalizes_symlink() {
     use std::os::unix::fs::symlink;
 
     let home = temp_subdir("data-dir-symlink-home");
@@ -231,9 +302,8 @@ fn validate_data_dir_path_rejects_symlink_escape() {
     let link = home.join("redirect");
     symlink(&outside, &link).unwrap();
     let candidate = link.join("data");
-    let err =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("outside home"));
+    let resolved = tokenless_stats::validate_data_dir(&candidate).unwrap();
+    assert_eq!(resolved, outside.canonicalize().unwrap().join("data"));
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&outside).ok();
 }
@@ -242,9 +312,8 @@ fn validate_data_dir_path_rejects_symlink_escape() {
 fn validate_data_dir_path_rejects_parent_traversal() {
     let home = temp_subdir("data-dir-traversal");
     let candidate = home.join("nested/../data");
-    let err =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("parent traversal"));
+    let error = tokenless_stats::validate_data_dir(&candidate).unwrap_err();
+    assert!(error.to_string().contains("parent traversal"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -253,9 +322,8 @@ fn validate_data_dir_path_rejects_existing_file() {
     let home = temp_subdir("data-dir-file");
     let candidate = home.join("not-a-directory");
     std::fs::write(&candidate, "").unwrap();
-    let err =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("not a directory"));
+    let error = tokenless_stats::validate_data_dir(&candidate).unwrap_err();
+    assert!(error.to_string().contains("not a directory"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -333,8 +401,108 @@ fn get_stash_db_path_default() {
         return;
     }
     let path = get_stash_db_path_with(&default_path_resolver(&home), None);
-    assert!(path.is_some());
-    assert!(path.unwrap().contains(".tokenless/stash.db"));
+    assert!(path.is_ok());
+    assert!(path.unwrap().ends_with(".tokenless/stash.db"));
+}
+
+#[test]
+fn get_data_dir_uses_managed_dsh_override_only_in_dsh_shell() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let managed = tempfile::tempdir().unwrap();
+    let explicit = tempfile::tempdir().unwrap();
+    let previous_data_dir = std::env::var_os("TOKENLESS_DATA_DIR");
+    let previous_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
+    let previous_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
+    let previous_dsh_shell = std::env::var_os("DSH_SHELL");
+    let previous_dsh_data_dir = std::env::var_os("DSH_TOKENLESS_DATA_DIR");
+    let previous_dsh_stats_db = std::env::var_os("DSH_TOKENLESS_STATS_DB");
+    let previous_dsh_stash_db = std::env::var_os("DSH_TOKENLESS_STASH_DB");
+    let managed_stats = managed.path().join("managed-stats.db");
+    let managed_stash = managed.path().join("managed-stash.db");
+    let explicit_stats = explicit.path().join("explicit-stats.db");
+    let explicit_stash = explicit.path().join("explicit-stash.db");
+
+    unsafe {
+        std::env::remove_var("TOKENLESS_DATA_DIR");
+        std::env::remove_var("TOKENLESS_STATS_DB");
+        std::env::remove_var("TOKENLESS_STASH_DB");
+        std::env::set_var("DSH_SHELL", "1");
+        std::env::set_var("DSH_TOKENLESS_DATA_DIR", managed.path());
+        std::env::set_var("DSH_TOKENLESS_STATS_DB", &managed_stats);
+        std::env::set_var("DSH_TOKENLESS_STASH_DB", &managed_stash);
+    }
+    let managed_result = get_data_dir(home.path().to_str().unwrap());
+    let managed_paths = DatabasePathResolver {
+        home: std::sync::OnceLock::from(home.path().to_string_lossy().into_owned()),
+        data_dir: std::sync::OnceLock::new(),
+    };
+    let managed_stats_result = get_db_path_with(&managed_paths);
+    let managed_stash_result = get_stash_db_path_with(&managed_paths, None);
+
+    unsafe {
+        std::env::remove_var("DSH_SHELL");
+    }
+    let ignored_result = get_data_dir(home.path().to_str().unwrap());
+
+    unsafe {
+        std::env::set_var("DSH_SHELL", "1");
+        std::env::set_var("TOKENLESS_DATA_DIR", explicit.path());
+        std::env::set_var("TOKENLESS_STATS_DB", &explicit_stats);
+        std::env::set_var("TOKENLESS_STASH_DB", &explicit_stash);
+    }
+    let explicit_result = get_data_dir(home.path().to_str().unwrap());
+    let explicit_paths = DatabasePathResolver {
+        home: std::sync::OnceLock::from(home.path().to_string_lossy().into_owned()),
+        data_dir: std::sync::OnceLock::new(),
+    };
+    let explicit_stats_result = get_db_path_with(&explicit_paths);
+    let explicit_stash_result = get_stash_db_path_with(&explicit_paths, None);
+
+    unsafe {
+        match previous_data_dir {
+            Some(value) => std::env::set_var("TOKENLESS_DATA_DIR", value),
+            None => std::env::remove_var("TOKENLESS_DATA_DIR"),
+        }
+        match previous_stats_db {
+            Some(value) => std::env::set_var("TOKENLESS_STATS_DB", value),
+            None => std::env::remove_var("TOKENLESS_STATS_DB"),
+        }
+        match previous_stash_db {
+            Some(value) => std::env::set_var("TOKENLESS_STASH_DB", value),
+            None => std::env::remove_var("TOKENLESS_STASH_DB"),
+        }
+        match previous_dsh_shell {
+            Some(value) => std::env::set_var("DSH_SHELL", value),
+            None => std::env::remove_var("DSH_SHELL"),
+        }
+        match previous_dsh_data_dir {
+            Some(value) => std::env::set_var("DSH_TOKENLESS_DATA_DIR", value),
+            None => std::env::remove_var("DSH_TOKENLESS_DATA_DIR"),
+        }
+        match previous_dsh_stats_db {
+            Some(value) => std::env::set_var("DSH_TOKENLESS_STATS_DB", value),
+            None => std::env::remove_var("DSH_TOKENLESS_STATS_DB"),
+        }
+        match previous_dsh_stash_db {
+            Some(value) => std::env::set_var("DSH_TOKENLESS_STASH_DB", value),
+            None => std::env::remove_var("DSH_TOKENLESS_STASH_DB"),
+        }
+    }
+
+    assert_eq!(managed_result.unwrap(), managed.path().canonicalize().unwrap());
+    assert_eq!(managed_stats_result.unwrap(), managed_stats);
+    assert_eq!(managed_stash_result.unwrap(), managed_stash);
+    assert_eq!(
+        ignored_result.unwrap(),
+        home.path().canonicalize().unwrap().join(".tokenless")
+    );
+    assert_eq!(
+        explicit_result.unwrap(),
+        explicit.path().canonicalize().unwrap()
+    );
+    assert_eq!(explicit_stats_result.unwrap(), explicit_stats);
+    assert_eq!(explicit_stash_result.unwrap(), explicit_stash);
 }
 
 #[test]
@@ -346,15 +514,7 @@ fn get_stash_db_path_with_valid_override() {
         &DatabasePathResolver::default(),
         Some(guard.stash_db_path()),
     );
-    assert_eq!(result, Some(guard.stash_db_path().to_string()));
-}
-
-#[test]
-fn open_stash_store_falls_back_on_bad_override() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    // Bad override is rejected but falls back to the temp DB path.
-    let result = open_stash_store(Some("/nonexistent/deep/dir/stash.db"));
-    assert!(result.is_some());
+    assert_eq!(result.unwrap(), PathBuf::from(guard.stash_db_path()));
 }
 
 #[test]
@@ -371,9 +531,24 @@ fn ensure_db_dir_creates_parent() {
 
     // ensure_db_dir is idempotent — calling it when the dir already exists
     // (which it does for most test envs) succeeds.
-    let result = ensure_db_dir(&get_db_path_with(&DatabasePathResolver::default()));
+    let db_path = get_db_path_with(&DatabasePathResolver::default()).unwrap();
+    let result = ensure_db_dir(&db_path);
     // With TempDbGuard the stats DB path points to a temp dir, so this succeeds.
     assert!(result.is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_db_dir_preserves_existing_parent_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = temp_subdir("existing-mode");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+    ensure_db_dir(&parent.join("stats.db")).unwrap();
+
+    assert_eq!(parent.metadata().unwrap().permissions().mode() & 0o777, 0o750);
+    std::fs::remove_dir_all(parent).ok();
 }
 
 #[test]
@@ -468,7 +643,7 @@ fn record_compression_stats_records_dryrun_mode() {
 fn get_db_path_returns_valid_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let db_path = get_db_path_with(&DatabasePathResolver::default());
-    assert!(db_path.contains("stats.db"));
+    assert!(db_path.unwrap().ends_with("stats.db"));
 }
 
 #[test]
@@ -572,6 +747,7 @@ fn run_command_compress_response_from_file() {
         tool_use_id: Some("tool-1".to_string()),
         truncate_strings_at: Some(100),
         truncate_arrays_at: Some(5),
+        array_tail_preserve: None,
         max_depth: Some(10),
         no_stash: true,
         stash_db: None,
@@ -593,6 +769,7 @@ fn run_command_compress_response_no_stash() {
         tool_use_id: None,
         truncate_strings_at: None,
         truncate_arrays_at: None,
+        array_tail_preserve: None,
         max_depth: None,
         no_stash: true,
         stash_db: None,
@@ -613,6 +790,7 @@ fn run_command_compress_response_with_stash() {
         tool_use_id: None,
         truncate_strings_at: None,
         truncate_arrays_at: None,
+        array_tail_preserve: None,
         max_depth: None,
         no_stash: false,
         stash_db: None,
@@ -658,6 +836,7 @@ fn run_command_compress_toon_from_file() {
         agent_id: Some("agent".to_string()),
         session_id: Some("sess".to_string()),
         tool_use_id: Some("tool".to_string()),
+        min_toon_chars: MIN_TOON_CHARS,
     });
     assert!(result.is_ok());
 }
@@ -691,13 +870,9 @@ fn run_command_decompress_toon_empty_input() {
 #[test]
 fn run_command_retrieve_with_marker() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let store = open_stash_store(None);
-    if store.is_none() {
-        return;
-    }
-    let store = store.unwrap();
-    let key = store.stash("hello world").unwrap();
-    let marker = format!("<<tokenless:{}>>", key);
+    let store = open_stash_store_or_err(None).unwrap();
+    let key = store.stash("hello world").unwrap().key;
+    let marker = format!("<<tokenless:{key}>>");
     let result = run_command(Commands::Retrieve {
         hash: marker,
         stash_db: None,
@@ -708,12 +883,8 @@ fn run_command_retrieve_with_marker() {
 #[test]
 fn run_command_retrieve_bare_hash() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let store = open_stash_store(None);
-    if store.is_none() {
-        return;
-    }
-    let store = store.unwrap();
-    let key = store.stash("retrieve bare hash test").unwrap();
+    let store = open_stash_store_or_err(None).unwrap();
+    let key = store.stash("retrieve bare hash test").unwrap().key;
     let result = run_command(Commands::Retrieve {
         hash: key,
         stash_db: None,
@@ -900,6 +1071,38 @@ fn stats_diff_cli_validates_scope_and_limit() {
 }
 
 #[test]
+fn stats_summary_cli_rejects_zero_limit() {
+    let zero = match Cli::try_parse_from(["tokenless", "stats", "summary", "--limit", "0"]) {
+        Err(error) => error,
+        Ok(_) => panic!("summary --limit 0 must fail at parse time"),
+    };
+    assert!(zero.to_string().contains("greater than zero"));
+
+    let compare_zero = match Cli::try_parse_from([
+        "tokenless",
+        "stats",
+        "summary",
+        "--limit",
+        "0",
+        "--compare",
+        "baseline-run",
+        "active-run",
+    ]) {
+        Err(error) => error,
+        Ok(_) => panic!("compare --limit 0 must fail at parse time"),
+    };
+    assert!(compare_zero.to_string().contains("greater than zero"));
+
+    let parsed = Cli::try_parse_from(["tokenless", "stats", "summary", "--limit", "1"]).unwrap();
+    match parsed.command {
+        Commands::Stats(StatsCommands::Summary { limit, .. }) => {
+            assert_eq!(limit, Some(1));
+        }
+        _ => panic!("expected stats summary"),
+    }
+}
+
+#[test]
 fn run_command_compress_response_large_with_truncation() {
     let _guard = TempDbGuard::new();
 
@@ -915,6 +1118,7 @@ fn run_command_compress_response_large_with_truncation() {
         tool_use_id: Some("tool-trunc".to_string()),
         truncate_strings_at: Some(50),
         truncate_arrays_at: Some(3),
+        array_tail_preserve: None,
         max_depth: Some(5),
         no_stash: true,
         stash_db: None,
@@ -1052,25 +1256,234 @@ fn run_command_stats_status() {
 }
 
 #[test]
+fn stats_persist_snapshot_enable_keeps_file_compression_and_sls() {
+    // A/B dry-run sets TOKENLESS_COMPRESSION_ENABLED=0 in the process, but
+    // `stats enable` must write the on-disk compression/SLS values, not the
+    // session overrides.
+    let file = TokenlessConfig {
+        stats_enabled: false,
+        sls_enabled: true,
+        compression_enabled: true,
+    };
+    let persisted = stats_persist_snapshot(file, true);
+    assert!(persisted.stats_enabled);
+    assert!(persisted.sls_enabled);
+    assert!(persisted.compression_enabled);
+}
+
+#[test]
+fn stats_persist_snapshot_disable_keeps_file_compression_and_sls() {
+    let file = TokenlessConfig {
+        stats_enabled: true,
+        sls_enabled: false,
+        compression_enabled: false,
+    };
+    let persisted = stats_persist_snapshot(file, false);
+    assert!(!persisted.stats_enabled);
+    assert!(!persisted.sls_enabled);
+    assert!(!persisted.compression_enabled);
+}
+
+#[test]
+fn run_command_stats_enable_does_not_persist_env_overrides() {
+    // Drive the production Enable arm (load_from_file + save). Replacing
+    // load_from_file() with load() would write the session env values.
+    let guard = PersistConfigGuard::with_file_and_env(
+        "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true}",
+        "0",
+        "0",
+        "0",
+    );
+    run_command(Commands::Stats(StatsCommands::Enable)).unwrap();
+    let persisted = guard.read_persisted();
+    assert!(persisted.stats_enabled);
+    assert!(persisted.sls_enabled);
+    assert!(persisted.compression_enabled);
+}
+
+#[test]
+fn run_command_stats_disable_does_not_persist_env_overrides() {
+    let guard = PersistConfigGuard::with_file_and_env(
+        "{\"stats_enabled\":true,\"sls_enabled\":false,\"compression_enabled\":false}",
+        "1",
+        "1",
+        "1",
+    );
+    run_command(Commands::Stats(StatsCommands::Disable)).unwrap();
+    let persisted = guard.read_persisted();
+    assert!(!persisted.stats_enabled);
+    assert!(!persisted.sls_enabled);
+    assert!(!persisted.compression_enabled);
+}
+
+#[test]
+fn missing_compare_sessions_reports_each_empty_side() {
+    let record = StatsRecord::new(
+        OperationType::CompressSchema,
+        "cli".to_string(),
+        100,
+        40,
+        50,
+        20,
+    );
+    assert!(
+        missing_compare_sessions(
+            "b",
+            "t",
+            std::slice::from_ref(&record),
+            std::slice::from_ref(&record)
+        )
+        .is_none()
+    );
+
+    let both = missing_compare_sessions("b", "t", &[], &[]).unwrap();
+    assert!(both.starts_with("No records found for "));
+    assert!(both.contains("baseline session \"b\""));
+    assert!(both.contains("tokenless session \"t\""));
+    assert!(both.contains(" and "));
+
+    let baseline_only =
+        missing_compare_sessions("b", "t", &[], std::slice::from_ref(&record)).unwrap();
+    assert!(baseline_only.contains("baseline session \"b\""));
+    assert!(!baseline_only.contains("tokenless session"));
+
+    let tokenless_only = missing_compare_sessions("b", "t", &[record], &[]).unwrap();
+    assert!(tokenless_only.contains("tokenless session \"t\""));
+    assert!(!tokenless_only.contains("baseline session"));
+}
+
+#[test]
+fn missing_compare_sessions_debug_escapes_control_chars() {
+    let message = missing_compare_sessions(
+        "base\u{1b}]0;INJECTED\u{7}",
+        "tls\u{1b}]52;c;INJECTED\u{7}",
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(!message.contains('\u{1b}'));
+    assert!(!message.contains('\u{7}'));
+    assert!(message.contains("INJECTED"));
+}
+
+fn seed_compare_record(session_id: &str, mode: CompressionMode, before: usize, after: usize) {
+    let recorder = open_recorder().expect("open recorder");
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".to_string(),
+                before * 4,
+                before,
+                after * 4,
+                after,
+            )
+            .with_session_id(session_id)
+            .with_mode(mode),
+        )
+        .expect("seed compare record");
+}
+
+#[test]
 fn run_command_stats_compare() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: None,
         json: false,
-        compare: Some(vec!["baseline-sess".to_string(), "tokenless-sess".to_string()]),
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
     }));
-    assert!(result.is_ok());
+    let err = result.expect_err("empty compare sessions must fail closed");
+    assert_eq!(err.1, 1);
+    assert!(err.0.contains("No records found"));
+    assert!(err.0.contains("baseline session \"baseline-sess\""));
+    assert!(err.0.contains("tokenless session \"tokenless-sess\""));
 }
 
 #[test]
 fn run_command_stats_compare_json() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: None,
         json: true,
-        compare: Some(vec!["baseline-sess".to_string(), "tokenless-sess".to_string()]),
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
+    }));
+    let err = result.expect_err("empty JSON compare must not emit a 0% report");
+    assert_eq!(err.1, 1);
+    assert!(err.0.contains("No records found"));
+}
+
+#[test]
+fn run_command_stats_compare_one_side_missing() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    seed_compare_record("tokenless-sess", CompressionMode::Active, 400, 200);
+    let baseline_missing = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: false,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
+    }))
+    .expect_err("missing baseline must fail");
+    assert!(baseline_missing.0.contains("baseline session \"baseline-sess\""));
+    assert!(!baseline_missing.0.contains("tokenless session"));
+
+    seed_compare_record("baseline-sess", CompressionMode::DryRun, 400, 200);
+    let tokenless_missing = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: true,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "absent-tokenless".to_string(),
+        ]),
+    }))
+    .expect_err("missing tokenless side must fail");
+    assert!(tokenless_missing.0.contains("tokenless session \"absent-tokenless\""));
+    assert!(!tokenless_missing.0.contains("baseline session"));
+}
+
+#[test]
+fn run_command_stats_compare_populated_sessions() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    seed_compare_record("baseline-sess", CompressionMode::DryRun, 400, 200);
+    seed_compare_record("tokenless-sess", CompressionMode::Active, 400, 200);
+    let result = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: false,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
     }));
     assert!(result.is_ok());
+
+    let json = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: true,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
+    }));
+    assert!(json.is_ok());
 }
 
 #[test]
@@ -1097,8 +1510,8 @@ fn get_stash_db_path_returns_valid() {
         return;
     }
     let path = get_stash_db_path_with(&default_path_resolver(&home), None);
-    assert!(path.is_some());
-    assert!(path.unwrap().contains(".tokenless/stash.db"));
+    assert!(path.is_ok());
+    assert!(path.unwrap().ends_with(".tokenless/stash.db"));
 }
 
 #[test]
@@ -1113,8 +1526,8 @@ fn get_stash_db_path_with_bad_override() {
         Some("/nonexistent/deep/dir/stash.db"),
     );
     // Bad override is rejected, falls back to default
-    assert!(path.is_some());
-    assert!(path.unwrap().contains(".tokenless/stash.db"));
+    assert!(path.is_ok());
+    assert!(path.unwrap().ends_with(".tokenless/stash.db"));
 }
 
 
@@ -1146,18 +1559,12 @@ fn run_command_compress_response_file_not_found() {
         tool_use_id: None,
         truncate_strings_at: None,
         truncate_arrays_at: None,
+        array_tail_preserve: None,
         max_depth: None,
         no_stash: true,
         stash_db: None,
     });
     assert!(result.is_err());
-}
-
-#[test]
-fn open_stash_store_none_returns_some() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let result = open_stash_store(None);
-    assert!(result.is_some());
 }
 
 #[test]
@@ -1245,6 +1652,7 @@ fn run_command_compress_response_no_agent_id() {
         tool_use_id: None,
         truncate_strings_at: None,
         truncate_arrays_at: None,
+        array_tail_preserve: None,
         max_depth: None,
         no_stash: true,
         stash_db: None,
@@ -1296,8 +1704,20 @@ fn run_command_compress_toon_tiny_input() {
         agent_id: None,
         session_id: None,
         tool_use_id: None,
+        min_toon_chars: MIN_TOON_CHARS,
     });
-    // A tiny JSON string compresses successfully.
+    // A tiny JSON string passes through the shared minimum-length gate
+    // without error.
+    assert!(result.is_ok());
+
+    // Disabling the gate keeps the legacy encode path available.
+    let result = run_command(Commands::CompressToon {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        min_toon_chars: 0,
+    });
     assert!(result.is_ok());
 }
 
@@ -1313,6 +1733,7 @@ fn run_command_compress_toon_empty_obj() {
         agent_id: None,
         session_id: None,
         tool_use_id: None,
+        min_toon_chars: MIN_TOON_CHARS,
     });
     // An empty JSON object compresses successfully.
     assert!(result.is_ok());
@@ -1334,10 +1755,51 @@ fn run_command_compress_response_with_stash_truncation() {
         tool_use_id: None,
         truncate_strings_at: Some(10),
         truncate_arrays_at: Some(3),
+        array_tail_preserve: None,
         max_depth: Some(3),
         no_stash: false,
         stash_db: None,
     });
     // Compression with stash enabled and aggressive truncation succeeds.
     assert!(result.is_ok());
+}
+
+#[test]
+fn stats_after_text_records_the_candidate_only_when_it_was_measured() {
+    let result_with = |disposition: Disposition| CompressResult {
+        output: "original".to_string(),
+        compressed_output: "candidate".to_string(),
+        disposition,
+        before_tokens: 10,
+        after_tokens: 4,
+        stash_writes: None,
+        stash_errors: None,
+        unrecoverable_truncations: None,
+        stash_size: None,
+    };
+
+    // Applied and dry-run measured the candidate; dry-run is what keeps
+    // A/B prediction records alive.
+    for disposition in [Disposition::Applied, Disposition::DryRun] {
+        assert_eq!(
+            stats_after_text(&result_with(disposition), "original"),
+            "candidate"
+        );
+    }
+    // Every rejection emitted the original: recording the discarded
+    // candidate would book savings that never reached the model. Timeout
+    // is the regression case — the pipeline keeps the candidate text for
+    // the legacy measurement channel even though the output fell back.
+    for disposition in [
+        Disposition::NoSavings,
+        Disposition::Timeout,
+        Disposition::Passthrough,
+        Disposition::RecoverabilityUnavailable,
+        Disposition::ToolError,
+    ] {
+        assert_eq!(
+            stats_after_text(&result_with(disposition), "original"),
+            "original"
+        );
+    }
 }

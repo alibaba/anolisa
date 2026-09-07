@@ -655,12 +655,12 @@ fn fuse_write_triggers_reload_and_refreshes_resolver() {
 // A4: Startup reconcile produces protocol events
 // ---------------------------------------------------------------------------
 
-/// Mirrors the `main.rs` wiring: `spawn_startup_reconcile` fires on a
-/// background thread after mount, skill names are derived from the store
-/// with `skill-discover` filtered out. Verifies the async path delivers
-/// both protocol events and notify events.
+/// Mirrors the `main.rs` wiring: `enqueue_startup_reconcile` queues each
+/// skill on the notify worker after mount, skill names are derived from the
+/// store with `skill-discover` filtered out. Verifies the queued path
+/// delivers both protocol events and notify events.
 #[test]
-fn startup_reconcile_spawn_produces_events() {
+fn startup_reconcile_enqueue_produces_events() {
     skip_if_no_fuse!();
 
     let source = tempfile::tempdir().unwrap();
@@ -710,10 +710,10 @@ fn startup_reconcile_spawn_produces_events() {
 
     std::thread::sleep(Duration::from_millis(300));
 
-    // Use the production path: spawn_startup_reconcile (non-blocking).
-    ctrl.spawn_startup_reconcile(skill_names);
+    // Use the production path: enqueue_startup_reconcile (non-blocking).
+    ctrl.enqueue_startup_reconcile(&skill_names);
 
-    // Wait for background thread to complete.
+    // Wait for the notify worker to drain the queue.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         if writer.len() >= 2 {

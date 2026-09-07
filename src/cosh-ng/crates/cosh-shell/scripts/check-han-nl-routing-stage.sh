@@ -43,11 +43,11 @@ require_shell_capabilities() {
 }
 
 run_c0() {
-  require_selector "$shell_host_tests" "input_intent::path_provably_missing_requires_enoent_proof"
+  require_selector "$lib_tests" "path_prompt_tests::path_provably_missing_requires_enoent_proof"
   require_selector "$shell_host_tests" "marker::shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats"
   require_selector "$shell_host_tests" "relay::raw_relay_bash_invalid_utf8_never_enters_event_provenance"
   require_selector "$lib_tests" "slash::registry::tests::shell_marker_exact_tokens_match_registry"
-  cargo test --locked -p cosh-shell --test shell_host input_intent::path_provably_missing_requires_enoent_proof -- --exact
+  cargo test --locked -p cosh-shell --lib path_prompt_tests::path_provably_missing_requires_enoent_proof -- --exact
   cargo test --locked -p cosh-shell --test shell_host marker::shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats -- --exact
   cargo test --locked -p cosh-shell --test shell_host relay::raw_relay_bash_invalid_utf8_never_enters_event_provenance -- --exact
   cargo test --locked -p cosh-shell --lib shell_marker_exact_tokens_match_registry

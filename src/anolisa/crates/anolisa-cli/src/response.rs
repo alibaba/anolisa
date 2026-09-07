@@ -15,11 +15,13 @@
 //! - `INVALID_ARGUMENT` -> 2 (POSIX convention shared with clap).
 //! - `NOT_INSTALLED` -> 2 (shares `INVALID_ARGUMENT`'s exit code only so
 //!   shell callers already branching on 2 keep working; `--json` callers
-//!   read the distinction off `error.code`). Reports one fact and only
-//!   one: the target is absent from state, so the operation had nothing
-//!   to act on. It says nothing about whether the name was valid — an
-//!   unknown name resolves to itself and lands here identically. What to
-//!   do about it is the caller's call and depends on the command: an
+//!   read the distinction off `error.code`). Reports a validated identity
+//!   with nothing installed: the name passed identity resolution (exact
+//!   local state or the component index) and the operation found nothing
+//!   to act on. Unknown names never land here — a name the index rejects
+//!   is `INVALID_ARGUMENT`, and a name nothing could validate because no
+//!   index was available is `EXECUTION_FAILED`. What to do about a real
+//!   `NOT_INSTALLED` is the caller's call and depends on the command: an
 //!   absent `uninstall` target is already the desired end state, an
 //!   absent `restart` target is a stale assumption.
 //! - `EXECUTION_FAILED` -> 1 (generic non-zero "the command ran but the
@@ -87,10 +89,11 @@ pub enum CliError {
     /// `--remove-system-package` with several targets are all things the
     /// caller got wrong, whereas this one may be nothing to fix at all.
     ///
-    /// **Not** a claim about the name. Resolution falls back to the literal
-    /// input when the component index has no entry for it, so an unknown
-    /// name and a known-but-absent one arrive here indistinguishably.
-    /// Callers must not read this code as "the name was valid".
+    /// The name itself was validated first: identity resolution accepts only
+    /// exact local-state identities and names the component index recognizes,
+    /// so this code means "a supported component with nothing installed".
+    /// Unknown names fail as `INVALID_ARGUMENT` (index rejected the name) or
+    /// `EXECUTION_FAILED` (no index available to validate it) instead.
     ///
     /// Shares exit code 2 with [`CliError::InvalidArgument`] for backward
     /// compatibility alone — shell callers already branch on 2. It does not

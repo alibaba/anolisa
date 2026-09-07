@@ -4,6 +4,7 @@
 //! and probes them via HTTP to determine health status.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,7 +13,8 @@ use super::port_detector::detect_listening_ports;
 use super::store::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore, now_ms};
 use crate::discovery::AgentScanner;
 use crate::interruption::{
-    InterruptionEvent, InterruptionType, ProcessExitStatus, was_pid_oom_killed,
+    InterruptionEvent, InterruptionType, ProcessExitStatus, is_reap_worker_agent,
+    was_pid_oom_killed,
 };
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 
@@ -52,6 +54,12 @@ fn infer_agent_role(
         }
     }
     AgentRole::Gateway
+}
+
+fn read_workspace_path(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
 }
 
 /// Background health checker that periodically probes discovered agents
@@ -158,6 +166,7 @@ impl HealthChecker {
             .collect();
 
         for agent in &agents {
+            let workspace_path = read_workspace_path(agent.pid);
             let ports = ports_by_pid.get(&agent.pid).cloned().unwrap_or_default();
             // Cosh has no daemon process and does not support keepalive/restart.
             // Build restart_cmd only for agents that support it.
@@ -178,6 +187,7 @@ impl HealthChecker {
                     agent_name: agent.agent_info.name.clone(),
                     category: agent.agent_info.category.clone(),
                     exe_path: agent.exe_path.clone(),
+                    workspace_path,
                     ports: vec![],
                     status: AgentHealthState::NoPort,
                     last_check_time: now_ms(),
@@ -264,7 +274,10 @@ impl HealthChecker {
                             })
                             .collect();
                         let all_clean_exit = exit_status_by_pid.len() == pids.len()
-                            && exit_status_by_pid.values().all(|s| s.is_clean());
+                            && exit_status_by_pid.values().all(|s| {
+                                s.is_clean()
+                                    || (s.is_graceful_reap() && is_reap_worker_agent(agent_name))
+                            });
                         if all_clean_exit {
                             log::debug!(
                                 "Agent {agent_name} (pids={pids:?}) exited cleanly (trace-recorded exit status) — treating as normal shutdown despite {} pending call(s)",
@@ -406,6 +419,7 @@ impl HealthChecker {
         parent_pid: Option<u32>,
     ) -> AgentHealthStatus {
         let mut last_error = String::new();
+        let workspace_path = read_workspace_path(agent.pid);
         // 标记是否遇到了超时错误（区分 hung vs unreachable）
         let mut timed_out = false;
 
@@ -429,6 +443,7 @@ impl HealthChecker {
                         agent_name: agent.agent_info.name.clone(),
                         category: agent.agent_info.category.clone(),
                         exe_path: agent.exe_path.clone(),
+                        workspace_path: workspace_path.clone(),
                         ports: ports.to_vec(),
                         status: AgentHealthState::Healthy,
                         last_check_time: now_ms(),
@@ -448,6 +463,7 @@ impl HealthChecker {
                         agent_name: agent.agent_info.name.clone(),
                         category: agent.agent_info.category.clone(),
                         exe_path: agent.exe_path.clone(),
+                        workspace_path: workspace_path.clone(),
                         ports: ports.to_vec(),
                         status: AgentHealthState::Healthy,
                         last_check_time: now_ms(),
@@ -492,6 +508,7 @@ impl HealthChecker {
             agent_name: agent.agent_info.name.clone(),
             category: agent.agent_info.category.clone(),
             exe_path: agent.exe_path.clone(),
+            workspace_path,
             ports: ports.to_vec(),
             status,
             last_check_time: now_ms(),
@@ -551,10 +568,10 @@ fn build_restart_cmd(exe_path: &str, cmdline_args: &[String]) -> Vec<String> {
     cmd
 }
 
-/// Read the parent PID (ppid) from /proc/<pid>/stat.
+/// Read the parent PID (ppid) from `<procfs root>/<pid>/stat`.
 /// Returns None if the file cannot be read or parsed.
 fn read_ppid(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let stat = std::fs::read_to_string(crate::utils::procfs::proc_pid_entry(pid, "stat")).ok()?;
     // Format: "pid (comm) state ppid ..."
     // Find the closing ')' first (comm may contain spaces/parens)
     let after_comm = stat.rsplit_once(')')?.1;
@@ -568,6 +585,12 @@ fn read_ppid(pid: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_read_ppid_current_process() {
+        // Whatever the parent is, our own stat entry parses.
+        assert!(read_ppid(std::process::id()).is_some());
+    }
 
     #[test]
     fn test_infer_agent_role_gateway_with_ports() {
@@ -683,9 +706,10 @@ mod tests {
     fn offline_status(pid: u32) -> AgentHealthStatus {
         AgentHealthStatus {
             pid,
-            agent_name: "cosh-core".to_string(),
+            agent_name: "CoshNG".to_string(),
             category: "cli".to_string(),
             exe_path: "/usr/bin/cosh-core".to_string(),
+            workspace_path: None,
             ports: vec![],
             status: AgentHealthState::Offline,
             last_check_time: now_ms(),
@@ -697,6 +721,18 @@ mod tests {
             parent_pid: None,
             has_crash: false,
         }
+    }
+
+    #[test]
+    fn reports_current_process_workspace() {
+        let expected = std::env::current_dir()
+            .expect("current directory")
+            .canonicalize()
+            .expect("canonical current directory");
+        assert_eq!(
+            read_workspace_path(std::process::id()).as_deref(),
+            expected.to_str()
+        );
     }
 
     fn list_crash_events(
@@ -731,6 +767,55 @@ mod tests {
                 .len(),
             1,
             "pending call must not be marked interrupted on clean exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_sigterm_reap_record_skips_agent_crash() {
+        let pid = 4_100_004;
+        let (dir, checker, genai_store, istore) = setup_checker("sigterm", pid);
+
+        // Trace mode recorded a graceful SIGTERM reap (raw 0x0f) for this pid:
+        // the checker backup path must not re-report it as a crash.
+        istore.record_process_exit(pid, 0x0f).expect("record exit");
+
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        assert!(
+            list_crash_events(&istore).is_empty(),
+            "SIGTERM reap recorded by trace must not be re-reported as agent_crash"
+        );
+        assert_eq!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .len(),
+            1,
+            "pending call must not be marked interrupted on graceful reap"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_sigterm_non_worker_still_records_agent_crash() {
+        let pid = 4_100_005;
+        let (dir, checker, _genai_store, istore) = setup_checker("sigterm-nonworker", pid);
+
+        // A non-worker agent (Codex) interrupted by SIGTERM is not eligible for
+        // the graceful-reap exemption; the checker backup path must record it.
+        istore.record_process_exit(pid, 0x0f).expect("record exit");
+        let mut status = offline_status(pid as u32);
+        status.agent_name = "Codex".to_string();
+
+        checker.record_offline_agent_crashes(&[status]);
+
+        assert_eq!(
+            list_crash_events(&istore).len(),
+            1,
+            "SIGTERM on a non-worker agent must still be recorded as agent_crash"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

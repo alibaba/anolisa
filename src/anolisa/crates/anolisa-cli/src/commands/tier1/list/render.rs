@@ -4,45 +4,36 @@ use crate::commands::tier1::list::Row;
 pub(super) fn human_header(rows: &[Row]) -> String {
     let widths = HumanWidths::for_rows(rows);
     format!(
-        "{:<name_width$}{:<backends_width$}{:<scope_width$}{:<local_state_width$}{:<ownership_width$}{}",
+        "{:<name_width$}{:<availability_width$}{:<scope_width$}{:<local_state_width$}{}",
         "NAME",
-        "BACKENDS",
+        "AVAILABILITY",
         "SCOPE",
         "LOCAL STATE",
-        "OWNERSHIP",
         "ACTION",
         name_width = widths.name,
-        backends_width = widths.backends,
+        availability_width = widths.availability,
         scope_width = widths.scope,
         local_state_width = widths.local_state,
-        ownership_width = widths.ownership,
     )
 }
 
 struct HumanWidths {
     name: usize,
-    backends: usize,
+    availability: usize,
     scope: usize,
     local_state: usize,
-    ownership: usize,
 }
 
 impl HumanWidths {
     fn for_rows(rows: &[Row]) -> Self {
         Self {
             name: rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4) + 4,
-            backends: rows
+            availability: rows
                 .iter()
-                .map(|r| {
-                    if r.backends.is_empty() {
-                        1
-                    } else {
-                        r.backends.join(",").len()
-                    }
-                })
+                .map(|r| availability_label(r).len())
                 .max()
-                .unwrap_or(8)
-                .max(8)
+                .unwrap_or(12)
+                .max(12)
                 + 4,
             scope: rows.iter().map(|r| r.scope.len()).max().unwrap_or(5).max(5) + 4,
             local_state: rows
@@ -52,19 +43,17 @@ impl HumanWidths {
                 .unwrap_or(11)
                 .max(11)
                 + 4,
-            ownership: rows
-                .iter()
-                .map(|r| r.ownership.len())
-                .max()
-                .unwrap_or(9)
-                .max(9)
-                + 4,
         }
     }
 }
 
-pub(super) fn render_human(rows: &[Row], no_color: bool) {
+pub(super) fn render_human(rows: &[Row], no_color: bool, os: &str, arch: &str) {
     let color = Palette::new(no_color);
+    println!(
+        "{}",
+        color.header(format!("Components for {}/{arch}", display_os(os)))
+    );
+    println!();
     if rows.is_empty() {
         println!("{}", color.muted("no components found"));
         return;
@@ -74,23 +63,47 @@ pub(super) fn render_human(rows: &[Row], no_color: bool) {
 
     println!("{}", color.header(human_header(rows)));
     for row in rows {
-        let backend_str = if row.backends.is_empty() {
-            "-".to_string()
+        let availability = availability_label(row);
+        let availability = if row.target_available {
+            color.ok(availability)
         } else {
-            row.backends.join(",")
+            color.err(availability)
+        };
+        let action = if row.action == "unavailable" {
+            "-"
+        } else {
+            &row.action
         };
         println!(
-            "{:<name_width$}{:<backends_width$}{:<scope_width$}{}{:<ownership_width$}{}",
+            "{:<name_width$}{}{:<scope_width$}{}{}",
             row.name,
-            backend_str,
+            pad_right(availability, widths.availability),
             row.scope,
             pad_right(color.status(&row.local_state), widths.local_state),
-            row.ownership,
-            row.action,
+            action,
             name_width = widths.name,
-            backends_width = widths.backends,
             scope_width = widths.scope,
-            ownership_width = widths.ownership,
         );
+    }
+}
+
+pub(super) fn availability_label(row: &Row) -> String {
+    if row.target_available {
+        return "available".to_string();
+    }
+    let supported = row
+        .targets
+        .iter()
+        .map(|target| format!("{}/{}", display_os(&target.os), target.arch))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{supported} only")
+}
+
+fn display_os(os: &str) -> String {
+    match os {
+        "linux" => "Linux".to_string(),
+        "macos" => "macOS".to_string(),
+        other => other.to_string(),
     }
 }

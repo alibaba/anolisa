@@ -19,6 +19,7 @@ from agent_sec_cli.telemetry.sanitizer import (
 
 _VERDICTS = frozenset({"pass", "warn", "deny", "error"})
 _RESULTS = frozenset({"succeeded", "failed"})
+_ASSET_OUTCOMES = frozenset({"verified", "failed", "no_candidates"})
 _BASELINE_ACTION = "harden"
 _ASSET_VERIFY_ACTION = "verify"
 _SCAN_ACTIONS = frozenset({"code_scan", "prompt_scan", "pii_scan"})
@@ -70,6 +71,11 @@ def _build_seccore_record(
         )
 
     if event.event_type == _ASSET_VERIFY_ACTION:
+        _add_optional(
+            record,
+            "seccore.asset_outcome",
+            enum_value(result.get("outcome"), _ASSET_OUTCOMES),
+        )
         _add_optional(
             record,
             "seccore.asset_passed_count",

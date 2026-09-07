@@ -13,7 +13,16 @@ mod evidence;
 #[allow(dead_code, unused_imports)]
 #[path = "hooks/public.rs"]
 mod hooks;
+#[cfg(test)]
+#[path = "evidence/redaction_boundary_tests.rs"]
+mod redaction_boundary_tests;
 
+#[cfg(test)]
+#[path = "ui/card_kind_tests.rs"]
+mod card_kind_tests;
+#[cfg(test)]
+#[path = "types/card_tests.rs"]
+mod card_tests;
 mod i18n;
 mod input;
 #[allow(dead_code)]
@@ -24,6 +33,9 @@ pub mod journal;
 pub mod ledger;
 #[path = "parser/public.rs"]
 pub mod parser;
+#[cfg(test)]
+#[path = "input/path_prompt_tests.rs"]
+mod path_prompt_tests;
 #[allow(dead_code)]
 #[path = "question/public.rs"]
 mod question;
@@ -41,6 +53,9 @@ pub mod types;
 #[allow(dead_code, unused_imports)]
 #[path = "ui/public.rs"]
 mod ui;
+#[cfg(test)]
+#[path = "ui/wrap_tests.rs"]
+mod wrap_tests;
 
 pub use adapter::{AuthFieldInfo, AuthProviderInfo, AuthResponse};
 pub use config::{

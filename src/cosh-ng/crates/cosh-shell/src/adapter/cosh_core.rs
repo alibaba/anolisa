@@ -1,31 +1,17 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Mutex};
 
 use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 
-use super::claude::{
-    is_terminal_agent_event, line_progress, send_agent_event, terminate_process,
-    update_completion_flags,
-};
-use super::cosh_core_process::{
-    drain_process_events, exit_failure_message, replace_synthetic_completion_for_nonzero_exit,
-    run_sync_cosh_core_process, start_control_protocol_cosh_core_process,
-    suppress_synthetic_completion_after_transport_failure,
-};
+use super::cosh_core_process::run_sync_cosh_core_process;
 use super::cosh_core_service::PersistentCoshCoreRuntime;
 use super::prompt::provider_prompt_contract_for_request_with_evidence_access;
 use super::{
-    agent_event_is_provider_progress, control_protocol, prompt_from_request_with_evidence_policy,
-    record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
-    start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
-    AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, FreshSessionOutcome,
-    PreparedInvocation, ProviderCancellationArtifactStore, ProviderLineProgress,
-    ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
+    prompt_from_request_with_evidence_policy, start_threaded_adapter_run, AdapterError,
+    AdapterInstance, AgentAdapter, AgentBackendCapabilities, AgentRunHandle, FreshSessionOutcome,
+    PreparedInvocation,
 };
 
 pub(super) mod question_ingress;
-pub(super) mod question_writer;
 mod recovery;
 mod session;
 
@@ -41,6 +27,11 @@ pub use session::{
     SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient, SessionSummary,
 };
 
+/// Provider name of the cosh-core driver. Verdict-channel behavior is keyed
+/// on this single constant so a provider rename or alias cannot silently
+/// disable the fail-closed guards (#2156).
+pub(crate) const COSH_CORE_PROVIDER_NAME: &str = "cosh-core";
+
 #[derive(Debug, Clone)]
 /// Adapter that delegates Agent turns and session ownership to cosh-core.
 pub struct CoshCoreAdapter {
@@ -51,6 +42,9 @@ pub struct CoshCoreAdapter {
     /// Atomically owned active session, workspace, generation, and recovery state.
     pub session: Arc<Mutex<SessionRuntimeState>>,
     pub(crate) runtime: Arc<PersistentCoshCoreRuntime>,
+    /// Shell cwd tracked from the PTY host so that short-lived `--registry`
+    /// processes resolve the same project root as the headless runtime.
+    pub(crate) shell_cwd: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for CoshCoreAdapter {
@@ -71,6 +65,7 @@ impl Default for CoshCoreAdapter {
             allow_model_call: false,
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
+            shell_cwd: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -83,6 +78,7 @@ impl CoshCoreAdapter {
             allow_model_call,
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
+            shell_cwd: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -90,6 +86,36 @@ impl CoshCoreAdapter {
     pub fn with_model_call(mut self, allow: bool) -> Self {
         self.allow_model_call = allow;
         self
+    }
+
+    /// Update the shell cwd used to forward `--workspace` to short-lived
+    /// `--registry` cosh-core processes. Without this, registry-mode
+    /// invocations fall back to the cosh-shell process cwd and fail to
+    /// discover project-level skills and hooks.
+    ///
+    /// `None` means the caller has no cwd to report (e.g. programmatic
+    /// path without a PTY); the last known value is retained rather than
+    /// cleared so subsequent registry queries keep using the real shell cwd
+    /// instead of silently degrading to the session workspace scope.
+    pub(crate) fn set_shell_cwd(&self, cwd: Option<&str>) {
+        if let Some(cwd) = cwd {
+            if let Ok(mut guard) = self.shell_cwd.lock() {
+                *guard = Some(cwd.to_string());
+            }
+        }
+    }
+
+    /// Clears the cached shell cwd.
+    ///
+    /// The dispatch layer calls this when both the event and the
+    /// dispatcher-tracked prompt cwd are unavailable. That combination
+    /// means the previously reported cwd may be stale (e.g. after a `cd`
+    /// whose OSC 1337 markers were lost), so continuing to forward it as
+    /// `--workspace` would target the wrong project.
+    pub(crate) fn clear_shell_cwd(&self) {
+        if let Ok(mut guard) = self.shell_cwd.lock() {
+            *guard = None;
+        }
     }
 
     /// Inspects a persisted session summary without selecting it.
@@ -284,17 +310,12 @@ impl CoshCoreAdapter {
             })
         };
 
-        let approval_mode = match mode {
-            CoshApprovalMode::Recommend => "strict",
-            CoshApprovalMode::Auto => "auto",
-            CoshApprovalMode::Trust => "trust",
-        };
         let mut args = vec![
             "--headless".to_string(),
             "--cosh-shell-transport".to_string(),
             "--enable-shell-evidence-tool".to_string(),
             "--approval-mode".to_string(),
-            approval_mode.to_string(),
+            mode.label().to_string(),
             "--workspace".to_string(),
             session_scope,
         ];
@@ -339,7 +360,7 @@ impl CoshCoreAdapter {
 
 impl AgentAdapter for CoshCoreAdapter {
     fn name(&self) -> &'static str {
-        "cosh-core"
+        COSH_CORE_PROVIDER_NAME
     }
 
     fn capabilities(&self) -> AgentBackendCapabilities {
@@ -445,235 +466,4 @@ fn cosh_core_dry_run_events(
             auto_execute: false,
         },
     ]
-}
-
-fn start_cancellable_cosh_core_process(
-    run_id: String,
-    prepared: PreparedInvocation,
-    session_state: Arc<Mutex<SessionRuntimeState>>,
-    session_scope: String,
-    resume_attempt: SessionResumeAttempt,
-) -> AgentRunHandle {
-    let (sender, receiver) = mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let child_pid = Arc::new(Mutex::new(None::<u32>));
-    let pending_session = Arc::new(Mutex::new(None));
-    let cancellation_artifacts = ProviderCancellationArtifactStore::default();
-
-    let cancel_flag = Arc::clone(&cancelled);
-    let cancel_pid = Arc::clone(&child_pid);
-    let cancel = Arc::new(move || {
-        cancel_flag.store(true, Ordering::SeqCst);
-        if let Some(pid) = cancel_pid.lock().ok().and_then(|guard| *guard) {
-            terminate_process(pid);
-        }
-    });
-
-    let pending_session_for_thread = Arc::clone(&pending_session);
-    let session_scope_for_thread = session_scope;
-    let cancellation_artifacts_for_thread = cancellation_artifacts.clone();
-    thread::spawn(move || {
-        send_agent_event(
-            &sender,
-            AgentEvent::StatusChanged {
-                run_id: run_id.clone(),
-                phase: "starting".to_string(),
-                message: "starting cosh-core headless backend".to_string(),
-            },
-        );
-
-        let mut child = match spawn_provider_child(
-            &prepared,
-            "cosh-core",
-            ProviderStdinMode::Null,
-            ProviderPromptArgMode::TrailingArgIfNonEmpty,
-        ) {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = mark_recovery_failure(&session_state, &resume_attempt, &err.message);
-                let _ = sender.send(Err(err));
-                return;
-            }
-        };
-
-        if let Ok(mut pid) = child_pid.lock() {
-            *pid = Some(child.id());
-        }
-        if cancelled.load(Ordering::SeqCst) {
-            terminate_process(child.id());
-        }
-
-        let mut parser = ClaudeStreamParser::new(
-            run_id.clone(),
-            Some(Arc::clone(&pending_session_for_thread)),
-        );
-        let mut completed = false;
-        let mut failed = false;
-        let mut terminal_events = Vec::new();
-        let (process_tx, process_rx) = mpsc::channel();
-        let outcome = run_provider_process_loop(
-            run_id.clone(),
-            "cosh-core",
-            &mut child,
-            Arc::clone(&child_pid),
-            Arc::clone(&cancelled),
-            cancellation_artifacts_for_thread.clone(),
-            &process_tx,
-            |line| {
-                let events = parser.parse_line(&line);
-                let progressed = events.iter().any(agent_event_is_provider_progress);
-                if events.is_empty() {
-                    if let Some(auth_event) = try_parse_auth_required_from_line(&line, &run_id) {
-                        send_agent_event(&sender, auth_event);
-                        return Ok(ProviderLineProgress::AwaitingApproval);
-                    }
-                }
-                for event in events {
-                    update_completion_flags(&event, &mut completed, &mut failed);
-                    if is_terminal_agent_event(&event) {
-                        terminal_events.push(event);
-                    } else {
-                        send_agent_event(&sender, event);
-                    }
-                }
-                Ok(line_progress(progressed))
-            },
-            || Ok(Vec::new()),
-        );
-
-        let (process_events, transport_error) = drain_process_events(&process_rx);
-        let transport_failed = matches!(outcome, ProviderRunOutcome::Failed);
-        let exit_failure = match &outcome {
-            ProviderRunOutcome::Cancelled => {
-                invalidate_resume_on_session_failure(
-                    &resume_attempt,
-                    parser.session_error_code(),
-                    parser.session_error_phase(),
-                    &terminal_events,
-                    &session_state,
-                );
-                let _ = commit_pending_session_for_scope(
-                    false,
-                    true,
-                    &session_state,
-                    &pending_session_for_thread,
-                    &session_scope_for_thread,
-                    parser.session_resumable(),
-                    &resume_attempt,
-                );
-                record_cancellation_pending_session(
-                    &cancellation_artifacts_for_thread,
-                    "cosh-core",
-                    &run_id,
-                    pending_session_for_thread
-                        .lock()
-                        .ok()
-                        .and_then(|session| session.clone()),
-                );
-                for event in process_events {
-                    send_agent_event(&sender, event);
-                }
-                if let Some(error) = transport_error {
-                    let _ = sender.send(Err(error));
-                }
-                return;
-            }
-            ProviderRunOutcome::Failed => None,
-            ProviderRunOutcome::Exited {
-                status,
-                stderr_tail,
-            } if !status.success() => Some(exit_failure_message(status, stderr_tail)),
-            ProviderRunOutcome::Exited { .. } => None,
-        };
-
-        let had_terminal_result = !terminal_events.is_empty();
-        let finish_result = parser.finish(&mut |event| {
-            update_completion_flags(&event, &mut completed, &mut failed);
-            if is_terminal_agent_event(&event) {
-                terminal_events.push(event);
-            } else {
-                send_agent_event(&sender, event);
-            }
-            Ok(())
-        });
-        suppress_synthetic_completion_after_transport_failure(
-            transport_failed,
-            had_terminal_result,
-            &mut completed,
-            &mut failed,
-            &mut terminal_events,
-        );
-        replace_synthetic_completion_for_nonzero_exit(
-            &run_id,
-            exit_failure,
-            had_terminal_result,
-            &mut completed,
-            &mut failed,
-            &mut terminal_events,
-        );
-        invalidate_resume_on_session_failure(
-            &resume_attempt,
-            parser.session_error_code(),
-            parser.session_error_phase(),
-            &terminal_events,
-            &session_state,
-        );
-        let session_metadata = (parser.session_error_phase(), parser.session_resumable());
-        let retain_session =
-            retain_context_session(&terminal_events, session_metadata.0, session_metadata.1);
-        let commit_outcome = commit_pending_session_for_scope(
-            completed || retain_session,
-            failed && !retain_session,
-            &session_state,
-            &pending_session_for_thread,
-            &session_scope_for_thread,
-            session_metadata.1,
-            &resume_attempt,
-        );
-        for event in terminal_events_for_session_commit(&run_id, terminal_events, commit_outcome) {
-            send_agent_event(&sender, event);
-        }
-        for event in process_events {
-            send_agent_event(&sender, event);
-        }
-        if let Some(error) = transport_error.or_else(|| finish_result.err()) {
-            let _ = sender.send(Err(error));
-        }
-    });
-
-    AgentRunHandle {
-        receiver,
-        cancel,
-        approval_sender: None,
-        question_answer_confirmation: None,
-        auth_sender: None,
-        control_capabilities: Arc::new(Mutex::new(
-            control_protocol::ControlProtocolCapabilities::default(),
-        )),
-        pending_provider_session: Some(pending_session),
-        cancellation_artifacts,
-    }
-}
-
-fn try_parse_auth_required_from_line(line: &str, run_id: &str) -> Option<AgentEvent> {
-    let trimmed = line.trim();
-    if !trimmed.contains("auth_required") {
-        return None;
-    }
-    let parsed = control_protocol::parse_control_request(trimmed)?;
-    match parsed {
-        control_protocol::ControlRequest::AuthRequired {
-            request_id,
-            reason,
-            error_message,
-            providers,
-        } => Some(AgentEvent::AuthRequired {
-            run_id: run_id.to_string(),
-            request_id,
-            reason,
-            error_message,
-            providers,
-        }),
-        _ => None,
-    }
 }

@@ -277,7 +277,7 @@ pub(super) fn extension_agent_registry(
         ext_manager,
         &allowed_tools,
         workspace_trusted,
-        &config.agent.approval_mode,
+        config.agent.approval_mode,
     )
 }
 

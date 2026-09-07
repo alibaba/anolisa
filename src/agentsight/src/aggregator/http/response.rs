@@ -57,7 +57,7 @@ impl AggregatedResponse {
     /// Get JSON bodies from SSE events, aggregated into a Vec
     ///
     /// Parses each SSE event's payload as JSON and collects into a Vec,
-    /// skipping events that are not valid JSON (e.g., [DONE] markers).
+    /// skipping events that are not valid JSON (e.g., `[DONE]` markers).
     pub fn json_body(&self) -> Vec<serde_json::Value> {
         self.sse_events
             .iter()
@@ -78,6 +78,19 @@ impl AggregatedResponse {
             .last()
             .map(|e| e.source_event().timestamp_ns)
             .unwrap_or_else(|| self.start_timestamp_ns())
+    }
+
+    /// Returns the timestamp of the first SSE event carrying model output.
+    ///
+    /// Lifecycle and usage events are skipped because they do not represent a
+    /// token becoming available to the caller. Text, reasoning, and tool-call
+    /// deltas all count as output because providers include them in output-token
+    /// accounting.
+    pub fn first_output_timestamp_ns(&self) -> Option<u64> {
+        self.sse_events
+            .iter()
+            .find(|event| event_has_meaningful_output(event.json_body().as_ref()))
+            .map(|event| event.source_event().timestamp_ns)
     }
 
     /// Get duration in nanoseconds
@@ -134,6 +147,74 @@ impl AggregatedResponse {
             .collect::<Vec<_>>()
             .join("")
     }
+}
+
+fn non_empty_string(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.is_empty())
+}
+
+pub(crate) fn event_has_meaningful_output(value: Option<&serde_json::Value>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+
+    if let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) {
+        match event_type {
+            "response.output_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.function_call_arguments.delta" => {
+                return non_empty_string(value.get("delta"));
+            }
+            "content_block_delta" => {
+                let delta = value.get("delta");
+                return non_empty_string(delta.and_then(|item| item.get("text")))
+                    || non_empty_string(delta.and_then(|item| item.get("thinking")))
+                    || non_empty_string(delta.and_then(|item| item.get("partial_json")));
+            }
+            "content_block_start" => {
+                let block = value.get("content_block");
+                return non_empty_string(block.and_then(|item| item.get("text")))
+                    || non_empty_string(block.and_then(|item| item.get("thinking")))
+                    || (block.and_then(|item| item.get("type"))
+                        == Some(&serde_json::Value::String("tool_use".to_string()))
+                        && non_empty_string(block.and_then(|item| item.get("name"))));
+            }
+            "response.output_item.added" => {
+                let item = value.get("item");
+                return item.and_then(|item| item.get("type"))
+                    == Some(&serde_json::Value::String("function_call".to_string()))
+                    && non_empty_string(item.and_then(|item| item.get("name")));
+            }
+            _ => {}
+        }
+    }
+
+    value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                let delta = choice.get("delta");
+                non_empty_string(choice.get("text"))
+                    || non_empty_string(delta.and_then(|item| item.get("content")))
+                    || non_empty_string(delta.and_then(|item| item.get("reasoning_content")))
+                    || delta
+                        .and_then(|item| item.get("tool_calls"))
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                let function = call.get("function");
+                                non_empty_string(function.and_then(|item| item.get("name")))
+                                    || non_empty_string(
+                                        function.and_then(|item| item.get("arguments")),
+                                    )
+                            })
+                        })
+            })
+        })
 }
 
 impl TraceArgs for AggregatedResponse {
@@ -212,5 +293,125 @@ impl ToChromeTraceEvent for AggregatedResponse {
         .with_trace_args(self);
 
         vec![event]
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::{AggregatedResponse, event_has_meaningful_output};
+    use crate::parser::http::ParsedResponse;
+    use crate::parser::sse::ParsedSseEvent;
+    use crate::probes::sslsniff::SslEvent;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    fn ssl_event(data: &str, timestamp_ns: u64) -> Rc<SslEvent> {
+        Rc::new(SslEvent {
+            source: 0,
+            timestamp_ns,
+            delta_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            len: data.len() as u32,
+            rw: 0,
+            comm: String::new(),
+            buf: data.as_bytes().to_vec(),
+            is_handshake: false,
+            ssl_ptr: 0,
+        })
+    }
+
+    fn sse_event(data: &str, timestamp_ns: u64) -> ParsedSseEvent {
+        ParsedSseEvent::new(
+            None,
+            None,
+            None,
+            0,
+            data.len(),
+            ssl_event(data, timestamp_ns),
+        )
+    }
+
+    fn response_with_sse_events(sse_events: Vec<ParsedSseEvent>) -> AggregatedResponse {
+        AggregatedResponse {
+            parsed: ParsedResponse {
+                version: 1,
+                status_code: 200,
+                reason: "OK".to_string(),
+                headers: HashMap::new(),
+                body_offset: 0,
+                body_len: 0,
+                source_event: ssl_event("", 10),
+            },
+            sse_events,
+            sse_continuation_bytes: None,
+        }
+    }
+
+    #[test]
+    fn skips_openai_metadata_before_output_delta() {
+        let created = serde_json::json!({"type": "response.created"});
+        let empty = serde_json::json!({"type": "response.output_text.delta", "delta": ""});
+        let output = serde_json::json!({
+            "type": "response.output_text.delta",
+            "delta": "hello"
+        });
+        assert!(!event_has_meaningful_output(Some(&created)));
+        assert!(!event_has_meaningful_output(Some(&empty)));
+        assert!(event_has_meaningful_output(Some(&output)));
+    }
+
+    #[test]
+    fn recognizes_anthropic_and_chat_completion_output() {
+        let anthropic = serde_json::json!({
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "hello"}
+        });
+        let chat = serde_json::json!({
+            "choices": [{"delta": {"content": "hello"}}]
+        });
+        assert!(event_has_meaningful_output(Some(&anthropic)));
+        assert!(event_has_meaningful_output(Some(&chat)));
+    }
+
+    #[test]
+    fn first_output_timestamp_uses_first_nonempty_output_delta() {
+        let response = response_with_sse_events(vec![
+            sse_event(r#"{"type":"response.created"}"#, 100),
+            sse_event(r#"{"type":"response.output_text.delta","delta":""}"#, 200),
+            sse_event(
+                r#"{"type":"response.output_text.delta","delta":"hello"}"#,
+                300,
+            ),
+            sse_event(
+                r#"{"type":"response.output_text.done","text":"hello world"}"#,
+                400,
+            ),
+            sse_event(
+                r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"hello world"}]}}"#,
+                500,
+            ),
+            sse_event(r#"{"type":"response.completed"}"#, 600),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), Some(300));
+    }
+
+    #[test]
+    fn first_output_timestamp_is_none_without_observable_delta() {
+        let response = response_with_sse_events(vec![
+            sse_event(
+                r#"{"type":"response.output_text.done","text":"final text"}"#,
+                500,
+            ),
+            sse_event(
+                r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"final text"}]}}"#,
+                600,
+            ),
+            sse_event(r#"{"type":"response.completed"}"#, 700),
+        ]);
+
+        assert_eq!(response.first_output_timestamp_ns(), None);
     }
 }

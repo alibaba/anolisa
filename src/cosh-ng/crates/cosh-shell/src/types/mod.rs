@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 
 mod agent_status;
 pub mod audit;
+mod card;
+pub(crate) mod composer;
 mod continuation;
 pub mod hooks;
 mod shell_event_metadata;
 mod shell_handoff;
 
 pub(crate) use agent_status::{TOOL_ARGUMENTS_STATUS_PHASE, TOOL_ARGUMENTS_STATUS_PREFIX};
+pub(crate) use card::{CardKind, CardModel, InputModel, InputOwner, PermissionCardRequest};
 pub(crate) use continuation::*;
 
 pub(crate) use hooks::BuiltinFactRecord;
@@ -17,7 +20,9 @@ pub use hooks::{
 };
 pub use shell_event_metadata::{ShellCaptureLifecycle, ShellCaptureMetadata, ShellRoutingMetadata};
 pub use shell_handoff::{ImplicitPagerPolicy, ShellHandoffRequest};
-pub(crate) use shell_handoff::{NON_INTERACTIVE_PAGER_PREFIX, SHELL_HANDOFF_UNTRACKED_STATUS};
+pub(crate) use shell_handoff::{
+    BOUNDED_HANDOFF_COMMAND, NON_INTERACTIVE_PAGER_PREFIX, SHELL_HANDOFF_UNTRACKED_STATUS,
+};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -457,6 +462,15 @@ pub enum AgentEvent {
         tool_id: String,
         status: String,
     },
+    /// The core's machine-readable hook verdict for a tool call (#2156).
+    /// Emitted only when the provider-native result carries the
+    /// `cosh_hook_verdict` wire marker; the bridge keys rejection semantics
+    /// on this event, never on user-controllable result text.
+    ToolHookVerdict {
+        run_id: String,
+        tool_id: String,
+        verdict: String,
+    },
     AgentCompleted {
         run_id: String,
         summary: String,
@@ -507,6 +521,27 @@ pub enum CoshApprovalMode {
 }
 
 impl CoshApprovalMode {
+    /// Parses canonical names and read-only legacy aliases.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "recommend" | "balanced" | "strict" | "suggest" => Some(Self::Recommend),
+            "auto" => Some(Self::Auto),
+            "trust" => Some(Self::Trust),
+            _ => None,
+        }
+    }
+
+    /// Parses configuration input and falls back to the safest mode.
+    pub fn from_config(value: &str) -> Self {
+        match Self::parse(value) {
+            Some(mode) => mode,
+            None => {
+                eprintln!("[cosh-shell] Warning: invalid approval mode {value:?}; using recommend");
+                Self::Recommend
+            }
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Recommend => "recommend",
@@ -577,7 +612,30 @@ impl Default for Policy {
 
 #[cfg(test)]
 mod tests {
-    use super::ShellEvent;
+    use super::{CoshApprovalMode, ShellEvent};
+
+    #[test]
+    fn approval_mode_parses_canonical_and_legacy_names() {
+        for value in ["recommend", "balanced", "strict", "suggest"] {
+            assert_eq!(
+                CoshApprovalMode::parse(value),
+                Some(CoshApprovalMode::Recommend)
+            );
+        }
+        assert_eq!(
+            CoshApprovalMode::parse("auto"),
+            Some(CoshApprovalMode::Auto)
+        );
+        assert_eq!(
+            CoshApprovalMode::parse("trust"),
+            Some(CoshApprovalMode::Trust)
+        );
+        assert_eq!(CoshApprovalMode::parse("unknown"), None);
+        assert_eq!(
+            CoshApprovalMode::from_config("unknown"),
+            CoshApprovalMode::Recommend
+        );
+    }
 
     #[test]
     fn shell_event_without_environment_generation_remains_compatible() {

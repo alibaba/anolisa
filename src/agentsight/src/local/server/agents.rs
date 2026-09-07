@@ -240,7 +240,8 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 /// the main process. We must skip them to avoid counting the same memory multiple times.
 /// On macOS, sysinfo doesn't enumerate threads as separate processes, so this is a no-op.
 fn is_thread(pid: u32) -> bool {
-    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+    if let Ok(status) = std::fs::read_to_string(crate::utils::procfs::proc_pid_entry(pid, "status"))
+    {
         let mut tgid = None;
         let mut pid_val = None;
         for line in status.lines() {

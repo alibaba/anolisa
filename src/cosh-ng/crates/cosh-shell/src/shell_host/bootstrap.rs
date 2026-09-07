@@ -8,7 +8,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use nix::libc;
-use nix::pty::openpty;
+use nix::pty::{openpty, Winsize};
+
+use crate::raw_input::ZshPathPromptBuffering;
 
 use super::adapter::{BashAdapter, ShellAdapter, ZshAdapter};
 use super::auth::{generate_marker_token, marker_script_with_token};
@@ -18,6 +20,11 @@ use super::osc::OscParser;
 
 const OUTPUT_REF_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const ISOLATED_INPUTRC: &str = "set input-meta on\nset convert-meta off\nset output-meta on\n";
+const ASSISTANCE_STATE_FILENAME: &str = "assistance-enabled";
+
+pub(crate) fn assistance_state_file(config: &ShellHostConfig) -> PathBuf {
+    config.work_dir.join(ASSISTANCE_STATE_FILENAME)
+}
 
 pub(super) struct PtySession {
     pub(super) master: File,
@@ -26,6 +33,7 @@ pub(super) struct PtySession {
     pub(super) parser: OscParser,
     pub(super) recovery_request_file: PathBuf,
     pub(super) handoff_request_file: PathBuf,
+    pub(super) zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
 }
 
 pub(super) fn start_bash_session(config: &ShellHostConfig) -> io::Result<PtySession> {
@@ -46,23 +54,37 @@ fn start_shell_session(
     fs::create_dir_all(&output_ref_dir)?;
     fs::set_permissions(&output_ref_dir, fs::Permissions::from_mode(0o700))?;
     cleanup_expired_output_refs(&output_ref_dir, OUTPUT_REF_RETENTION)?;
-    let rcfile = config.work_dir.join(adapter.marker_filename());
     let recovery_request_file = config.work_dir.join("terminal-recovery-request");
     let handoff_request_file = config.work_dir.join("shell-handoff-request");
-    let marker_token = generate_marker_token();
-    let recovery_request_file_str = recovery_request_file.to_string_lossy().to_string();
-    let handoff_request_file_str = handoff_request_file.to_string_lossy().to_string();
-    fs::write(
-        &rcfile,
-        marker_script_with_token(
-            adapter.marker_script(),
-            &marker_token,
-            &recovery_request_file_str,
-            &handoff_request_file_str,
-            config.input_classifier.ai_enabled(),
-        ),
-    )?;
-    fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
+    let marker = if config.integration.uses_markers() {
+        let rcfile = config.work_dir.join(adapter.marker_filename());
+        let assistance_state_file = assistance_state_file(config);
+        let history_file_state = config
+            .work_dir
+            .join("terminal-recovery-request.history-file");
+        fs::write(&assistance_state_file, b"enabled\n")?;
+        fs::set_permissions(&assistance_state_file, fs::Permissions::from_mode(0o600))?;
+        fs::write(&history_file_state, b"")?;
+        fs::set_permissions(&history_file_state, fs::Permissions::from_mode(0o600))?;
+        let marker_token = generate_marker_token();
+        let recovery_request_file_str = recovery_request_file.to_string_lossy().to_string();
+        let handoff_request_file_str = handoff_request_file.to_string_lossy().to_string();
+        fs::write(
+            &rcfile,
+            marker_script_with_token(
+                adapter.marker_script(),
+                &marker_token,
+                &recovery_request_file_str,
+                &handoff_request_file_str,
+                &assistance_state_file.to_string_lossy(),
+                config.input_classifier.ai_enabled(),
+            ),
+        )?;
+        fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
+        Some((rcfile, marker_token))
+    } else {
+        None
+    };
     let isolated_inputrc = if config.native_mode || !adapter.isolates_readline() {
         None
     } else {
@@ -71,13 +93,14 @@ fn start_shell_session(
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Some(path)
     };
+    let zsh_path_prompt_buffering = (marker.is_some()
+        && adapter.supports_zsh_path_prompt_buffering())
+    .then(ZshPathPromptBuffering::new);
 
-    let pty = openpty(Some(&config.winsize), None).map_err(nix_to_io)?;
-    let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
+    let (master, slave) = open_pty_pair(Some(&config.winsize))?;
     set_close_on_exec(master.as_raw_fd())?;
     set_nonblocking(master.as_raw_fd())?;
 
-    let slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
     set_interactive_terminal_baseline(slave.as_raw_fd())?;
     let terminal = slave.try_clone()?;
     let stdin = slave.try_clone()?;
@@ -88,13 +111,21 @@ fn start_shell_session(
     set_close_on_exec(stdout.as_raw_fd())?;
 
     let mut command = Command::new(adapter.executable(config));
-    adapter.configure_command(&mut command, &rcfile, config);
+    adapter.configure_command(
+        &mut command,
+        marker.as_ref().map(|(path, _)| path.as_path()),
+        config,
+    );
     command
-        .env("COSH_SESSION_ID", &config.session_id)
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(slave));
-    if !config.native_mode {
+    if config.integration.uses_markers() {
+        command.env("COSH_SESSION_ID", &config.session_id);
+    }
+    if config.native_mode {
+        command.env_remove("COSH_SHELL_ISOLATED");
+    } else {
         command
             .env("COSH_HISTFILE", config.work_dir.join("history"))
             .env("COSH_POC_PS1", &config.prompt)
@@ -110,6 +141,9 @@ fn start_shell_session(
 
     unsafe {
         command.pre_exec(|| {
+            // The inner user shell must observe the SIGPIPE disposition the
+            // host process inherited, not the Rust runtime's rewrite.
+            super::sigpipe::restore_in_child()?;
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -124,14 +158,31 @@ fn start_shell_session(
         });
     }
 
-    let child = command.spawn()?;
-    let mut parser = OscParser::new(config.session_id.clone(), output_ref_dir, marker_token);
+    let mut parser = match marker {
+        Some((_, marker_token)) => OscParser::with_retention(
+            config.session_id.clone(),
+            output_ref_dir,
+            marker_token,
+            config.transcript_retention,
+            &config.work_dir,
+        )?,
+        None => OscParser::passthrough_with_retention(
+            config.session_id.clone(),
+            output_ref_dir,
+            config.transcript_retention,
+            &config.work_dir,
+        )?,
+    };
     if let Some(observer) = config.shell_environment_observer.clone() {
         parser = parser.with_environment_observer(observer);
     }
     if let Some(observer) = config.shell_history_file_observer.clone() {
         parser = parser.with_history_file_observer(observer);
     }
+
+    // Build all fallible session-owned storage before spawning the shell so
+    // an unwritable spool cannot leave an unmanaged child process behind.
+    let child = command.spawn()?;
     push_shell_started_event(&mut parser, config);
 
     Ok(PtySession {
@@ -141,7 +192,47 @@ fn start_shell_session(
         parser,
         recovery_request_file,
         handoff_request_file,
+        zsh_path_prompt_buffering,
     })
+}
+
+pub(crate) fn spawn_profile_probe_on_pty(
+    mut command: Command,
+    winsize: &Winsize,
+) -> io::Result<(Child, File)> {
+    let (master, slave) = open_pty_pair(Some(winsize))?;
+    set_close_on_exec(master.as_raw_fd())?;
+    set_interactive_terminal_baseline(slave.as_raw_fd())?;
+    command
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    unsafe {
+        command.pre_exec(|| {
+            super::sigpipe::restore_in_child()?;
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            set_interactive_terminal_baseline(0)?;
+            if libc::tcsetpgrp(0, libc::getpgrp()) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn()?;
+    drop(command);
+    Ok((child, master))
+}
+
+fn open_pty_pair(winsize: Option<&Winsize>) -> io::Result<(File, File)> {
+    let pty = openpty(winsize, None).map_err(nix_to_io)?;
+    let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
+    let slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
+    Ok((master, slave))
 }
 
 fn set_nonblocking(fd: i32) -> io::Result<()> {

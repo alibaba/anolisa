@@ -28,6 +28,15 @@ function createMockApi(pluginConfig: Record<string, any> = {}) {
   return { api: api as any, hooks, logs };
 }
 
+function registerHandlersWithoutDebug(pluginConfig: Record<string, any> = {}) {
+  const { api, hooks, logs } = createMockApi(pluginConfig);
+  delete api.logger.debug;
+  piiScan.register(api);
+  const beforeDispatch = hooks.find((hook) => hook.hookName === "before_dispatch");
+  assert.ok(beforeDispatch, "before_dispatch handler should be registered");
+  return { beforeDispatch, hooks, logs };
+}
+
 function registerHandlers(pluginConfig: Record<string, any> = {}) {
   const { api, hooks, logs } = createMockApi(pluginConfig);
   piiScan.register(api);
@@ -184,8 +193,11 @@ describe("pii-scan-user-input", () => {
       const result = await beforeDispatch.handler({ content: "email alice@example.com" });
 
       assert.equal(result, undefined);
-      assert.ok(logs.some((log) => log.includes("[pii-checker] WARN")));
-      assert.ok(logs.some((log) => log.includes("a***@example.com")));
+      assert.ok(logs.some((log) => log.includes("[WARN] [pii-checker] 检测到")));
+      assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("verdict=")));
+      assert.ok(logs.some((log) => log.includes("检测到 1 项一般风险敏感信息")));
+      assert.ok(logs.some((log) => log.includes("本次仅提醒，未触发确认或阻断")));
+      assert.ok(!logs.some((log) => log.includes("a***@example.com")));
       assert.ok(!logs.some((log) => log.includes("alice@example.com")));
     });
   }
@@ -208,12 +220,45 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result?.handled, true);
     assert.match(result?.text, /\[pii-checker\]/);
-    assert.match(result?.text, /高风险/);
-    assert.match(result?.text, /credential/);
-    assert.match(result?.text, /password=\[REDACTED\]/);
-    assert.match(result?.text, /本轮请求已被阻断/);
+    assert.match(result?.text, /检测到 1 项高风险敏感信息/);
+    assert.match(result?.text, /当前策略已阻断本次请求/);
+    assert.doesNotMatch(result?.text, /credential/);
+    assert.doesNotMatch(result?.text, /password=\[REDACTED\]/);
     assert.doesNotMatch(result?.text, /password=secret/);
     assert.doesNotMatch(result?.text, /raw_evidence/);
+  });
+
+  it("block policy works when the host logger has no debug method", async () => {
+    const { beforeDispatch } = registerHandlersWithoutDebug(policyConfig("block"));
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeDispatch.handler({ content: "password=secret" });
+
+    assert.equal(result?.handled, true);
+    assert.match(result?.text, /当前策略已阻断本次请求/);
+  });
+
+  it("summarizes mixed findings by per-finding risk", async () => {
+    const { beforeDispatch } = registerHandlers(policyConfig("block"));
+    mockCli(
+      scanResult("deny", [
+        warnFinding,
+        denyFinding,
+        {
+          type: "custom",
+          severity: "unknown",
+          evidence_redacted: "custom-***",
+        },
+      ]),
+    );
+
+    const result = await beforeDispatch.handler({ content: "sensitive input" });
+
+    assert.equal(result?.handled, true);
+    assert.match(result?.text, /检测到 3 项敏感信息（高风险 2、一般风险 1）/);
+    assert.doesNotMatch(result?.text, /email|credential|custom/);
+    assert.doesNotMatch(result?.text, /warn|deny|unknown/);
+    assert.doesNotMatch(result?.text, /\[REDACTED\]|a\*\*\*|custom-\*\*\*/);
   });
 
   it("block policy blocks a before_tool_call deny verdict", async () => {
@@ -234,7 +279,10 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result?.block, true);
     assert.match(result?.blockReason, /\[pii-checker\]/);
-    assert.match(result?.blockReason, /本次工具调用已被阻断/);
+    assert.match(result?.blockReason, /检测到 1 项高风险敏感信息/);
+    assert.match(result?.blockReason, /当前策略已阻断本次工具调用/);
+    assert.doesNotMatch(result?.blockReason, /credential/);
+    assert.doesNotMatch(result?.blockReason, /password=\[REDACTED\]/);
     assert.doesNotMatch(result?.blockReason, /password=secret/);
     assert.deepEqual(lastCliArgs, [
       "--trace-context",
@@ -270,8 +318,12 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result?.requireApproval?.title, "PII Checker Security Review");
     assert.equal(result?.requireApproval?.severity, "critical");
-    assert.match(result?.requireApproval?.description, /password=\[REDACTED\]/);
+    assert.match(result?.requireApproval?.description, /检测到 1 项高风险敏感信息/);
+    assert.match(result?.requireApproval?.description, /当前策略要求确认，请确认后继续/);
+    assert.doesNotMatch(result?.requireApproval?.description, /credential/);
+    assert.doesNotMatch(result?.requireApproval?.description, /password=\[REDACTED\]/);
     assert.doesNotMatch(result?.requireApproval?.description, /password=secret/);
+    assert.doesNotMatch(result?.requireApproval?.description, /仅提醒|继续处理/);
   });
 
   it("ask policy falls back to a warning before dispatch", async () => {
@@ -281,9 +333,15 @@ describe("pii-scan-user-input", () => {
     const result = await beforeDispatch.handler({ content: "password=secret" });
 
     assert.equal(result, undefined);
-    assert.ok(logs.some((log) => log.includes("DENY (policy=ask)")));
-    assert.ok(logs.some((log) => log.includes("本轮请求将继续处理")));
-    assert.ok(!logs.some((log) => log.includes("本轮请求已被阻断")));
+    assert.ok(logs.some((log) => log.includes("verdict=deny policy=ask")));
+    assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("policy=")));
+    assert.ok(
+      logs.some((log) =>
+        log.includes("当前环节不支持确认/阻断，本次仅提醒，不会阻断"),
+      ),
+    );
+    assert.ok(!logs.some((log) => log.includes("password=[REDACTED]")));
+    assert.ok(!logs.some((log) => log.includes("当前策略已阻断本次请求")));
   });
 
   it("after_tool_call logs warning without raw evidence", async () => {
@@ -302,8 +360,14 @@ describe("pii-scan-user-input", () => {
     );
 
     assert.equal(result, undefined);
-    assert.ok(logs.some((log) => log.includes("[pii-checker] WARN")));
-    assert.ok(logs.some((log) => log.includes("a***@example.com")));
+    assert.ok(logs.some((log) => log.includes("[WARN] [pii-checker] 检测到")));
+    assert.ok(logs.some((log) => log.includes("检测到 1 项一般风险敏感信息")));
+    assert.ok(logs.some((log) => log.includes("工具已经执行")));
+    assert.ok(logs.some((log) => log.includes("未触发确认或阻断")));
+    assert.ok(!logs.some((log) => log.includes("当前环节不支持")));
+    assert.ok(logs.some((log) => log.includes("工具结果仍会进入模型上下文")));
+    assert.ok(logs.some((log) => log.includes("已发生的外部副作用不会撤销")));
+    assert.ok(!logs.some((log) => log.includes("a***@example.com")));
     assert.ok(!logs.some((log) => log.includes("alice@example.com")));
     assert.equal(lastCliArgs?.at(-1), "tool_output");
   });
@@ -323,8 +387,13 @@ describe("pii-scan-user-input", () => {
     );
 
     assert.equal(result, undefined);
-    assert.ok(logs.some((log) => log.includes("DENY (policy=block)")));
-    assert.ok(logs.some((log) => log.includes("本轮请求将继续处理")));
+    assert.ok(logs.some((log) => log.includes("verdict=deny policy=block")));
+    assert.ok(!logs.some((log) => log.startsWith("[WARN]") && log.includes("policy=")));
+    assert.ok(logs.some((log) => log.includes("工具已经执行")));
+    assert.ok(logs.some((log) => log.includes("本次仅提醒")));
+    assert.ok(logs.some((log) => log.includes("工具结果仍会进入模型上下文")));
+    assert.ok(logs.some((log) => log.includes("已发生的外部副作用不会撤销")));
+    assert.ok(!logs.some((log) => log.includes("password=[REDACTED]")));
     assert.ok(!logs.some((log) => log.includes("已被阻断")));
   });
 
@@ -343,8 +412,11 @@ describe("pii-scan-user-input", () => {
     );
 
     assert.equal(result, undefined);
-    assert.ok(logs.some((log) => log.includes("[pii-checker] WARN")));
-    assert.ok(logs.some((log) => log.includes("a***@example.com")));
+    assert.ok(logs.some((log) => log.includes("[WARN] [pii-checker] 检测到")));
+    assert.ok(logs.some((log) => log.includes("检测到 1 项一般风险敏感信息")));
+    assert.ok(logs.some((log) => log.includes("原始模型输出仍会交付")));
+    assert.ok(logs.some((log) => log.includes("不会被脱敏或阻断")));
+    assert.ok(!logs.some((log) => log.includes("a***@example.com")));
     assert.ok(!logs.some((log) => log.includes("alice@example.com")));
     assert.equal(lastCliArgs?.at(-1), "model_output");
   });

@@ -26,6 +26,7 @@ from agent_sec_cli.skill_ledger.config import (
     deprecated_skill_dir_entries,
     effective_skill_dir_entries,
     is_covered,
+    is_default_system_skill_dir,
     is_managed_covered,
     load_config,
     remember_skill_dir,
@@ -55,6 +56,24 @@ class TestDefaultConfig(unittest.TestCase):
 
     def test_default_signing_backend(self):
         self.assertEqual(_DEFAULT_CONFIG["signingBackend"], "ed25519")
+
+    def test_system_skill_matching_uses_exact_parent(self):
+        self.assertTrue(
+            is_default_system_skill_dir("/usr/share/anolisa/skills/weather")
+        )
+        self.assertTrue(
+            is_default_system_skill_dir("/usr/local/share/anolisa/skills/weather")
+        )
+        self.assertTrue(
+            is_default_system_skill_dir("/usr/share/anolisa/skills/../skills/weather")
+        )
+        self.assertFalse(
+            is_default_system_skill_dir("/usr/share/anolisa/skills-evil/weather")
+        )
+        self.assertFalse(is_default_system_skill_dir("/usr/share/anolisa/skills"))
+        self.assertFalse(
+            is_default_system_skill_dir("/usr/share/anolisa/skills/weather/nested")
+        )
 
     def test_default_activation_policy(self):
         self.assertEqual(

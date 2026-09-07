@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::types::CoshApprovalMode;
+
 use super::hook_feedback::{
     hook_feedback_store_path_in_dir, read_hook_feedback_from_store_path,
     write_hook_feedback_entries_to_store_path, write_hook_feedback_to_store_path,
@@ -48,8 +50,9 @@ fn temp_home_path(label: &str) -> PathBuf {
 fn default_config_values() {
     let cfg = CoshConfig::default();
     assert_eq!(cfg.shell_default, "auto");
+    assert_eq!(cfg.shell_integration, "enhanced");
     assert_eq!(cfg.analysis_mode, "smart");
-    assert_eq!(cfg.approval_mode, "auto");
+    assert_eq!(cfg.approval_mode, CoshApprovalMode::Auto);
     assert_eq!(cfg.adapter_default, "cosh-core");
     assert_eq!(cfg.language, "auto");
     assert!(cfg.startup_banner);
@@ -210,6 +213,7 @@ language = "fr-FR"
 fn parse_simple_key_value() {
     let content = r#"
 shell.default = "zsh"
+shell.integration = enhanced
 shell.analysis_mode = conservative
 shell.approval_mode = recommend
 shell.adapter_default = "qwen"
@@ -218,10 +222,31 @@ ui.language = zh-CN
     let mut cfg = CoshConfig::default();
     parse_simple_config(content, &mut cfg);
     assert_eq!(cfg.shell_default, "zsh");
+    assert_eq!(cfg.shell_integration, "enhanced");
     assert_eq!(cfg.analysis_mode, "conservative");
-    assert_eq!(cfg.approval_mode, "recommend");
+    assert_eq!(cfg.approval_mode, CoshApprovalMode::Recommend);
     assert_eq!(cfg.adapter_default, "qwen");
     assert_eq!(cfg.language, "zh-CN");
+
+    for value in ["balanced", "strict", "suggest"] {
+        let mut simple = CoshConfig::default();
+        parse_simple_config(&format!("shell.approval_mode = {value}\n"), &mut simple);
+        assert_eq!(simple.approval_mode, CoshApprovalMode::Recommend);
+
+        let mut toml = CoshConfig::default();
+        parse_toml_config(
+            &format!("[shell]\napproval_mode = \"{value}\"\n"),
+            &mut toml,
+        );
+        assert_eq!(toml.approval_mode, CoshApprovalMode::Recommend);
+    }
+
+    let mut config = CoshConfig {
+        approval_mode: CoshApprovalMode::Trust,
+        ..Default::default()
+    };
+    parse_simple_config("shell.approval_mode = invalid\n", &mut config);
+    assert_eq!(config.approval_mode, CoshApprovalMode::Recommend);
 }
 
 #[test]
@@ -551,18 +576,22 @@ fn project_trust_store_adds_dedupes_and_removes_canonical_roots() {
     add_trusted_project_root_to_store_path(&store, &nested.join("..")).expect("dedupe root");
     add_trusted_project_root_to_store_path(&store, &other).expect("trust other");
 
-    let roots = read_trusted_project_roots_from_store_path(&store);
+    let roots = read_trusted_project_roots_from_store_path(&store).expect("read store");
     assert_eq!(roots.len(), 2, "{roots:?}");
     assert!(roots.contains(&root.canonicalize().expect("canonical root")));
     assert!(roots.contains(&other.canonicalize().expect("canonical other")));
 
     remove_trusted_project_root_from_store_path(&store, &nested.join("..")).expect("untrust root");
-    let roots = read_trusted_project_roots_from_store_path(&store);
+    let roots = read_trusted_project_roots_from_store_path(&store).expect("read store");
     assert_eq!(roots, vec![other.canonicalize().expect("canonical other")]);
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&other);
     let _ = std::fs::remove_file(&store);
+
+    assert_corrupted_project_trust_store_is_reported();
+    #[cfg(unix)]
+    assert_trust_store_atomic_write_preserves_permissions();
 }
 
 #[test]
@@ -575,7 +604,7 @@ fn load_project_trust_store_extends_config_roots() {
     std::fs::write(&store, "# comment\n/work/app\n\n/work/lib\n").expect("write store");
 
     let mut cfg = CoshConfig::default();
-    load_project_trust_store(&mut cfg, &store);
+    load_project_trust_store(&mut cfg, &store).expect("load store");
 
     assert_eq!(cfg.trusted_project_roots.len(), 2);
     assert_eq!(cfg.trusted_project_roots[0], PathBuf::from("/work/app"));
@@ -595,12 +624,71 @@ fn clear_project_trust_store_path_keeps_empty_store_file() {
 
     write_trusted_project_roots_to_store_path(&store, &[]).expect("clear store");
 
-    let roots = read_trusted_project_roots_from_store_path(&store);
+    let roots = read_trusted_project_roots_from_store_path(&store).expect("read store");
     assert!(roots.is_empty(), "{roots:?}");
     let content = std::fs::read_to_string(&store).expect("read store");
     assert!(content.contains("cosh-shell trusted project hook roots"));
 
     let _ = std::fs::remove_file(&store);
+}
+
+fn assert_corrupted_project_trust_store_is_reported() {
+    let store = std::env::temp_dir().join(format!(
+        "cosh-shell-trust-store-corrupt-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&store);
+    std::fs::write(&store, b"/work/app\n\xff\n").expect("write corrupt store");
+
+    let error = read_trusted_project_roots_from_store_path(&store)
+        .expect_err("invalid UTF-8 must not become an empty trust set");
+    assert!(error.contains("not valid UTF-8"), "{error}");
+    let mut cfg = CoshConfig::default();
+    assert!(load_project_trust_store(&mut cfg, &store).is_err());
+    assert!(cfg.trusted_project_roots.is_empty());
+
+    let _ = std::fs::remove_file(&store);
+}
+
+#[cfg(unix)]
+fn assert_trust_store_atomic_write_preserves_permissions() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let dir = std::env::temp_dir().join(format!(
+        "cosh-shell-trust-store-atomic-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let store = dir.join("trusted-project-hooks");
+    std::fs::write(&store, "/work/old\n").expect("seed store");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o640))
+        .expect("set store mode");
+
+    write_trusted_project_roots_to_store_path(&store, &[PathBuf::from("/work/new")])
+        .expect("atomic update");
+
+    let mode = std::fs::metadata(&store)
+        .expect("stat store")
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert_eq!(mode, 0o640);
+    assert_eq!(
+        read_trusted_project_roots_from_store_path(&store).expect("read updated store"),
+        vec![PathBuf::from("/work/new")]
+    );
+    assert!(!std::fs::read_dir(&dir)
+        .expect("list store directory")
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().contains(".tmp-")));
+
+    let link = dir.join("trusted-project-hooks-link");
+    symlink(&store, &link).expect("create symlink");
+    let error = write_trusted_project_roots_to_store_path(&link, &[])
+        .expect_err("symlink target must not be replaced");
+    assert!(error.contains("symbolic link"), "{error}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

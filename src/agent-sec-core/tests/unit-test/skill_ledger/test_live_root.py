@@ -21,6 +21,18 @@ from agent_sec_cli.skill_ledger.path_identity import (
     normalize_canonical_skill_dir,
     validate_canonical_skill_dir,
 )
+from agent_sec_cli.skill_ledger.skillfs_peer_auth import (
+    AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE,
+    AGENT_SEC_SKILLFS_CONTROL_SOCKET,
+    CONTROL_CLIENT_DOMAIN,
+    CONTROL_SERVER_DOMAIN,
+    AuthenticatedSession,
+    SharedSecret,
+    build_auth_challenge_frame,
+    build_auth_proof_frame,
+    validate_auth_init_frame,
+    verify_auth_proof_frame,
+)
 
 
 def _make_skill(parent: Path, name: str) -> Path:
@@ -69,6 +81,76 @@ def _resolver(socket_path: Path, *, timeout_seconds: float = 1.0) -> SkillRootRe
     return SkillRootResolver(
         SkillFsResolverClient(socket_path, timeout_seconds=timeout_seconds)
     )
+
+
+def _write_auth_key(path: Path, value: bytes = b"k" * 32) -> Path:
+    path.write_bytes(value)
+    path.chmod(0o600)
+    return path
+
+
+def _start_authenticated_server(
+    socket_path: Path,
+    secret: SharedSecret,
+    response: dict[str, Any],
+    *,
+    response_secret: SharedSecret | None = None,
+) -> tuple[list[dict[str, Any]], list[BaseException], threading.Thread]:
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    requests: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            with listener:
+                connection, _ = listener.accept()
+                with connection, connection.makefile("rb") as reader:
+                    validate_auth_init_frame(reader.readline())
+                    nonce, challenge = build_auth_challenge_frame(bytes(range(32)))
+                    connection.sendall(challenge)
+                    verify_auth_proof_frame(
+                        reader.readline(),
+                        expected_kind="auth.proof",
+                        secret=secret,
+                        domain=CONTROL_CLIENT_DOMAIN,
+                        nonce=nonce,
+                    )
+                    connection.sendall(
+                        build_auth_proof_frame(
+                            "auth.ok", secret, CONTROL_SERVER_DOMAIN, nonce
+                        )
+                    )
+                    session = AuthenticatedSession(
+                        secret,
+                        nonce,
+                        CONTROL_CLIENT_DOMAIN,
+                        CONTROL_SERVER_DOMAIN,
+                    )
+                    payload = reader.readline().removesuffix(b"\n")
+                    tag = reader.readline()
+                    session.verify_payload(payload, tag, "client")
+                    requests.append(json.loads(payload.decode("utf-8")))
+
+                    response_payload = json.dumps(
+                        response, separators=(",", ":")
+                    ).encode("utf-8")
+                    response_session = AuthenticatedSession(
+                        response_secret or secret,
+                        nonce,
+                        CONTROL_CLIENT_DOMAIN,
+                        CONTROL_SERVER_DOMAIN,
+                    )
+                    connection.sendall(
+                        response_session.protect_payload(response_payload, "server")
+                    )
+        except BaseException as exc:  # pragma: no cover - surfaced in the test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return requests, errors, thread
 
 
 def test_default_socket_follows_effective_uid(
@@ -196,6 +278,199 @@ def test_resolver_uses_host_when_socket_is_missing(tmp_path: Path) -> None:
     root = _resolver(tmp_path / "missing.sock").resolve(canonical)
 
     assert root == ResolvedSkillRoot(canonical, canonical, "host")
+
+
+def test_default_resolver_uses_host_when_socket_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _make_skill(tmp_path, "weather")
+    monkeypatch.setattr(
+        live_root_module,
+        "default_skillfs_control_socket",
+        lambda: tmp_path / "missing.sock",
+    )
+
+    root = SkillRootResolver(SkillFsResolverClient()).resolve(canonical)
+
+    assert root == ResolvedSkillRoot(canonical, canonical, "host")
+
+
+@pytest.mark.parametrize("explicit_socket", [False, True])
+def test_resolver_fails_closed_when_hmac_socket_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit_socket: bool,
+) -> None:
+    canonical = _make_skill(tmp_path, "weather")
+    missing_socket = tmp_path / "missing.sock"
+    key_path = _write_auth_key(tmp_path / "control.key")
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE, str(key_path))
+    monkeypatch.setattr(
+        live_root_module,
+        "default_skillfs_control_socket",
+        lambda: missing_socket,
+    )
+    client = SkillFsResolverClient(missing_socket if explicit_socket else None)
+
+    with pytest.raises(SkillRootResolveError, match="authentication failed"):
+        SkillRootResolver(client).resolve(canonical)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_authenticated_resolver_accepts_trusted_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
+) -> None:
+    canonical = _make_skill(tmp_path / "mount", "weather")
+    live = _make_skill(tmp_path / "backing", "weather")
+    socket_path = tmp_path / "skillfs.sock"
+    key_path = _write_auth_key(tmp_path / "control.key")
+    secret = SharedSecret.load(key_path)
+    response_result: dict[str, Any] = {
+        "managed": managed,
+        "canonicalSkillDir": str(canonical),
+    }
+    if managed:
+        response_result["liveSkillDir"] = str(live)
+    requests, errors, thread = _start_authenticated_server(
+        socket_path,
+        secret,
+        {"schemaVersion": "1", "ok": True, "result": response_result},
+    )
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE, str(key_path))
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_SOCKET, str(socket_path))
+
+    root = SkillRootResolver(SkillFsResolverClient()).resolve(canonical)
+    thread.join(timeout=1)
+
+    expected = ResolvedSkillRoot(
+        canonical, live if managed else canonical, "skillfs" if managed else "host"
+    )
+    assert root == expected
+    assert requests[0]["canonicalSkillDir"] == str(canonical)
+    assert errors == []
+
+
+def test_authenticated_resolver_rejects_wrong_response_mac(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _make_skill(tmp_path / "mount", "weather")
+    socket_path = tmp_path / "skillfs.sock"
+    key_path = _write_auth_key(tmp_path / "control.key")
+    secret = SharedSecret.load(key_path)
+    wrong_secret = SharedSecret(b"w" * 32)
+    _, errors, thread = _start_authenticated_server(
+        socket_path,
+        secret,
+        {
+            "schemaVersion": "1",
+            "ok": True,
+            "result": {
+                "managed": False,
+                "canonicalSkillDir": str(canonical),
+            },
+        },
+        response_secret=wrong_secret,
+    )
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE, str(key_path))
+
+    with pytest.raises(SkillRootResolveError, match="authentication failed"):
+        _resolver(socket_path).resolve(canonical)
+    thread.join(timeout=1)
+
+    assert errors == []
+
+
+def test_authenticated_resolver_rejects_wrong_handshake_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _make_skill(tmp_path / "mount", "weather")
+    socket_path = tmp_path / "skillfs.sock"
+    key_path = _write_auth_key(tmp_path / "control.key")
+    server_secret = SharedSecret(b"s" * 32)
+    _, errors, thread = _start_authenticated_server(
+        socket_path,
+        server_secret,
+        {
+            "schemaVersion": "1",
+            "ok": True,
+            "result": {
+                "managed": False,
+                "canonicalSkillDir": str(canonical),
+            },
+        },
+    )
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE, str(key_path))
+
+    with pytest.raises(SkillRootResolveError, match="authentication failed"):
+        _resolver(socket_path).resolve(canonical)
+    thread.join(timeout=1)
+
+    assert errors
+
+
+def test_authenticated_resolver_handshake_uses_total_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _make_skill(tmp_path / "mount", "weather")
+    socket_path = tmp_path / "skillfs.sock"
+    key_path = _write_auth_key(tmp_path / "control.key")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+
+    def serve() -> None:
+        with listener:
+            connection, _ = listener.accept()
+            with connection, connection.makefile("rb") as reader:
+                validate_auth_init_frame(reader.readline())
+                time.sleep(0.05)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE, str(key_path))
+
+    with pytest.raises(SkillRootResolveError, match="timed out"):
+        _resolver(socket_path, timeout_seconds=0.01).resolve(canonical)
+    thread.join(timeout=1)
+
+
+def test_authenticated_resolver_never_retries_plaintext(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = _make_skill(tmp_path / "mount", "weather")
+    socket_path = tmp_path / "skillfs.sock"
+    key_path = _write_auth_key(tmp_path / "control.key")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(2)
+    received: list[bytes] = []
+
+    def serve() -> None:
+        with listener:
+            connection, _ = listener.accept()
+            with connection, connection.makefile("rb") as reader:
+                received.append(reader.readline())
+                connection.sendall(b'{"schemaVersion":"1","ok":true}\n')
+            listener.settimeout(0.1)
+            with pytest.raises(socket.timeout):
+                listener.accept()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    monkeypatch.setenv(AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE, str(key_path))
+
+    with pytest.raises(SkillRootResolveError, match="authentication failed"):
+        _resolver(socket_path).resolve(canonical)
+    thread.join(timeout=1)
+
+    assert received == [b'{"authVersion":"1","type":"auth.init"}\n']
 
 
 def test_resolver_uses_host_for_explicit_not_managed(tmp_path: Path) -> None:

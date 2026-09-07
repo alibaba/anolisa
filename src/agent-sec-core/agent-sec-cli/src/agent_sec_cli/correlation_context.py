@@ -48,7 +48,7 @@ class TraceContext:
 # Hybrid storage: process-level singleton + request-local ContextVar override.
 #
 # `_PROCESS_TRACE_CONTEXT` is set in `cli.main()` and read by every thread,
-# including ThreadPoolExecutor workers in `prompt_scanner`. A pure ContextVar
+# including ThreadPoolExecutor workers in the native scanner. A pure ContextVar
 # would default to empty in newly-spawned threads and break the invariant
 # that all records in one CLI process share the same trace context.
 #

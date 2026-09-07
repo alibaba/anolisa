@@ -202,8 +202,7 @@ dependencies = [
 
 [[package]]
 name = "actplane-ifc-compiler"
-version = "0.1.8"
-source = "git+https://github.com/eunomia-bpf/ActPlane.git?rev=a62e5d9d96f91101cda019519053e950d532380a#a62e5d9d96f91101cda019519053e950d532380a"
+version = "0.1.9"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -217,7 +216,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentsight"
-version = "0.9.1"
+version = "0.12.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -306,6 +305,7 @@ version = "0.1.0"
 dependencies = [
  "agentsight-enforcement-protocol",
  "libc",
+ "log 0.4.33",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1570,8 +1570,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebpf-ifc-engine"
-version = "0.1.8"
-source = "git+https://github.com/eunomia-bpf/ActPlane.git?rev=a62e5d9d96f91101cda019519053e950d532380a#a62e5d9d96f91101cda019519053e950d532380a"
+version = "0.1.9"
 dependencies = [
  "aya",
  "libbpf-sys",

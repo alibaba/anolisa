@@ -2,7 +2,6 @@
 //! split): the per-relay bookkeeping struct and its borrow-splitting helper.
 
 use std::fs::File;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -11,15 +10,94 @@ use crate::input::InputClassifier;
 use super::super::capture_bridge::consume_captured_input;
 use super::super::card_capture::CardInputState;
 use super::super::event_parser::{CandidateLineBuffer, NativeLineState};
+use super::super::event_sender::RawInputEventSink;
 use super::super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::super::mode::current_raw_input_mode;
 use super::super::mode::RawInputMode;
-use super::super::relay::{ExplicitExitTracker, InputRelayContext};
-use super::super::{MainPromptGate, RawInputEvent};
+use super::super::relay::{
+    replay_deferred_zsh_tab_typeahead, ExplicitExitTracker, InputRelayContext,
+};
+use super::super::MainPromptGate;
 use super::action::PendingDelayEscape;
+use super::assistance::PendingAssistanceEscape;
 use super::capture::{drain_capture_submission, CaptureOwnedInput};
 use super::prompt_ghost::{PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix};
 use super::InputRead;
+
+pub(crate) struct RawInputShellRoute {
+    pub(crate) main_prompt_gate: MainPromptGate,
+    pub(crate) slash_route_enabled: bool,
+    pub(crate) zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
+}
+
+/// Marks Zsh sessions that keep slash candidates Rust-owned until submission.
+pub(crate) struct ZshPathPromptBuffering {
+    deferred_tab_typeahead: Option<DeferredZshTabTypeahead>,
+}
+
+struct DeferredZshTabTypeahead {
+    bytes: Vec<u8>,
+    deadline: Instant,
+}
+
+const ZSH_TAB_TYPEAHEAD_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+impl ZshPathPromptBuffering {
+    pub(crate) fn new() -> Self {
+        Self {
+            deferred_tab_typeahead: None,
+        }
+    }
+
+    pub(in crate::raw_input) fn defer_tab_typeahead(&mut self, bytes: &[u8]) {
+        if let Some(pending) = self.deferred_tab_typeahead.as_mut() {
+            pending.bytes.extend_from_slice(bytes);
+        } else {
+            self.deferred_tab_typeahead = Some(DeferredZshTabTypeahead {
+                bytes: bytes.to_vec(),
+                deadline: Instant::now() + ZSH_TAB_TYPEAHEAD_DELAY,
+            });
+        }
+    }
+
+    pub(in crate::raw_input) fn has_deferred_tab_typeahead(&self) -> bool {
+        self.deferred_tab_typeahead.is_some()
+    }
+
+    pub(in crate::raw_input) fn tab_typeahead_deadline(&self) -> Option<Instant> {
+        self.deferred_tab_typeahead
+            .as_ref()
+            .map(|pending| pending.deadline)
+    }
+
+    fn take_due_tab_typeahead(&mut self, force: bool, now: Instant) -> Option<Vec<u8>> {
+        if !force
+            && self
+                .deferred_tab_typeahead
+                .as_ref()
+                .is_none_or(|pending| now < pending.deadline)
+        {
+            return None;
+        }
+        self.deferred_tab_typeahead
+            .take()
+            .map(|pending| pending.bytes)
+    }
+}
+
+impl RawInputShellRoute {
+    pub(crate) fn new(
+        main_prompt_gate: MainPromptGate,
+        slash_route_enabled: bool,
+        zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
+    ) -> Self {
+        Self {
+            main_prompt_gate,
+            slash_route_enabled,
+            zsh_path_prompt_buffering,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(in super::super) struct RawInputRelayState {
@@ -34,8 +112,10 @@ pub(in super::super) struct RawInputRelayState {
     /// recall (issue #1718); gated further by `main_prompt_gate` at
     /// submission time.
     pub(super) slash_route_enabled: bool,
+    pub(super) zsh_path_prompt_buffering: Option<ZshPathPromptBuffering>,
     pub(super) pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
     pub(super) pending_delay_escape: Option<PendingDelayEscape>,
+    pub(super) pending_assistance_escape: Option<PendingAssistanceEscape>,
     pub(super) pending_replaced_prompt_ghost_suffix: Option<PendingReplacedPromptGhostSuffix>,
     pub(super) capture_owned_input: CaptureOwnedInput,
     pub(super) deferred_input: Option<InputRead>,
@@ -45,7 +125,7 @@ pub(in super::super) struct RawInputRelayState {
 }
 
 impl RawInputRelayState {
-    pub(super) fn with_generation_and_gate(
+    pub(in crate::raw_input) fn with_generation_and_gate(
         input_generation: UserPtyInputGeneration,
         main_prompt_gate: MainPromptGate,
         slash_route_enabled: bool,
@@ -57,11 +137,24 @@ impl RawInputRelayState {
             ..Self::default()
         }
     }
+
+    pub(in crate::raw_input) fn with_shell_route(
+        input_generation: UserPtyInputGeneration,
+        route: RawInputShellRoute,
+    ) -> Self {
+        Self {
+            input_generation,
+            main_prompt_gate: route.main_prompt_gate,
+            slash_route_enabled: route.slash_route_enabled,
+            zsh_path_prompt_buffering: route.zsh_path_prompt_buffering,
+            ..Self::default()
+        }
+    }
 }
-pub(super) fn input_relay_context<'a>(
+pub(in crate::raw_input) fn input_relay_context<'a>(
     master: &'a mut File,
     input_classifier: &'a InputClassifier,
-    input_events: &'a Sender<RawInputEvent>,
+    input_events: &'a dyn RawInputEventSink,
     input_mode: &'a Arc<Mutex<RawInputMode>>,
     state: &'a mut RawInputRelayState,
 ) -> InputRelayContext<'a> {
@@ -77,7 +170,28 @@ pub(super) fn input_relay_context<'a>(
         exit_tracker: &mut state.exit_tracker,
         main_prompt_gate: &state.main_prompt_gate,
         slash_route_enabled: state.slash_route_enabled,
+        zsh_path_prompt_buffering: state.zsh_path_prompt_buffering.as_mut(),
     }
+}
+
+pub(in crate::raw_input) fn flush_deferred_zsh_tab_typeahead(
+    force: bool,
+    now: Instant,
+    master: &mut File,
+    input_classifier: &InputClassifier,
+    input_events: &dyn RawInputEventSink,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &mut RawInputRelayState,
+) -> std::io::Result<()> {
+    let Some(bytes) = state
+        .zsh_path_prompt_buffering
+        .as_mut()
+        .and_then(|buffering| buffering.take_due_tab_typeahead(force, now))
+    else {
+        return Ok(());
+    };
+    let mut relay = input_relay_context(master, input_classifier, input_events, input_mode, state);
+    replay_deferred_zsh_tab_typeahead(&bytes, &mut relay)
 }
 
 // A bare ESC inside the draft card waits this long for a split CR/LF
@@ -106,7 +220,7 @@ pub(super) fn flush_pending_draft_escape(
     now: Instant,
     master: &mut File,
     input_classifier: &InputClassifier,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
 ) -> std::io::Result<()> {
@@ -144,6 +258,7 @@ pub(super) fn flush_pending_draft_escape(
                 line_submits,
                 main_prompt_gate,
                 slash_route_enabled,
+                zsh_path_prompt_buffering,
                 ..
             } = state;
             let mut relay = InputRelayContext {
@@ -158,6 +273,7 @@ pub(super) fn flush_pending_draft_escape(
                 exit_tracker,
                 main_prompt_gate,
                 slash_route_enabled: *slash_route_enabled,
+                zsh_path_prompt_buffering: zsh_path_prompt_buffering.as_mut(),
             };
             relay.line_buffer.clear();
             relay.native_line_state.clear();

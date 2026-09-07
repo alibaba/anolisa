@@ -179,6 +179,21 @@ impl HttpStore {
         Ok(deleted as u64)
     }
 
+    /// Delete the oldest N records by timestamp.
+    ///
+    /// Used for size-based pruning when the database file exceeds its
+    /// configured maximum.
+    pub fn delete_oldest_batch(&self, limit: usize) -> Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (
+                SELECT id FROM {} ORDER BY timestamp_ns ASC LIMIT ?1
+            )",
+            self.table_name, self.table_name
+        );
+        let deleted = self.conn.execute(&sql, params![limit as i64])?;
+        Ok(deleted)
+    }
+
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> Result<()> {
         wal_checkpoint(&self.conn)
@@ -213,6 +228,7 @@ fn row_to_record(row: &rusqlite::Row) -> Result<HttpRecord> {
         response_headers,
         response_body,
         duration_ns: duration_ns as u64,
+        first_output_timestamp_ns: None,
         is_sse: is_sse_int != 0,
         sse_event_count: sse_event_count as usize,
     })
@@ -247,6 +263,7 @@ mod tests {
             response_headers: r#"{"content-type":"application/json"}"#.to_string(),
             response_body: Some(r#"{"choices":[]}"#.to_string()),
             duration_ns: 500000000,
+            first_output_timestamp_ns: None,
             is_sse: false,
             sse_event_count: 0,
         };
@@ -286,6 +303,7 @@ mod tests {
             response_headers: "{}".to_string(),
             response_body: None,
             duration_ns: 0,
+            first_output_timestamp_ns: None,
             is_sse: true,
             sse_event_count: 10,
         };
@@ -323,6 +341,7 @@ mod tests {
                 response_headers: "{}".to_string(),
                 response_body: None,
                 duration_ns: 0,
+                first_output_timestamp_ns: None,
                 is_sse: false,
                 sse_event_count: 0,
             };

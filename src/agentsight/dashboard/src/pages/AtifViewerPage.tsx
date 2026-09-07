@@ -9,10 +9,13 @@ import {
 } from '../utils/apiClient';
 import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
 import { SubagentGraph } from '../components/SubagentGraph';
+import { CausalAttributionPanel } from '../components/CausalAttributionPanel';
 import type { TrajNode } from '../utils/trajectoryTree';
 import {
   buildTrajectoryTree, findNodeByPath, findNodeByRef, encodeNodePath, decodeNodePath,
 } from '../utils/trajectoryTree';
+import { useI18n, useLocaleTag } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -20,10 +23,10 @@ function fmtTokens(n: number): string {
   return n.toLocaleString();
 }
 
-function fmtTimestamp(iso?: string): string {
+function fmtTimestamp(iso: string | undefined, locale: string): string {
   if (!iso) return '';
   try {
-    return new Date(iso).toLocaleString('zh-CN', {
+    return new Date(iso).toLocaleString(locale, {
       month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
@@ -85,11 +88,14 @@ function highlightedSections(doc: AtifDocument, callId: string | null): Set<stri
 interface Round {
   key: number;
   label: string;
+  /** True for the synthetic leading round that only carries the system prompt.
+   *  Kept separate from `label` so consumers never branch on translated text. */
+  isPreamble: boolean;
   userStep: AtifStep | null;
   steps: AtifStep[];
 }
 
-function groupIntoRounds(steps: AtifStep[]): Round[] {
+function groupIntoRounds(steps: AtifStep[], t: (key: MessageKey, params?: Record<string, string | number>) => string): Round[] {
   const rounds: Round[] = [];
   let userRoundCount = 0;
   for (const step of steps) {
@@ -98,7 +104,8 @@ function groupIntoRounds(steps: AtifStep[]): Round[] {
       if (isUser) userRoundCount++;
       rounds.push({
         key: rounds.length,
-        label: isUser ? `第 ${userRoundCount} 轮` : '前置',
+        label: isUser ? t('atif.round', { n: userRoundCount }) : t('atif.preamble'),
+        isPreamble: !isUser,
         userStep: isUser ? step : null,
         steps: [step],
       });
@@ -124,34 +131,44 @@ function initialRound(rounds: Round[], sections: Set<string>): number | null {
 
 // ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
 
-const STRATEGY_LABELS: Record<string, { label: string; color: string; bg: string }> = {
-  'compress-schema':   { label: 'Schema 压缩', color: 'text-blue-700',   bg: 'bg-blue-100' },
-  'compress-response': { label: '响应压缩',    color: 'text-violet-700', bg: 'bg-violet-100' },
-  'rewrite-command':   { label: '命令重写',    color: 'text-orange-700', bg: 'bg-orange-100' },
-  'compress-toon':     { label: 'TOON 编码',   color: 'text-teal-700',  bg: 'bg-teal-100' },
+const STRATEGY_STYLES: Record<string, { color: string; bg: string }> = {
+  'compress-schema':   { color: 'text-blue-700',   bg: 'bg-blue-100' },
+  'compress-response': { color: 'text-violet-700', bg: 'bg-violet-100' },
+  'rewrite-command':   { color: 'text-orange-700', bg: 'bg-orange-100' },
+  'compress-toon':     { color: 'text-teal-700',  bg: 'bg-teal-100' },
+};
+
+const STRATEGY_LABEL_KEYS: Record<string, MessageKey> = {
+  'compress-schema':   'ts.schemaCompression',
+  'compress-response': 'ts.responseCompression',
+  'rewrite-command':   'ts.commandRewrite',
+  'compress-toon':     'ts.toonEncoding',
 };
 
 // ─── Source styling ───────────────────────────────────────────────────────────
 
-const SOURCE_STYLES: Record<string, { dot: string; badge: string; border: string; label: string }> = {
+const SOURCE_STYLES: Record<string, { dot: string; badge: string; border: string }> = {
   system: {
     dot: 'bg-purple-500',
     badge: 'bg-purple-100 text-purple-700',
     border: 'border-l-purple-400',
-    label: '系统',
   },
   user: {
     dot: 'bg-blue-500',
     badge: 'bg-blue-100 text-blue-700',
     border: 'border-l-blue-400',
-    label: '用户',
   },
   agent: {
     dot: 'bg-green-500',
     badge: 'bg-green-100 text-green-700',
     border: 'border-l-green-400',
-    label: 'Agent',
   },
+};
+
+const SOURCE_LABEL_KEYS: Record<string, MessageKey> = {
+  system: 'atif.system',
+  user: 'atif.user',
+  agent: 'atif.agentLabel',
 };
 
 function getSourceStyle(source: string) {
@@ -159,7 +176,6 @@ function getSourceStyle(source: string) {
     dot: 'bg-gray-400',
     badge: 'bg-gray-100 text-gray-600',
     border: 'border-l-gray-300',
-    label: source,
   };
 }
 
@@ -198,6 +214,7 @@ const Collapsible: React.FC<CollapsibleProps> = ({ icon, title, count, isOpen, o
 const TEXT_THRESHOLD = 300;
 
 const ExpandableText: React.FC<{ text: string; className?: string }> = ({ text, className = '' }) => {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const isLong = text.length > TEXT_THRESHOLD;
   const display = isLong && !expanded ? text.slice(0, TEXT_THRESHOLD) + '\u2026' : text;
@@ -212,7 +229,7 @@ const ExpandableText: React.FC<{ text: string; className?: string }> = ({ text, 
           onClick={() => setExpanded(!expanded)}
           className="mt-1 text-xs text-blue-600 hover:text-blue-800"
         >
-          {expanded ? '← 收起' : '展开全部 →'}
+          {expanded ? t('common.collapseAll') : t('common.expandAll')}
         </button>
       )}
     </div>
@@ -230,7 +247,10 @@ interface StepCardProps {
 }
 
 const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap, onNavigateSubagent }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const style = getSourceStyle(step.source);
+  const sourceLabel = SOURCE_LABEL_KEYS[step.source] ? t(SOURCE_LABEL_KEYS[step.source]) : step.source;
   const sectionKey = (name: string) => `${step.step_id}-${name}`;
   const isOpen = (name: string) => expandedSections.has(sectionKey(name));
   const toggle = (name: string) => onToggleSection(sectionKey(name));
@@ -255,11 +275,11 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
         {/* Header */}
         <div className="px-5 py-3 flex items-center gap-3 flex-wrap">
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${style.badge}`}>
-            {style.label}
+            {sourceLabel}
           </span>
-          <span className="text-sm font-medium text-gray-900">Step {step.step_id}</span>
+          <span className="text-sm font-medium text-gray-900">{t('atif.stepLabel', { n: step.step_id })}</span>
           {step.timestamp && (
-            <span className="text-xs text-gray-400">{fmtTimestamp(step.timestamp)}</span>
+            <span className="text-xs text-gray-400">{fmtTimestamp(step.timestamp, locale)}</span>
           )}
           {step.model_name && (
             <span className="px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs">
@@ -274,7 +294,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
           {step.message ? (
             <ExpandableText text={step.message} className="text-gray-700 bg-gray-50" />
           ) : (
-            <span className="text-xs text-gray-400 italic">无消息内容</span>
+            <span className="text-xs text-gray-400 italic">{t('atif.noMessageContent')}</span>
           )}
 
           {/* Agent-only sections */}
@@ -284,7 +304,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
               {hasReasoning && (
                 <Collapsible
                   icon="💭"
-                  title="推理过程"
+                  title={t('atif.reasoning')}
                   isOpen={isOpen('reasoning')}
                   onToggle={() => toggle('reasoning')}
                 >
@@ -298,7 +318,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
               {hasToolCalls && (
                 <Collapsible
                   icon="🔧"
-                  title="工具调用"
+                  title={t('atif.toolCall')}
                   count={toolCalls.length}
                   isOpen={isOpen('toolcalls')}
                   onToggle={() => toggle('toolcalls')}
@@ -315,7 +335,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
               {hasObservation && (
                 <Collapsible
                   icon="📋"
-                  title="观察结果"
+                  title={t('atif.observation')}
                   count={observationResults.length}
                   isOpen={isOpen('observation')}
                   onToggle={() => toggle('observation')}
@@ -329,7 +349,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                         <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
                           {r.source_call_id && (
                             <div className="px-3 py-1 bg-teal-50 border-b border-teal-100">
-                              <span className="text-xs text-gray-400 font-mono">call: {shortId(r.source_call_id, 16)}</span>
+                              <span className="text-xs text-gray-400 font-mono">{t('atif.callLabel', { id: shortId(r.source_call_id, 16) })}</span>
                             </div>
                           )}
                           {hasSubagentRef && (
@@ -339,9 +359,9 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                                   key={ri}
                                   onClick={() => onNavigateSubagent?.(ref)}
                                   className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg text-xs font-medium transition-colors"
-                                  title="在上方拓扑图中选中该子代理并查看其轨迹"
+                                  title={t('atif.selectSubagentInGraph')}
                                 >
-                                  🤖 子代理轨迹
+                                  {t('atif.subagentTrajectory')}
                                   {ref.trajectory_id && (
                                     <span className="font-mono text-indigo-400">{shortId(ref.trajectory_id, 12)}</span>
                                   )}
@@ -354,7 +374,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                               <ExpandableText text={content} className="text-xs text-gray-700 bg-teal-50 font-mono" />
                             </div>
                           ) : !hasSubagentRef ? (
-                            <div className="px-3 py-2 text-xs text-gray-400 italic">无输出内容</div>
+                            <div className="px-3 py-2 text-xs text-gray-400 italic">{t('atif.noOutputContent')}</div>
                           ) : null}
                         </div>
                       );
@@ -368,17 +388,17 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-100">
                   {step.metrics!.prompt_tokens != null && (
                     <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs">
-                      输入: {fmtTokens(step.metrics!.prompt_tokens!)}
+                      {t('atif.inputLabel', { n: fmtTokens(step.metrics!.prompt_tokens!) })}
                     </span>
                   )}
                   {step.metrics!.completion_tokens != null && (
                     <span className="px-2 py-1 bg-green-50 text-green-700 rounded text-xs">
-                      输出: {fmtTokens(step.metrics!.completion_tokens!)}
+                      {t('atif.outputLabel', { n: fmtTokens(step.metrics!.completion_tokens!) })}
                     </span>
                   )}
                   {step.metrics!.cached_tokens != null && step.metrics!.cached_tokens! > 0 && (
                     <span className="px-2 py-1 bg-yellow-50 text-yellow-700 rounded text-xs">
-                      缓存: {fmtTokens(step.metrics!.cached_tokens!)}
+                      {t('atif.cacheLabel', { n: fmtTokens(step.metrics!.cached_tokens!) })}
                     </span>
                   )}
                 </div>
@@ -394,13 +414,15 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
 // ─── ToolCallItem ─────────────────────────────────────────────────────────────
 
 const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, OptimizationItem> }> = ({ tc, savingsMap }) => {
+  const { t } = useI18n();
   const [showArgs, setShowArgs] = useState(false);
   const argsStr = typeof tc.arguments === 'string'
     ? tc.arguments
     : JSON.stringify(tc.arguments, null, 2);
   const isLongArgs = argsStr.length > 200;
   const savings = savingsMap?.get(tc.tool_call_id);
-  const stratStyle = savings ? (STRATEGY_LABELS[savings.strategy] ?? { label: savings.strategy_label, color: 'text-gray-700', bg: 'bg-gray-100' }) : null;
+  const stratStyle = savings ? (STRATEGY_STYLES[savings.strategy] ?? { color: 'text-gray-700', bg: 'bg-gray-100' }) : null;
+  const stratLabelKey = savings ? STRATEGY_LABEL_KEYS[savings.strategy] : undefined;
 
   return (
     <div className="border border-orange-100 rounded-lg overflow-hidden">
@@ -411,7 +433,10 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, Optimi
         <span className="text-xs text-gray-400 font-mono">{shortId(tc.tool_call_id, 16)}</span>
         {savings && stratStyle && (
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${stratStyle.bg} ${stratStyle.color}`}>
-            已优化 -{fmtTokens(savings.compounded_saved)} tokens ({stratStyle.label})
+            {t('atif.optimizedTokens', {
+              n: fmtTokens(savings.compounded_saved),
+              strategy: stratLabelKey ? t(stratLabelKey) : savings.strategy_label,
+            })}
           </span>
         )}
         {isLongArgs && (
@@ -419,7 +444,7 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, Optimi
             onClick={() => setShowArgs(!showArgs)}
             className="ml-auto text-xs text-blue-600 hover:text-blue-800"
           >
-            {showArgs ? '收起参数' : '展开参数'}
+            {showArgs ? t('atif.collapseArgs') : t('atif.expandArgs')}
           </button>
         )}
       </div>
@@ -462,6 +487,8 @@ interface RoundListItemProps {
 }
 
 const RoundListItem: React.FC<RoundListItemProps> = ({ round, isActive, onSelect }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const stats = roundStats(round);
 
   return (
@@ -479,22 +506,22 @@ const RoundListItem: React.FC<RoundListItemProps> = ({ round, isActive, onSelect
         }`}>
           {round.label}
         </span>
-        {stats.firstTs && <span className="text-xs text-gray-400">{fmtTimestamp(stats.firstTs)}</span>}
+        {stats.firstTs && <span className="text-xs text-gray-400">{fmtTimestamp(stats.firstTs, locale)}</span>}
       </div>
       <p
         className="text-sm text-gray-800"
         style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
       >
-        {stats.preview || <span className="text-gray-400 italic">无消息内容</span>}
+        {stats.preview || <span className="text-gray-400 italic">{t('atif.noMessageContent')}</span>}
       </p>
       <div className="flex items-center gap-1.5 mt-1.5 text-xs flex-wrap">
-        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded">{round.steps.length} 步</span>
+        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded">{t('common.steps', { n: round.steps.length })}</span>
         {stats.toolCallCount > 0 && (
-          <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded">🔧 {stats.toolCallCount}</span>
+          <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded">{'\ud83d\udd27'} {stats.toolCallCount}</span>
         )}
         {(stats.promptSum > 0 || stats.completionSum > 0) && (
           <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded">
-            {fmtTokens(stats.promptSum)} in / {fmtTokens(stats.completionSum)} out
+            {t('common.inOut', { in: fmtTokens(stats.promptSum), out: fmtTokens(stats.completionSum) })}
           </span>
         )}
       </div>
@@ -515,20 +542,21 @@ interface RoundDetailProps {
 const RoundDetail: React.FC<RoundDetailProps> = ({
   round, expandedSections, onToggleSection, savingsMap, onNavigateSubagent,
 }) => {
+  const { t } = useI18n();
   const stats = roundStats(round);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
       {/* Detail header */}
       <div className="flex items-center gap-3 flex-wrap pb-4 border-b border-gray-100">
-        <h3 className="text-sm font-semibold text-gray-900">{round.label} · 对话详情</h3>
-        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{round.steps.length} 步</span>
+        <h3 className="text-sm font-semibold text-gray-900">{round.label} · {t('atif.conversationDetails')}</h3>
+        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{t('common.steps', { n: round.steps.length })}</span>
         {stats.toolCallCount > 0 && (
-          <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded text-xs">🔧 {stats.toolCallCount} 次工具调用</span>
+          <span className="px-1.5 py-0.5 bg-orange-50 text-orange-600 rounded text-xs">{t('atif.toolCalls', { n: stats.toolCallCount })}</span>
         )}
         {(stats.promptSum > 0 || stats.completionSum > 0) && (
           <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-xs">
-            {fmtTokens(stats.promptSum)} in / {fmtTokens(stats.completionSum)} out
+            {t('common.inOut', { in: fmtTokens(stats.promptSum), out: fmtTokens(stats.completionSum) })}
           </span>
         )}
       </div>
@@ -554,18 +582,19 @@ const RoundDetail: React.FC<RoundDetailProps> = ({
 // ─── AgentInfoCard ────────────────────────────────────────────────────────────
 
 const AgentInfoCard: React.FC<{ doc: AtifDocument }> = ({ doc }) => {
+  const { t } = useI18n();
   const agent = doc.agent ?? { name: 'unknown', version: '—', model_name: undefined, tool_definitions: [] };
   const toolCount = Array.isArray(agent.tool_definitions) ? agent.tool_definitions.length : 0;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 lg:col-span-2">
-      <h3 className="text-sm font-semibold text-gray-900 mb-3">Agent 信息</h3>
+      <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('atif.agentInfo')}</h3>
       <div className="space-y-2 text-sm">
         {[
-          { label: '名称', value: agent.name },
-          { label: '版本', value: agent.version },
-          { label: '模型', value: agent.model_name ?? '—' },
-          { label: '工具定义', value: `${toolCount} 个` },
+          { label: t('atif.name'), value: agent.name },
+          { label: t('atif.version'), value: agent.version },
+          { label: t('atif.model'), value: agent.model_name ?? '—' },
+          { label: t('atif.toolDefinitions'), value: `${toolCount}` },
         ].map(({ label, value }) => (
           <div key={label} className="flex items-center justify-between">
             <span className="text-gray-500">{label}</span>
@@ -586,7 +615,6 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
     {sub && <span className="text-xs text-gray-400 mt-1">{sub}</span>}
   </div>
 );
-
 // ─── Session loading (two stores) ─────────────────────────────────────────────
 // A session lives in either store: eBPF-captured genai events (genai_events.db)
 // or a collector-ingested log trajectory (trajectories.db). Both now serve the
@@ -601,7 +629,10 @@ function isAtifDocument(value: unknown): value is AtifDocument {
     && String((value as { schema_version: string }).schema_version).startsWith('ATIF');
 }
 
-async function loadSessionDoc(sessionId: string): Promise<AtifDocument> {
+async function loadSessionDoc(
+  sessionId: string,
+  t: (key: MessageKey, params?: Record<string, string | number>) => string,
+): Promise<AtifDocument> {
   try {
     const exported = await fetchAtifBySession(sessionId);
     if (isAtifDocument(exported)) return exported;
@@ -612,10 +643,10 @@ async function loadSessionDoc(sessionId: string): Promise<AtifDocument> {
   try {
     const collected = await fetchTrajectoryAtif(sessionId);
     if (isAtifDocument(collected)) return collected;
-    throw new Error(`采集轨迹格式异常：${sessionId}`);
+    throw new Error(t('atif.malformedCollected', { id: sessionId }));
   } catch (fallbackErr: any) {
     if (fallbackErr?.status === 404) {
-      throw new Error(`未找到该 Session：${sessionId}（既无 eBPF 捕获记录，也无采集轨迹）`);
+      throw new Error(t('atif.sessionNotFound', { id: sessionId }));
     }
     throw fallbackErr;
   }
@@ -624,6 +655,7 @@ async function loadSessionDoc(sessionId: string): Promise<AtifDocument> {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export const AtifViewerPage: React.FC = () => {
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const searchParamsRef = useRef(searchParams);
 
@@ -672,14 +704,14 @@ export const AtifViewerPage: React.FC = () => {
     }
     setNodePath(node.path);
     setExpandedSections(new Set());
-    setSelectedRound(initialRound(groupIntoRounds(stepsOf(node.doc)), new Set()));
+    setSelectedRound(initialRound(groupIntoRounds(stepsOf(node.doc), t), new Set()));
     const next = new URLSearchParams(searchParamsRef.current);
     if (node.path.length > 0) next.set('node', encodeNodePath(node.path));
     else next.delete('node');
     setSearchParams(next);
-  }, [setSearchParams]);
+  }, [setSearchParams, t]);
 
-  /** Step-level "🤖 子代理轨迹" button: select the node in the graph above. */
+  /** Step-level "🤖 Subagent trajectory" button: select the node in the graph above. */
   const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
     const target = tree ? findNodeByRef(tree, ref) : null;
     if (target) {
@@ -690,11 +722,11 @@ export const AtifViewerPage: React.FC = () => {
     if (ref.session_id) {
       window.open(`#/atif?type=session&id=${encodeURIComponent(ref.session_id)}`, '_blank');
     } else if (ref.trajectory_path) {
-      setError(`外部子轨迹引用暂不支持: ${ref.trajectory_path}`);
+      setError(t('atif.externalNotSupported', { path: ref.trajectory_path }));
     } else {
-      setError('无法解析子轨迹引用：缺少 trajectory_id 或 trajectory_path');
+      setError(t('atif.cannotResolveSub'));
     }
-  }, [tree, selectNode]);
+  }, [tree, selectNode, t]);
 
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
@@ -707,11 +739,11 @@ export const AtifViewerPage: React.FC = () => {
 
   // Load data
   const handleLoad = useCallback(async (type?: 'session' | 'conversation', id?: string) => {
-    const t = type ?? queryType;
+    const qt = type ?? queryType;
     const i = id ?? queryId;
     if (!i.trim()) return;
 
-    const nextParams: Record<string, string> = { type: t, id: i.trim() };
+    const nextParams: Record<string, string> = { type: qt, id: i.trim() };
     const currentSearchParams = searchParamsRef.current;
     // Node selection and highlights only carry over when the target is unchanged
     // (an explicit reload of a different id starts at the root trajectory).
@@ -737,10 +769,10 @@ export const AtifViewerPage: React.FC = () => {
 
     try {
       let data: AtifDocument;
-      if (t === 'conversation') {
+      if (qt === 'conversation') {
         data = await fetchAtifByConversation(i.trim());
       } else {
-        data = await loadSessionDoc(i.trim());
+        data = await loadSessionDoc(i.trim(), t);
       }
       setDoc(data);
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
@@ -750,7 +782,7 @@ export const AtifViewerPage: React.FC = () => {
       const restoredDoc = restoredTree
         ? (findNodeByPath(restoredTree, initialPath).doc ?? data)
         : data;
-      setSelectedRound(initialRound(groupIntoRounds(stepsOf(restoredDoc)), sections));
+      setSelectedRound(initialRound(groupIntoRounds(stepsOf(restoredDoc), t), sections));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -758,11 +790,11 @@ export const AtifViewerPage: React.FC = () => {
           .catch(() => setSavingsDetail(null));
       }
     } catch (e: any) {
-      setError(e.message ?? '加载失败');
+      setError(e.message ?? t('atif.loadFailed'));
     } finally {
       setLoading(false);
     }
-  }, [queryType, queryId, setSearchParams]);
+  }, [queryType, queryId, setSearchParams, t]);
 
   // Back/forward navigation changes the URL without going through selectNode,
   // so mirror the `node` param back into state when they diverge.
@@ -772,8 +804,8 @@ export const AtifViewerPage: React.FC = () => {
     if (encodeNodePath(urlPath) === encodeNodePath(nodePath)) return;
     setNodePath(urlPath);
     setExpandedSections(new Set());
-    setSelectedRound(initialRound(groupIntoRounds(stepsOf(findNodeByPath(tree, urlPath).doc)), new Set()));
-  }, [searchParams, tree, nodePath]);
+    setSelectedRound(initialRound(groupIntoRounds(stepsOf(findNodeByPath(tree, urlPath).doc), t), new Set()));
+  }, [searchParams, tree, nodePath, t]);
 
   // Auto-load from URL on mount
   useEffect(() => {
@@ -796,7 +828,7 @@ export const AtifViewerPage: React.FC = () => {
       try {
         const parsed = JSON.parse(ev.target?.result as string);
         if (!parsed.schema_version || !String(parsed.schema_version).startsWith('ATIF')) {
-          setError('JSON 解析失败：缺少 schema_version 字段或非 ATIF 格式');
+          setError(t('atif.jsonParseFailedNotATIF'));
           return;
         }
         setDoc(parsed as AtifDocument);
@@ -804,14 +836,14 @@ export const AtifViewerPage: React.FC = () => {
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setExpandedSections(new Set());
-        setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument)), new Set()));
+        setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument), t), new Set()));
       } catch {
-        setError('JSON 解析失败，请检查文件格式');
+        setError(t('atif.jsonParseFailed'));
       }
     };
     reader.readAsText(file);
     e.target.value = '';
-  }, []);
+  }, [t]);
 
   // JSON download
   const handleDownload = useCallback(() => {
@@ -827,7 +859,7 @@ export const AtifViewerPage: React.FC = () => {
 
   // Compute metrics (fallback when final_metrics is partial)
   const steps = activeDoc?.steps ?? [];
-  const rounds = React.useMemo(() => groupIntoRounds(activeDoc?.steps ?? []), [activeDoc]);
+  const rounds = React.useMemo(() => groupIntoRounds(activeDoc?.steps ?? [], t), [activeDoc, t]);
   const activeRound = rounds.find(r => r.key === selectedRound) ?? null;
   const computedMetrics = activeDoc ? (() => {
     const fm = activeDoc.final_metrics;
@@ -853,7 +885,7 @@ export const AtifViewerPage: React.FC = () => {
       <header className="bg-white border-b border-gray-200 px-6 py-4">
         <div className="max-w-screen-xl mx-auto flex items-center gap-4">
           <div className="flex-1 min-w-0">
-            <h1 className="text-lg font-bold text-gray-900">轨迹查看</h1>
+            <h1 className="text-lg font-bold text-gray-900">{t('atif.trajectoryViewer')}</h1>
             {doc && (
               <div className="flex items-center gap-2 mt-0.5">
                 <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
@@ -866,7 +898,7 @@ export const AtifViewerPage: React.FC = () => {
           {doc && (
             <button onClick={handleDownload}
               className="flex-shrink-0 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm transition-colors">
-              ⬇️ 下载 JSON
+              {t('atif.downloadJson')}
             </button>
           )}
         </div>
@@ -877,17 +909,17 @@ export const AtifViewerPage: React.FC = () => {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Type toggle */}
           <div className="flex gap-1">
-            {(['session', 'conversation'] as const).map(t => (
+            {(['session', 'conversation'] as const).map(mode => (
               <button
-                key={t}
-                onClick={() => setQueryType(t)}
+                key={mode}
+                onClick={() => setQueryType(mode)}
                 className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                  queryType === t
+                  queryType === mode
                     ? 'bg-blue-600 text-white'
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                按 {t === 'conversation' ? 'Conversation' : 'Session'}
+                {mode === 'conversation' ? t('atif.byConversation') : t('atif.bySession')}
               </button>
             ))}
           </div>
@@ -899,7 +931,7 @@ export const AtifViewerPage: React.FC = () => {
               value={queryId}
               onChange={e => setQueryId(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleLoad(); }}
-              placeholder={queryType === 'conversation' ? '输入 Conversation ID...' : '输入 Session ID...'}
+              placeholder={queryType === 'conversation' ? t('atif.enterConversationId') : t('atif.enterSessionId')}
               className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
             />
           </div>
@@ -910,7 +942,7 @@ export const AtifViewerPage: React.FC = () => {
             disabled={loading || !queryId.trim()}
             className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {loading ? '加载中...' : '加载'}
+            {loading ? t('atif.loading') : t('atif.load')}
           </button>
 
           {/* File import */}
@@ -925,14 +957,14 @@ export const AtifViewerPage: React.FC = () => {
             onClick={() => fileInputRef.current?.click()}
             className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-lg transition-colors"
           >
-            📁 导入 JSON
+            {t('atif.importJson')}
           </button>
         </div>
 
         {/* Error */}
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-600 text-sm">
-            ⚠️ {error}
+            {'\u26a0\ufe0f'} {error}
           </div>
         )}
 
@@ -941,7 +973,7 @@ export const AtifViewerPage: React.FC = () => {
           <div className="flex items-center justify-center py-16">
             <div className="text-center">
               <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mx-auto mb-4" />
-              <p className="text-gray-600">加载中...</p>
+              <p className="text-gray-600">{t('atif.loading')}</p>
             </div>
           </div>
         )}
@@ -951,8 +983,8 @@ export const AtifViewerPage: React.FC = () => {
           <div className="flex items-center justify-center py-24">
             <div className="text-center">
               <p className="text-3xl text-gray-300 mb-4">ATIF</p>
-              <p className="text-gray-500">请输入 Session 或 Conversation ID，然后点击「加载」</p>
-              <p className="text-gray-400 text-sm mt-1">或导入本地 ATIF JSON 文件</p>
+              <p className="text-gray-500">{t('atif.enterSessionOrConv')}</p>
+              <p className="text-gray-400 text-sm mt-1">{t('atif.orImportLocal')}</p>
             </div>
           </div>
         )}
@@ -966,18 +998,18 @@ export const AtifViewerPage: React.FC = () => {
               {computedMetrics && (
                 <>
                   <MetricCard
-                    label="总步骤数"
+                    label={t('atif.totalSteps')}
                     value={String(computedMetrics.steps)}
                     color="text-indigo-600"
                   />
                   <MetricCard
-                    label="总输入 Token"
+                    label={t('atif.totalInputTokens')}
                     value={fmtTokens(computedMetrics.prompt)}
                     color="text-blue-600"
-                    sub={computedMetrics.cached > 0 ? `其中缓存: ${fmtTokens(computedMetrics.cached)}` : undefined}
+                    sub={computedMetrics.cached > 0 ? t('atif.ofWhichCached', { n: fmtTokens(computedMetrics.cached) }) : undefined}
                   />
                   <MetricCard
-                    label="总输出 Token"
+                    label={t('atif.totalOutputTokens')}
                     value={fmtTokens(computedMetrics.completion)}
                     color="text-green-600"
                   />
@@ -988,22 +1020,22 @@ export const AtifViewerPage: React.FC = () => {
             {/* Token Savings Comparison Card */}
             {savingsDetail && savingsDetail.total_compounded_saved > 0 && (
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <h3 className="text-sm font-semibold text-gray-900 mb-3">Token 节省对比</h3>
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('atif.tokenSavingsComparison')}</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
                   <div>
-                    <span className="text-xs text-gray-500">原始 Token（未优化）</span>
+                    <span className="text-xs text-gray-500">{t('atif.originalTokens')}</span>
                     <p className="text-xl font-bold text-gray-700">{fmtTokens(savingsDetail.total_original_tokens)}</p>
                   </div>
                   <div>
-                    <span className="text-xs text-gray-500">实际 Token（优化后）</span>
+                    <span className="text-xs text-gray-500">{t('atif.actualTokens')}</span>
                     <p className="text-xl font-bold text-blue-600">{fmtTokens(savingsDetail.total_actual_tokens)}</p>
                   </div>
                   <div>
-                    <span className="text-xs text-gray-500">节省</span>
+                    <span className="text-xs text-gray-500">{t('atif.savedLabel')}</span>
                     <p className="text-xl font-bold text-green-600">
-                      -{fmtTokens(savingsDetail.total_compounded_saved)}
+                      {fmtTokens(savingsDetail.total_compounded_saved)}
                       <span className="text-sm font-normal text-gray-400 ml-1">
-                        ({savingsDetail.savings_rate.toFixed(1)}%)
+                        ({(savingsDetail.savings_rate * 100).toFixed(1)}%)
                       </span>
                     </p>
                   </div>
@@ -1011,13 +1043,13 @@ export const AtifViewerPage: React.FC = () => {
                 {/* Comparison bar */}
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-400 w-10">原始</span>
+                    <span className="text-xs text-gray-400 w-10">{t('atif.originalLabel')}</span>
                     <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
                       <div className="h-full bg-gray-400 rounded-full" style={{ width: '100%' }} />
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-400 w-10">实际</span>
+                    <span className="text-xs text-gray-400 w-10">{t('atif.actualLabel')}</span>
                     <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
                       <div
                         className="h-full bg-green-500 rounded-full"
@@ -1046,19 +1078,19 @@ export const AtifViewerPage: React.FC = () => {
                 {selectedNode && selectedNode.depth > 0 && (
                   <span className="text-indigo-600">{selectedNode.label} · </span>
                 )}
-                交互轨迹
+                {t('atif.interactionTrajectory')}
                 <span className="ml-2 text-sm font-normal text-gray-400">
-                  共 {rounds.length} 轮对话 · {steps.length} 步
+                  {t('atif.roundsSteps', { rounds: rounds.length, steps: steps.length })}
                 </span>
               </h2>
 
               {steps.length === 0 ? (
                 <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
                   <p className="text-4xl text-gray-300 mb-2">--</p>
-                  <p className="text-gray-400">该轨迹暂无步骤数据</p>
+                  <p className="text-gray-400">{t('atif.noStepData')}</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-[minmax(280px,1fr)_2fr] gap-4 items-start">
+                <div className="grid grid-cols-1 lg:grid-cols-[minmax(240px,1fr)_2fr_minmax(300px,380px)] gap-4 items-start">
                   {/* Left: round list */}
                   <div className="space-y-2 lg:max-h-[calc(100vh-200px)] lg:overflow-y-auto lg:sticky lg:top-4 pr-1">
                     {rounds.map(round => (
@@ -1071,7 +1103,7 @@ export const AtifViewerPage: React.FC = () => {
                     ))}
                   </div>
 
-                  {/* Right: selected round detail */}
+                  {/* Center: selected round detail */}
                   <div>
                     {activeRound ? (
                       <RoundDetail
@@ -1083,9 +1115,20 @@ export const AtifViewerPage: React.FC = () => {
                       />
                     ) : (
                       <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
-                        <p className="text-gray-400">点击左侧轮次查看详情</p>
+                        <p className="text-gray-400">{t('atif.clickRoundToView')}</p>
                       </div>
                     )}
+                  </div>
+
+                  {/* Right: causal attribution panel */}
+                  <div className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+                    <CausalAttributionPanel
+                      sessionId={queryId}
+                      roundIndex={selectedRound ?? undefined}
+                      roundLabel={activeRound?.label}
+                      isPreambleRound={activeRound?.isPreamble ?? false}
+                      idKind={queryType}
+                    />
                   </div>
                 </div>
               )}

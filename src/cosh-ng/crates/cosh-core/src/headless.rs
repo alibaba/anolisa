@@ -1,15 +1,24 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::brokered_profile::{verify_task_only_runtime_tools, BrokeredCapabilityProfileIdentity};
 use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
+#[cfg(test)]
+use crate::config::ApprovalMode;
 use crate::config::CoreConfig;
 use crate::core::{AgentTurnOutcome, CoshCore};
-use crate::extension::{ExtensionManager, RuntimeSnapshotBuilder};
+use crate::extension::{
+    ExtensionManager, RuntimeGeneration, RuntimeSnapshot, RuntimeSnapshotBuilder,
+};
 use crate::metrics::TurnMetrics;
-use crate::protocol::{InputMessage, OutputMessage, ShellControlRequest};
+use crate::protocol::{
+    InputMessage, OutputMessage, ShellControlRequest, BROKERED_CONTROL_PROTOCOL_VERSION,
+    CONTROL_PROTOCOL_VERSION,
+};
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 use crate::sls;
 use crate::tool::SessionWorkspace;
@@ -24,6 +33,8 @@ use auth::request_auth;
 /// the child exits non-zero, and stderr carries the reason. Staying alive on a
 /// transport we cannot write to would only reproduce the #1994 hang.
 const EXIT_CONTROL_TRANSPORT_FAILURE: i32 = 74;
+const EXIT_PROTOCOL_MISMATCH: i32 = 65;
+const EXIT_TURN_FAILURE: i32 = 1;
 
 pub async fn run(
     args: &CliArgs,
@@ -49,27 +60,37 @@ pub async fn run(
     // such as MCP filesystem servers resolve the user's project root, not the
     // cosh-core process cwd. The helper absolutizes relative paths and treats
     // empty --workspace "" as missing.
-    let mut ext_manager = ExtensionManager::new(project_root.clone());
+    let mut ext_manager = if args.execution_profile.is_brokered() {
+        None
+    } else {
+        Some(ExtensionManager::new(project_root.clone()))
+    };
     if !args.bare {
-        ext_manager.refresh();
+        if let Some(manager) = ext_manager.as_mut() {
+            manager.refresh();
+        }
     }
-    let generation_id = crate::extension::state::publish_next_generation(None).unwrap_or_else(
-        |error| {
-            tracing::error!(code = %error.code(), "failed to persist extension generation: {error}");
-            1
-        },
-    );
-    let snapshot = RuntimeSnapshotBuilder::new(
-        &mut ext_manager,
-        &config,
-        project_root.clone(),
-        generation_id,
-    )
-    .with_shell_evidence(args.enable_shell_evidence_tool)
-    .with_skill_loading(!args.bare)
-    .with_tool_selection(args.tools.as_deref())
-    .build()
-    .await;
+    let snapshot = if args.execution_profile.is_brokered() {
+        RuntimeSnapshot::bootstrap(
+            RuntimeGeneration::healthy(0, "gateway-brokered-v1"),
+            Arc::new(crate::tool::ToolRegistry::gateway_brokered_v1()),
+        )
+    } else {
+        let generation_id =
+            crate::extension::state::publish_next_generation(None).unwrap_or_else(|error| {
+                tracing::error!(code = %error.code(), "failed to persist extension generation: {error}");
+                1
+            });
+        let Some(manager) = ext_manager.as_mut() else {
+            unreachable!("legacy profile always constructs its extension manager");
+        };
+        RuntimeSnapshotBuilder::new(manager, &config, project_root.clone(), generation_id)
+            .with_shell_evidence(args.enable_shell_evidence_tool)
+            .with_skill_loading(!args.bare)
+            .with_tool_selection(args.tools.as_deref())
+            .build()
+            .await
+    };
     if let Some(diagnostic) = snapshot
         .diagnostics
         .iter()
@@ -129,12 +150,16 @@ pub async fn run(
         session.record.session_id.to_string(),
         project_root,
         workspace,
+        args.execution_profile,
     );
+    engine.set_session_resumed(session.resumed);
     let live_extension_runtime = crate::registry::LiveExtensionRuntime::new(
         engine.extension_generation.clone(),
-        args.enable_shell_evidence_tool,
-        !args.bare,
-        args.tools.clone(),
+        !args.execution_profile.is_brokered() && args.enable_shell_evidence_tool,
+        !args.execution_profile.is_brokered() && !args.bare,
+        (!args.execution_profile.is_brokered())
+            .then(|| args.tools.clone())
+            .flatten(),
     );
     engine.extra_params = extra_params;
     engine.messages = session.record.messages.clone();
@@ -146,6 +171,7 @@ pub async fn run(
         engine.model = session.record.model.clone();
     }
     if let Some(ref prompt) = args.prompt {
+        engine.use_one_shot_approval_timeout();
         if !session.resumable() {
             engine.emit(
                 &mut writer,
@@ -162,10 +188,10 @@ pub async fn run(
             .handle_user_message(prompt, &mut lines, &mut writer)
             .await;
         let persist_result = session.persist(&engine);
+        let upload_handle;
         match combine_turn_and_persist(turn_result, persist_result) {
             Ok(()) => {
                 let duration = start.elapsed();
-                sls::append_sls_log(&engine.build_sls_record(duration));
                 let result_msg = OutputMessage::Result {
                     subtype: Some("success".to_string()),
                     is_error: false,
@@ -179,28 +205,48 @@ pub async fn run(
                     env_delta: None,
                     duration_ms: Some(duration.as_millis() as u64),
                 };
+                // Emit the result before awaiting telemetry so a stalled
+                // metadata probe does not delay the visible turn result.
                 engine.emit(&mut writer, &result_msg);
+                upload_handle = sls::emit(&engine.build_sls_record(duration)).await;
                 session.recommend_auto_compaction(&mut engine, &mut writer);
             }
             Err(failure) => {
-                sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
                 let err_msg = failure.output_message(&engine.session_id);
+                // Emit the error result before awaiting telemetry so a stalled
+                // metadata probe does not delay the visible turn result.
                 engine.emit(&mut writer, &err_msg);
+                upload_handle = sls::emit(&engine.build_sls_record(start.elapsed())).await;
             }
         }
+        let turn_exit_code = if engine.approval_timed_out() {
+            EXIT_TURN_FAILURE
+        } else {
+            0
+        };
         let transport_failed = engine.control_transport_failure().is_some();
         engine.shutdown_extension_runtime().await;
+        // Await the standalone upload handle with a 1-second grace period
+        // reserved for the POST itself. The region probe (also bounded, see
+        // `metadata_probe_deadline`) already completed before this handle was
+        // returned, so the upload budget is not consumed by discovery. Telemetry
+        // is best-effort and a slow or unreachable network must not delay the
+        // CLI exit.
+        if let Some(handle) = upload_handle {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        }
         return Ok(if transport_failed {
             EXIT_CONTROL_TRANSPORT_FAILURE
         } else {
-            0
+            turn_exit_code
         });
     }
 
     let mut extensions = HeadlessExtensionRuntime {
-        manager: &mut ext_manager,
+        manager: ext_manager.as_mut(),
         live: &live_extension_runtime,
     };
+    let mut protocol = ProtocolState::new(args.execution_profile);
 
     // Replay any lines that were buffered during the auth wait
     for buffered_line in buffered_lines {
@@ -212,6 +258,7 @@ pub async fn run(
             args,
             &mut session,
             &mut extensions,
+            &mut protocol,
         )
         .await
         {
@@ -223,6 +270,10 @@ pub async fn run(
             InputLineResult::InvalidJson => {
                 engine.shutdown_extension_runtime().await;
                 return Ok(1);
+            }
+            InputLineResult::ProtocolMismatch => {
+                engine.shutdown_extension_runtime().await;
+                return Ok(EXIT_PROTOCOL_MISMATCH);
             }
         }
         if engine.control_transport_failure().is_some() {
@@ -245,6 +296,7 @@ pub async fn run(
             args,
             &mut session,
             &mut extensions,
+            &mut protocol,
         )
         .await
         {
@@ -256,6 +308,10 @@ pub async fn run(
             InputLineResult::InvalidJson => {
                 engine.shutdown_extension_runtime().await;
                 return Ok(1);
+            }
+            InputLineResult::ProtocolMismatch => {
+                engine.shutdown_extension_runtime().await;
+                return Ok(EXIT_PROTOCOL_MISMATCH);
             }
         }
         // Checked after every line, not only after a turn: once the transport
@@ -273,6 +329,65 @@ enum InputLineResult {
     Continue,
     Shutdown,
     InvalidJson,
+    ProtocolMismatch,
+}
+
+struct ProtocolState {
+    profile: crate::cli::ExecutionProfile,
+    initialized: bool,
+}
+
+impl ProtocolState {
+    fn new(profile: crate::cli::ExecutionProfile) -> Self {
+        Self {
+            profile,
+            initialized: false,
+        }
+    }
+}
+
+fn negotiate_profile(
+    profile: crate::cli::ExecutionProfile,
+    protocol_version: Option<u32>,
+    requested_profile: Option<&str>,
+    requested_capability_profile: Option<&BrokeredCapabilityProfileIdentity>,
+    runtime_tools: &[String],
+) -> Result<(), String> {
+    if profile.is_brokered() {
+        if protocol_version != Some(BROKERED_CONTROL_PROTOCOL_VERSION) {
+            return Err(format!(
+                "gateway brokered profile requires exact control protocol version {BROKERED_CONTROL_PROTOCOL_VERSION}"
+            ));
+        }
+        if requested_profile != Some(profile.wire_name()) {
+            return Err(format!(
+                "gateway brokered profile requires exact execution_profile {}",
+                profile.wire_name()
+            ));
+        }
+        let requested_capability_profile = requested_capability_profile.ok_or_else(|| {
+            "gateway brokered profile requires a capability_profile identity".to_string()
+        })?;
+        requested_capability_profile
+            .verify_task_only_v1()
+            .map_err(str::to_owned)?;
+        verify_task_only_runtime_tools(runtime_tools).map_err(str::to_owned)?;
+        return Ok(());
+    }
+
+    if protocol_version.is_some_and(|version| version != CONTROL_PROTOCOL_VERSION) {
+        return Err(format!(
+            "unsupported control protocol version {}; expected exact version {CONTROL_PROTOCOL_VERSION}",
+            protocol_version.unwrap_or_default()
+        ));
+    }
+    if requested_profile.is_some_and(|requested| requested != profile.wire_name()) {
+        return Err(format!(
+            "legacy launch profile cannot acknowledge execution_profile {}",
+            requested_profile.unwrap_or_default()
+        ));
+    }
+    Ok(())
 }
 
 /// Processes a single JSONL input line.
@@ -284,6 +399,7 @@ async fn process_input_line<W, R>(
     args: &CliArgs,
     session: &mut SessionRuntime,
     extensions: &mut HeadlessExtensionRuntime<'_>,
+    protocol: &mut ProtocolState,
 ) -> InputLineResult
 where
     W: io::Write,
@@ -306,19 +422,21 @@ where
         }
     };
 
-    match extensions
-        .live
-        .refresh_linked_runtime(&engine.config, extensions.manager)
-        .await
-    {
-        Ok(true) => {
-            engine.drain_retired_extension_snapshots().await;
-            if let Err(error) = extensions.live.persist_current_generation() {
-                tracing::error!("failed to persist linked extension generation: {error}");
+    if let Some(manager) = extensions.manager.as_deref_mut() {
+        match extensions
+            .live
+            .refresh_linked_runtime(&engine.config, manager)
+            .await
+        {
+            Ok(true) => {
+                engine.drain_retired_extension_snapshots().await;
+                if let Err(error) = extensions.live.persist_current_generation() {
+                    tracing::error!("failed to persist linked extension generation: {error}");
+                }
             }
+            Ok(false) => {}
+            Err(error) => tracing::warn!("linked extension reload deferred: {error}"),
         }
-        Ok(false) => {}
-        Err(error) => tracing::warn!("linked extension reload deferred: {error}"),
     }
 
     match msg {
@@ -326,18 +444,73 @@ where
             request_id,
             request,
         } => match request {
-            ShellControlRequest::Initialize { fire_session_start } => {
+            ShellControlRequest::Initialize {
+                fire_session_start,
+                protocol_version,
+                capabilities,
+                execution_profile,
+                capability_profile,
+            } => {
+                engine.client_capabilities = capabilities;
+                let runtime_tools = engine.tool_names();
+                let negotiation = negotiate_profile(
+                    protocol.profile,
+                    protocol_version,
+                    execution_profile.as_deref(),
+                    capability_profile.as_ref(),
+                    &runtime_tools,
+                );
+                let expected_capability_profile = protocol
+                    .profile
+                    .is_brokered()
+                    .then(BrokeredCapabilityProfileIdentity::task_only_v1);
+                if let Err(error) = negotiation {
+                    let expected_version = if protocol.profile.is_brokered() {
+                        BROKERED_CONTROL_PROTOCOL_VERSION
+                    } else {
+                        CONTROL_PROTOCOL_VERSION
+                    };
+                    engine.emit(
+                        writer,
+                        &OutputMessage::initialize_negotiation_error(
+                            &request_id,
+                            expected_version,
+                            protocol
+                                .profile
+                                .is_brokered()
+                                .then(|| protocol.profile.wire_name()),
+                            expected_capability_profile,
+                            error,
+                        ),
+                    );
+                    return InputLineResult::ProtocolMismatch;
+                }
+                protocol.initialized = true;
                 engine.emit(
                     writer,
-                    &OutputMessage::initialize_success(
+                    &OutputMessage::initialize_success_for_profile(
                         &request_id,
-                        args.enable_shell_evidence_tool,
+                        if protocol.profile.is_brokered() {
+                            BROKERED_CONTROL_PROTOCOL_VERSION
+                        } else {
+                            CONTROL_PROTOCOL_VERSION
+                        },
+                        protocol
+                            .profile
+                            .is_brokered()
+                            .then(|| protocol.profile.wire_name()),
+                        expected_capability_profile,
+                        protocol
+                            .profile
+                            .is_brokered()
+                            .then(|| runtime_tools.clone()),
+                        !protocol.profile.is_brokered() && args.enable_shell_evidence_tool,
                     ),
                 );
                 let init_msg = OutputMessage::system_init(
                     &engine.session_id,
                     &engine.model,
-                    engine.tool_names(),
+                    runtime_tools,
                     session.resumable(),
                 );
                 engine.emit(writer, &init_msg);
@@ -345,7 +518,9 @@ where
                 // Only the shell-owned transport may suppress SessionStart.
                 // Generic headless clients keep the historical lifecycle even
                 // if they send the optional control field themselves.
-                if fire_session_start || !args.cosh_shell_transport {
+                if !protocol.profile.is_brokered()
+                    && (fire_session_start || !args.cosh_shell_transport)
+                {
                     // ─── Hook: SessionStart ───
                     let cwd_str = engine.cwd().to_string_lossy().to_string();
                     let ss_result = engine
@@ -384,6 +559,17 @@ where
             }
             ShellControlRequest::Shutdown => return InputLineResult::Shutdown,
             ShellControlRequest::SwitchModel { model } => {
+                if protocol.profile.is_brokered() {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            "switch_model is disabled by the gateway brokered profile",
+                            Some("BrokeredProfileViolation"),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                }
                 engine.model = model.clone();
                 engine.emit(
                     writer,
@@ -391,6 +577,17 @@ where
                 );
             }
             ShellControlRequest::ReloadConfig => {
+                if protocol.profile.is_brokered() {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            "reload_config is disabled by the gateway brokered profile",
+                            Some("BrokeredProfileViolation"),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                }
                 engine.config =
                     load_runtime_config(args, std::path::Path::new(session.workspace_scope()));
                 engine.emit(writer, &OutputMessage::system_status("config_reloaded"));
@@ -399,6 +596,17 @@ where
                 approval_mode,
                 allowed_tools: _,
             } => {
+                if protocol.profile.is_brokered() {
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error_with_code(
+                            &engine.session_id,
+                            "config_override is disabled by the gateway brokered profile",
+                            Some("BrokeredProfileViolation"),
+                        ),
+                    );
+                    return InputLineResult::Continue;
+                }
                 if let Some(mode) = approval_mode {
                     engine.config.agent.approval_mode = mode;
                 }
@@ -415,6 +623,17 @@ where
             shell_context,
             ..
         } => {
+            if protocol.profile.is_brokered() && !protocol.initialized {
+                engine.emit(
+                    writer,
+                    &OutputMessage::result_error_with_code(
+                        &engine.session_id,
+                        "gateway brokered profile requires a successful v2 initialize before user input",
+                        Some("BrokeredProfileNotInitialized"),
+                    ),
+                );
+                return InputLineResult::ProtocolMismatch;
+            }
             if let Some(sid) = session_id {
                 if !sid.is_empty() && sid != "default" && sid != engine.session_id {
                     let error = format!(
@@ -447,7 +666,6 @@ where
             match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
                     let duration = start.elapsed();
-                    sls::append_sls_log(&engine.build_sls_record(duration));
                     let result_msg = OutputMessage::Result {
                         subtype: Some("success".to_string()),
                         is_error: false,
@@ -461,7 +679,11 @@ where
                         env_delta: None,
                         duration_ms: Some(duration.as_millis() as u64),
                     };
+                    // Emit the result before awaiting telemetry so a stalled
+                    // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &result_msg);
+                    // Interactive mode: the process stays alive, so fire-and-forget is safe.
+                    let _ = sls::emit(&engine.build_sls_record(duration)).await;
                     // Idle boundary: the Agent run finished and its transcript
                     // was persisted, so background compaction is safe now. The
                     // shell owns the compactor process so its prompt returns
@@ -469,14 +691,18 @@ where
                     session.recommend_auto_compaction(engine, writer);
                 }
                 Err(failure) => {
-                    sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
                     let err_msg = failure.output_message(&engine.session_id);
+                    // Emit the error result before awaiting telemetry so a stalled
+                    // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &err_msg);
+                    let _ = sls::emit(&engine.build_sls_record(start.elapsed())).await;
                 }
             }
             engine.drain_retired_extension_snapshots().await;
-            if let Err(error) = extensions.live.persist_current_generation() {
-                tracing::error!("failed to persist activated extension generation: {error}");
+            if extensions.manager.is_some() {
+                if let Err(error) = extensions.live.persist_current_generation() {
+                    tracing::error!("failed to persist activated extension generation: {error}");
+                }
             }
         }
 
@@ -490,13 +716,28 @@ where
             action,
             params,
         } => {
+            let Some(manager) = extensions.manager.as_deref_mut() else {
+                engine.emit(
+                    writer,
+                    &OutputMessage::RegistryResponse {
+                        request_id,
+                        success: false,
+                        data: None,
+                        error: Some(
+                            "registry mutation is disabled by the gateway brokered profile"
+                                .to_string(),
+                        ),
+                    },
+                );
+                return InputLineResult::Continue;
+            };
             let response = crate::registry::handle_registry_request(
                 &request_id,
                 &domain,
                 &action,
                 &params,
                 &mut engine.config,
-                extensions.manager,
+                manager,
                 None,
                 Some(extensions.live),
             )
@@ -509,7 +750,7 @@ where
 }
 
 struct HeadlessExtensionRuntime<'a> {
-    manager: &'a mut ExtensionManager,
+    manager: Option<&'a mut ExtensionManager>,
     live: &'a crate::registry::LiveExtensionRuntime,
 }
 
@@ -760,7 +1001,7 @@ fn apply_cli_overrides(args: &CliArgs, config: &mut CoreConfig) {
         config.ai.active_model = Some(model.clone());
     }
     if let Some(ref mode) = args.approval_mode {
-        config.agent.approval_mode = mode.clone();
+        config.agent.approval_mode = *mode;
     }
     if let Some(ref tools) = args.allowed_tools {
         config.agent.allowed_tools = tools
@@ -789,6 +1030,88 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[test]
+    fn brokered_profile_requires_exact_v3_profile_and_inventory() {
+        let profile = crate::cli::ExecutionProfile::GatewayBrokeredV1;
+        let capability_profile = BrokeredCapabilityProfileIdentity::task_only_v1();
+        let runtime_tools = vec!["ask_user_question".to_string()];
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &runtime_tools,
+        )
+        .is_ok());
+        assert!(negotiate_profile(
+            profile,
+            None,
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &runtime_tools,
+        )
+        .is_err());
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            None,
+            &runtime_tools,
+        )
+        .is_err());
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some("legacy"),
+            Some(&capability_profile),
+            &runtime_tools,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn brokered_profile_rejects_digest_and_inventory_drift() {
+        let profile = crate::cli::ExecutionProfile::GatewayBrokeredV1;
+        let mut drifted_identity = BrokeredCapabilityProfileIdentity::task_only_v1();
+        drifted_identity.manifest_digest = "0".repeat(64);
+
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&drifted_identity),
+            &["ask_user_question".to_string()],
+        )
+        .unwrap_err()
+        .contains("manifest digest"));
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&BrokeredCapabilityProfileIdentity::task_only_v1()),
+            &["ask_user_question".to_string(), "shell".to_string()],
+        )
+        .unwrap_err()
+        .contains("tool inventory"));
+    }
+
+    #[test]
+    fn legacy_profile_keeps_unversioned_and_v1_compatibility() {
+        let profile = crate::cli::ExecutionProfile::Legacy;
+        assert!(negotiate_profile(profile, None, None, None, &[]).is_ok());
+        assert!(
+            negotiate_profile(profile, Some(CONTROL_PROTOCOL_VERSION), None, None, &[],).is_ok()
+        );
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some("gateway_brokered_v1"),
+            None,
+            &[],
+        )
+        .is_err());
+    }
 
     #[test]
     fn typed_max_turn_outcome_sets_structured_result_fields() {
@@ -828,7 +1151,7 @@ mod tests {
 
         let config = load_runtime_config(&args, workspace.path());
 
-        assert_ne!(config.agent.approval_mode, "project-only-mode");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
         assert!(!config.session.auto_persist);
     }
 }

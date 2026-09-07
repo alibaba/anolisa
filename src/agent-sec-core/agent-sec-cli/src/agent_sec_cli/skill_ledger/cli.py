@@ -27,13 +27,17 @@ app = typer.Typer(
         "  5. certify   Import external findings and sign the manifest\n"
         "  6. status    Show overall ledger health overview\n"
         "  7. audit     Deep-verify the full version history\n\n"
-        "Integrity statuses:\n\n"
+        "Integrity states:\n\n"
         "  pass      Files unchanged, signature valid, scan clean\n"
         "  none      No ledger artifacts, or verified scan status is none\n"
         "  drifted   Skill files changed since last certification\n"
         "  warn      Scan found low-risk issues\n"
         "  deny      Scan found high-risk issues\n"
-        "  tampered  Ledger metadata is incomplete or fails authenticity checks"
+        "  tampered  Ledger metadata is incomplete or fails authenticity checks\n\n"
+        "Other command outcomes:\n\n"
+        "  unmanaged Skill directory is not covered by any managed skill\n"
+        "            directory, or ledger state is not writable\n"
+        "  error     Check could not be completed for the skill"
     ),
     add_completion=True,
 )
@@ -186,6 +190,10 @@ def cmd_check(
       warn      Signature valid, but scan found low-risk issues
       deny      Signature valid, but scan found high-risk issues
       tampered  Ledger metadata is incomplete or fails authenticity checks
+      error     Check could not run for the skill (e.g. missing SKILL.md);
+                single checks print a JSON object with status and error
+                keys and exit 1, while --all records it as a per-skill
+                entry and checks the rest
 
     Use --all to check every registered skill and receive a JSON array of
     enriched results. Skill discovery uses built-in default directories plus
@@ -559,40 +567,21 @@ def cmd_export(
 
 
 # ---------------------------------------------------------------------------
-# set-policy (stub)
-# ---------------------------------------------------------------------------
-
-
-@app.command("set-policy", hidden=True)
-def cmd_set_policy(
-    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
-    policy: str = typer.Option(
-        ..., "--policy", help="Execution policy to apply: allow | block | warning"
-    ),
-) -> None:
-    """Set a skill's execution policy (coming soon).
-
-    Will control whether a skill is allowed to run, blocked, or triggers a
-    warning based on its security state. Not yet implemented.
-    """
-    typer.echo("set-policy: this feature is coming soon.")
-    raise typer.Exit(code=0)
-
-
-# ---------------------------------------------------------------------------
-# rotate-keys (stub)
+# rotate-keys (reserved stub)
 # ---------------------------------------------------------------------------
 
 
 @app.command("rotate-keys", hidden=True)
 def cmd_rotate_keys() -> None:
-    """Rotate the signing key pair (coming soon).
+    """Report that signing-key rotation is not implemented.
 
-    Will archive the current key pair and generate a new one, allowing
-    continued verification of manifests signed with the old keys.
+    This reserved command makes no key changes and exits non-zero when invoked.
     """
-    typer.echo("rotate-keys: this feature is coming soon.")
-    raise typer.Exit(code=0)
+    typer.echo(
+        "Error: rotate-keys is not implemented; no keys were changed.",
+        err=True,
+    )
+    raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

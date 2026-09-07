@@ -387,8 +387,11 @@ Kubernetes 1.29+、`/dev/fuse`，并允许 Sidecar 使用特权模式。
 
 ```bash
 cd src/skillfs
-IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
-docker build -f container/Dockerfile -t "$IMAGE" .
+IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)
+DOCKERFILE=container/Dockerfile
+# Alibaba Cloud Linux 4 使用 container/Dockerfile.alinux4。
+docker build -f "$DOCKERFILE" -t "$IMAGE" .
+docker run --rm "$IMAGE" skillfs --version
 docker push "$IMAGE"
 kubectl apply -f deploy/kubernetes/00-namespace.yaml
 kubectl apply -f deploy/kubernetes/10-example-configmap.yaml
@@ -464,12 +467,23 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 - `--notify-socket <PATH>` 将 debounce 后的 skill mutation 通知发给外部 daemon。
   Notify v2 使用 canonical 路径和完整 flat/Hermes `skillId` 标识 Skill；
   live/backing 路径通过独立 resolver 解析。in-place notify mount，以及任何配置了
-  `--ledger-backing-root` 的 notify mount，都要求配置 `--trusted-peer-exe`，
-  确保 daemon 访问 source 前 authenticated resolver 已可用。
+  `--ledger-backing-root` 的 notify mount，都要求配置 authenticated control-peer
+  mode，确保 daemon 访问 source 前 resolver 已可用。
+  `--notify-auth-key-file <PATH>` 可以为实现拟议合同的容器 peer 启用双向 HMAC
+  认证。内部 notify v2 业务 payload 保持不变，request 和 acknowledgement 由
+  session-bound tag 保护。Authenticated notify 还要求 owner 匹配的 socket 位于
+  owner 匹配且不给 group/other 任何权限的目录下，目录推荐使用 `0700`；socket
+  同样不能给 group/other 任何权限。首版 profile 要求 SkillFS 与 sec-core 使用相同
+  effective UID。本次 SkillFS 改动不实现 peer-side sec-core 支持，该工作仍由 #2439
+  跟踪。
 - `--activation-events-log <PATH>` 将 activation protocol events 写成 JSONL。
 - `--activation-reload-mode poll` 在 notify events 后重读 activation state，
   无需 remount 即可更新 resolver。
-- startup reconcile 会在挂载启动后对已知 skills 发送 best-effort 通知。
+- startup reconcile 会通过 notify worker 为已知 skill 入队，并在暂时性投递失败时
+  重试直至 daemon 确认，因此 SkillFS 先于 daemon 启动时仍能自行收敛。不可重试的
+  错误会被报告，认证结果不确定时则使用所有 skill 共享的有界 endpoint 预算，避免
+  重试风暴。重试与可观测性细节见
+  [Reconcile Delivery Durability](docs/security/runtime-activation-implementation-plan.md#reconcile-delivery-durability)。
 - `--ledger-backing-root <PATH>` 为 in-place activation/notify mount 提供
   daemon 可见的 source 视图，因为公开 source path 已经是 FUSE over-mount。
   推荐使用 `/run/user/$UID/skillfs-ledger/...` 或
@@ -481,17 +495,18 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
   process-name spoofing 风险。
 - `--trusted-writer <NAME>` 是已废弃的兼容门禁，基于 Linux TGID `comm`；
   进程名可伪造，不应用作生产可信依据。
-- `--control-socket <PATH>` 配合 `--trusted-peer-exe <PATH>` 启动可信 Unix
-  socket control plane。可信 peer 可通过 `meta.writeActivation`、
-  `meta.setActivationXattr` 等方法写 activation JSON 或 xattr。packaged Skill
-  Ledger worker 通过 `sys.executable` 启动，因此其 executable 是
-  `/usr/bin/python3.11`，不是 `skill-ledger` launcher。
+- `--control-socket <PATH>` 在恰好配置一种 peer mode 时启动可信 Unix socket
+  control plane。`--trusted-peer-exe <PATH>` 保持宿主机 executable 认证；
+  `--trusted-peer-key-file <PATH>` 启用显式容器 HMAC profile，以 session-bound tag
+  保护 control request/response，并要求显式 socket path。可信 peer 可通过
+  `meta.writeActivation`、`meta.setActivationXattr` 等方法写 activation JSON 或
+  xattr。
 - control plane 是 opt-in 且需认证的。endpoint 按优先级解析：CLI
   `--control-socket` > 配置 `[control_socket].path` > 默认的每用户 endpoint
-  `/run/user/<uid>/skillfs/control.sock`。仅配置 trusted peer 而未给显式
-  path 时使用默认 endpoint；仅给显式 path 而未配置 trusted peer 为配置错误；
-  两者都没有则 control plane 保持关闭。默认 endpoint 绝不 fallback 到 `/tmp`
-  或 `/var/tmp`，第二个实例也绝不 unlink 处于活跃状态的 endpoint。
+  `/run/user/<uid>/skillfs/control.sock`。executable peer 未给显式 path 时使用默认
+  endpoint；HMAC mode 始终要求显式 path；仅给显式 path 而未配置 peer mode 为配置
+  错误。默认 endpoint 绝不 fallback 到 `/tmp` 或 `/var/tmp`，第二个实例也绝不
+  unlink 处于活跃状态的 endpoint。
 - `skill.resolveLiveSource` 是只读查询，将调用方给定的 canonical Skill 目录
   映射到物理 live/backing source。返回 `managed=true`（含推导出的
   `skillId`、`relativeSkillDir`、`liveSkillDir` 以及实际 live 目录的

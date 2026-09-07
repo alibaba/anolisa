@@ -4,7 +4,159 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.0] — Unreleased
+## [Unreleased]
+
+## [0.23.0] — 2026-09-02
+
+### Added
+- The `/hooks` slash panel now lists individual shell hooks with their source and trust state, matching how agent hooks are displayed (#2999)
+
+### Changed
+- cosh-ng no longer depends on the system OpenSSL runtime: HTTPS now runs on a pure-Rust TLS stack that still trusts the host OS certificate store, so Linux installs no longer require the openssl-libs / openssl1.1 system packages and source builds succeed on macOS without OpenSSL headers (#3030)
+
+### Fixed
+- Secret redaction now respects word boundaries: ordinary text such as `sk-hynix` or `npm_package_version` stays visible in local evidence, while short credentials next to CJK text and structured Cookie/Bearer/JWT forms are consistently kept out of native shell history and redacted from journals, no matter which shell or entry path produced the output (#2996)
+
+## [0.22.3] — 2026-08-31
+
+### Fixed
+- A damaged or unterminated terminal control sequence no longer hides subsequent terminal output or blocks command-boundary detection: oversized fragments are discarded and parsing resumes at the next valid marker (#2967)
+- Installing the prebuilt cosh-ng package now works on newer distributions such as Ubuntu 24.04: the portable artifact bundles its own OpenSSL instead of requiring the OpenSSL 1.1 runtime that newer systems no longer ship (#2982)
+- Natural-language prompts that are deliberately kept out of Bash history are now recalled and re-submitted with their exact original text instead of falling through to the shell or disappearing from history recall; leftover fragments from wrapped hint lines no longer linger on the next prompt (#2983)
+- An unknown command entered right after a successful one still shows its failure insight: the command-not-found event is now attributed to the current input instead of being dropped (#2983)
+- Prompt lines keep exactly one assisted marker after redraws caused by agent interactions, cancellations, or terminal width changes, instead of duplicating or dropping it (#2983)
+
+## [0.22.2] — 2026-08-28
+
+### Fixed
+- Approved Bash tool commands handed off to the native shell now display the approved command itself instead of the internal wrapper line, including on Bash 4.4 terminals where fragmented redraws previously leaked that wrapper; execution, approval, history, and exit status are unchanged (#2949)
+- Slash commands entered directly, recalled with Up-arrow, or typed on narrow terminals now appear exactly once in the terminal before their result panel again, while the internal guard line stays absent from terminal output, history, and logs; sensitive slash input is no longer expanded into Bash xtrace output (#2955)
+- Natural-language prompts containing file paths that are routed to the Agent remain visible as a request notice even when the model's first response event is a tool call, so the original request no longer disappears from the screen; sensitive input is redacted as a whole field (#2953)
+- An external interrupt signal sent to the shell process no longer leaves the parent terminal in raw mode: terminal settings are restored while the signal exit status is still reported to callers (#2968)
+
+## [0.22.1] — 2026-08-28
+
+### Fixed
+- The internal `builtin true __cosh_slash_guard__` sentinel line no longer appears in the terminal after an exact slash command in native Bash, including with verbose echo (`set -v`) enabled; slash routing, command execution, and history recall behave as before (#2943)
+- Input that arrives pasted or piped in one batch together with a running command is no longer misrouted: slash-looking lines inside such a batch are delivered to the shell byte-for-byte instead of being intercepted as slash commands, keeping scripted pipelines intact (#2938)
+- Command tracking and working-directory reporting keep working in directories whose names contain control characters, instead of dropping shell events (#2938)
+- Headless one-shot runs with a prompt argument no longer hang for hours when an approval request goes unanswered: the request times out after 30 seconds and the run exits with a clear timeout error and a non-zero exit code (#2941)
+
+## [0.22.0] — 2026-08-27
+
+### Added
+- Enhanced Assisted mode no longer relies on a global Bash DEBUG trap or forced tracing options; user-defined traps, shell options, and prompt hooks are preserved, and slash-command handoffs keep normal interactive shell semantics (#2832)
+- System extensions installed outside the package-managed root (e.g. under `/usr/local/share/anolisa/extensions`) are now discovered automatically, so raw-installed sec-core and tokenless extensions load without a separate enable step; conflicting duplicate system installs stay disabled unless an exact source selection is persisted (#2909)
+
+### Fixed
+- With xtrace enabled, cosh's internal hook activity no longer appears in the trace, so dynamic marker, working-directory, and environment data are not exposed; user commands and user-defined hooks keep producing trace output as before (#2914)
+- Slash-bearing Han prompts such as `打开./missing/SKILL.md` are routed to the Agent again instead of failing as a shell path, and the Agent now receives the correct prompt-time working directory, including after `cd` (#2918)
+- Slash commands entered in the interactive shell are now persisted in Bash history so Up-arrow recall retrieves them correctly instead of an older command (#2917)
+
+## [0.21.1] — 2026-08-26
+
+### Fixed
+- Registry slash commands such as `/skills list`, `/hooks`, and `/extensions` now discover project-level resources when no Agent turn has run yet and the process working directory differs from the shell cwd, e.g. after `cd` or daemon-style startup (#2686)
+- Shell commands that produce very large output no longer exhaust memory: output is capped at 32 MB, oversized commands are stopped automatically, and the Agent sees a truncation notice with the start of the output instead of a bare error; when a hook's output exceeds the cap, the affected command stays blocked (safe side) instead of the hook's decision being silently ignored (#2880)
+- Gateway tasks now start correctly on hosts running systemd 255, where the packaged service previously failed at startup because one of its security hardening settings is incompatible with that systemd version; workspace isolation is unchanged: task files stay confined to the workspace, host files remain read-only, and daemon state stays private to the service (#2843)
+
+## [0.21.0] — 2026-08-25
+
+### Added
+- Add Native shell integration (`shell.integration = "native"`) for a hook-free shell and Enhanced Shell-only mode toggled with `Shift+Tab`, while keeping Enhanced Assisted as the default with visible prompt markers; slash commands, tool calls, permissions, and system notices now use distinct `/`, `*`, `!`, and `·` card prefixes so output ownership is visible at a glance (#2759)
+
+## [0.20.0] — 2026-08-24
+
+### Added
+- Report anonymous operational telemetry directly to SLS when cosh-ng runs without the anolisa unified uploader; no user prompts, code, or conversation content is collected; opt out at any time by creating `~/.copilot-shell/telemetry_disabled` (per-user) or `/etc/anolisa/.telemetry_disabled` (system-wide) (#2715)
+- Bind the local Gateway task profile to a closed `task-only-v1` manifest so mismatched Core/Gateway pairs are rejected before task input or side effects (#2728)
+
+### Fixed
+- Restore `/usr/bin/cosh raw <adapter>` to launch the TUI instead of failing with exit 127 after the transparency classifier misrouted the `raw` subcommand to bash (#2743)
+- Route Han-leading natural-language prompts containing simple parameter references such as `$HOME` to the Agent, while keeping executable shell structures native so an intercept cannot alter adjacent command execution (#2746)
+- Preserve the DEBUG trap across prompts on bash 4.2.x so command audit markers keep emitting after the first command (#2757)
+
+## [0.19.0] — 2026-08-21
+
+### Added
+- Add a local gateway control plane with durable Task scheduling, runtime leases, and crash recovery, exposed through `cosh agent task ...` commands (#2603)
+- Add direct ACP entrypoints `cosh agent doctor` and `cosh agent run` to verify and drive locally installed ACP adapters from outside the interactive Shell, with a once-only permission flow that prompts only on the local controlling terminal and records redacted evidence (#2603)
+
+### Fixed
+- Detect `system()` calls in awk programs even when whitespace or line continuations appear before the opening parenthesis (#2655)
+- Map missing precmd status markers to -1 instead of fabricating exit 0, preserving ledger integrity for interrupted or forged markers (#2709)
+
+## [0.18.0] — 2026-08-20
+
+### Added
+- Cap in-memory transcript growth in long-running interactive sessions by keeping bounded working windows while spooling full terminal output to session files (#2682)
+- Enable MCP tools that require long-running task augmentation, returning actionable errors when tasks fail or time out (#2645)
+
+### Changed
+- **BREAKING**: `/usr/bin/cosh` now forwards non-TUI invocations directly to the configured shell; `cosh --version`, `cosh --help`, and `cosh <script>` outside an interactive terminal behave like the shell rather than opening the cosh TUI (#2625)
+
+### Fixed
+- In trust approval mode under the cosh-core driver, hook-blocked shell commands can no longer execute through the staging grace window (#2125)
+- Approval decisions are now resolved correctly when an external component has already logged the initial request (#2402)
+- Approving a hook-rewritten shell command no longer fails with "could not route this approval" when another request in the same batch was refused (#2667)
+- Audit logs now include a paired cancellation resolution when a pending turn extension is superseded, instead of leaving an orphaned request entry (#2695)
+
+## [0.17.2] — 2026-08-19
+
+### Fixed
+- Cap `run_command` output at 32 MB to prevent out-of-memory kills from runaway commands such as `dd if=/dev/zero` or `yes`; when stdout or stderr exceeds the limit, the process group is killed and an `OutputTooLarge` error is returned instead of growing unbounded (#2405)
+- Make RPM `%post` /etc/shells registration idempotent by normalizing content and probing before appending, and add a `%preun` scriptlet that fails closed when users still reference `/usr/bin/cosh` as their login shell, preventing dangling shells after `rpm -e cosh-ng` (#2599)
+
+## [0.17.1] — 2026-08-18
+
+### Fixed
+- Reduce interactive echo latency from p50 20 ms to sub-millisecond and eliminate high-frequency idle CPU polling in long-running sessions by making the raw relay and SIGINT paths event-driven (#2622)
+- Keep allowed commands executing when best-effort audit storage writes fail (#2631)
+- Allow approved pipelines whose single-quoted arguments contain quoted newlines, such as multi-line jq or awk scripts (#2638)
+
+## [0.17.0] — 2026-08-17
+
+### Added
+- Interactive disambiguation panel for `/hooks enable|disable <id>` when the hook id exists in both shell and agent layers, letting users choose to toggle the shell hook, the agent hook, or both (#2400)
+
+### Changed
+- Skip redundant history processing during idle polling so long-running interactive sessions no longer repeat history-sized work while idle (#2546)
+
+### Fixed
+- Reject hook output with an explicit `"decision": null` as invalid hook output: the tool call is blocked by default, or passes through with a recorded `hook_failure` notice when the hook sets `fail_open = true`; emitting `{}` remains valid pass-through (#2529)
+- Report `cosh pkg install/remove --dry-run` success on dnf-based systems instead of returning a backend error for installable or removable packages (#2605)
+
+## [0.16.1] — 2026-08-14
+
+### Fixed
+- Improve CJK text wrapping so East Asian characters fill the full terminal line width and punctuation stays attached to adjacent text (#2446)
+- Validate credentials, endpoints, and models before persisting `/auth` changes, keeping the auth panel open on failure (#2458)
+- Treat empty successful output from extension hooks as valid instead of fail-closed (#2506)
+
+## [0.16.0] — 2026-08-13
+
+### Added
+- Raw packaging interface for deterministic cosh-ng archives with cross-target build validation and portable macOS launchers (#2411)
+
+### Changed
+- Converge cosh-core and cosh-shell runtime paths, unify Claude and Qwen provider drivers, and add explicit shell/core protocol v1 negotiation with legacy fallback (#2403)
+- Remove deprecated `/draft` slash command alias in favor of `/agent` (#2441)
+
+### Fixed
+- Use monotonic clock for input-wait timing to avoid clock-skew stalls (#2176)
+- Fix panel-family hint card rendering (#2196)
+- Decode SSE events per spec and fail loud on malformed input (#2209)
+- Confine and guard sensitive file writes across core (#2211, #2378)
+- Pass raw prompt text through core and shell without normalization (#2256)
+- Fix review marker activation on Enter key (#2274)
+- Narrow interactive-cancel detection and pair ledger finish after correlated intercept (#2352, #2353)
+- Send raw-mode disable to stdout on drop to prevent terminal state leaks (#2357)
+- Harden hooks across core and shell (#2359)
+- Avoid predictable temporary file paths (#2361)
+- Enforce byte cap in line truncation branch (#2370)
+- List all slash hint matches instead of first-only (#2410)
+- Map missing failed exit code to -1 sentinel for consistent error reporting (#2412)
+- Expose runtime context in core for consistent state access (#2428)
 
 ## [0.15.0] — 2026-08-09
 

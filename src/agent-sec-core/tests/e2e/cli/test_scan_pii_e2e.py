@@ -93,6 +93,50 @@ def test_scan_pii_text_json(mode: str, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("mode", _MODES)
+def test_scan_pii_filters_email_and_jwt_false_positives(
+    mode: str, tmp_path: Path
+) -> None:
+    text = (
+        "Call resolved.auth_source.as_deref(); then connect to "
+        "ssh://deploy@securecorp.cn/home/deploy or contact alice@example.com"
+    )
+    default_result = _run_cli(
+        mode,
+        "scan-pii",
+        "--text",
+        text,
+        "--format",
+        "json",
+        data_dir=tmp_path / mode / "filtered-default",
+    )
+    default_data = _load_json(default_result)
+
+    assert default_data["verdict"] == "pass"
+    assert default_data["findings"] == []
+
+    detailed_result = _run_cli(
+        mode,
+        "scan-pii",
+        "--text",
+        text,
+        "--format",
+        "json",
+        "--include-low-confidence",
+        data_dir=tmp_path / mode / "filtered-detailed",
+    )
+    detailed_data = _load_json(detailed_result)
+
+    assert detailed_data["verdict"] == "warn"
+    assert detailed_data["summary"]["by_type"] == {"email": 2}
+    assert {
+        finding["metadata"]["context"] for finding in detailed_data["findings"]
+    } == {
+        "remote_identity",
+        "reserved_domain",
+    }
+
+
+@pytest.mark.parametrize("mode", _MODES)
 def test_scan_pii_stdin_json(mode: str, tmp_path: Path) -> None:
     result = _run_cli(
         mode,

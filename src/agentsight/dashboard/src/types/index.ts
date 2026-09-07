@@ -166,31 +166,44 @@ export interface TraceData {
 
 // ==================== Agent Health Types ====================
 
+export interface AgentActivitySummary {
+  agent_name: string;
+  last_seen_ns: number;
+  genai_calls: number;
+  genai_tokens: number;
+  trajectory_steps: number;
+  trajectory_tokens: number;
+  source: 'genai_events' | 'trajectories' | 'genai_events+trajectories';
+}
+
+export interface AgentHealthResponse {
+  agents: AgentActivitySummary[];
+  warnings?: string[];
+}
+
 export interface AgentHealthStatus {
   pid: number;
   agent_name: string;
   category: string;
   exe_path: string;
+  /** Agent 进程当前工作目录，用作安全保护默认范围 */
+  workspace_path?: string;
   ports: number[];
   status: 'healthy' | 'unhealthy' | 'hung' | 'unknown' | 'no_port' | 'offline';
   last_check_time: number;
   latency_ms: number | null;
   error_message: string | null;
-  /** 用于重启的完整命令行，undefined 表示不支持重启 */
   restart_cmd?: string[];
-  /** 进入 Offline 状态的时刻（Unix ms）。仅 offline 项有值。 */
   offline_since?: number;
-  /** 进程角色 */
   role: 'gateway' | 'client' | 'worker';
-  /** 父进程 PID */
   parent_pid?: number;
-  /** 进程退出时是否关联了 agent_crash 事件（有未完成的 LLM 调用被中断） */
   has_crash?: boolean;
 }
 
-export interface AgentHealthResponse {
+export interface AgentProcessHealthResponse {
   agents: AgentHealthStatus[];
   last_scan_time: number;
+  filtered_count: number;
 }
 
 

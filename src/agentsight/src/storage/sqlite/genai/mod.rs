@@ -11,6 +11,8 @@
 
 mod events;
 mod pending;
+mod resource;
+mod resource_timeline;
 mod schema;
 mod session;
 mod stats;
@@ -28,8 +30,13 @@ use crate::config::BatchConfig;
 // Re-export public types from sub-modules
 pub use events::TraceEventDetail;
 pub use pending::{PendingCallInfo, PendingOrigin, SseEnrichment};
+pub use resource::ResourceSample;
+pub use resource_timeline::{SessionPhase, SessionResourceTimeline};
 pub use session::{SavingsSessionSummary, SessionSummary, ToolCallTurnInfo, TraceSummary};
-pub use stats::{AgentTokenSummary, ModelTimeseriesBucket, TimeseriesBucket};
+pub use stats::{
+    AgentActivitySummary, AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles,
+    ModelTimeseriesBucket, TimeseriesBucket,
+};
 
 /// SQLite-backed GenAI event storage
 pub struct GenAISqliteStore {
@@ -84,6 +91,16 @@ impl GenAISqliteStore {
             store.batch_config.max_size,
             store.batch_config.flush_ms,
         );
+
+        // If the database is already oversized on startup (e.g. from a prior
+        // crash or a config change), prune immediately rather than waiting for
+        // the first write to trigger cleanup.
+        if current_size >= threshold {
+            log::info!("Database oversized on startup, triggering cleanup");
+            if let Err(e) = store.check_and_prune_if_needed() {
+                log::warn!("Startup cleanup failed: {e}");
+            }
+        }
 
         Ok(store)
     }

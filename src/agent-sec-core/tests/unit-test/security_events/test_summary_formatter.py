@@ -399,8 +399,10 @@ class TestAssetVerifySummary:
         output = format_summary(events, "last 24 hours")
 
         assert "--- Asset Verification ---" in output
-        assert "Verifications performed: 2 (succeeded: 2, failed: 0)" in output
-        assert "5 passed, 0 failed" in output
+        assert (
+            "Verifications performed: 2 (verified: 1, skipped: 0, failed: 1)" in output
+        )
+        assert "5 checked, 5 passed, 0 failed" in output
         assert "ALL CLEAR" in output
 
     def test_failed_verification(self):
@@ -418,7 +420,7 @@ class TestAssetVerifySummary:
         ]
         output = format_summary(events, "last 24 hours")
         assert "FAILURES DETECTED" in output
-        assert "3 passed, 2 failed" in output
+        assert "5 checked, 3 passed, 2 failed" in output
 
     def test_single_skill_verify_after_full_verify(self):
         """After full verify + single skill verify, summary shows latest result.
@@ -461,10 +463,156 @@ class TestAssetVerifySummary:
         # (single-skill verify should not affect posture)
         assert "Needs attention" in output
         assert "--- Asset Verification ---" in output
-        assert "Verifications performed: 2 (succeeded: 2, failed: 0)" in output
+        assert (
+            "Verifications performed: 2 (verified: 1, skipped: 0, failed: 1)" in output
+        )
         # Latest result shows single skill result (1 passed, 0 failed)
         assert "Latest result:" in output
-        assert "1 passed, 0 failed" in output
+        assert "1 checked, 1 passed, 0 failed" in output
+
+    def test_no_candidates_is_reported_as_not_assessed(self):
+        events = [
+            _make_event(
+                event_type="verify",
+                category="asset_verify",
+                result="succeeded",
+                details={
+                    "request": {"skill": None},
+                    "result": {
+                        "outcome": "no_candidates",
+                        "checked": 0,
+                        "passed": 0,
+                        "failed": 0,
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert (
+            "Verifications performed: 1 (verified: 0, skipped: 1, failed: 0)" in output
+        )
+        assert "0 checked, 0 passed, 0 failed" in output
+        assert "NOT ASSESSED (no candidate skills)" in output
+        assert "ALL CLEAR" not in output
+        assert "System Status: Good" in output
+
+    def test_legacy_zero_counts_are_reported_as_not_assessed(self):
+        events = [
+            _make_event(
+                event_type="verify",
+                category="asset_verify",
+                result="succeeded",
+                details={
+                    "request": {"skill": None},
+                    "result": {"passed": 0, "failed": 0},
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert (
+            "Verifications performed: 1 (verified: 0, skipped: 1, failed: 0)" in output
+        )
+        assert "NOT ASSESSED (no candidate skills)" in output
+        assert "ALL CLEAR" not in output
+
+    def test_latest_no_candidates_does_not_clear_prior_full_failure(self):
+        events = [
+            _make_event(
+                event_type="verify",
+                category="asset_verify",
+                result="succeeded",
+                details={
+                    "request": {"skill": None},
+                    "result": {
+                        "outcome": "failed",
+                        "checked": 1,
+                        "passed": 0,
+                        "failed": 1,
+                    },
+                },
+                timestamp=_ts_minutes_ago(10),
+            ),
+            _make_event(
+                event_type="verify",
+                category="asset_verify",
+                result="succeeded",
+                details={
+                    "request": {"skill": None},
+                    "result": {
+                        "outcome": "no_candidates",
+                        "checked": 0,
+                        "passed": 0,
+                        "failed": 0,
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert "NOT ASSESSED (no candidate skills)" in output
+        assert "System Status: Needs attention" in output
+
+    def test_nested_no_candidates_overrides_failed_event_envelope(self):
+        events = [
+            _make_event(
+                event_type="verify",
+                category="asset_verify",
+                result="failed",
+                details={
+                    "request": {"skill": None},
+                    "result": {
+                        "outcome": "no_candidates",
+                        "checked": 0,
+                        "passed": 0,
+                        "failed": 0,
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert (
+            "Verifications performed: 1 (verified: 0, skipped: 1, failed: 0)" in output
+        )
+        assert "NOT ASSESSED (no candidate skills)" in output
+        assert "System Status: Good" in output
+
+    def test_nested_failed_outcome_overrides_successful_event_envelope(self):
+        events = [
+            _make_event(
+                event_type="verify",
+                category="asset_verify",
+                result="succeeded",
+                details={
+                    "request": {"skill": None},
+                    "result": {
+                        "outcome": "failed",
+                        "checked": 1,
+                        "passed": 1,
+                        "failed": 0,
+                    },
+                },
+                timestamp=_ts_minutes_ago(5),
+            ),
+        ]
+
+        output = format_summary(events, "last 24 hours")
+
+        assert (
+            "Verifications performed: 1 (verified: 0, skipped: 0, failed: 1)" in output
+        )
+        assert "FAILURES DETECTED" in output
+        assert "System Status: Needs attention" in output
 
 
 # ---------------------------------------------------------------------------

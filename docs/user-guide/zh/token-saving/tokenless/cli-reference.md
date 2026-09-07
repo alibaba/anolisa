@@ -2,20 +2,22 @@
 
 [English](../../../en/token-saving/tokenless/cli-reference.md)
 
-`tokenless` CLI 可独立压缩 Schema 和响应、进行 TOON 编解码、取回 Stash 内容、检查工具环境并查询统计。Agent Adapter 在内部调用同一组能力。
+`tokenless` CLI 开放统一的 content-aware 压缩命令、直接 Schema/JSON/TOON 操作、Stash
+恢复、环境状态与统计。共享 Agent Hook 使用 `tokenless compress`；直接命令继续用于脚本和
+诊断。
 
 ## 命令总览
 
 | 命令 | 用途 |
 |------|------|
+| `tokenless compress` | 执行一个 Protocol v2 生命周期操作 |
 | `tokenless compress-schema` | 压缩 Function Calling 工具 Schema |
 | `tokenless compress-response` | 压缩 JSON/API/工具响应 |
 | `tokenless compress-toon` | 将 JSON 编码为 TOON |
 | `tokenless decompress-toon` | 将 TOON 解码为 JSON |
 | `tokenless retrieve` | 取回被截断并写入 Stash 的 Payload |
-| `tokenless env-check` | 检查工具依赖与环境 |
+| `tokenless env-check` | 报告旧版环境检查已硬关闭 |
 | `tokenless stats` | 查询和控制本地统计 |
-| `tokenless mcp serve` | 启动提供取回工具的 MCP stdio 服务 |
 
 使用当前安装版本的帮助查看最终参数定义：
 
@@ -40,6 +42,103 @@ cat response.json | tokenless compress-response
 - JSON 相关命令要求输入为合法 JSON。
 - 压缩后没有 Token 收益时，CLI 向 stderr 说明原因，并输出原文。
 
+### 最小有效 Payload
+
+`compress-schema` 和 `compress-response` 没有固定的最小输入大小。对于每个通过输入
+规则的合法 JSON，CLI 都会生成候选结果，并用同一个启发式规则估算两者的 Token 数：每个 CJK
+字符计一个 Token，其他字符每四个计一个 Token 并向上取整。在 Active 模式下，只有候选结果的
+估算值严格小于原文（`after < before`）时才会输出候选结果；否则 stdout 输出原文，stderr
+报告 `did not reduce size`，且不写入统计记录。在 Dry-run 模式
+（`TOKENLESS_COMPRESSION_ENABLED=0` 或 `compression_enabled=false`）下，stdout 始终输出
+原文；候选结果更小时，如果已启用 Stats 或 SLS 记录，则把它记为预测节省。
+
+因此，盈亏平衡点取决于内容和 JSON 结构，而不只取决于字节数或字符数。包含可移除字段
+的小 Payload 仍可能被压缩，而已经紧凑的较大 Payload 也可能原样透传。下文的描述、
+字符串、数组和深度阈值只决定单项转换何时触发，并不是整个 Payload 的最小大小。
+Agent Adapter 还可能在启动 CLI 前应用独立的大小门槛，详见
+[Adapter 处理规则](framework-integration.md#adapter-处理规则)。
+
+## `compress`
+
+`compress` 是共享 Agent Hook 使用的严格 Protocol v2 Transport。命令名保持不变，但 Wire
+格式有意不兼容 Protocol v1。每个 Envelope 顶层严格只有四个字段：请求使用
+`protocol_version`、`operation`、`attribution`、`input`，响应把 `input` 换为 `result`。
+Envelope 和操作 Payload 中的未知字段都会被拒绝。
+
+PostTool 示例：
+
+```bash
+jq -n \
+  --rawfile content build.log \
+  '{
+    protocol_version: 2,
+    operation: "post_tool",
+    attribution: {
+      agent_id: "my-agent",
+      session_id: "session-42",
+      tool_use_id: "tool-7"
+    },
+    input: {
+      result_kind: "tool",
+      tool_name: "Bash",
+      content: $content,
+      status: "success",
+      content_origin: "command_output",
+      output_optimization: "none",
+      capabilities: {
+        replace_output: true,
+        recovery: {kind: "none"},
+        replace_with_text: true
+      }
+    }
+  }' \
+  | tokenless compress \
+  | jq '{operation, result: (.result | {disposition, content_type, applied_operations, recoverability, output})}'
+```
+
+操作：
+
+| `operation` | 必填 `input` 事实 | 结果 |
+|-------------|-------------------|------|
+| `before_model` | `tools`、排除工具后的模型可见上下文、工具替换能力，以及 Integration 是否已有 Marker 授权恢复 | 变换后的工具与排序后的可见 Marker Hash |
+| `pre_tool` | 工具名、参数、明确的命令字段，以及参数替换/阻止能力 | 参数、`passthrough`/`replace_arguments`/`block_and_suggest` Action，以及 `none`/`rtk` 输出优化状态 |
+| `post_tool` | Result Kind、工具名、内容、状态、明确 Content Origin、上游输出优化状态和输出能力 | Output、Disposition、检测类型、实际操作、Recoverability、Token 计数和 Stash Keys |
+| `retrieve` | Hash 或 Marker，以及模型当前可见的 Marker 集合 | 授权后的规范化 Hash 和字节级一致 Payload |
+
+只有 `post_tool` 会进入 `PostToolPipeline`。当前生产路由为：
+
+- Retrieve Result、Interrupted/Denied 调用和 RTK 已优化输出绕过压缩。
+- Tool Error 原样透传，并可携带限长 `additional_context` 诊断。
+- 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
+- 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的
+  Routine Progress Reduction。
+- 在对应领域 Compressor 接入前，其他非 JSON 内容类型都原样透传。
+
+只有 `disposition: "applied"` 表示 `output` 与原文不同。`dry_run`、`passthrough`、
+`no_savings`、`recoverability_unavailable`、`timeout` 和 `tool_error` 都携带原始内容。
+JSON 的 `content_type` 现在是 `json`；`applied_operations` 报告实际发生的变换，而不是配置的
+Compressor 列表。
+
+`before_model` 和 `post_tool` 必须提供 `capabilities.recovery`：`{"kind":"none"}`、
+`{"kind":"shell"}` 或 `{"kind":"tool","name":"tokenless_retrieve"}`。Tool 名称限 1–64 个
+ASCII 字母、数字、下划线或连字符。未知字段、缺失 recovery 和旧的 `retrieval_available`
+布尔字段均会被拒绝，Core 与调用方必须一起更新；协议版本保持 2。只有静态 Tool 能启用
+BeforeModel Schema 的可恢复截断；Shell 恢复用于 PostTool，不新增或改变 Agent 工具。
+
+退出码属于 Transport 契约：
+
+- `0`：正常操作结果，包括透传、无收益、Dry-run、Recoverability 不可用、RTK 不适用和
+  Tool Error。
+- `1`：操作失败，包括 RTK Timeout、未授权/缺失 Retrieve、Stash 或 Pipeline 失败。错误写入
+  stderr，不输出 Response JSON。
+- `2`：JSON 格式错误、不支持的协议版本，或 Envelope/Payload Shape 无效。
+
+`pre_tool` 从 `PATH` 和支持的安装布局解析独立打包的 `rtk`；低于 0.35.0 的候选会被跳过，
+并继续尝试后续打包位置。已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令保持
+原生形式，使其输出只有一个 PostTool 所有者；其他受支持命令仍可由 RTK 改写。Agent-facing
+`retrieve` 在读取 Stash 前根据 `visible_markers` 授权
+请求 Hash。下文的独立 `tokenless retrieve` 是受信本地运维入口，不要求模型可见性上下文。
+
 ## `compress-schema`
 
 压缩单个 OpenAI Function Calling Schema：
@@ -54,7 +153,24 @@ tokenless compress-schema -f tool.json
 cat tools.json | tokenless compress-schema --batch
 ```
 
-输入本身是数组时会自动使用 batch 处理。常用参数：
+接受的输入条目形态（按条目自动识别）：
+
+- OpenAI function 包装：`{"function": {"name", "description", "parameters"}}`
+- 直接 Schema：`{"name", "description", "parameters"}`
+- Gemini / copilot-shell 包装：`{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`；copilot-shell 的 BeforeModel hook 以该形态下发工具声明（`llm_request.config.tools`）。包装内的声明逐个压缩（参数 schema 优先取 `parametersJsonSchema`，其次取 `parameters`），包装本身及其同级字段原样保留。
+
+输入本身是数组时会自动使用 batch 处理。
+
+包含顶层 `tools` 数组的完整请求对象也受支持，其中的 Function Calling 定义可以是
+OpenAI `{"function": {...}}` Wrapper、Gemini `{"functionDeclarations": [...]}` 工具对象，
+或裸 `{name, description, parameters}` 定义。该结构不要传 `--batch`；非函数工具及
+`tools` 之外的字段会原样保留。
+
+```bash
+tokenless compress-schema -f request.json
+```
+
+常用参数：
 
 | 参数 | 说明 |
 |------|------|
@@ -98,13 +214,18 @@ tokenless compress-response -f response.json
 |------|--------|------|
 | `-f, --file <path>` | stdin | 输入文件 |
 | `--truncate-strings-at <n>` | `4096` | 字符串截断阈值 |
-| `--truncate-arrays-at <n>` | `32` | 数组元素保留上限 |
+| `--truncate-arrays-at <n>` | `32` | 触发数组截断的长度阈值；保留前 `n` 个元素。对象记录数组改用记录缩减（见下文） |
+| `--array-tail-preserve <n>` | `8` | 截断数组时从尾部保留的元素数；`0` 禁用尾部保留。不适用于对象记录数组 |
 | `--max-depth <n>` | `8` | 最大嵌套深度 |
 | `--agent-id <id>` | `cli` | 统计中的 Agent 标识 |
 | `--session-id <id>` | — | 统计中的 Session 标识 |
 | `--tool-use-id <id>` | — | 统计中的工具调用标识 |
 | `--no-stash` | 关闭 | 禁用可逆 Stash |
 | `--stash-db <path>` | `~/.tokenless/stash.db` | 覆盖 Stash 数据库；无效路径会被拒绝为覆盖值，CLI 随后回退到环境变量或默认路径 |
+
+数组截断会保留 `--truncate-arrays-at` 个头部元素和 `--array-tail-preserve` 个尾部元素，并在两者之间插入截断标记。只有当数组长度超过首尾窗口之和时才会丢弃中间元素：默认配置下单条命令可保留 `n + 8` 个元素（外加截断标记）；当两个窗口覆盖整个数组时，所有元素都会保留且不插入标记。设置 `--array-tail-preserve 0` 可恢复纯头部截断。
+
+对象记录数组是例外：任何包含至少 33 个 JSON Object 的数组都会按 32 条记录的基础预算进行缩减，并追加一个取回标记，与 `--truncate-arrays-at` 和 `--array-tail-preserve` 的取值无关。选取会保留前 4 条和后 4 条记录、携带错误或异常信号的记录、数值异常记录，以及其余记录的稳定采样；关键记录可以突破基础预算。完整原始数组作为一个条目写入 Stash，可通过 `tokenless retrieve` 恢复。记录缩减依赖 Stash，因此使用 `--no-stash` 时会保留此类数组的全部记录而不做缩减。
 
 覆盖阈值：
 
@@ -123,17 +244,19 @@ debug, trace, traces, stack, stacktrace, logs, logging
 
 字段匹配和截断会改变模型看到的响应表示。处理关键 Payload 前，应先保存样例并对比压缩结果。
 
-Stash 只作用于字符串、数组尾部和深层子树截断。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
+Stash 会保存 Record Reduction 使用的完整原始数组、被截断的字符串、其他截断数组中被丢弃的中间段和深层子树。尾部元素直接保留在输出中，不进入 Stash。黑名单字段、`null` 和空值会直接移除，不会生成取回标记。
 
-大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[框架集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)。
+大多数 Adapter 会覆盖这些独立 CLI 默认值。共享 Shell 策略使用 `65536`、`128`、`8`；其他结构化工具策略使用 `1048576`、`65536`、`32`。内容读取类工具会被跳过。详见[Agent 集成 · Adapter 处理规则](framework-integration.md#adapter-处理规则)。
 
 ## `compress-toon` 与 `decompress-toon`
 
 JSON 转 TOON：
 
 ```bash
-echo '{"name":"Alice","age":30}' | tokenless compress-toon
+echo '{"name":"Alice","age":30}' | tokenless compress-toon --min-toon-chars 0
 ```
+
+短于 500 字符的负载默认原样透传：TOON 对小型 JSON 的节省近乎为零，因此 CLI 应用与 Adapter Hook 相同的最小长度。传入 `--min-toon-chars 0` 可对任意有 token 收益的负载编码。输入会先通过 JSON 校验再做长度判断，因此低于阈值的非法 JSON 仍会以退出码 2 失败。
 
 TOON 转 JSON：
 
@@ -145,18 +268,18 @@ printf 'name: Alice\nage: 30\n' | tokenless decompress-toon
 
 ```bash
 echo '{"name":"test","value":42}' \
-  | tokenless compress-toon \
+  | tokenless compress-toon --min-toon-chars 0 \
   | tokenless decompress-toon
 ```
 
-`compress-toon` 支持 `--agent-id`、`--session-id` 和 `--tool-use-id`。编码后无收益时会输出原 JSON，且不记录该次统计。
+`compress-toon` 支持 `--agent-id`、`--session-id`、`--tool-use-id` 和 `--min-toon-chars`。当负载低于最小长度或编码后无收益时会输出原 JSON，且不记录该次统计。这类透传场景退出码仍为 `0`，stderr 上的提示仅供参考：在脚本等自动化场景中，请通过比较 stdout 与输入负载来判断是否发生了编码，不要依赖 stderr。透传和无收益场景会在 stdout 上逐字节原样复现输入（不添加、不去除末尾换行符），任何字节差异都说明负载已被编码；作为兜底，也可以检查 stdout 是否仍为合法 JSON。
 
 ## `retrieve`
 
-压缩输出中出现以下标记时，说明被截断的内容已写入 Stash：
+压缩输出中出现以下按需操作提示时，说明被省略的内容已写入 Stash：
 
 ```text
-<<tokenless:0123456789abcdef01234567>>
+12 passing-test lines omitted. If needed, run in shell: tokenless retrieve 0123456789abcdef01234567
 ```
 
 使用裸 Hash 取回：
@@ -165,11 +288,16 @@ echo '{"name":"test","value":42}' \
 tokenless retrieve 0123456789abcdef01234567
 ```
 
-也可以粘贴包含标记的整行文本：
+AgentScope 使用实际配置的静态 Tool，而不是 Shell 命令：
+
+```text
+12 passing-test lines omitted. If needed, call tool tokenless_retrieve with hash_or_marker=0123456789abcdef01234567
+```
+
+历史 Marker 仍可读取，但不再生成：
 
 ```bash
-tokenless retrieve \
-  '<... 12 items truncated, retrieve with <<tokenless:0123456789abcdef01234567>>'
+tokenless retrieve '<<tokenless:0123456789abcdef01234567>>'
 ```
 
 覆盖数据库：
@@ -181,40 +309,34 @@ tokenless retrieve 0123456789abcdef01234567 \
 
 Hash 必须是 24 个十六进制字符，且不区分大小写。SQLite Stash 默认 TTL 为一小时，最多保留 10,000 个有效条目。超过 TTL、被容量策略淘汰、使用 `--no-stash`、处于 dry-run、写入失败或数据库路径不一致时都无法取回。
 
-## `mcp serve`
-
-启动 stdio MCP 服务：
-
-```bash
-tokenless mcp serve
-```
-
-服务暴露 `tokenless_retrieve` 工具，让支持 MCP 的 Agent 无需执行 Shell 命令即可取回 Stash 内容。MCP 服务必须使用与压缩流程相同的用户和 Stash 数据库。
-
 ## `env-check`
 
-检查单个工具：
+Tool Ready 已硬关闭。文本输出只报告这一状态，不会读取规范或改变环境。
+任何环境变量都无法重新启用它。
+
+所有 JSON 调用都只返回三个字段：
+
+```json
+{"tool":"Shell","status":"UNKNOWN","enabled":false}
+```
+
+`tool` 是指定的工具名、`all` 或 `checklist`。硬关闭契约绝不会包含休眠旧版
+清单的 `tools` 或 `summary` 字段。
+
+报告单个工具对应的硬关闭状态：
 
 ```bash
 tokenless env-check --tool Shell
 ```
 
-检查全部已声明工具：
+报告全部工具或清单模式的硬关闭状态：
 
 ```bash
 tokenless env-check --all
 tokenless env-check --all --json
-tokenless env-check --all --checklist
+tokenless env-check --checklist
+tokenless env-check --checklist --json
 ```
-
-状态含义：
-
-| 状态 | 含义 |
-|------|------|
-| `READY` | 必需依赖、推荐依赖、配置和权限均满足 |
-| `PARTIAL` | 必需依赖和权限已满足，但缺少推荐依赖、配置项或网络检查 |
-| `NOT_READY` | 缺少必需依赖或权限，不应重复调用该工具 |
-| `UNKNOWN` | 依赖规范中没有该工具 |
 
 自动修复：
 
@@ -222,13 +344,14 @@ tokenless env-check --all --checklist
 tokenless env-check --tool Shell --fix
 ```
 
-> `--fix` 只尝试修复缺失的必需依赖，不会安装推荐依赖。它可能调用系统包管理器、安装依赖或创建链接。应先阅读普通检查输出，并在明确接受环境变更后使用；需要管理员权限时，按输出提示操作。
+> 硬旁路生效期间，`--fix` 不会调用包管理器或修改环境。如果未来重新设计并启用，保留的旧版实现只会尝试修复缺失的必需依赖。
 
 ## `stats`
 
 ```bash
 tokenless stats summary
 tokenless stats summary --json
+tokenless stats summary --limit 1000
 tokenless stats list --limit 20
 tokenless stats show <record-id>
 tokenless stats diff <record-id>
@@ -244,6 +367,8 @@ tokenless stats clear --yes
 ```bash
 tokenless stats summary --compare <baseline-session> <active-session>
 ```
+
+Session ID 不存在时以非零退出码失败，而不是输出 0% 对比，行为与 `stats diff --session` 一致。`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝，行为与 `stats diff --limit` 一致。
 
 查看单条记录，或一次工具调用中可确认衔接的阶段：
 

@@ -34,13 +34,15 @@ fn run_scripted_shell(
 ) -> io::Result<ShellHostOutput> {
     let mut session = start_session(config)?;
 
-    read_until(
-        &mut session.master,
-        &mut session.child,
-        &mut session.parser,
-        Duration::from_secs(5),
-        |parser| parser.precmd_count() >= 1,
-    )?;
+    if config.integration.uses_markers() {
+        read_until(
+            &mut session.master,
+            &mut session.child,
+            &mut session.parser,
+            Duration::from_secs(5),
+            |parser| parser.precmd_count() >= 1,
+        )?;
+    }
 
     for input in inputs {
         match input {
@@ -51,9 +53,15 @@ fn run_scripted_shell(
                     &mut session.parser,
                     &config.prompt,
                     command,
+                    config.integration.uses_markers(),
                 )?;
             }
-            ScriptedInput::UserLine(input) => match config.input_classifier.classify(input) {
+            ScriptedInput::UserLine(input) => match config
+                .input_classifier
+                .clone()
+                .with_shell_passthrough(!config.integration.uses_markers())
+                .classify(input)
+            {
                 InputDecision::SendToShell(command) => {
                     send_command_line(
                         &mut session.master,
@@ -61,6 +69,7 @@ fn run_scripted_shell(
                         &mut session.parser,
                         &config.prompt,
                         &command,
+                        config.integration.uses_markers(),
                     )?;
                 }
                 InputDecision::Intercept { input, reason } => {
@@ -93,7 +102,7 @@ fn run_scripted_shell(
         Duration::from_millis(300),
         |_| false,
     )?;
-    session.parser.flush_pending();
+    session.parser.flush_pending()?;
     let exit_status = wait_pty_foreground_bounded(
         &session.master,
         &session.terminal,
@@ -114,14 +123,16 @@ where
 {
     let mut session = start_bash_session(config)?;
 
-    read_until_streaming(
-        &mut session.master,
-        &mut session.child,
-        &mut session.parser,
-        &mut output,
-        Duration::from_secs(5),
-        |parser| parser.precmd_count() >= 1,
-    )?;
+    if config.integration.uses_markers() {
+        read_until_streaming(
+            &mut session.master,
+            &mut session.child,
+            &mut session.parser,
+            &mut output,
+            Duration::from_secs(5),
+            |parser| parser.precmd_count() >= 1,
+        )?;
+    }
 
     let mut line = String::new();
     loop {
@@ -136,7 +147,12 @@ where
             continue;
         }
 
-        match config.input_classifier.classify(&user_line) {
+        match config
+            .input_classifier
+            .clone()
+            .with_shell_passthrough(!config.integration.uses_markers())
+            .classify(&user_line)
+        {
             InputDecision::SendToShell(command) => send_command_line_streaming(
                 &mut session.master,
                 &mut session.child,
@@ -144,6 +160,7 @@ where
                 &mut output,
                 &config.prompt,
                 &command,
+                config.integration.uses_markers(),
             )?,
             InputDecision::Intercept { input, reason } => {
                 session.parser.push_intercept_event(
@@ -167,9 +184,13 @@ where
         Duration::from_millis(300),
         |_| false,
     )?;
-    let display_start = session.parser.display.len();
-    session.parser.flush_pending();
-    output.write_all(&session.parser.display[display_start..])?;
+    let display_start = session.parser.display_position();
+    session.parser.flush_pending()?;
+    session.parser.write_display_range(
+        display_start,
+        session.parser.display_position(),
+        &mut output,
+    )?;
     output.flush()?;
 
     let exit_status = wait_pty_foreground_bounded(
@@ -187,11 +208,15 @@ fn send_command_line(
     parser: &mut OscParser,
     _prompt: &str,
     command: &str,
+    wait_for_marker: bool,
 ) -> io::Result<()> {
     let target_precommands = parser.precmd_count() + 1;
     master.write_all(command.as_bytes())?;
     master.write_all(b"\n")?;
     master.flush()?;
+    if !wait_for_marker {
+        return Ok(());
+    }
     read_until(master, child, parser, Duration::from_secs(5), |parser| {
         parser.precmd_count() >= target_precommands
     })?;
@@ -205,11 +230,15 @@ fn send_command_line_streaming<W: Write>(
     output: &mut W,
     _prompt: &str,
     command: &str,
+    wait_for_marker: bool,
 ) -> io::Result<()> {
     let target_precommands = parser.precmd_count() + 1;
     master.write_all(command.as_bytes())?;
     master.write_all(b"\n")?;
     master.flush()?;
+    if !wait_for_marker {
+        return Ok(());
+    }
     read_until_streaming(
         master,
         child,

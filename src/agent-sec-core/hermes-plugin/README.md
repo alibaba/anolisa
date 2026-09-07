@@ -91,8 +91,10 @@ enabled = true
 timeout = 5
 ```
 
-`timeout` 控制 `agent-sec-cli observability record` 子进程。CLI 失败、超时、invalid record
-或缺少必需 metadata 都是 fail-open。
+`timeout` 控制每次 PII 脱敏和 `agent-sec-cli observability record` 子进程，默认 5 秒。
+`OBSERVABILITY_TIMEOUT` 可覆盖该值；空值、非法值或非正数回退到 capability 配置值，
+配置值和环境变量均封顶为 5 秒。
+CLI 失败、超时、invalid record 或缺少必需 metadata 都是 fail-open。
 
 Observability hook 默认开启。启动 Hermes 前设置
 `OBSERVABILITY_HOOK_ENABLED=false` 可关闭记录而无需修改 `config.toml`；未设置或值无效时
@@ -101,7 +103,9 @@ Observability hook 默认开启。启动 Hermes 前设置
 
 ## 可用 Hook 列表
 
-Hermes 支持的 hook 及其回调签名：
+Hermes 支持的 hook 及其回调签名如下。该表描述 Hermes 框架 API，不代表本插件全部
+注册；本插件的实际 hook 范围以 `src/plugin.yaml` 和各 capability 的
+`get_hooks_define()` 为准。
 
 | Hook | 签名 | 返回值 |
 |------|------|--------|
@@ -132,29 +136,26 @@ Code Scanner ask，因此 `ask`、`warn` 和非法值都等价于未设置并回
 
 ### Skill Ledger
 
-当前 Hermes 场景暂不支持 Skill Ledger 安全检查，请自行关注 skill 安全性。Hermes
-`skill-ledger` capability 只保留 fail-open 兼容行为：检测到不兼容的 Hermes skill root
-时跳过检查、不调用 CLI、不阻断，并在 `policy = "ask"` / `policy = "warn"` 下提示
-`暂不支持Hermes场景，请自行关注skill安全性。`
+Hermes `skill-ledger` capability 当前只覆盖默认本地技能目录。检测到不兼容的 Hermes
+skill root 时跳过检查、不调用 CLI、不阻断，并通过宿主 logger 记录诊断。
 
 - `enabled = false`：完全不注册 Hermes hook。
-- `policy = "ask"`：默认策略；未触发暂不支持兜底时，当 summary `message` 非空会缓存为本轮告警，并通过
-  `transform_llm_output` 追加到最终回复开头，确保用户可见。
-- `policy = "observe"`：静默模式；summary `message` 非空、CLI 失败或 JSON 解析失败都 fail-open，只写 debug。旧值 `debug` 仍作为别名兼容。
-- `policy = "warn"`：warning-only 兼容模式；未触发暂不支持兜底时，summary `message` 非空会缓存为本轮告警，并通过
-  `transform_llm_output` 追加到最终回复开头，确保用户可见。
+- `policy = "observe"`：默认策略；summary `message` 非空时 fail-open，`deny` / `tampered`
+  状态或 `reasonCode=tampered` 写 WARNING，其它情况写 INFO；CLI 失败或 JSON 解析失败仍
+  fail-open 并写 debug 诊断。
+  旧值 `debug` 仍作为别名兼容。
 - `policy = "block"`：summary `message` 非空时直接返回 Hermes block 结果。
-- 检测到暂不支持的 Hermes skill root 时，所有 `policy` 都 fail-open；`ask` / `warn`
-  会显示 `暂不支持Hermes场景，请自行关注skill安全性。`，`debug` 只写日志，`block`
-  不阻断。
+- `policy = "warn"` / `policy = "ask"`：Hermes 没有插件可用的原生 advisory/确认
+  通道，两者兼容降级为 `observe`，并在注册时写一次宿主诊断。
+- 检测到暂不支持的 Hermes skill root 时，所有 `policy` 都 fail-open，只写日志。
 - `latestStatus = "unmanaged"` 是 Skill Ledger 诊断状态，summary `message` 为 `null`，包括 `block` 在内的所有 policy 都静默放行。
-- 未配置 `policy` 的旧配置仍兼容：`enable_block = true` 映射为 `block`，`enable_block = false` 映射为 `warn`。
+- 未配置 `policy` 的旧配置仍兼容：`enable_block = true` 映射为 `block`，`enable_block = false` 映射为 `observe`。
 - 当前版本仅覆盖 Hermes 默认本地技能目录 `~/.hermes/skills`，按 Hermes `skill_view`
   的本地目录规则解析 `category/skill` 或裸 skill 名称；`skills.external_dirs` 和
   plugin-provided skills 暂不覆盖，hook 会 fail-open 跳过。
 - `file_path` / `path` 仅表示 skill 内 supporting file，不参与 skill 目录定位。
 - `block_statuses` 是 legacy 兼容配置；当前 `policy = "block"` 不再按状态过滤。
-- `max_warnings_per_turn = 0` 影响 `policy = "ask"` / `policy = "warn"` 的用户可见 warning 注入。
+- 旧 `max_warnings_per_turn` / `max_warning_contexts` 已废弃并忽略。
 - Skill Ledger 全局 `activationPolicy` 属于 SkillFS/daemon activation；这里的 hook `policy`
   只控制宿主 hook 的可见行为和日志等级。
 
@@ -164,11 +165,7 @@ Code Scanner ask，因此 `ask`、`warn` 和非法值都等价于未设置并回
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-policy = "ask"
-enable_block = false
-block_statuses = ["none", "drifted", "deny", "tampered"]
-max_warnings_per_turn = 5
-max_warning_contexts = 128
+policy = "observe"
 ```
 
 Hermes 场景请不要依赖该 capability 作为 Skill Ledger 安全拦截；如需严格 Skill
@@ -216,37 +213,32 @@ CLI 调用方式和 `openclaw-plugin` 保持一致：helper 将一条 JSON paylo
 
 `pii-scan-user-input` 对齐 Cosh/OpenClaw 多点位 PII checker 语义：
 
-默认 `policy = "observe"`，只扫描和审计。`warn` 返回脱敏告警并继续。
-Hermes 没有可靠的原生确认协议，因此 `ask` 显式 fallback 为 `warn`。
-`block + deny` 在
-`pre_tool_call` 返回原生 block；`pre_llm_call` / `post_tool_call` 的不可阻断边界
-fallback 为 `warn`。model output 保留现有脱敏行为。环境变量 policy 优先于
-capability 配置；对应环境变量为 `PII_CHECKER_MODE`。
+默认 `policy = "observe"`，只扫描和审计，不修改用户回复。
+Hermes 没有插件可用的原生 advisory/确认协议，因此 `warn` / `ask` 降级为
+`observe` 并写宿主诊断。`block + deny` 在 `pre_tool_call` 返回原生 block；
+`pre_llm_call` / `post_tool_call` / `post_llm_call` 等不可阻断边界只审计。模型输出通过
+`post_llm_call` 扫描并记录安全事件和宿主日志；Hermes 没有插件可用的 pre-stream
+model-output gate，因此不会修改或阻断模型输出。环境变量 policy 优先于 capability 配置；
+对应环境变量为 `PII_CHECKER_MODE`。
 
-- 挂在 `pre_llm_call`、`pre_tool_call`、`post_tool_call`、`transform_llm_output`、`on_session_end`
+- 挂在 `pre_llm_call`、`pre_tool_call`、`post_tool_call`、`post_llm_call`
 - 扫描本轮用户输入、tool 参数、tool 返回结果和最终模型回复；不扫描 history、memory 或 RAG context
-- 调用 `agent-sec-cli scan-pii --stdin --format json --redact-output --source <source>`，敏感原文仅通过 stdin 传入子进程
-- tool 参数的 `block + deny` 在执行前阻断；scanner `warn`、`ask` fallback 和 tool
-  结果只缓存脱敏 warning
-- `transform_llm_output` 会扫描最终模型回复；命中时使用 `redacted_text` 替换用户可见回复，并 prepend 已缓存 warning
-- 当前实现依赖 Hermes 对完整最终回复调用一次 `transform_llm_output`；若未来改成流式分片 transform，需要重新审视 warning pop 语义
-- `on_session_end` 清理残留缓存
+- 调用 `agent-sec-cli scan-pii --stdin --format json --source <source>`，敏感原文仅通过 stdin 传入子进程
+- tool 参数的 `block + deny` 在执行前阻断；scanner `warn`、tool 结果和模型输出只审计
 - 所有异常、超时、非 JSON 输出、未知 verdict 都 fail-open
-- warning 只使用 `evidence_redacted`，不展示 raw evidence 或原始文本
 
 ### prompt-scan-user-input
 
 基于`agent-sec-cli scan-prompt` 的多层检测（L1 规则引擎 + L2 ML 分类器）能力识别 prompt injection / jailbreak 攻击。
 
-- 挂在 `pre_llm_call`、`transform_llm_output`、`on_session_end` 三个钩子
-- `warn` / `deny` 不阻断请求，缓存脱敏 warning，通过 `transform_llm_output` prepend 到回复前
+- 仅挂在 `pre_llm_call`；不注册 `transform_llm_output`
+- `warn` / `deny` 不阻断请求，只写安全审计和宿主日志，不修改最终回复
 - 所有异常情况 fail-open
 
 ```toml
 [capabilities.prompt-scan-user-input]
 enabled = true
 timeout = 15
-warning_ttl_seconds = 300
 ```
 
 环境变量 `PROMPT_SCANNER_HOOK_ENABLED` 可覆盖 capability 开关：设为 `false` 时完全跳过 prompt 扫描（默认 `true`）。`PROMPT_SCANNER_SCAN_MODE` 控制扫描强度，`fast` / `standard` / `strict`（默认 `standard`）。

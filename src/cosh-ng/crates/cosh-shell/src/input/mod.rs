@@ -1,14 +1,120 @@
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub(crate) mod path_prompt;
+pub(crate) use path_prompt::{PathPromptIntercept, ShellPathCommandNames, ShellPromptCwd};
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistanceControl {
+    enabled: Arc<AtomicBool>,
+    at_prompt: Arc<AtomicBool>,
+    state_file: PathBuf,
+}
+
+impl AssistanceControl {
+    pub(crate) fn enabled(state_file: PathBuf) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(true)),
+            at_prompt: Arc::new(AtomicBool::new(false)),
+            state_file,
+        }
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_at_prompt(&self, at_prompt: bool) {
+        self.at_prompt.store(at_prompt, Ordering::Release);
+    }
+
+    pub(crate) fn is_at_prompt(&self) -> bool {
+        self.at_prompt.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn toggle(&self) -> std::io::Result<bool> {
+        self.set_enabled(!self.is_enabled())
+    }
+
+    pub(crate) fn set_enabled(&self, enabled: bool) -> std::io::Result<bool> {
+        if enabled {
+            if let Err(error) = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&self.state_file)
+            {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+        } else if let Err(error) = fs::remove_file(&self.state_file) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+        self.enabled.store(enabled, Ordering::Release);
+        Ok(enabled)
+    }
+}
+
+impl PartialEq for AssistanceControl {
+    fn eq(&self, other: &Self) -> bool {
+        self.state_file == other.state_file
+            && self.is_enabled() == other.is_enabled()
+            && self.is_at_prompt() == other.is_at_prompt()
+    }
+}
+
+impl Eq for AssistanceControl {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputClassifier {
     slash_commands: Vec<String>,
     slash_hint_commands: Vec<String>,
     ai_enabled: bool,
+    shell_passthrough: bool,
+    bash_readline_history_privacy: bool,
+    bash_slash_submission_guard: bool,
+    assistance_control: Option<AssistanceControl>,
+    shell_prompt_cwd: ShellPromptCwd,
+    shell_path_command_names: ShellPathCommandNames,
 }
 
 impl InputClassifier {
     pub fn with_ai_enabled(mut self, ai_enabled: bool) -> Self {
         self.ai_enabled = ai_enabled;
         self
+    }
+
+    pub(crate) fn with_shell_passthrough(mut self, shell_passthrough: bool) -> Self {
+        self.shell_passthrough = shell_passthrough;
+        self
+    }
+
+    pub(crate) fn with_bash_readline_history_privacy(mut self, enabled: bool) -> Self {
+        self.bash_readline_history_privacy = enabled;
+        self
+    }
+
+    pub(crate) fn with_bash_slash_submission_guard(mut self, enabled: bool) -> Self {
+        self.bash_slash_submission_guard = enabled;
+        self
+    }
+
+    pub(crate) fn with_assistance_control(mut self, control: AssistanceControl) -> Self {
+        self.assistance_control = Some(control);
+        self
+    }
+
+    pub(crate) fn prompt_cwd(&self) -> ShellPromptCwd {
+        self.shell_prompt_cwd.clone()
+    }
+    pub(crate) fn shell_path_command_names(&self) -> ShellPathCommandNames {
+        self.shell_path_command_names.clone()
     }
 }
 
@@ -22,6 +128,12 @@ impl Default for InputClassifier {
                 .map(str::to_string)
                 .collect(),
             ai_enabled: true,
+            shell_passthrough: false,
+            bash_readline_history_privacy: false,
+            bash_slash_submission_guard: false,
+            assistance_control: None,
+            shell_prompt_cwd: ShellPromptCwd::default(),
+            shell_path_command_names: ShellPathCommandNames::default(),
         }
     }
 }
@@ -31,7 +143,48 @@ impl InputClassifier {
         self.ai_enabled
     }
 
+    pub(crate) fn shell_owns_input(&self) -> bool {
+        self.shell_passthrough
+    }
+
+    pub(crate) fn bash_readline_history_privacy_enabled(&self) -> bool {
+        self.bash_readline_history_privacy
+    }
+
+    pub(crate) fn bash_slash_submission_guard_enabled(&self) -> bool {
+        self.bash_slash_submission_guard
+    }
+
+    pub(crate) fn assistance_control(&self) -> Option<&AssistanceControl> {
+        self.assistance_control.as_ref()
+    }
+
+    pub(crate) fn assistance_enabled(&self) -> bool {
+        self.assistance_control
+            .as_ref()
+            .is_none_or(AssistanceControl::is_enabled)
+    }
+
+    pub(crate) fn classify_missing_path_submission(
+        &self,
+        input: &str,
+    ) -> Option<PathPromptIntercept> {
+        if self.shell_passthrough || !self.ai_enabled || !self.assistance_enabled() {
+            return None;
+        }
+        let shell_cwd = self.shell_prompt_cwd.current()?;
+        path_prompt::is_slash_bearing_han_prompt(input, Some(std::path::Path::new(&shell_cwd)))
+            .then(|| PathPromptIntercept {
+                input: input.to_string(),
+                reason: InterceptReason::NaturalLanguage,
+                cwd: shell_cwd,
+            })
+    }
+
     pub(crate) fn is_slash_control_candidate(&self, token: &str) -> bool {
+        if !self.assistance_enabled() {
+            return token == "/" || "/mode".starts_with(token);
+        }
         self.is_slash_control_input(token)
     }
 
@@ -44,8 +197,22 @@ impl InputClassifier {
     }
 
     pub fn classify(&self, input: &str) -> InputDecision {
+        if self.shell_passthrough {
+            return InputDecision::SendToShell(input.to_string());
+        }
         let trimmed = input.trim();
         if trimmed.is_empty() {
+            return InputDecision::SendToShell(input.to_string());
+        }
+
+        if !self.assistance_enabled() {
+            let mut tokens = trimmed.split_whitespace();
+            if tokens.next() == Some("/mode") && tokens.next() == Some("routing") {
+                return InputDecision::Intercept {
+                    input: input.to_string(),
+                    reason: InterceptReason::Slash,
+                };
+            }
             return InputDecision::SendToShell(input.to_string());
         }
 
@@ -148,7 +315,7 @@ fn edit_distance(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputClassifier, InputDecision, InterceptReason};
+    use super::{AssistanceControl, InputClassifier, InputDecision, InterceptReason};
 
     #[test]
     fn classifies_known_slash_commands_without_capturing_paths() {
@@ -480,6 +647,29 @@ mod tests {
             d.classify("\u{5e2e}\u{6211}\u{5206}\u{6790}"),
             InputDecision::SendToShell("\u{5e2e}\u{6211}\u{5206}\u{6790}".to_string())
         );
+
+        let state_file = std::env::temp_dir().join(format!(
+            "cosh-shell-only-classifier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let control = AssistanceControl::enabled(state_file);
+        control.set_enabled(false).expect("disable assistance");
+        let shell_only = InputClassifier::default().with_assistance_control(control);
+        assert_eq!(
+            shell_only.classify("/mode routing assisted"),
+            InputDecision::Intercept {
+                input: "/mode routing assisted".to_string(),
+                reason: InterceptReason::Slash,
+            }
+        );
+        for input in ["/help", "/agent", "?? explain this", "hello"] {
+            assert_eq!(
+                shell_only.classify(input),
+                InputDecision::SendToShell(input.to_string()),
+                "{input}"
+            );
+        }
     }
 
     #[test]

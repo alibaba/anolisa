@@ -110,25 +110,46 @@ pub enum ResolverError {
     },
 }
 
-/// Probes declared runtime dependencies against the host. Generic over the
-/// command runner so tests inject a fake; the default runs real commands.
-pub struct DependencyResolver<R: CommandRunner = SystemCommandRunner> {
+/// Probes declared runtime dependencies through a command runner and a lazy
+/// filesystem-capability reader. The defaults use real host probes.
+pub struct DependencyResolver<
+    R: CommandRunner = SystemCommandRunner,
+    F: Fn() -> std::io::Result<String> = fn() -> std::io::Result<String>,
+> {
     runner: R,
+    read_filesystems: F,
 }
 
 impl DependencyResolver<SystemCommandRunner> {
-    /// Build a resolver that runs real host commands.
+    /// Build a resolver that runs real host commands and reads `/proc/filesystems`
+    /// only when a btrfs capability check reaches that probe.
     pub fn system() -> Self {
-        Self {
-            runner: SystemCommandRunner,
-        }
+        Self::with_runner(SystemCommandRunner)
     }
 }
 
 impl<R: CommandRunner> DependencyResolver<R> {
-    /// Build a resolver backed by a custom runner (primarily for tests).
+    /// Build a resolver backed by a custom command runner.
+    ///
+    /// The btrfs probe still reads the host's `/proc/filesystems`; use
+    /// [`Self::with_probes`] to replace both host boundaries.
     pub fn with_runner(runner: R) -> Self {
-        Self { runner }
+        Self::with_probes(runner, || std::fs::read_to_string("/proc/filesystems"))
+    }
+}
+
+impl<R: CommandRunner, F: Fn() -> std::io::Result<String>> DependencyResolver<R, F> {
+    /// Build a resolver with custom command and filesystem-capability probes.
+    ///
+    /// `read_filesystems` supplies raw `/proc/filesystems` content or its read
+    /// error. It is called once per evaluated btrfs dependency, after the kernel
+    /// gate; construction and unrelated checks do not call it. Results are not
+    /// cached, so a later resolution observes the reader again.
+    pub fn with_probes(runner: R, read_filesystems: F) -> Self {
+        Self {
+            runner,
+            read_filesystems,
+        }
     }
 
     /// Probe every dependency and aggregate the outcome. Never mutates the host.
@@ -147,7 +168,9 @@ impl<R: CommandRunner> DependencyResolver<R> {
             let (status, detail) = match dep.kind {
                 DependencyKind::SystemPackage => self.resolve_system_package(dep, env),
                 DependencyKind::LanguageRuntime => self.resolve_language_runtime(dep),
-                DependencyKind::PlatformCapability => resolve_platform_capability(dep, env)?,
+                DependencyKind::PlatformCapability => {
+                    resolve_platform_capability(dep, env, &self.read_filesystems)?
+                }
             };
             plan.resolutions.push(DependencyResolution {
                 name: dep.name.clone(),
@@ -263,6 +286,7 @@ enum ProbeOutcome {
 fn resolve_platform_capability(
     dep: &RuntimeDependency,
     env: &ResolverEnv,
+    read_filesystems: &impl Fn() -> std::io::Result<String>,
 ) -> Result<(DependencyStatus, Option<String>), ResolverError> {
     if let Some(min) = &dep.min_kernel {
         match kernel_satisfies(env.kernel.as_deref(), min) {
@@ -289,9 +313,11 @@ fn resolve_platform_capability(
     }
 
     if let Some(check) = &dep.check {
-        let result = evaluate_check(check, env).ok_or_else(|| ResolverError::UnknownCheck {
-            name: dep.name.clone(),
-            check: check.clone(),
+        let result = evaluate_check(check, env, read_filesystems).ok_or_else(|| {
+            ResolverError::UnknownCheck {
+                name: dep.name.clone(),
+                check: check.clone(),
+            }
         })?;
         return Ok(match result {
             CheckResult::Supported => (DependencyStatus::Resolved, None),
@@ -349,11 +375,15 @@ enum CheckResult {
 /// Dispatch a built-in `check` identifier. `None` → unknown identifier (a
 /// contract bug the caller turns into [`ResolverError::UnknownCheck`]). The set
 /// is intentionally small; extend it deliberately.
-fn evaluate_check(check: &str, env: &ResolverEnv) -> Option<CheckResult> {
+fn evaluate_check(
+    check: &str,
+    env: &ResolverEnv,
+    read_filesystems: &impl Fn() -> std::io::Result<String>,
+) -> Option<CheckResult> {
     match check {
         "btf" => Some(bool_fact(env.btf, "kernel BTF (/sys/kernel/btf/vmlinux)")),
         "cap_bpf" => Some(bool_fact(env.cap_bpf, "CAP_BPF capability")),
-        "btrfs" => Some(btrfs_supported()),
+        "btrfs" => Some(btrfs_supported(read_filesystems)),
         _ => None,
     }
 }
@@ -374,8 +404,8 @@ fn bool_fact(fact: Option<bool>, label: &str) -> CheckResult {
 }
 
 /// Whether the running kernel supports btrfs, read from `/proc/filesystems`.
-fn btrfs_supported() -> CheckResult {
-    match std::fs::read_to_string("/proc/filesystems") {
+fn btrfs_supported(read_filesystems: &impl Fn() -> std::io::Result<String>) -> CheckResult {
+    match read_filesystems() {
         Ok(contents) if fs_supported(&contents, "btrfs") => CheckResult::Supported,
         Ok(_) => CheckResult::Unsupported {
             reason: "btrfs is not supported by the running kernel (absent from /proc/filesystems)"
@@ -838,6 +868,199 @@ mod tests {
         assert!(fs_supported(procfs, "btrfs"));
         assert!(fs_supported(procfs, "ext4"));
         assert!(!fs_supported(procfs, "xfs"));
+    }
+
+    #[test]
+    fn btrfs_probe_classifies_injected_filesystems() {
+        for (contents, supported) in [
+            ("nodev\tsysfs\n\tbtrfs\n", true),
+            ("nodev\tbtrfs\n", true),
+            ("\text4\n", false),
+            ("", false),
+            ("\tbtrfs_backup\n\tmybtrfs\nbtrfs\text4\n", false),
+        ] {
+            let reads = std::cell::Cell::new(0);
+            let resolver = DependencyResolver::with_probes(FakeRunner::default(), || {
+                reads.set(reads.get() + 1);
+                Ok(contents.to_string())
+            });
+            assert_eq!(reads.get(), 0, "construction must not read the host");
+            let mut dependency = dep("kernel-btrfs", DependencyKind::PlatformCapability);
+            dependency.check = Some("btrfs".to_string());
+            let plan = resolver
+                .resolve(&[dependency], &rpm_env())
+                .expect("resolve");
+            assert_eq!(reads.get(), 1);
+            assert_eq!(plan.resolutions[0].detail, None);
+            assert_eq!(
+                plan.resolutions[0].status,
+                if supported {
+                    DependencyStatus::Resolved
+                } else {
+                    DependencyStatus::Unresolvable {
+                        reason: "btrfs is not supported by the running kernel (absent from /proc/filesystems)".to_string(),
+                    }
+                },
+                "{contents:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn btrfs_probe_read_failure_keeps_existing_reason() {
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::InvalidData,
+        ] {
+            let reads = std::cell::Cell::new(0);
+            let resolver = DependencyResolver::with_probes(FakeRunner::default(), || {
+                reads.set(reads.get() + 1);
+                Err(io::Error::new(kind, "scripted filesystem read error"))
+            });
+            let mut dependency = dep("kernel-btrfs", DependencyKind::PlatformCapability);
+            dependency.check = Some("btrfs".to_string());
+            let plan = resolver
+                .resolve(&[dependency], &rpm_env())
+                .expect("read error is evidence");
+            assert_eq!(reads.get(), 1);
+            assert_eq!(
+                plan.resolutions[0].status,
+                DependencyStatus::Unresolvable {
+                    reason: "could not read /proc/filesystems to verify btrfs support".to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_checks_and_kernel_gates_never_read_filesystems() {
+        let resolver = DependencyResolver::with_probes(
+            FakeRunner::default()
+                .ok("rpm", 0, "")
+                .ok("node", 0, "v20.0.0"),
+            || -> io::Result<String> { panic!("filesystem reader must not run") },
+        );
+        assert!(
+            resolver
+                .resolve(&[], &rpm_env())
+                .expect("empty")
+                .is_satisfied()
+        );
+        for kind in [
+            DependencyKind::SystemPackage,
+            DependencyKind::LanguageRuntime,
+        ] {
+            assert!(
+                resolver
+                    .resolve(&[dep("node", kind)], &rpm_env())
+                    .expect("command")
+                    .is_satisfied()
+            );
+        }
+        for check in [None, Some("btf"), Some("cap_bpf")] {
+            let mut dependency = dep("capability", DependencyKind::PlatformCapability);
+            dependency.check = check.map(str::to_string);
+            let env = ResolverEnv {
+                btf: Some(true),
+                cap_bpf: Some(true),
+                ..rpm_env()
+            };
+            assert!(
+                resolver
+                    .resolve(&[dependency], &env)
+                    .expect("capability")
+                    .is_satisfied()
+            );
+        }
+        for kernel in [None, Some("3.10.0")] {
+            let mut dependency = dep("kernel-btrfs", DependencyKind::PlatformCapability);
+            dependency.check = Some("btrfs".to_string());
+            dependency.min_kernel = Some("5.4".to_string());
+            let env = ResolverEnv {
+                kernel: kernel.map(str::to_string),
+                ..rpm_env()
+            };
+            assert!(
+                !resolver
+                    .resolve(&[dependency], &env)
+                    .expect("kernel gate")
+                    .is_satisfied()
+            );
+        }
+        let mut invalid = dep("future-capability", DependencyKind::PlatformCapability);
+        invalid.check = Some("unknown".to_string());
+        assert!(matches!(
+            resolver.resolve(&[invalid], &rpm_env()),
+            Err(ResolverError::UnknownCheck { .. })
+        ));
+    }
+
+    #[test]
+    fn dependency_probes_preserve_order_and_repeat_reads() {
+        use std::cell::RefCell;
+
+        struct RecordingRunner<'a>(&'a RefCell<Vec<String>>);
+        impl CommandRunner for RecordingRunner<'_> {
+            fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+                self.0
+                    .borrow_mut()
+                    .push(format!("{program} {}", args.join(" ")));
+                Ok(CommandOutput {
+                    code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let events = RefCell::new(Vec::new());
+        let reads = std::cell::Cell::new(0);
+        let resolver = DependencyResolver::with_probes(RecordingRunner(&events), || {
+            events.borrow_mut().push("filesystems".to_string());
+            reads.set(reads.get() + 1);
+            Ok(if reads.get() <= 2 {
+                "btrfs\n"
+            } else {
+                "ext4\n"
+            }
+            .to_string())
+        });
+        let mut capability = dep("kernel-btrfs", DependencyKind::PlatformCapability);
+        capability.check = Some("btrfs".to_string());
+        capability.min_kernel = Some("5.4".to_string());
+        let env = ResolverEnv {
+            kernel: Some("5.10.0".to_string()),
+            ..rpm_env()
+        };
+        let deps = [
+            capability.clone(),
+            dep("tool", DependencyKind::SystemPackage),
+            capability,
+        ];
+        assert!(
+            resolver
+                .resolve(&deps, &env)
+                .expect("first pass")
+                .is_satisfied()
+        );
+        assert!(
+            !resolver
+                .resolve(&deps, &env)
+                .expect("second pass")
+                .is_satisfied()
+        );
+        assert_eq!(reads.get(), 4);
+        assert_eq!(
+            *events.borrow(),
+            [
+                "filesystems",
+                "rpm -q tool",
+                "filesystems",
+                "filesystems",
+                "rpm -q tool",
+                "filesystems"
+            ]
+        );
     }
 
     #[test]

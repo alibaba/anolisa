@@ -7,6 +7,7 @@ use fuser::{FUSE_ROOT_ID, FileType, ReplyAttr, ReplyEmpty, ReplyEntry, ReplyStat
 use tracing::debug;
 
 use super::super::SkillFs;
+use super::super::paths::FlatLiveDirKind;
 use super::super::read_resolution::ReadResolution;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
 use crate::path::{PathType, is_skill_discover_path};
@@ -263,7 +264,7 @@ impl SkillFs {
                             // snapshot.
                             if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
                             {
-                                self.source_base().join(&skill_name)
+                                self.flat_live_dir(&skill_name, FlatLiveDirKind::ExistingSkill)
                             } else {
                                 d
                             }
@@ -274,7 +275,7 @@ impl SkillFs {
                             // whitelist, resolve against physical source.
                             if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
                             {
-                                self.source_base().join(&skill_name)
+                                self.flat_live_dir(&skill_name, FlatLiveDirKind::ExistingSkill)
                             } else {
                                 reply.error(libc::ENOENT);
                                 return;
@@ -754,7 +755,7 @@ impl SkillFs {
                         Some(d) => {
                             if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
                             {
-                                self.source_base().join(&skill_name)
+                                self.flat_live_dir(&skill_name, FlatLiveDirKind::ExistingSkill)
                             } else {
                                 d
                             }
@@ -763,7 +764,7 @@ impl SkillFs {
                             // I4: grace bypass for getattr on passthrough path.
                             if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
                             {
-                                self.source_base().join(&skill_name)
+                                self.flat_live_dir(&skill_name, FlatLiveDirKind::ExistingSkill)
                             } else {
                                 reply.error(libc::ENOENT);
                                 return;
@@ -1085,13 +1086,17 @@ impl SkillFs {
         skill_name: &str,
         relative_path: Option<&Path>,
     ) -> Option<std::path::PathBuf> {
-        let live_dir = self.source_base().join(skill_name);
-        if self.is_staging_skill_root(skill_name)
-            || self.is_pending_install(skill_name)
-            || relative_path.is_some_and(|relative| {
-                self.is_post_publish_grace_allowed(skill_name, Some(relative))
-            })
-        {
+        let source_root_candidate =
+            self.is_staging_skill_root(skill_name) || self.is_pending_install(skill_name);
+        let grace_path = relative_path
+            .is_some_and(|relative| self.is_post_publish_grace_allowed(skill_name, Some(relative)));
+        if source_root_candidate || grace_path {
+            let kind = if source_root_candidate {
+                FlatLiveDirKind::SourceRootCandidate
+            } else {
+                FlatLiveDirKind::ExistingSkill
+            };
+            let live_dir = self.flat_live_dir(skill_name, kind);
             return Some(match relative_path {
                 Some(relative) => live_dir.join(relative),
                 None => live_dir,
@@ -1237,7 +1242,7 @@ impl SkillFs {
                         reply.ok();
                     }
                 } else {
-                    let live_path = self.source_base().join(skill_name).join("SKILL.md");
+                    let live_path = self.skill_physical_dir(skill_name).join("SKILL.md");
                     let read_path =
                         match self.flat_access_read_path(skill_name, Some(Path::new("SKILL.md"))) {
                             Some(path) => path,
@@ -1297,7 +1302,7 @@ impl SkillFs {
                             return;
                         }
                     }
-                    let live_path = self.source_base().join(skill_name).join(relative_path);
+                    let live_path = self.skill_physical_dir(skill_name).join(relative_path);
                     let read_path = match self
                         .flat_access_read_path(skill_name, Some(relative_path.as_path()))
                     {
@@ -1430,5 +1435,64 @@ impl SkillFs {
                 reply.error(libc::ENOENT);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, store::SkillStore};
+
+    use super::*;
+    use crate::security::{
+        PostPublishGraceController, PostPublishSessionKind, PostPublishWritePattern, StagingConfig,
+        StagingMatcher, StagingPattern,
+    };
+
+    #[test]
+    fn flat_access_separates_categorized_grace_from_staging_candidates() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let skill_dir = source.path().join("catalog/demo");
+        std::fs::create_dir_all(skill_dir.join(".clawhub")).expect("categorized skill directories");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: categorized\n---\nbody\n",
+        )
+        .expect("categorized SKILL.md");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let grace = PostPublishGraceController::new(
+            Duration::from_secs(5),
+            vec![PostPublishWritePattern::PrefixRecursive(
+                ".clawhub".to_string(),
+            )],
+        );
+        grace.start_session("demo", PostPublishSessionKind::StagingRename);
+        let staging = Arc::new(StagingMatcher::new(StagingConfig {
+            patterns: vec![StagingPattern::Exact(".staging-demo".to_string())],
+            ..StagingConfig::default()
+        }));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            Arc::new(RwLock::new(store)),
+            false,
+        )
+        .with_post_publish_controller(grace.clone())
+        .with_staging_matcher(staging);
+
+        assert_eq!(
+            fs.flat_access_read_path("demo", Some(Path::new(".clawhub/origin.json"))),
+            Some(skill_dir.join(".clawhub/origin.json"))
+        );
+        assert_eq!(
+            fs.flat_access_read_path(".staging-demo", Some(Path::new("SKILL.md"))),
+            Some(source.path().join(".staging-demo/SKILL.md"))
+        );
+
+        grace.shutdown();
     }
 }

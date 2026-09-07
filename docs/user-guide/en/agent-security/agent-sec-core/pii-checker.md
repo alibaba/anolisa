@@ -77,11 +77,29 @@ only observes a finding or blocks an operation depends on that host's configured
 
 Set `PII_CHECKER_HOOK_ENABLED=false` to skip host PII hooks entirely. When enabled,
 `PII_CHECKER_MODE` accepts `observe`, `warn`, `ask`, or `block` and defaults to
-`observe`. `ask` or `block` falls back to `warn` when the host or hook event cannot enforce
-that action; post-execution hooks never claim to undo an external side effect. The environment
-policy overrides Hermes/OpenClaw capability configuration. `debug` maps to `observe`, and
-`deny` maps to `block`. Qwen Code additionally accepts the legacy `PII_CHECKER_ENABLED` switch when
+`observe` on hosts with native notice support. Hermes accepts only `observe` and `block`;
+legacy `warn` / `ask` values fall back to `observe` with a host diagnostic. It never injects
+advisories through the final assistant response. On Hermes, `block` can enforce a `deny` only at
+`pre_tool_call`. Model output is scanned for audit through `post_llm_call`, but it is never
+modified or blocked because Hermes has no plugin-usable pre-stream output gate. On other hosts,
+an unsupported `ask` or `block` boundary may fall back
+to `warn`; post-execution hooks never claim to undo an external side effect. The environment
+policy overrides Hermes/OpenClaw capability configuration. `debug` maps to `observe`, and `deny`
+maps to `block`. Qwen Code additionally accepts the legacy `PII_CHECKER_ENABLED` switch when
 `PII_CHECKER_HOOK_ENABLED` is absent.
+
+`PII_CHECKER_HOOK_ENABLED` and `PII_CHECKER_MODE` are read by all six hosts. Two further
+variables are only read by some of them:
+
+| Environment variable | Default | Hosts that read it |
+|----------------------|---------|--------------------|
+| `PII_CHECKER_TIMEOUT` | `5` | Qoder, Codex, Qwen Code (Qwen Code caps it at 8 seconds) |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder, Qwen Code |
+
+cosh, Hermes, and OpenClaw do not read those two environment variables. Hermes supports both
+settings through capability configuration (`timeout` and `include_low_confidence`). OpenClaw
+supports only `piiIncludeLowConfidence`; its PII scanner CLI timeout is fixed at 10 seconds.
+cosh uses a fixed timeout and never requests low-confidence findings.
 
 The host Agent reads these variables when it loads the plugin. Restart the Agent process that
 hosts the hook after changing them; the hook and agent-sec-core are not separate policy services.

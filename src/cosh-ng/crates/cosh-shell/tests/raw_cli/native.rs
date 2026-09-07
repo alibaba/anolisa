@@ -1,5 +1,315 @@
 use super::*;
 
+fn initial_prompt_line_prefix<'a>(visible: &'a str, prompt: &str) -> &'a str {
+    let prompt_start = visible.find(prompt).expect("initial enhanced prompt");
+    visible[..prompt_start]
+        .rsplit(['\r', '\n'])
+        .next()
+        .unwrap_or_default()
+}
+
+#[test]
+fn initial_assisted_prompt_prefix_requires_exactly_one_symbol() {
+    let prompt = "enhanced-owner$ ";
+
+    assert_eq!(
+        initial_prompt_line_prefix("◇ enhanced-owner$ ", prompt),
+        "◇ "
+    );
+    assert_ne!(initial_prompt_line_prefix("enhanced-owner$ ", prompt), "◇ ");
+    assert_ne!(
+        initial_prompt_line_prefix("◇ ◇ enhanced-owner$ ", prompt),
+        "◇ "
+    );
+}
+
+#[test]
+fn raw_cli_isolated_card_and_candidate_redraws_keep_one_assisted_prefix_per_prompt() {
+    let prompt = "isolated-owner$ ";
+    let home = temp_shell_home("prompt-owner-isolation-values");
+    fs::write(home.join(".bashrc"), format!("PS1='{prompt}'\n")).unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    for isolated in ["1", "false"] {
+        for width in ["74", "80", "200"] {
+            let output = run_raw_cli_with_args_env_and_delayed_input(
+                "fake",
+                &["--shell", "bash"],
+                &[
+                    ("HOME", &home_str),
+                    ("COSH_POC_PS1", prompt),
+                    ("COSH_SHELL_INTEGRATION", "enhanced"),
+                    ("COSH_SHELL_ISOLATED", isolated),
+                    ("COSH_SHELL_STARTUP_BANNER", "0"),
+                    ("COSH_SHELL_LANG", "en-US"),
+                    ("COSH_SHELL_WIDTH", width),
+                ],
+                vec![
+                    ("你".as_bytes().to_vec(), Duration::from_millis(300)),
+                    (b"\x15".to_vec(), Duration::from_millis(300)),
+                    (
+                        b"?? hold test slow agent\n".to_vec(),
+                        Duration::from_millis(300),
+                    ),
+                    (b"/cancel\n".to_vec(), Duration::from_millis(1_000)),
+                    (
+                        b"echo ordinary-control-1\n".to_vec(),
+                        Duration::from_millis(700),
+                    ),
+                    (
+                        b"echo ordinary-control-2\n".to_vec(),
+                        Duration::from_millis(300),
+                    ),
+                    (b"exit\n".to_vec(), Duration::from_millis(300)),
+                ],
+            );
+            let visible = strip_ansi_escape(&output);
+
+            assert!(visible.contains("Agent cancellation requested"), "{output}");
+            assert!(visible.contains("ordinary-control-2"), "{output}");
+            let prompt_count = count_occurrences(&visible, prompt);
+            let expected_prompt_count = if isolated == "1" { 8 } else { 5 };
+            assert_eq!(
+                prompt_count, expected_prompt_count,
+                "{isolated}/{width}: {output}"
+            );
+            assert_eq!(
+                count_occurrences(&visible, &format!("◇ {prompt}")),
+                prompt_count,
+                "{isolated}/{width}: every complete prompt must bind exactly one Assisted prefix: {output}"
+            );
+            assert!(
+                !visible.contains(&format!("◇ ◇ {prompt}")),
+                "{isolated}/{width}: {output}"
+            );
+            assert!(
+                !visible.contains(&format!("◌ {prompt}")),
+                "{isolated}/{width}: {output}"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn raw_cli_native_keeps_custom_bash_prompt_undecorated() {
+    let home = temp_shell_home("native-custom-prompt");
+    fs::write(home.join(".bashrc"), "PS1='native-owner$ '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "native"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[("native-owner$", b"exit\n")],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("native-owner$ "), "{output}");
+    assert!(!output.contains("◇ native-owner$ "), "{output}");
+    assert!(!output.contains("◌ native-owner$ "), "{output}");
+}
+
+#[test]
+fn raw_cli_default_enhanced_assisted_decorates_bash_prompt_without_mutating_ps1() {
+    let home = temp_shell_home("enhanced-custom-prompt");
+    fs::write(home.join(".bashrc"), "PS1='enhanced-owner$ '\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "bash"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("enhanced-owner$", b"printf '__PS1__<%s>\\n' \"$PS1\"\n"),
+            ("__PS1__<enhanced-owner$ >", b"exit\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output);
+
+    assert_eq!(
+        initial_prompt_line_prefix(&visible, "enhanced-owner$ "),
+        "◇ ",
+        "initial prompt must expose the Assisted input owner: {output}"
+    );
+
+    assert!(
+        count_occurrences(&visible, "◇ enhanced-owner$ ") >= 2,
+        "{output}"
+    );
+    assert!(visible.contains("__PS1__<enhanced-owner$ >"), "{output}");
+    assert!(!visible.contains("__PS1__<◇ enhanced-owner$ >"), "{output}");
+}
+
+#[test]
+fn raw_cli_mode_routing_switches_the_live_enhanced_session() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (
+                b"/mode routing shell-only\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"hello there\n".to_vec(), Duration::from_millis(300)),
+            (
+                b"/mode routing assisted\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"hello there\n".to_vec(), Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+    let visible = strip_ansi_escape(&output);
+
+    assert!(
+        visible.contains("Routing mode set to shell-only."),
+        "{output}"
+    );
+    assert!(
+        visible.contains("Routing mode set to assisted."),
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&visible, "hello: command not found"),
+        1,
+        "{output}"
+    );
+    assert!(visible.contains("◌ "), "{output}");
+    assert!(visible.contains("◇ "), "{output}");
+}
+
+#[test]
+fn raw_cli_enhanced_decorates_zsh_prompt_without_mutating_prompt() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("enhanced-custom-zsh-prompt");
+    fs::write(home.join(".zshrc"), "PROMPT='enhanced-zsh> '\nRPROMPT=''\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            (
+                "enhanced-zsh> ",
+                b"printf '__PROMPT__<%s>\\n' \"$PROMPT\"\n",
+            ),
+            ("__PROMPT__<enhanced-zsh> >", b"exit\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output);
+
+    assert!(
+        count_occurrences(&visible, "◇ enhanced-zsh> ") >= 2,
+        "{output}"
+    );
+    assert!(visible.contains("__PROMPT__<enhanced-zsh> >"), "{output}");
+    assert!(
+        !visible.contains("__PROMPT__<◇ enhanced-zsh> >"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_enhanced_shift_tab_toggles_zsh_routing_in_place() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("enhanced-zsh-toggle");
+    fs::write(home.join(".zshrc"), "PROMPT='enhanced-zsh> '\nRPROMPT=''\n").unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("enhanced-zsh> ", b"\x1b[Z"),
+            ("enhanced-zsh> ", b"/help\n"),
+            ("no such file or directory: /help", b""),
+            ("enhanced-zsh> ", b"\x1b[Z"),
+            ("enhanced-zsh> ", b"exit 0\n"),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output);
+
+    assert!(
+        visible.contains("no such file or directory: /help"),
+        "{output}"
+    );
+    assert!(
+        count_occurrences(&visible, "◇ enhanced-zsh> ") >= 2,
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_explicit_native_skips_enhanced_startup_workers() {
+    let home = temp_shell_home("native-no-enhanced-workers");
+    let core = home.join("cosh-core-probe");
+    let invocation_log = home.join("core-invoked");
+    write_executable(
+        &core,
+        &format!(
+            "#!/bin/sh\nprintf invoked >> '{}'\nexit 1\n",
+            invocation_log.display()
+        ),
+    );
+    let home_str = home.to_string_lossy().into_owned();
+    let core_str = core.to_string_lossy().into_owned();
+
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("COSH_CORE_PATH", core_str.as_str()),
+            ("COSH_SHELL_INTEGRATION", "native"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_RECOMMENDATIONS_ENABLED", RAW_CLI_UNSET_ENV),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+        ],
+        vec![(b"exit\n".to_vec(), Duration::from_millis(300))],
+    );
+
+    assert!(!invocation_log.exists(), "{output}");
+    assert!(
+        !home.join(".copilot-shell/cosh/recommendations").exists(),
+        "{output}"
+    );
+}
+
 #[test]
 fn raw_cli_zsh_native_loads_existing_user_history() {
     if Command::new("zsh").arg("--version").output().is_err() {
@@ -29,6 +339,7 @@ fn raw_cli_zsh_native_loads_existing_user_history() {
             ("HOME", &home_str),
             ("TERM", "xterm-256color"),
             ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_INTEGRATION", "native"),
         ],
         vec![
             (
@@ -78,6 +389,7 @@ fn raw_cli_bash_native_loads_existing_user_history() {
             ("HOME", &home_str),
             ("TERM", "xterm-256color"),
             ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_INTEGRATION", "native"),
         ],
         vec![
             (
@@ -113,7 +425,10 @@ fn raw_cli_zsh_native_path_slash_and_tab_stay_in_shell() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &["--shell", "zsh"],
-        &[("COSH_SHELL_ISOLATED", "0")],
+        &[
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_INTEGRATION", "native"),
+        ],
         vec![
             (b"/Users".to_vec(), Duration::ZERO),
             (vec![0x03], Duration::from_millis(100)),

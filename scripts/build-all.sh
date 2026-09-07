@@ -5,7 +5,7 @@
 # Usage:
 #   ./scripts/build-all.sh                                    # install deps + build + install (default)
 #   ./scripts/build-all.sh --no-install                       # install deps + build, skip installation
-#   ./scripts/build-all.sh --ignore-deps                      # build + install, skip dep install
+#   ./scripts/build-all.sh --ignore-deps                      # build + install, skip dependency setup and verification
 #   ./scripts/build-all.sh --deps-only                        # install deps only
 #   ./scripts/build-all.sh --component cosh                   # deps + build + install copilot-shell only
 #   ./scripts/build-all.sh --uninstall                        # uninstall all components
@@ -73,6 +73,7 @@ INSTALL_EXTENSIONS_DIR="$USER_COSH_EXTENSIONS_DIR"
 SEC_CORE_BIN_DIR=""
 SEC_CORE_LIB_DIR=""
 SEC_CORE_RUST_TOOLCHAIN="1.93.0"
+RUNTIME_SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ─── output / staging ───
 
@@ -604,17 +605,24 @@ query_repo_ver() {
     fi
 }
 
+node_version_satisfies_on_path() {
+    local command_path="$1" required="$2" version
+    version="$(PATH="$command_path" node -v 2>/dev/null)" || return 1
+    version="$(extract_ver "$version" || true)"
+    [[ -n "$version" ]] && ver_gte "$version" "$required"
+}
+
 install_node() {
     step "Node.js (for copilot-shell)"
     local REQUIRED="20.0.0"
+    local NVM_INSTALL_MAJOR="24"
 
     local node_pkg="nodejs" npm_pkg="npm"
 
     _node_ver_ok() {
-        cmd_exists node || return 1
-        local v
-        v=$(extract_ver "$(node -v 2>/dev/null)" || echo "")
-        [[ -n "$v" ]] && ver_gte "$v" "$REQUIRED"
+        local command_path="$PATH"
+        [[ "$INSTALL_MODE" == "system" ]] && command_path="$RUNTIME_SYSTEM_PATH"
+        node_version_satisfies_on_path "$command_path" "$REQUIRED"
     }
 
     _source_nvm() {
@@ -626,8 +634,17 @@ install_node() {
     _configure_npm_mirror
 
     if _node_ver_ok; then
-        ok "Node.js $(node -v) already installed, skipping"
+        local command_path="$PATH"
+        [[ "$INSTALL_MODE" == "system" ]] && command_path="$RUNTIME_SYSTEM_PATH"
+        ok "Node.js $(PATH="$command_path" node -v) already installed, skipping"
         return 0
+    fi
+
+    # System installs keep language runtimes outside automatic package
+    # mutation. The aggregate preflight normally reports this first; retain a
+    # defensive check in case the runtime disappears between phases.
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        die "System Node.js >= $REQUIRED is required in $RUNTIME_SYSTEM_PATH; install it manually and retry"
     fi
 
     local repo_ver
@@ -637,7 +654,9 @@ install_node() {
         if [[ "$PKG_BASE" == "deb" ]]; then sudo apt-get update -y 2>/dev/null || true; fi
         sudo $PKG_INSTALL $node_pkg $npm_pkg 2>/dev/null || true
         if _node_ver_ok; then
-            ok "Node.js $(node -v) installed via package manager"
+            local command_path="$PATH"
+            [[ "$INSTALL_MODE" == "system" ]] && command_path="$RUNTIME_SYSTEM_PATH"
+            ok "Node.js $(PATH="$command_path" node -v) installed via package manager"
             return 0
         fi
         warn "Package manager install did not satisfy version requirement"
@@ -712,7 +731,8 @@ install_node() {
     fi
     cmd_exists nvm || die "Failed to install nvm"
 
-    nvm install 20 || die "nvm install 20 failed; check network or mirror settings"
+    nvm install "$NVM_INSTALL_MAJOR" || \
+        die "nvm install $NVM_INSTALL_MAJOR failed; check network or mirror settings"
 
     _configure_npm_mirror
 
@@ -1128,7 +1148,9 @@ _configure_uv_mirror() {
     # Configure mirrors for uv (and pip3 as fallback).
     # uv respects these env vars and ~/.config/uv/uv.toml.
     local aliyun_pypi="https://mirrors.aliyun.com/pypi/simple/"
-    local python_install_mirror="${UV_PYTHON_INSTALL_MIRROR:-https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone}"
+    local official_python_install_mirror="https://github.com/astral-sh/python-build-standalone/releases/download"
+    local legacy_python_install_mirror="https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone"
+    local python_install_mirror="${UV_PYTHON_INSTALL_MIRROR:-$official_python_install_mirror}"
 
     export UV_INDEX_URL="$aliyun_pypi"
     export UV_DEFAULT_INDEX="$aliyun_pypi"
@@ -1146,6 +1168,24 @@ _configure_uv_mirror() {
     fi
 
     local uv_cfg="$HOME/.config/uv/uv.toml"
+    if [[ -f "$uv_cfg" ]] && \
+            grep -Fq 'managed by build-all.sh' "$uv_cfg" 2>/dev/null && \
+            grep -Fqx "python-install-mirror = \"$legacy_python_install_mirror\"" \
+                "$uv_cfg" 2>/dev/null; then
+        local tmp_cfg old_setting new_setting
+        tmp_cfg=$(mktemp)
+        old_setting="python-install-mirror = \"$legacy_python_install_mirror\""
+        new_setting="python-install-mirror = \"$python_install_mirror\""
+        if awk -v old="$old_setting" -v new="$new_setting" \
+                '{ print ($0 == old ? new : $0) }' "$uv_cfg" > "$tmp_cfg"; then
+            mv "$tmp_cfg" "$uv_cfg"
+            ok "uv Python install mirror migrated: $python_install_mirror"
+        else
+            rm -f "$tmp_cfg"
+            return 1
+        fi
+    fi
+
     if [[ ! -f "$uv_cfg" ]]; then
         mkdir -p "$(dirname "$uv_cfg")"
         if [[ "$_uv_supports_pim" == "true" ]]; then
@@ -1341,35 +1381,6 @@ check_ebpf_deps() {
     fi
 }
 
-install_cosh_ng_native_deps() {
-    step "Native dependencies (for cosh-ng)"
-
-    local missing=()
-    if ! cmd_exists pkg-config; then
-        if [[ "$PKG_BASE" == "rpm" ]]; then
-            missing+=("pkgconf-pkg-config")
-        else
-            missing+=("pkg-config")
-        fi
-    fi
-
-    if [[ "$PKG_BASE" == "rpm" ]]; then
-        rpm -q openssl-devel &>/dev/null || missing+=("openssl-devel")
-    else
-        dpkg -s libssl-dev &>/dev/null 2>&1 || missing+=("libssl-dev")
-    fi
-
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        ok "cosh-ng native dependencies already installed"
-        return 0
-    fi
-
-    info "Installing: ${missing[*]}"
-    # shellcheck disable=SC2086
-    as_root $PKG_INSTALL "${missing[@]}"
-    ok "cosh-ng native dependencies installed"
-}
-
 # ─── top-level dep installer ───
 
 install_just() {
@@ -1400,6 +1411,13 @@ do_install_deps() {
     if $DRY_RUN; then
         step "Dependency plan"
         echo "DRY-RUN: detect Linux distribution and package manager"
+        if $DO_INSTALL || $DEPS_ONLY; then
+            if [[ "$INSTALL_MODE" == "system" ]]; then
+                echo "DRY-RUN: preflight all selected component runtime dependencies"
+            else
+                echo "DRY-RUN: preflight platform capabilities before user dependency setup"
+            fi
+        fi
         if want_component cosh || want_component sec-core || want_component sight; then
             echo "DRY-RUN: check/install Node.js if needed"
         fi
@@ -1408,9 +1426,6 @@ do_install_deps() {
         fi
         if want_component sec-core || want_component cosh-ng || want_component sight || want_component tokenless || want_component ws-ckpt || want_component memory; then
             echo "DRY-RUN: check/install Rust toolchain if needed"
-        fi
-        if want_component cosh-ng; then
-            echo "DRY-RUN: check/install pkg-config and OpenSSL development files"
         fi
         if want_component tokenless; then
             echo "DRY-RUN: check/install just if needed"
@@ -1421,12 +1436,23 @@ do_install_deps() {
         if want_component sight; then
             echo "DRY-RUN: check agentsight eBPF dependencies"
         fi
+        if { $DO_INSTALL || $DEPS_ONLY; } && [[ "$INSTALL_MODE" != "system" ]]; then
+            echo "DRY-RUN: verify all runtime dependencies after user dependency setup"
+        fi
         ok "Dependency setup plan generated"
         return 0
     fi
 
     step "Detecting system"
     detect_distro
+
+    if $DO_INSTALL || $DEPS_ONLY; then
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            preflight_runtime_dependencies || return 1
+        else
+            preflight_runtime_dependencies platform-only || return 1
+        fi
+    fi
 
     if want_component cosh || want_component sec-core || want_component sight; then
         install_node
@@ -1440,10 +1466,6 @@ do_install_deps() {
         install_rust
     fi
 
-    if want_component cosh-ng; then
-        install_cosh_ng_native_deps
-    fi
-
     if want_component tokenless; then
         install_just
     fi
@@ -1455,6 +1477,10 @@ do_install_deps() {
 
     if want_component sight; then
         check_ebpf_deps
+    fi
+
+    if { $DO_INSTALL || $DEPS_ONLY; } && [[ "$INSTALL_MODE" != "system" ]]; then
+        preflight_runtime_dependencies || return 1
     fi
 
     echo ""
@@ -1550,19 +1576,36 @@ build_sec_core() {
 build_cosh_ng() {
     step "Building cosh-ng"
     local dir="$PROJECT_ROOT/src/cosh-ng"
+    local cosh_ng_toolchain="${COSH_NG_RUST_TOOLCHAIN:-1.88.0}"
     [[ -d "$dir" ]] || die "Directory not found: $dir"
 
     local component_root bin source
+    local -a cargo_command=(cargo)
     component_root="$(component_target_dir cosh-ng)"
 
     if $DRY_RUN; then
         echo "DRY-RUN: rm -rf $component_root"
-        echo "DRY-RUN: CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --manifest-path $dir/Cargo.toml --workspace --release"
-        for bin in cosh-cli cosh-core cosh-shell; do
+        echo "DRY-RUN: ensure Rust $cosh_ng_toolchain via rustup, or validate the PATH toolchain"
+        echo "DRY-RUN: CARGO_NET_GIT_FETCH_WITH_CLI=true rustup run $cosh_ng_toolchain cargo build --manifest-path $dir/Cargo.toml --workspace --release"
+        for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
             echo "DRY-RUN: install $dir/target/release/$bin -> $component_root/bin/$bin"
         done
         ok "cosh-ng build plan generated"
         return 0
+    fi
+
+    if cmd_exists rustup; then
+        if ! rustup toolchain list | grep -Eq "^${cosh_ng_toolchain}(-|[[:space:]])"; then
+            info "Installing cosh-ng Rust toolchain ${cosh_ng_toolchain} ..."
+            rustup toolchain install "$cosh_ng_toolchain" --profile minimal
+        fi
+        cargo_command=(rustup run "$cosh_ng_toolchain" cargo)
+    else
+        local installed_rust
+        installed_rust=$(extract_ver "$(rustc --version 2>/dev/null)" || echo "")
+        [[ -n "$installed_rust" ]] && ver_gte "$installed_rust" "$cosh_ng_toolchain" \
+            || die "cosh-ng requires Rust >= ${cosh_ng_toolchain}; rustup is unavailable"
+        info "rustup unavailable; using validated Rust ${installed_rust} from PATH"
     fi
 
     rm -rf "$component_root"
@@ -1574,9 +1617,10 @@ build_cosh_ng() {
     run_logged_timeout "${COSH_NG_BUILD_TIMEOUT:-1200}" \
         "cargo build (cosh-ng workspace)" \
         env CARGO_NET_GIT_FETCH_WITH_CLI=true \
-        cargo build --manifest-path "$dir/Cargo.toml" --workspace --release
+        "${cargo_command[@]}" build \
+            --manifest-path "$dir/Cargo.toml" --workspace --release
 
-    for bin in cosh-cli cosh-core cosh-shell; do
+    for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
         source="$dir/target/release/$bin"
         copy_file "$source" "$component_root/bin/$bin" 0755
     done
@@ -1639,23 +1683,21 @@ build_tokenless() {
         return 0
     fi
 
-    local component_root bin rtk_bin toon_bin
+    local component_root bin rtk_bin
     component_root="$(component_target_dir tokenless)"
     bin="$component_root/bin/tokenless"
     rtk_bin="$component_root/libexec/anolisa/tokenless/rtk"
-    toon_bin="$component_root/libexec/anolisa/tokenless/toon"
-    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]] && [[ -f "$toon_bin" ]]; then
+    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]]; then
         if [[ ! -d "$component_root/share/anolisa/adapters/tokenless" ]]; then
             warn "tokenless adapter resources staged empty"
         fi
         if [[ ! -d "$component_root/share/anolisa/extensions/tokenless" ]]; then
             warn "tokenless cosh extension staged empty"
         fi
-        ok "tokenless, rtk, and toon built successfully"
+        ok "tokenless and rtk built successfully"
     else
         [[ -f "$bin" ]]     || warn "Expected artifact $bin not found"
         [[ -f "$rtk_bin" ]] || warn "Expected artifact $rtk_bin not found"
-        [[ -f "$toon_bin" ]] || warn "Expected artifact $toon_bin not found"
     fi
 }
 
@@ -1799,38 +1841,470 @@ install_skills() {
     fi
 }
 
-install_sec_core_runtime_deps() {
-    if cmd_exists bwrap && { cmd_exists gpg || cmd_exists gpg2; } && cmd_exists jq; then
+# Detection stays non-fatal so every selected component can appear in one
+# actionable report before any package-manager mutation.
+detect_runtime_package_manager() {
+    if [[ "$PKG_BASE" =~ ^(deb|rpm)$ && -n "$PKG_INSTALL" ]]; then
         return 0
     fi
 
-    if [[ "$INSTALL_MODE" != "system" ]]; then
-        cmd_exists bwrap || warn "bubblewrap not found; linux-sandbox may not run until it is installed."
-        if ! cmd_exists gpg && ! cmd_exists gpg2; then
-            warn "gpg/gpg2 not found; skill signature setup will need GnuPG."
+    [[ -r /etc/os-release ]] || return 1
+    local ID="" ID_LIKE=""
+    # shellcheck source=/dev/null
+    source /etc/os-release
+
+    if [[ "${ID:-}" =~ ^(fedora|rhel|centos|anolis|alinux)$ ]] || \
+            [[ "${ID_LIKE:-}" =~ (fedora|rhel) ]]; then
+        PKG_BASE="rpm"
+        if cmd_exists dnf; then
+            PKG_INSTALL="dnf install -y"
+        elif cmd_exists yum; then
+            PKG_INSTALL="yum install -y"
+        else
+            return 1
         fi
-        cmd_exists jq || warn "jq not found; sec-core helper scripts may need jq."
+    elif [[ "${ID:-}" =~ ^(debian|ubuntu)$ ]] || [[ "${ID_LIKE:-}" =~ debian ]]; then
+        cmd_exists apt-get || return 1
+        PKG_BASE="deb"
+        PKG_INSTALL="apt-get install -y"
+    else
+        return 1
+    fi
+}
+
+runtime_manifest_path() {
+    case "$1" in
+        cosh)      echo "$PROJECT_ROOT/src/anolisa/manifests/components/cosh/component.toml" ;;
+        skills)    echo "$PROJECT_ROOT/src/anolisa/manifests/components/os-skills/component.toml" ;;
+        sec-core)  echo "$PROJECT_ROOT/src/agent-sec-core/.anolisa/component.toml" ;;
+        cosh-ng)   echo "$PROJECT_ROOT/src/cosh-ng/.anolisa/component.toml" ;;
+        tokenless) echo "$PROJECT_ROOT/src/anolisa/manifests/components/tokenless/component.toml" ;;
+        ws-ckpt)   echo "$PROJECT_ROOT/src/anolisa/manifests/components/ws-ckpt/component.toml" ;;
+        memory)    echo "$PROJECT_ROOT/src/anolisa/manifests/components/agent-memory/component.toml" ;;
+        sight)     echo "$PROJECT_ROOT/src/anolisa/manifests/components/agentsight/component.toml" ;;
+        *)         return 1 ;;
+    esac
+}
+
+# Emits component|name|kind|probe|rpm|deb|check|version|min_kernel records.
+runtime_dependencies_for_manifest() {
+    local component="$1" manifest="$2"
+    [[ -r "$manifest" ]] || return 1
+    awk -v component="$component" '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        function quoted_string(value, quote, position, char, escaped, result) {
+            value = trim(value)
+            quote = substr(value, 1, 1)
+            if (quote != "\"" && quote != sprintf("%c", 39)) return ""
+            value = substr(value, 2)
+            escaped = 0
+            result = ""
+            for (position = 1; position <= length(value); position++) {
+                char = substr(value, position, 1)
+                if (quote == "\"" && escaped) {
+                    result = result char
+                    escaped = 0
+                } else if (quote == "\"" && char == "\\") {
+                    escaped = 1
+                } else if (char == quote) {
+                    return result
+                } else {
+                    result = result char
+                }
+            }
+            return ""
+        }
+        function assignment_string(line, value) {
+            value = line
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            return quoted_string(value)
+        }
+        function inline_string(line, key, pattern, value) {
+            pattern = "(^|[,{[:space:]])" key "[[:space:]]*=[[:space:]]*"
+            if (!match(line, pattern)) return ""
+            value = substr(line, RSTART + RLENGTH)
+            return quoted_string(value)
+        }
+        function emit() {
+            if (name != "") {
+                print component "|" name "|" kind "|" probe "|" rpm "|" deb \
+                    "|" check "|" version "|" min_kernel
+            }
+        }
+        function clear_dep() {
+            name = kind = probe = rpm = deb = check = version = min_kernel = ""
+        }
+        {
+            header = trim($0)
+            if (header ~ /^\[\[[[:space:]]*component\.dependencies[[:space:]]*\]\]([[:space:]]*#.*)?$/) {
+                emit(); clear_dep(); inside = 1; next
+            }
+            if (inside && header ~ /^\[/) {
+                emit(); clear_dep(); inside = 0; next
+            }
+            if (!inside || $0 !~ /=/) next
+
+            key = $0
+            sub(/=.*/, "", key)
+            key = trim(key)
+            if (key == "name") name = assignment_string($0)
+            else if (key == "kind") kind = assignment_string($0)
+            else if (key == "probe") probe = assignment_string($0)
+            else if (key == "check") check = assignment_string($0)
+            else if (key == "version") version = assignment_string($0)
+            else if (key == "min_kernel") min_kernel = assignment_string($0)
+            else if (key == "packages") {
+                rpm = inline_string($0, "rpm")
+                deb = inline_string($0, "deb")
+            }
+        }
+        END { emit() }
+    ' "$manifest"
+}
+
+runtime_dependency_for_source_build() {
+    local record="$1" component name
+    IFS='|' read -r component name _ <<< "$record"
+    if [[ "$component" == "sec-core" && "$name" == "systemd" ]]; then
+        # Source installs do not install or manage the packaged systemd unit.
+        return 0
+    elif [[ "$component" == "sec-core" && "$name" == "nodejs" ]]; then
+        # The manifest only probes runtime presence, while the OpenClaw plugin
+        # source build requires the same Node version as copilot-shell.
+        echo 'sec-core|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+    else
+        echo "$record"
+    fi
+}
+
+source_build_runtime_dependencies() {
+    local component
+    while IFS= read -r component; do
+        case "$component" in
+            sight)
+                echo 'sight|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+                ;;
+        esac
+    done < <(runtime_install_components)
+}
+
+runtime_install_components() {
+    local component
+    while IFS= read -r component; do
+        # ws-ckpt installs no files in user mode, so its daemon runtime
+        # requirements must not block unrelated user-profile installs.
+        if [[ "$INSTALL_MODE" == "user" && "$component" == "ws-ckpt" ]]; then
+            continue
+        fi
+        echo "$component"
+    done < <(active_components)
+}
+
+selected_runtime_dependencies() {
+    local component manifest dependencies record
+    while IFS= read -r component; do
+        manifest="$(runtime_manifest_path "$component")" || return 1
+        dependencies="$(runtime_dependencies_for_manifest "$component" "$manifest")" || return 1
+        while IFS= read -r record; do
+            [[ -n "$record" ]] || continue
+            runtime_dependency_for_source_build "$record"
+        done <<< "$dependencies"
+    done < <(runtime_install_components)
+    source_build_runtime_dependencies
+}
+
+runtime_command_path() {
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        echo "$RUNTIME_SYSTEM_PATH"
+    elif [[ -n "${PATH:-}" ]]; then
+        # Preserve user-local runtimes while keeping system package tools in
+        # sbin discoverable from non-login environments.
+        echo "$PATH:$RUNTIME_SYSTEM_PATH"
+    else
+        echo "$RUNTIME_SYSTEM_PATH"
+    fi
+}
+
+normalize_runtime_version() {
+    local version="$1"
+    case "$version" in
+        *.*.*) echo "$version" ;;
+        *.*)   echo "${version}.0" ;;
+        *)     echo "${version}.0.0" ;;
+    esac
+}
+
+runtime_probe_succeeds() {
+    local dependency="$1" probe="$2" version="$3"
+    local command_path output required actual
+    local -a argv=()
+    read -r -a argv <<< "$probe"
+    [[ ${#argv[@]} -gt 0 ]] || return 1
+    command_path="$(runtime_command_path)"
+    output="$(PATH="$command_path" "${argv[@]}" 2>/dev/null)" || {
+        # The rpm package is gnupg2, whose binary name differs across distros.
+        if [[ "$dependency" == "gnupg" ]]; then
+            output="$(PATH="$command_path" gpg2 --version 2>/dev/null)" || return 1
+        else
+            return 1
+        fi
+    }
+    [[ -z "$version" ]] && return 0
+    [[ "$version" == '>='* ]] || return 0
+    required="$(normalize_runtime_version "${version#>=}")"
+    actual="$(extract_ver "$output" || true)"
+    [[ -n "$actual" ]] && ver_gte "$actual" "$required"
+}
+
+runtime_package_present() {
+    local rpm_package="$1" deb_package="$2"
+    case "$PKG_BASE" in
+        rpm) [[ -n "$rpm_package" ]] && rpm -q "$rpm_package" &>/dev/null ;;
+        deb) [[ -n "$deb_package" ]] && dpkg -s "$deb_package" &>/dev/null ;;
+        *)   return 1 ;;
+    esac
+}
+
+runtime_kernel_satisfies() {
+    local minimum="$1" current required
+    [[ -z "$minimum" ]] && return 0
+    current="$(uname -r 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+(\.[0-9]+)?' || true)"
+    [[ -n "$current" ]] || return 1
+    current="$(normalize_runtime_version "$current")"
+    required="$(normalize_runtime_version "$minimum")"
+    ver_gte "$current" "$required"
+}
+
+runtime_btrfs_available() {
+    local filesystems="${RUNTIME_PROC_FILESYSTEMS:-/proc/filesystems}"
+    grep -qw btrfs "$filesystems" 2>/dev/null && return 0
+    # Kernel module tools live in sbin on supported distributions. This host
+    # capability must not depend on whether the invoking user's PATH includes it.
+    PATH="$RUNTIME_SYSTEM_PATH" modprobe -n btrfs &>/dev/null
+}
+
+RUNTIME_DEP_DETAIL=""
+runtime_dependency_present() {
+    local name="$1" kind="$2" probe="$3" rpm_package="$4" deb_package="$5"
+    local check="$6" version="$7" min_kernel="$8"
+    RUNTIME_DEP_DETAIL=""
+
+    if ! runtime_kernel_satisfies "$min_kernel"; then
+        RUNTIME_DEP_DETAIL="requires kernel >= ${min_kernel}"
+        return 1
+    fi
+
+    case "$kind" in
+        system-package)
+            if [[ -n "$probe" ]]; then
+                runtime_probe_succeeds "$name" "$probe" "" && return 0
+                RUNTIME_DEP_DETAIL="requires probe: ${probe}"
+            else
+                runtime_package_present "$rpm_package" "$deb_package" && return 0
+                RUNTIME_DEP_DETAIL="required system package is not installed"
+            fi
+            ;;
+        language-runtime)
+            runtime_probe_succeeds "$name" "${probe:-$name --version}" "$version" && return 0
+            RUNTIME_DEP_DETAIL="requires ${name}${version:+ ${version}}"
+            ;;
+        platform-capability)
+            case "$check" in
+                btf)
+                    [[ -f /sys/kernel/btf/vmlinux ]] && return 0
+                    RUNTIME_DEP_DETAIL="kernel BTF is unavailable (/sys/kernel/btf/vmlinux)"
+                    ;;
+                btrfs)
+                    runtime_btrfs_available && return 0
+                    RUNTIME_DEP_DETAIL="btrfs is neither registered nor loadable"
+                    ;;
+                *)
+                    RUNTIME_DEP_DETAIL="unknown platform check: ${check:-<empty>}"
+                    ;;
+            esac
+            ;;
+        *)
+            RUNTIME_DEP_DETAIL="unknown dependency kind: ${kind:-<empty>}"
+            ;;
+    esac
+    return 1
+}
+
+collect_missing_runtime_dependencies() {
+    local -n missing_ref="$1"
+    local filter="${2:-all}"
+    local dependencies component name kind probe rpm_package deb_package check version min_kernel
+    missing_ref=()
+    dependencies="$(selected_runtime_dependencies)" || {
+        err "Failed to load runtime dependency manifests"
+        return 1
+    }
+    while IFS='|' read -r component name kind probe rpm_package deb_package check version min_kernel; do
+        [[ -n "$name" ]] || continue
+        if [[ "$filter" == "platform-only" && "$kind" != "platform-capability" ]]; then
+            continue
+        fi
+        if ! runtime_dependency_present \
+                "$name" "$kind" "$probe" "$rpm_package" "$deb_package" \
+                "$check" "$version" "$min_kernel"; then
+            missing_ref+=("${component}|${name}|${kind}|${probe}|${rpm_package}|${deb_package}|${check}|${version}|${min_kernel}|${RUNTIME_DEP_DETAIL}")
+        fi
+    done <<< "$dependencies"
+}
+
+runtime_missing_packages() {
+    local -n missing_ref="$1" packages_ref="$2"
+    local record component name kind probe rpm_package deb_package check version min_kernel detail package
+    local -A seen=()
+    packages_ref=()
+    for record in "${missing_ref[@]}"; do
+        IFS='|' read -r component name kind probe rpm_package deb_package check version min_kernel detail <<< "$record"
+        # Selecting a language-runtime distribution is a user decision; only
+        # native system packages participate in the automatic transaction.
+        [[ "$kind" == "system-package" ]] || continue
+        if [[ "$PKG_BASE" == "rpm" ]]; then package="$rpm_package"; else package="$deb_package"; fi
+        [[ -n "$package" && -z "${seen[$package]:-}" ]] || continue
+        seen[$package]=1
+        packages_ref+=("$package")
+    done
+}
+
+runtime_missing_has_blocker() {
+    local record kind
+    for record in "$@"; do
+        IFS='|' read -r _ _ kind _ <<< "$record"
+        # Resolve manual runtimes and host capabilities before mutating packages.
+        [[ "$kind" == "platform-capability" || "$kind" == "language-runtime" ]] && return 0
+    done
+    return 1
+}
+
+runtime_retry_command() {
+    local retry=("$PROJECT_ROOT/scripts/build-all.sh") component
+    while IFS= read -r component; do
+        retry+=("--component" "$component")
+    done < <(active_components)
+    [[ "$INSTALL_MODE" == "system" ]] && retry+=("--system")
+    $INSTALL_DEPS || retry+=("--ignore-deps")
+    $DEPS_ONLY && retry+=("--deps-only")
+    shell_args "${retry[@]}"
+}
+
+report_missing_runtime_dependencies() {
+    local phase="$1" package_manager_known="$2"; shift 2
+    local missing=("$@") packages=() record component name kind probe rpm_package deb_package
+    local check version min_kernel detail manual_runtime=false
+
+    if [[ "$phase" == "after-install" ]]; then
+        err "Runtime dependencies are still missing after package installation; no components were installed:"
+    else
+        err "Missing runtime dependencies; no component files were installed:"
+    fi
+    for record in "${missing[@]}"; do
+        IFS='|' read -r component name kind probe rpm_package deb_package check version min_kernel detail <<< "$record"
+        echo "  ${component}: ${name} [${kind}]${detail:+ - ${detail}}"
+        [[ "$kind" == "language-runtime" ]] && manual_runtime=true
+    done
+
+    runtime_missing_packages missing packages
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        echo ""
+        if [[ "$package_manager_known" == "true" ]]; then
+            local install_command=() privilege_prefix="sudo "
+            read -r -a install_command <<< "$PKG_INSTALL"
+            [[ "$(id -u)" -eq 0 ]] && privilege_prefix=""
+            info "Install them with:"
+            echo "  ${privilege_prefix}$(shell_args "${install_command[@]}" "${packages[@]}")"
+        else
+            err "Cannot determine a supported deb/rpm package manager; install the listed dependencies manually."
+        fi
+    fi
+
+    if $manual_runtime; then
+        echo ""
+        info "Install these language runtimes manually:"
+        for record in "${missing[@]}"; do
+            IFS='|' read -r component name kind probe rpm_package deb_package check version min_kernel detail <<< "$record"
+            [[ "$kind" == "language-runtime" ]] || continue
+            if [[ "$INSTALL_MODE" == "system" ]]; then
+                echo "  ${component}: ${name} ${version} in $RUNTIME_SYSTEM_PATH"
+            else
+                echo "  ${component}: ${name} ${version} in PATH"
+            fi
+        done
+    fi
+
+    echo ""
+    info "Then retry:"
+    echo "  $(runtime_retry_command)"
+    return 1
+}
+
+preflight_runtime_dependencies() {
+    local filter="${1:-all}"
+    if [[ "$filter" == "platform-only" ]]; then
+        step "Runtime platform capability preflight"
+    else
+        step "Runtime dependency preflight"
+    fi
+
+    local missing=()
+    local package_manager_known=true
+    detect_runtime_package_manager || package_manager_known=false
+    collect_missing_runtime_dependencies missing "$filter" || return 1
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        if [[ "$filter" == "platform-only" ]]; then
+            ok "Selected component platform capabilities are available"
+        else
+            ok "Selected component runtime dependencies are available"
+        fi
         return 0
     fi
 
-    if [[ -z "$PKG_INSTALL" ]]; then
-        detect_distro
+    # User installs and --ignore-deps never mutate system package state.
+    if [[ "$INSTALL_MODE" != "system" ]] || ! $INSTALL_DEPS; then
+        report_missing_runtime_dependencies "preflight" "$package_manager_known" "${missing[@]}"
+        return 1
     fi
 
-    if ! cmd_exists bwrap; then
-        info "Installing runtime dependency: bubblewrap ..."
-        as_root $PKG_INSTALL bubblewrap || warn "bubblewrap not installed (linux-sandbox runtime dep)"
+    if ! $package_manager_known || runtime_missing_has_blocker "${missing[@]}"; then
+        report_missing_runtime_dependencies "preflight" "$package_manager_known" "${missing[@]}"
+        return 1
     fi
-    if ! cmd_exists gpg && ! cmd_exists gpg2; then
-        local gpg_pkg="gnupg2"
-        [[ "$PKG_BASE" == "deb" ]] && gpg_pkg="gnupg"
-        info "Installing runtime dependency: ${gpg_pkg} ..."
-        as_root $PKG_INSTALL "$gpg_pkg" || warn "${gpg_pkg} not installed (skill signature verification)"
+
+    local packages=() install_command=()
+    runtime_missing_packages missing packages
+    read -r -a install_command <<< "$PKG_INSTALL"
+    if [[ ${#install_command[@]} -eq 0 || ${#packages[@]} -eq 0 ]]; then
+        report_missing_runtime_dependencies "preflight" false "${missing[@]}"
+        return 1
     fi
-    if ! cmd_exists jq; then
-        info "Installing runtime dependency: jq ..."
-        as_root $PKG_INSTALL jq || warn "jq not installed (sec-core helper/signing dependency)"
+
+    if [[ "$PKG_BASE" == "deb" ]]; then
+        info "Refreshing APT package indexes ..."
+        if ! as_root apt-get update; then
+            err "Failed to refresh APT package indexes; no runtime packages were installed."
+            return 1
+        fi
     fi
+
+    info "Installing runtime dependencies: ${packages[*]}"
+    if ! as_root "${install_command[@]}" "${packages[@]}"; then
+        warn "The package manager returned an error; re-checking every runtime dependency."
+    fi
+
+    missing=()
+    collect_missing_runtime_dependencies missing "$filter" || return 1
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        report_missing_runtime_dependencies "after-install" true "${missing[@]}"
+        return 1
+    fi
+
+    ok "Runtime dependencies installed and verified"
 }
 
 install_sec_core() {
@@ -1849,7 +2323,6 @@ install_sec_core() {
         else
             echo "DRY-RUN: make -C $dir install BUILD_DIR=$build_dir INSTALL_PROFILE=user"
         fi
-        echo "DRY-RUN: check/install sec-core runtime dependencies"
         ok "agent-sec-core install plan generated for $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
         return 0
     fi
@@ -1878,8 +2351,6 @@ install_sec_core() {
                 BUILD_DIR="$build_dir" INSTALL_PROFILE=user
     fi
 
-    install_sec_core_runtime_deps
-
     ok "agent-sec-core installed to $SEC_CORE_BIN_DIR and $SEC_CORE_LIB_DIR"
     if [[ "$INSTALL_MODE" != "system" ]]; then
         info "Make sure $SEC_CORE_BIN_DIR is in PATH before starting integrations."
@@ -1892,14 +2363,14 @@ install_cosh_ng() {
     staged="$(component_target_dir cosh-ng)/bin"
 
     if $DRY_RUN; then
-        for bin in cosh-cli cosh-core cosh-shell; do
+        for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
             echo "DRY-RUN: install -p -m 0755 $staged/$bin $INSTALL_BIN_DIR/$bin"
         done
         ok "cosh-ng install plan generated for ${INSTALL_BIN_DIR}/"
         return 0
     fi
 
-    for bin in cosh-cli cosh-core cosh-shell; do
+    for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
         [[ -f "$staged/$bin" ]] || die "Built cosh-ng binary not found: $staged/$bin"
         target="$INSTALL_BIN_DIR/$bin"
         if [[ "$INSTALL_MODE" == "system" ]]; then
@@ -1911,7 +2382,7 @@ install_cosh_ng() {
         fi
     done
 
-    ok "cosh-ng installed to ${INSTALL_BIN_DIR}/{cosh-cli,cosh-core,cosh-shell}"
+    ok "cosh-ng installed to ${INSTALL_BIN_DIR}/{cosh-cli,cosh-core,cosh-gateway,cosh-shell}"
     info "Start cosh-ng with: ${INSTALL_BIN_DIR}/cosh-shell"
     info "The existing cosh launcher was not changed."
 }
@@ -1956,27 +2427,6 @@ install_tokenless() {
     fi
 }
 
-install_wsckpt_runtime_deps() {
-    [[ "$INSTALL_MODE" == "system" ]] || return 0
-
-    if $DRY_RUN; then
-        echo "DRY-RUN: check/install ws-ckpt runtime dependency: btrfs-progs"
-        return 0
-    fi
-
-    if cmd_exists mkfs.btrfs; then
-        return 0
-    fi
-
-    if [[ -z "$PKG_INSTALL" ]]; then
-        detect_distro
-    fi
-
-    info "Installing runtime dependency: btrfs-progs ..."
-    as_root $PKG_INSTALL btrfs-progs || \
-        warn "btrfs-progs not installed; ws-ckpt btrfs-loop backend may not start"
-}
-
 install_wsckpt() {
     step "Installing ws-ckpt"
     local dir="$PROJECT_ROOT/src/ws-ckpt"
@@ -1985,7 +2435,6 @@ install_wsckpt() {
     fi
     run_component_make_install "ws-ckpt" "$dir"
     if [[ "$INSTALL_MODE" == "system" ]]; then
-        install_wsckpt_runtime_deps
         refresh_systemd_service ws-ckpt.service
     else
         info "Skipping ws-ckpt systemd service in user mode; use --system for service management."
@@ -2013,6 +2462,17 @@ install_agent_memory() {
 
 do_install() {
     step "Installing components (mode=${INSTALL_MODE})"
+    if $DRY_RUN; then
+        if $INSTALL_DEPS; then
+            echo "DRY-RUN: preflight selected component runtime dependencies before install (host probes skipped)"
+        else
+            echo "DRY-RUN: skip runtime dependency verification (--ignore-deps)"
+        fi
+    elif $INSTALL_DEPS; then
+        preflight_runtime_dependencies || return 1
+    else
+        warn "Skipping runtime dependency verification (--ignore-deps)"
+    fi
     if want_component cosh;      then install_cosh;         fi
     if want_component skills;    then install_skills;       fi
     if want_component sec-core;  then install_sec_core;     fi
@@ -2076,7 +2536,9 @@ uninstall_cosh_ng() {
     step "Uninstalling cosh-ng"
     local bin
 
-    for bin in cosh-cli cosh-core cosh-shell; do
+    stop_systemd_service 'cosh-gateway@*.service'
+
+    for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
         if $DRY_RUN; then
             echo "DRY-RUN: rm -f $INSTALL_BIN_DIR/$bin"
         elif [[ "$INSTALL_MODE" == "system" ]]; then
@@ -2111,9 +2573,9 @@ uninstall_tokenless() {
     local dir="$PROJECT_ROOT/src/tokenless"
     run_component_make_uninstall "tokenless" "$dir" || true
     if $DRY_RUN; then
-        ok "tokenless, rtk, and toon uninstall plan generated"
+        ok "tokenless and rtk uninstall plan generated"
     else
-        ok "tokenless, rtk, and toon uninstalled"
+        ok "tokenless and rtk uninstalled"
     fi
 }
 
@@ -2317,7 +2779,7 @@ $(echo -e "${BOLD}Options:${NC}")
     --no-install            Skip installing built components
     --install-mode <mode>   Install mode: user or system (default: user)
     --usr, --system         Use system install mode
-    --ignore-deps           Skip dependency installation
+    --ignore-deps           Skip dependency setup and runtime verification (pre-provisioned hosts only)
     --deps-only             Install dependencies only, do not build
     --uninstall             Remove installed files (skips build; combine with --component to target one)
     --dry-run               Print actions without changing files or systemd state
@@ -2336,7 +2798,7 @@ $(echo -e "${BOLD}Examples:${NC}")
     $0 --non-interactive                           # Explicit automation mode (same as default)
     $0 --install-mode user                         # Explicit user install mode
     $0 --no-install                                # Install deps + build (skip installation)
-    $0 --ignore-deps                               # Build + install (skip dep install)
+    $0 --ignore-deps                               # Build + install (pre-provisioned hosts only)
     $0 --deps-only                                 # Install deps only
     $0 --all                                       # Build + install default and optional components
     $0 --component cosh                            # Install deps + build + install copilot-shell
@@ -2345,7 +2807,7 @@ $(echo -e "${BOLD}Examples:${NC}")
     $0 --no-install                                # Build target/ staging only
     $0 --component sec-core                          # Build + install sec-core to user paths
     $0 --system --component sec-core                 # Build + install sec-core to FHS system paths
-    $0 --ignore-deps --component sec-core            # Build + install sec-core to user paths (no dep install)
+    $0 --ignore-deps --component sec-core            # Build + install sec-core without dependency setup or verification
     $0 --uninstall                                 # Uninstall all default components
     $0 --uninstall --component cosh                # Uninstall copilot-shell only
     $0 --uninstall --component tokenless --component ws-ckpt
@@ -2499,4 +2961,6 @@ main() {
     ok "Done"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

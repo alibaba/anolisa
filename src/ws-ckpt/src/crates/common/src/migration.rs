@@ -233,6 +233,7 @@ mod tests {
             workspace_path: PathBuf::from(workspace_path),
             snapshots: HashMap::new(),
             head: None,
+            governed_evidence: HashMap::new(),
         }
     }
 
