@@ -110,9 +110,9 @@ fn main() {
         ) {
             Invocation::ExecShell(plan) => std::process::exit(exec_shell(plan)),
             Invocation::Tui(entry) => {
-                runtime::terminal::install_terminal_recovery();
                 let cosh_config = config::load_config();
                 runtime::logging::init_logging(&cosh_config.log_level);
+                runtime::terminal::install_terminal_recovery();
                 tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
                 // The classifier only admits valid UTF-8 launch arguments;
                 // argv[0] may be arbitrary bytes, so it never reaches the
@@ -166,11 +166,12 @@ fn main() {
         }
     }
 
-    runtime::terminal::install_terminal_recovery();
-
     // Initialize structured logging (file output to ~/.copilot-shell/logs/)
+    // before terminal recovery so that the self-heal warning is captured.
     let cosh_config = config::load_config();
     runtime::logging::init_logging(&cosh_config.log_level);
+
+    runtime::terminal::install_terminal_recovery();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
 
     if !has_subcommand {

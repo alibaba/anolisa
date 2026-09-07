@@ -9,7 +9,7 @@ static SIGNAL_OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
 static SIGNAL_OUTPUT_IS_TTY: AtomicBool = AtomicBool::new(false);
 static SIGNAL_RECOVERY_ARMED: AtomicBool = AtomicBool::new(false);
 
-const MODIFY_OTHER_KEYS_DISABLE: &[u8] = b"\x1b[>4;0m";
+pub(crate) const MODIFY_OTHER_KEYS_DISABLE: &[u8] = b"\x1b[>4;0m";
 
 fn arm_signal_recovery(output_fd: i32) {
     SIGNAL_OUTPUT_FD.store(output_fd, Ordering::Relaxed);

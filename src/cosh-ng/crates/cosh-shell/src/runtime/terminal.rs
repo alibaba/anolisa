@@ -19,10 +19,35 @@ pub(crate) fn install_terminal_recovery() {
     if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
         return;
     }
-    let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    let mut original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if original_flags < 0 {
         return;
     }
+
+    // SIGKILL cannot be caught, so a previous cosh-shell session may have
+    // left the outer tty in raw mode. Heal that residue before saving the
+    // "original" state used by panic/signal recovery paths.
+    if termios_looks_like_raw_mode(&original) {
+        tracing::warn!("detected stale raw mode from a previous session, self-healing terminal");
+        restore_minimal_sane_terminal_modes(fd);
+        clear_nonblock(fd);
+        unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                crate::shell_host::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+                crate::shell_host::MODIFY_OTHER_KEYS_DISABLE.len(),
+            );
+        }
+        // Re-sample the terminal so the recovery snapshot is sane, not raw.
+        if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
+            return;
+        }
+        let flags_after_heal = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags_after_heal >= 0 {
+            original_flags = flags_after_heal;
+        }
+    }
+
     unsafe { ORIGINAL_TERMIOS = Some(original) };
     ORIGINAL_FILE_STATUS_FLAGS.store(original_flags, Ordering::Release);
 
@@ -49,6 +74,36 @@ pub(crate) fn install_terminal_recovery() {
             libc::SIGQUIT,
             restore_and_exit as *const () as libc::sighandler_t,
         );
+    }
+}
+
+fn termios_looks_like_raw_mode(termios: &libc::termios) -> bool {
+    let required_off = libc::ECHO | libc::ICANON | libc::ISIG;
+    termios.c_lflag & required_off == 0
+}
+
+fn restore_minimal_sane_terminal_modes(fd: i32) {
+    let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } < 0 {
+        return;
+    }
+    termios.c_lflag |= libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN;
+    termios.c_iflag |= libc::ICRNL | libc::IXON;
+    termios.c_oflag |= libc::OPOST;
+    unsafe {
+        // Best-effort: if the tty cannot be configured, the subsequent
+        // cosh-shell session will still attempt to enter raw mode and the
+        // user will see the failure surface.
+        let _ = libc::tcsetattr(fd, libc::TCSANOW, &termios);
+    }
+}
+
+fn clear_nonblock(fd: i32) {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags >= 0 && flags & libc::O_NONBLOCK != 0 {
+        unsafe {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        }
     }
 }
 
@@ -103,5 +158,27 @@ impl<W: Write> Write for CrLfWriter<'_, W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn termios_looks_like_raw_mode_detects_cfmakeraw_signature() {
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        assert!(termios_looks_like_raw_mode(&termios));
+        termios.c_lflag = libc::ECHO | libc::ICANON | libc::ISIG;
+        assert!(!termios_looks_like_raw_mode(&termios));
+    }
+
+    #[test]
+    fn termios_looks_like_raw_mode_does_not_flag_partial_noncanonical() {
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        termios.c_lflag = libc::ECHO | libc::ISIG;
+        assert!(!termios_looks_like_raw_mode(&termios));
+        termios.c_lflag = libc::ICANON;
+        assert!(!termios_looks_like_raw_mode(&termios));
     }
 }

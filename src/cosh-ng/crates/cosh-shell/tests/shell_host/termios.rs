@@ -668,6 +668,204 @@ mod parent_lifecycle {
             "exit preserves the foreground command signal status"
         );
     }
+
+    #[test]
+    fn raw_cli_self_heals_stale_raw_mode_after_sigkill() {
+        let _guard = shell_host_run_guard();
+
+        let pty = nix::pty::openpty(None, None).expect("open parent PTY");
+        let mut master = File::from(pty.master);
+        let terminal = File::from(pty.slave);
+
+        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "read parent PTY master flags");
+        assert_eq!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK,) },
+            0,
+            "make parent PTY master nonblocking"
+        );
+
+        let original = read_termios(terminal.as_raw_fd());
+        let original_flags = read_file_status_flags(terminal.as_raw_fd());
+
+        let root = std::env::temp_dir().join(format!(
+            "cosh-shell-sigkill-heal-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home = root.join("home");
+        let work = root.join("work");
+        std::fs::create_dir_all(&home).expect("create isolated HOME");
+        std::fs::create_dir_all(&work).expect("create isolated work dir");
+
+        let mut output = Vec::new();
+
+        // First session: activate raw mode, then die via SIGKILL.
+        let mut child1 = spawn_cosh_on_pty(&terminal, &work, &home, "sigkill-first");
+        wait_for_raw_mode(&mut master, terminal.as_raw_fd(), &mut child1, &mut output);
+        assert_eq!(
+            unsafe { libc::kill(child1.id() as i32, libc::SIGKILL) },
+            0,
+            "send SIGKILL to first cosh-shell"
+        );
+        let _ = child1.wait();
+
+        let residual = read_termios(terminal.as_raw_fd());
+        assert_eq!(
+            residual.c_lflag & (libc::ECHO | libc::ICANON | libc::ISIG),
+            0,
+            "tty should still be raw after SIGKILL"
+        );
+        let residual_flags = read_file_status_flags(terminal.as_raw_fd());
+        assert_ne!(
+            residual_flags & libc::O_NONBLOCK,
+            0,
+            "O_NONBLOCK should be left set after SIGKILL"
+        );
+
+        output.clear();
+
+        // Second session on the same PTY: startup self-heal should restore
+        // a sane baseline before entering raw mode again.
+        let mut child2 = spawn_cosh_on_pty(&terminal, &work, &home, "sigkill-second");
+        wait_for_raw_mode(&mut master, terminal.as_raw_fd(), &mut child2, &mut output);
+        write_to_pty(&mut master, b"exit\n");
+        let status2 = wait_for_child(&mut master, &mut child2, &mut output);
+        assert!(
+            status2.success(),
+            "second session should exit cleanly: {status2:?}"
+        );
+
+        let after = read_termios(terminal.as_raw_fd());
+        assert_termios_eq(&after, &original);
+        assert_eq!(
+            read_file_status_flags(terminal.as_raw_fd()),
+            original_flags,
+            "file status flags should be restored after second session exits"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        unsafe {
+            let _ = libc::tcsetattr(terminal.as_raw_fd(), libc::TCSANOW, &original);
+        }
+    }
+
+    fn spawn_cosh_on_pty(terminal: &File, work: &Path, home: &Path, _label: &str) -> Child {
+        let stdin = terminal.try_clone().expect("clone PTY stdin");
+        let stdout = terminal.try_clone().expect("clone PTY stdout");
+        let stderr = terminal.try_clone().expect("clone PTY stderr");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cosh-shell"));
+        command
+            .args(["raw", "fake", "--shell", "bash"])
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .current_dir(work)
+            .env("HOME", home)
+            .env("COSH_SHELL_ISOLATED", "1")
+            .env("COSH_SHELL_INTEGRATION", "enhanced")
+            .env("COSH_SHELL_RAW_SHELL", "bash")
+            .env("COSH_SHELL_DEFAULT_SHELL", "bash")
+            .env("COSH_SHELL_LANG", "en-US")
+            .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
+            .env("COSH_SHELL_HEALTH_SCAN", "disabled")
+            .env("COSH_RECOMMENDATIONS_ENABLED", "0")
+            .env("TERM", "xterm-256color")
+            .env("LANG", "C.UTF-8")
+            .env("LC_ALL", "C.UTF-8");
+        unsafe {
+            command.pre_exec(|| {
+                // Each invocation must become its own session leader and
+                // acquire the PTY as its controlling terminal.
+                if libc::setsid() < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp()) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn().expect("spawn cosh-shell on parent PTY")
+    }
+
+    fn wait_for_raw_mode(
+        master: &mut File,
+        terminal_fd: i32,
+        child: &mut Child,
+        output: &mut Vec<u8>,
+    ) {
+        let deadline = Instant::now() + TERMINAL_LIFECYCLE_TIMEOUT;
+        while Instant::now() < deadline {
+            drain_master(master, output);
+            let current = read_termios(terminal_fd);
+            let modify_other_keys_enabled = output
+                .windows(b"\x1b[>4;1m".len())
+                .any(|window| window == b"\x1b[>4;1m");
+            if current.c_lflag & (libc::ECHO | libc::ICANON) == 0 && modify_other_keys_enabled {
+                return;
+            }
+            if child
+                .try_wait()
+                .expect("poll wrapper while waiting for raw mode")
+                .is_some()
+            {
+                panic!("cosh-shell exited before activating raw mode");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("cosh-shell did not activate raw mode");
+    }
+
+    fn wait_for_child(master: &mut File, child: &mut Child, output: &mut Vec<u8>) -> ExitStatus {
+        let deadline = Instant::now() + TERMINAL_LIFECYCLE_TIMEOUT;
+        let status = loop {
+            drain_master(master, output);
+            if let Some(status) = child.try_wait().expect("poll cosh-shell") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                panic!("cosh-shell did not exit within {TERMINAL_LIFECYCLE_TIMEOUT:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drain_master(master, output);
+        status
+    }
+
+    fn write_to_pty(master: &mut File, bytes: &[u8]) {
+        let deadline = Instant::now() + TERMINAL_LIFECYCLE_TIMEOUT;
+        let mut written = 0;
+        while written < bytes.len() {
+            match master.write(&bytes[written..]) {
+                Ok(0) => panic!("parent PTY accepted zero input bytes"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        panic!("timed out writing parent PTY input");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("write parent PTY input: {error}"),
+            }
+        }
+    }
+
+    fn drain_master(master: &mut File, output: &mut Vec<u8>) {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => return,
+                Err(error) => panic!("drain parent PTY output: {error}"),
+            }
+        }
+    }
 }
 
 #[test]
