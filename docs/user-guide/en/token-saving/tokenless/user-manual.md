@@ -2,7 +2,7 @@
 
 [中文版](../../../zh/token-saving/tokenless/user-manual.md)
 
-Tokenless is designed for tool-heavy AI agents. Its CLI compacts schemas and JSON responses, while its adapters can also rewrite shell commands, check tool dependencies, and pass compressed results to an agent. The exact effect depends on the host framework: some adapters replace the original result, while others add compressed context without removing the original.
+Tokenless is designed for tool-heavy AI agents. Its CLI compacts schemas and tool responses, while its adapters can also rewrite shell commands, check tool dependencies, and pass compressed results to an agent. The exact effect depends on the host framework: some adapters replace the original result, while others add compressed context without removing the original.
 
 Start with the [Quick Start](QUICKSTART.md) if this is your first use.
 
@@ -44,11 +44,11 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; CSV/TSV is routed to `TabularCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | Recognized build/test commands stay native for Build Log handling; other unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
-| Stash | Stores content removed by string, array, depth, or schema-description truncation, complete arrays behind record reduction, and omitted Build Log progress intervals | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
+| Stash | Stores content removed by string, array, depth, or schema-description truncation, complete arrays behind record reduction, omitted Build Log progress intervals, and complete original tables behind row reduction | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
 
@@ -59,7 +59,7 @@ After an adapter is enabled, a tool call may pass through these stages:
 ```text
 Before the tool: hard-disabled Tool Ready hook → command rewrite
 Before the tool: reserve recognized build/test commands; otherwise RTK rewrite → carry output-optimization state
-After the tool: status and optimization bypass → JSON/Build Log PostTool Pipeline → optional Stash/TOON → statistics
+After the tool: status and optimization bypass → JSON/CSV/TSV/Build Log PostTool Pipeline → optional Stash/TOON → statistics
 Before the model: schema compression → visible Marker extraction → conditional Retrieve declaration
 Retrieve: visible-Marker authorization → byte-identical Stash read
 ```
@@ -93,6 +93,38 @@ This setting does not disable RTK command rewriting, adapter execution, or retri
 ```bash
 anolisa adapter disable tokenless <framework>
 ```
+
+### CSV/TSV views can be incomplete
+
+Successful CSV/TSV tool results can be compressed when the host can replace output with text.
+File-origin results, failed tools, RTK-optimized output and Retrieve output pass through.
+A supported table has a header and at least two data rows of equal width, with an unambiguous
+comma or tab delimiter. Malformed quoting, ambiguous delimiters, single-column text, Markdown
+and fixed-width tables are not compressed by this compressor.
+
+Full compaction preserves all cell strings, including empty cells, duplicate headers, leading
+zeros and large numeric strings. It removes unnecessary quoting and normalizes record separators;
+embedded cell line endings remain unchanged. This preserves cells, not the original bytes.
+A full view saving at least 15% of estimated tokens takes priority.
+
+Row reduction requires column labels: each nonempty header starts with a Unicode letter or `_`,
+then contains only letters, numbers, `_`, `-` or `.`; at least one label must be nonempty.
+Duplicate and empty labels are allowed. Headers containing spaces, expressions or sentence
+punctuation keep all rows, preventing the reported source/prose patterns from being sampled.
+This conservative heuristic also skips reduction for some genuine tables.
+
+Otherwise, tables with more than 32 data rows may retain the first and last four rows,
+rows containing diagnostic keywords, and evenly spaced ordinary rows up to a base budget of 32.
+Protected rows may exceed that budget. The notice outside the table states the retained and total
+row counts, original one-based data row ranges excluding the header, and how to recover the source.
+The complete original CSV/TSV is stored in Stash; retrieval returns its original bytes.
+Retrieve before complete enumeration or calculations: selected rows are an incomplete view.
+Missing recovery or a failed Stash write permits only full compaction or the original input.
+The same applies if the exact source-range list exceeds 1 KiB; diagnostic rows and their
+provenance are never partially reported.
+
+A reduced candidate must use fewer characters and estimated tokens than both the original and
+full view, including the notice. These checks do not guarantee savings with every model tokenizer.
 
 ### Reversible compression is conditional
 

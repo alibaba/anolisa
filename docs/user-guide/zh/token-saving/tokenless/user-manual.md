@@ -2,7 +2,7 @@
 
 [English](../../../en/token-saving/tokenless/user-manual.md)
 
-Tokenless 面向工具调用密集的 AI Agent。它的 CLI 可以精简 Schema 和 JSON 响应，Adapter 还可以改写 Shell 命令、检查工具依赖，并把压缩结果交给 Agent。最终效果取决于宿主框架：有的 Adapter 会替换原始结果，有的只会追加压缩上下文而保留原文。
+Tokenless 面向工具调用密集的 AI Agent。它的 CLI 可以精简 Schema 和工具响应，Adapter 还可以改写 Shell 命令、检查工具依赖，并把压缩结果交给 Agent。最终效果取决于宿主框架：有的 Adapter 会替换原始结果，有的只会追加压缩上下文而保留原文。
 
 第一次使用请从[快速开始](QUICKSTART.md)进入。
 
@@ -42,11 +42,11 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；CSV/TSV 路由给 `TabularCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 已识别的构建/测试命令保持原生输出交给 Build Log；其他无规则或被拒绝的改写透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
-| Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容、Record Reduction 背后的完整原始数组，以及被省略的 Build Log 进度区间 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
+| Stash | 保存因字符串、数组、深度或 Schema 描述截断而省略的内容、Record Reduction 背后的完整原始数组，被省略的 Build Log 进度区间，以及行缩减背后的完整原始表格 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
 
 代码没有提供固定节省率保证。结果取决于 Payload、Adapter 交付语义，以及工具数据在模型上下文中的占比。请按[效果度量](measuring-savings.md)使用自己的工作负载测量。
 
@@ -56,7 +56,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 
 ```text
 工具调用前：已识别的构建/测试命令预留给 Build Log；其他命令 RTK 改写 → 传递输出优化状态
-工具调用后：状态与优化旁路 → JSON/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
+工具调用后：状态与优化旁路 → JSON/CSV/TSV/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
 模型调用前：Schema 压缩 → 提取可见 Marker → 条件式 Retrieve 声明
 Retrieve：可见 Marker 授权 → 字节级一致的 Stash Read
 ```
@@ -89,6 +89,31 @@ CLI-only 用法不需要 Adapter。
 ```bash
 anolisa adapter disable tokenless <framework>
 ```
+
+### CSV/TSV 视图可能不完整
+
+宿主支持用文本替换输出时，成功的 CSV/TSV 工具结果可以被压缩。文件来源结果、失败工具、
+已由 RTK 优化的输出以及 Retrieve 输出透传。支持的表格必须有表头和至少两条等宽数据行，
+且逗号或制表符分隔格式没有歧义。此压缩器不处理引号格式错误、分隔符有歧义、单列文本、
+Markdown 或定宽表格。
+
+全量压紧保留所有单元格字符串，包括空单元格、重复表头、前导零和大数值字符串。
+它移除非必要引号并规范化记录分隔符；单元格内部的换行保持不变。
+这保证单元格等价，不保证原始字节一致。全量视图的估算 Token 节省达到 15% 时优先采用。
+
+行筛选要求列名证据：每个非空表头以 Unicode 字母或 `_` 开头，后续只允许字母、数字、
+`_`、`-` 和 `.`，且至少有一个非空列名。允许重复和空列名。含空格、表达式或句子标点的
+表头保留全部行，避免对这些源码或散文形式采样。该保守启发式规则也会跳过部分真实表格的行筛选。
+
+否则，超过 32 条数据行的表格可保留首尾各四行、含诊断关键词的行，并均匀选择普通行补足
+32 行基础预算。受保护行可以超出该预算。表格外的提示说明保留行数和总行数、从 1 开始且
+不含表头的原始数据行区间，以及恢复方法。完整原始 CSV/TSV 会存入 Stash，Retrieve 返回
+原始字节。完整枚举或计算前应先恢复原文：选定行只是一个不完整视图。
+缺少恢复能力或 Stash 写入失败时，只允许全量压紧或原文透传。
+精确源行号范围列表超过 1 KiB 时也只保留全量候选或原文，不会只报告部分诊断行或源行号。
+
+计入提示后，缩减候选的字符数和估算 Token 数必须同时小于原文及全量视图。
+这些检查不保证在所有模型的 Tokenizer 下都有节省。
 
 ### 可逆压缩是有条件的
 

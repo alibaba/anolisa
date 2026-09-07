@@ -105,14 +105,19 @@ fn detects_html_documents_but_not_fragments() {
 
 #[test]
 fn detects_tabular_content() {
+    for input in [
+        "name,value\nalice,1\nbob,2",
+        "name,value\ralice,1\rbob,2",
+        "name,value\n\"alice, a\",1\n\"bob\nb\",2",
+        "name\tvalue\nalice\t001\nbob\t002",
+    ] {
+        assert_eq!(detect(input), ContentType::Tabular);
+    }
     assert_eq!(
         detect("name,age,city\nalice,30,berlin\nbob,25,tokyo"),
         ContentType::Tabular
     );
-    assert_eq!(
-        detect("a\tb\nc\td\ne\tf"),
-        ContentType::Tabular
-    );
+    assert_eq!(detect("a\tb\nc\td\ne\tf"), ContentType::Tabular);
     assert_eq!(
         detect("| col | n |\n|---|---:|\n| x | 1 |"),
         ContentType::Tabular
@@ -121,7 +126,10 @@ fn detects_tabular_content() {
 
 #[test]
 fn detects_source_code_on_strong_signals_only() {
-    assert_eq!(detect("#!/usr/bin/env bash\necho hi"), ContentType::SourceCode);
+    assert_eq!(
+        detect("#!/usr/bin/env bash\necho hi"),
+        ContentType::SourceCode
+    );
     let rust = "use std::fs;\n\
                 pub struct Config;\n\
                 impl Config {\n\
@@ -134,6 +142,14 @@ fn detects_source_code_on_strong_signals_only() {
         detect("please use the new API for this import step"),
         ContentType::PlainText
     );
+}
+
+#[test]
+fn source_declarations_take_precedence_over_rectangular_commas() {
+    let input = (0..100)
+        .map(|i| format!("def function_{i:03}(a, b): return a + b\n"))
+        .collect::<String>();
+    assert_eq!(detect(&input), ContentType::SourceCode);
 }
 
 #[test]
@@ -152,7 +168,9 @@ fn prose_carrying_build_words_is_not_a_build_log() {
     doc.push_str("We build with gcc on every supported platform. The make: prefix in\n");
     doc.push_str("the transcript below is the recursive build announcing itself.\n\n");
     for i in 0..36 {
-        doc.push_str(&format!("Paragraph {i} explains one configuration knob in prose.\n"));
+        doc.push_str(&format!(
+            "Paragraph {i} explains one configuration knob in prose.\n"
+        ));
     }
     assert_eq!(detect(&doc), ContentType::PlainText);
 

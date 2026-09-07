@@ -11,6 +11,7 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
+| CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
@@ -163,7 +164,7 @@ dsh --profile <profile>
 ### `compress` 压缩入口
 
 共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
-PostTool JSON 和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
+PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
 旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
 
 PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
@@ -542,7 +543,7 @@ tokenless env-check --tool Shell --fix
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-runtime/` — 生命周期 API 与 Runtime 内部的 `PostToolPipeline`
 - `crates/tokenless-protocol/` — 版本化 Adapter 契约与共享 `heuristic-v1` Token Estimator
-- `crates/tokenless-compressors/` — 已接入 PostTool 的 `JsonCompressor` 与 `BuildLogCompressor`
+- `crates/tokenless-compressors/` — 已接入 PostTool 的 `JsonCompressor`、`TabularCompressor` 与 `BuildLogCompressor`
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据

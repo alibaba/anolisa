@@ -494,6 +494,10 @@ pub enum AppliedOperation {
     TerminalCleanup,
     /// Repeated build/test progress was reduced behind retrieval markers.
     BuildLogReduction,
+    /// CSV/TSV quoting and record terminators changed with all cells retained.
+    TabularCompaction,
+    /// CSV/TSV rows were omitted behind a reference to the original text.
+    TabularRowReduction,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
@@ -512,6 +516,8 @@ impl AppliedOperation {
             Self::SchemaCompression => "schema_compression",
             Self::TerminalCleanup => "terminal_cleanup",
             Self::BuildLogReduction => "build_log_reduction",
+            Self::TabularCompaction => "tabular_compaction",
+            Self::TabularRowReduction => "tabular_row_reduction",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

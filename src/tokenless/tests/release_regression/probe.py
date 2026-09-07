@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Container-side checks; Tokenless is installed exclusively from supplied npm tarballs."""
 
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -107,6 +109,12 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
         ("build_success", raw_log, {}, "build_log_reduction"),
         ("full_toon", full_records, {}, "toon"),
         ("records_contract", records, {}, "json_record_reduction"),
+        (
+            "tabular_full",
+            '"name","value"\r\n' + '"alpha","001"\r\n' * 50,
+            {},
+            "tabular_compaction",
+        ),
         ("tool_error", failure_log, {"status": "error"}, None),
         ("tool_error_diagnosis", missing_command.stderr.decode(), {"status": "error"}, None),
         (
@@ -142,6 +150,25 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
             None,
         ),
     ]
+    for name, delimiter in (("tabular_csv", ","), ("tabular_tsv", "\t")):
+        content = f"id{delimiter}amount{delimiter}message\r\n" + "".join(
+            f"{index:04}{delimiter}{index * 7 + 11}{delimiter}record-{index}-{'payload ' * 12}\r\n"
+            for index in range(100)
+        )
+        cases.append((name, content, {}, "tabular_row_reduction"))
+    for name, delimiter in (("tabular_full_bom_csv", ","), ("tabular_full_bom_tsv", "\t")):
+        content = f'"\ufeffid"{delimiter}"name"\r\n' + f'"001"{delimiter}"alpha"\r\n' * 50
+        cases.append((name, content, {}, "tabular_compaction"))
+    for name, template in (
+        ("source_definitions", "def function_{i:03}(a, b): return a + b"),
+        ("source_calls", "assert_equal(expected_value_number_{i}, actual_value_number_{i})"),
+        (
+            "comma_prose",
+            "- Note {i}, the parser rejected the header row while processing request {i} in the ingestion pipeline",
+        ),
+    ):
+        content = "\n".join(template.format(i=i) for i in range(100))
+        cases.append((name, content, {"content_origin": "api_response"}, None))
     for name, content, overrides, operation in cases:
         directory = RESULTS / "core" / name
         env = state_env(directory)
@@ -154,7 +181,7 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
             assert result["disposition"] == "applied", (name, result["disposition"])
             assert operation in result["applied_operations"], (name, result["applied_operations"])
             assert result["recoverability"] == (
-                "lossless" if name == "full_toon" else "retrievable"
+                "lossless" if name == "full_toon" or name.startswith("tabular_full") else "retrievable"
             )
             assert result["after_tokens"] < result["before_tokens"]
             assert set(keys) == set(REFERENCE.findall(result["output"]))
@@ -168,6 +195,24 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
                     if record["status"] == "ok"
                     and f'request-{record["id"]} ' not in result["output"]
                 )
+            elif name.startswith("tabular_full"):
+                delimiter = "\t" if name.endswith("_tsv") else ","
+                # Match CSV readers that consume a document BOM, but preserve
+                # U+FEFF inside a quoted first field as cell data.
+                output = result["output"].encode().decode("utf-8-sig")
+                assert list(csv.reader(io.StringIO(output), delimiter=delimiter)) == list(
+                    csv.reader(io.StringIO(content), delimiter=delimiter)
+                ), "full table compaction changed cells"
+            elif name in ("tabular_csv", "tabular_tsv"):
+                (directory / "input.txt").write_bytes(content.encode())
+                REPORT[name] = {
+                    "target": next(
+                        index
+                        for index in range(4, 96)
+                        if f"record-{index}-" not in result["output"]
+                    ),
+                    "total": sum(index * 7 + 11 for index in range(100)),
+                }
             for entry in stashed:
                 marker = entry["hash"]
                 denied = request(
@@ -182,6 +227,10 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
                     assert json.loads(retrieved) == json.loads(
                         content
                     ), "full array recovery failed"
+                elif name.startswith("tabular_"):
+                    assert retrieved == content.encode(), "full table recovery changed bytes"
+                    assert result["content_type"] == "tabular"
+                    assert "Incomplete table" in result["output"]
                 else:
                     assert entry["payload"] in content, "stash payload is not a native log interval"
             hits = rows(directory, "stats.db", "SELECT * FROM retrieve_events")
@@ -338,9 +387,9 @@ def live_check(agent: str, case: str, prompt: str, expected_operation: str) -> N
     assert len(retrieval_ids) == 1, f"expected one standalone Retrieve call, got {retrieval_ids}"
     restored = outputs[retrieval_ids[0]]
     # Record host newline normalization separately from exact CLI recovery.
-    assert restored.rstrip("\n") == entry["payload"].rstrip(
-        "\n"
-    ), "Agent did not receive the recovered payload"
+    assert restored.replace("\r\n", "\n").rstrip("\n") == entry["payload"].replace(
+        "\r\n", "\n"
+    ).rstrip("\n"), "Agent did not receive the recovered payload"
     byte_env = {**env, "TOKENLESS_STATS_ENABLED": "0"}
     cli_payload = run(["tokenless", "retrieve", entry["hash"]], env=byte_env).stdout
     assert cli_payload == entry["payload"].encode(), "installed CLI changed retrieved bytes"
@@ -354,6 +403,11 @@ def live_check(agent: str, case: str, prompt: str, expected_operation: str) -> N
         assert any(
             name in final and name not in visible for name in recovered_names
         ), "final answer lacks an omitted test"
+    elif case.startswith("tabular_"):
+        target = f'record-{REPORT[case]["target"]}-'
+        assert target in final and target not in visible
+        assert str(REPORT[case]["total"]) in final.replace(",", ""), "wrong full-table sum"
+        assert "Incomplete table" in visible
     else:
         target = f'request-{REPORT["record_target"]} '
         assert target.strip() in final and target not in visible
@@ -489,6 +543,23 @@ def main() -> None:
             "json_record_reduction",
         ),
     ]
+    for case, format_name in (("tabular_csv", "CSV"), ("tabular_tsv", "TSV")):
+        prompts.append(
+            (
+                case,
+                "Run exactly `node -e 'process.stdout.write(require(\"fs\").readFileSync(\""
+                f"/results/core/{case}/input.txt"
+                "\"))'` using the shell tool. "
+                f"This is a synthetic {format_name} recovery contract. "
+                "Do not filter, redirect or pipe the initial output. "
+                "Follow the recovery instruction exactly once to recover the full table. "
+                f'Report the message for id {REPORT[case]["target"]:04}, '
+                "and the sum of the amount column over ALL 100 data rows. "
+                "Do not read the input file or database by another method. "
+                "Do not calculate from a partial table.",
+                "tabular_row_reduction",
+            )
+        )
     for case, prompt, operation in prompts:
         try:
             live_check(agent, case, prompt, operation)

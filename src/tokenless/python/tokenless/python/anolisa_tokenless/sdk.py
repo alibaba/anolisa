@@ -126,6 +126,8 @@ class AppliedOperation(StrEnum):
     SCHEMA_COMPRESSION = "schema_compression"
     TERMINAL_CLEANUP = "terminal_cleanup"
     BUILD_LOG_REDUCTION = "build_log_reduction"
+    TABULAR_COMPACTION = "tabular_compaction"
+    TABULAR_ROW_REDUCTION = "tabular_row_reduction"
     JSON_CLEANUP = "json_cleanup"
     JSON_RECORD_REDUCTION = "json_record_reduction"
     JSON_TRUNCATION = "json_truncation"

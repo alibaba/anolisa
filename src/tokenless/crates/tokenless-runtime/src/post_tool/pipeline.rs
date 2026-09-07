@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokenless_ccr::{InMemoryStore, StashStore, StashWrite};
 use tokenless_compressors::{
     BuildLogCompressor, BuildLogOperation, JsonCompressionConfig, JsonCompressionContext,
-    JsonCompressor, JsonOperation,
+    JsonCompressor, JsonOperation, TabularCompressor, TabularOperation,
 };
 use tokenless_protocol::{
     AppliedOperation, BYTE_ESTIMATOR_ID, ContentOrigin, ContentType, Disposition, PostToolRequest,
@@ -88,7 +88,9 @@ impl PostToolPipeline {
             || is_wrapped_structured_json(&request.content);
         let build_log_candidate = content_type == ContentType::BuildLog
             && request.content_origin == ContentOrigin::CommandOutput;
-        if !json_candidate && !build_log_candidate {
+        let tabular_candidate =
+            content_type == ContentType::Tabular && request.capabilities.replace_with_text;
+        if !json_candidate && !build_log_candidate && !tabular_candidate {
             return Ok(passthrough(request, before_tokens, content_type));
         }
 
@@ -130,7 +132,7 @@ impl PostToolPipeline {
                     .contains(&JsonOperation::Truncation)
                     .then_some(outcome.metrics.unrecoverable_truncations),
             }
-        } else {
+        } else if build_log_candidate {
             let outcome = BuildLogCompressor.compress_with_recovery(
                 &request.content,
                 attached_store,
@@ -139,6 +141,27 @@ impl PostToolPipeline {
             DomainCandidate {
                 output: outcome.output,
                 operations: build_log_operations(&outcome.operations),
+                recoverability: outcome.recoverability,
+                stash_writes: outcome.stash_writes,
+                stash_errors: outcome.metrics.stash_errors,
+                unrecoverable_truncations: None,
+            }
+        } else {
+            let outcome = TabularCompressor.compress_with_recovery(
+                &request.content,
+                attached_store,
+                &request.capabilities.recovery,
+            );
+            DomainCandidate {
+                output: outcome.output,
+                operations: outcome
+                    .operations
+                    .iter()
+                    .map(|operation| match operation {
+                        TabularOperation::Compaction => AppliedOperation::TabularCompaction,
+                        TabularOperation::RowReduction => AppliedOperation::TabularRowReduction,
+                    })
+                    .collect(),
                 recoverability: outcome.recoverability,
                 stash_writes: outcome.stash_writes,
                 stash_errors: outcome.metrics.stash_errors,
@@ -206,7 +229,7 @@ impl PostToolPipeline {
                 content_type: Some(if json_candidate {
                     ContentType::Json
                 } else {
-                    ContentType::BuildLog
+                    content_type
                 }),
                 applied_operations: response_operations,
                 recoverability,
@@ -310,6 +333,7 @@ mod tests {
     };
 
     use super::*;
+    include!("tests/tabular_pipeline_tests.rs");
 
     #[derive(Default)]
     struct CountingStore {

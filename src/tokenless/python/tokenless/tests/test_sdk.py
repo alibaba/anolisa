@@ -70,6 +70,10 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_record_reduction_operation_uses_the_core_wire_value(self) -> None:
+        self.assertEqual(AppliedOperation("tabular_compaction"), AppliedOperation.TABULAR_COMPACTION)
+        self.assertEqual(
+            AppliedOperation("tabular_row_reduction"), AppliedOperation.TABULAR_ROW_REDUCTION
+        )
         self.assertEqual(
             AppliedOperation("json_record_reduction"),
             AppliedOperation.JSON_RECORD_REDUCTION,
@@ -311,6 +315,58 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         stats = sdk.stats
         self.assertIs(stats, sdk.stats)
         self.assertEqual(stats.status.data_dir, sdk.runtime.data_dir)
+
+    async def test_tabular_pipeline_preserves_raw_recovery_and_bypasses_retrieved_output(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        for delimiter in (",", "\t"):
+            with self.subTest(delimiter=delimiter):
+                original = f"id{delimiter}message\r\n" + "".join(
+                    f"{index:04}{delimiter}record-{index}-{'payload ' * 12}\r\n"
+                    for index in range(100)
+                )
+                capabilities = PostToolCapabilities(
+                    replace_output=True,
+                    recovery=RecoveryMethod.tool("tokenless_retrieve"),
+                    replace_with_text=True,
+                )
+                result = await sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name="table_query",
+                        content=original,
+                        status=ToolResultStatus.SUCCESS,
+                        content_origin=ContentOrigin.API_RESPONSE,
+                        output_optimization=OutputOptimization.NONE,
+                        capabilities=capabilities,
+                        attribution=Attribution("sdk-agent", "table-session", "table-call"),
+                    )
+                )
+                self.assertEqual(result.applied_operations, (AppliedOperation.TABULAR_ROW_REDUCTION,))
+                self.assertEqual(result.content_type.value, "tabular")
+                self.assertEqual(result.recoverability.value, "retrievable")
+                self.assertIn("Incomplete table", result.output)
+                restored = await sdk.retrieve(
+                    RetrieveRequest(result.stash_keys[0], frozenset(result.stash_keys), self.attribution)
+                )
+                self.assertEqual(restored.payload.encode(), original.encode())
+                for kind, optimization in (
+                    (ResultKind.RETRIEVE, OutputOptimization.NONE),
+                    (ResultKind.TOOL, OutputOptimization.RTK),
+                ):
+                    bypass = await sdk.post_tool(
+                        PostToolRequest(
+                            result_kind=kind,
+                            tool_name="tokenless_retrieve",
+                            content=restored.payload,
+                            status=ToolResultStatus.SUCCESS,
+                            content_origin=ContentOrigin.API_RESPONSE,
+                            output_optimization=optimization,
+                            capabilities=capabilities,
+                            attribution=Attribution("sdk-agent", "table-session", "table-bypass"),
+                        )
+                    )
+                    self.assertEqual(bypass.output, original)
+                    self.assertEqual(bypass.applied_operations, ())
 
 
 if __name__ == "__main__":
