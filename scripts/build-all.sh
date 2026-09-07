@@ -788,6 +788,11 @@ install_rust() {
     }
 
     _source_cargo
+    # Capture overrides before automatic mirror selection exports its defaults.
+    local rustup_server_override=false
+    if [[ -n "${RUSTUP_DIST_SERVER:-}" || -n "${RUSTUP_UPDATE_ROOT:-}" ]]; then
+        rustup_server_override=true
+    fi
     _configure_cargo_mirror
 
     if _rust_ver_ok; then
@@ -800,8 +805,10 @@ install_rust() {
     # RUSTUP_DIST_SERVER remains selected for sec-core's pinned Rust toolchain.
     if cmd_exists rustup; then
         info "Updating via rustup ..."
-        local stable_picked stable_dist stable_update_root
-        stable_picked=$(_pick_rustup_stable_mirror 2>/dev/null || echo "")
+        local stable_picked="" stable_dist stable_update_root
+        if ! $rustup_server_override; then
+            stable_picked=$(_pick_rustup_stable_mirror 2>/dev/null || echo "")
+        fi
         if [[ -n "$stable_picked" ]]; then
             stable_dist="${stable_picked%%|*}"
             stable_update_root="${stable_picked##*|}"
@@ -1030,24 +1037,10 @@ _configure_cargo_mirror() {
     # rustup silently downloads the pinned toolchain (7+ components, ~300MB)
     # from the configured dist server — defaulting to static.rust-lang.org,
     # which is effectively unreachable from China and causes long hangs.
-    local picked dist update_root probe_path
-    probe_path="$(_rustup_probe_path)"
-    if [[ -n "${RUSTUP_DIST_SERVER:-}" ]]; then
-        if _rustup_dist_has_toolchain "$RUSTUP_DIST_SERVER" "$probe_path"; then
-            info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
-        else
-            warn "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER} cannot serve Rust ${SEC_CORE_RUST_TOOLCHAIN}; selecting fallback mirror"
-            picked=$(_pick_rustup_mirror 2>/dev/null || echo "")
-            if [[ -n "$picked" ]]; then
-                dist="${picked%%|*}"
-                update_root="${picked##*|}"
-                export RUSTUP_DIST_SERVER="$dist"
-                export RUSTUP_UPDATE_ROOT="$update_root"
-                info "RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}"
-            else
-                warn "No fallback rustup mirror verified for ${SEC_CORE_RUST_TOOLCHAIN}"
-            fi
-        fi
+    local picked dist update_root
+    if [[ -n "${RUSTUP_DIST_SERVER:-}" || -n "${RUSTUP_UPDATE_ROOT:-}" ]]; then
+        # Let rustup use the configured endpoints and report download failures.
+        info "Using configured rustup servers"
     else
         picked=$(_pick_rustup_mirror 2>/dev/null || echo "")
         if [[ -n "$picked" ]]; then

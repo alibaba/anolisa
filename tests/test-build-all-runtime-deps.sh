@@ -785,6 +785,83 @@ test_dry_run_skips_host_preflight() {
     (( preflight_line < install_line )) || fail "dry-run listed install before preflight"
 }
 
+reset_rustup_stubs() {
+    reset_preflight_stubs
+    export CARGO_HOME="$TEST_TMP/rustup-cargo"
+    mkdir -p "$CARGO_HOME"
+    echo '[source.crates-io]' > "$CARGO_HOME/config.toml"
+    unset RUSTUP_DIST_SERVER RUSTUP_UPDATE_ROOT
+    TEST_RUST_VERSION=1.80.0
+    TEST_RUSTUP_CALL=""
+    TEST_RUSTUP_PROBES="$TEST_TMP/rustup-probes"
+    : > "$TEST_RUSTUP_PROBES"
+    # Keep the host environment and all network/package operations isolated.
+    source() { :; }
+    curl() { return 1; }
+    sudo() { fail "unexpected package installation"; }
+    query_repo_ver() { fail "unexpected package lookup"; }
+    _rustup_host_triple() { echo x86_64-unknown-linux-gnu; }
+    rustc() { echo "rustc $TEST_RUST_VERSION"; }
+    cargo() { :; }
+    rustup() {
+        TEST_RUSTUP_CALL="$*|${RUSTUP_DIST_SERVER-unset}|${RUSTUP_UPDATE_ROOT-unset}"
+        TEST_RUST_VERSION=1.93.0
+    }
+    _pick_rustup_mirror() {
+        echo pinned >> "$TEST_RUSTUP_PROBES"
+        echo 'https://pinned.example|https://pinned.example/rustup'
+    }
+    _pick_rustup_stable_mirror() {
+        echo stable >> "$TEST_RUSTUP_PROBES"
+        echo 'https://stable.example|https://stable.example/rustup'
+    }
+}
+
+test_rustup_explicit_servers_are_preserved() {
+    local mode expected_dist expected_update
+    for mode in both dist update; do
+        reset_rustup_stubs
+        if [[ "$mode" != update ]]; then
+            export RUSTUP_DIST_SERVER=https://custom.example
+        fi
+        if [[ "$mode" != dist ]]; then
+            export RUSTUP_UPDATE_ROOT=https://updater.example/rustup
+        fi
+        expected_dist="${RUSTUP_DIST_SERVER-unset}"
+        expected_update="${RUSTUP_UPDATE_ROOT-unset}"
+
+        # Even failed probes must not replace explicit configuration, including
+        # across repeated configuration and the stable update command.
+        _configure_cargo_mirror > "$TEST_OUTPUT" 2>&1
+        _configure_cargo_mirror >> "$TEST_OUTPUT" 2>&1
+        install_rust >> "$TEST_OUTPUT" 2>&1
+
+        [[ "${RUSTUP_DIST_SERVER-unset}" == "$expected_dist" ]] || \
+            fail "$mode: distribution server changed"
+        [[ "${RUSTUP_UPDATE_ROOT-unset}" == "$expected_update" ]] || \
+            fail "$mode: update root changed"
+        [[ "$TEST_RUSTUP_CALL" == "update stable|$expected_dist|$expected_update" ]] || \
+            fail "$mode: stable update did not inherit explicit configuration"
+        [[ ! -s "$TEST_RUSTUP_PROBES" ]] || fail "$mode: auto-selected a mirror"
+    done
+}
+
+test_rustup_automatic_mirrors_still_select_by_channel() {
+    reset_rustup_stubs
+
+    install_rust > "$TEST_OUTPUT" 2>&1
+
+    [[ "$RUSTUP_DIST_SERVER" == https://pinned.example ]] || \
+        fail "pinned-toolchain distribution server changed"
+    [[ "$RUSTUP_UPDATE_ROOT" == https://pinned.example/rustup ]] || \
+        fail "pinned-toolchain update root changed"
+    [[ "$TEST_RUSTUP_CALL" == \
+        'update stable|https://stable.example|https://stable.example/rustup' ]] || \
+        fail "stable update did not use the stable-channel mirror"
+    assert_contains "$TEST_RUSTUP_PROBES" pinned
+    assert_contains "$TEST_RUSTUP_PROBES" stable
+}
+
 run_test() {
     local name="$1" status
     set +e
@@ -833,3 +910,5 @@ run_test test_no_install_skips_runtime_preflight
 run_test test_preflight_failure_precedes_first_install
 run_test test_ignore_deps_skips_install_preflight
 run_test test_dry_run_skips_host_preflight
+run_test test_rustup_explicit_servers_are_preserved
+run_test test_rustup_automatic_mirrors_still_select_by_channel
