@@ -14,6 +14,7 @@ Activation is controlled by the Hermes plugin system — list ``tokenless`` in
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -76,13 +77,147 @@ def _validate_hooks_dir(path: str) -> str | None:
     return None
 
 
+# Symbols that must exist in the shared hook_utils module, paired with the
+# exact call shape this adapter uses at its hook entry points.  When a
+# candidate passes the trust check but ships an older hook_utils.py (e.g. a
+# stale install from a previous adapter version), the candidate is rejected and
+# the search continues to later paths.  The lifecycle migration made the Hermes
+# adapter a thin Core client, so the required symbols are the Protocol v2
+# request builders, the compress runner, and the Retrieve helpers this module
+# from-imports at load time.  The remaining load-time imports (resolve_binary,
+# SHELL_TOOLS, SKIP_TOOLS, and the local-path constants) predate Protocol v2,
+# so every module that ships the v2 API also ships them.  A module missing any
+# listed symbol would pass a narrower check and then raise ImportError at the
+# top-level from-import, after the candidate search has already ended — with no
+# fallback to later complete candidates.
+#
+# Symbol names alone are not enough: hook_utils has also changed *call
+# signatures* while keeping names stable.  ``build_post_tool_request`` took a
+# keyword-only ``retrieval_available`` flag until c2c7e580e replaced it with
+# the ``recovery`` mapping, so the module shipped by 9f109d559 exports all five
+# required symbols yet rejects the ``recovery=`` this adapter passes — the
+# plugin would import cleanly and every PostTool request would then die with
+# "unexpected keyword argument 'recovery'", again after the candidate search
+# has ended and with no fallback.  Each shape is therefore bound with
+# :func:`inspect.signature`; the values below are placeholders mirroring the
+# real call sites (``bind`` only checks arity and parameter names, so nothing
+# is ever called here).
+_HOOK_UTILS_CALL_SHAPES: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
+    # on_compress_pre_tool:
+    #   build_pre_tool_request(args, AGENT_ID, tool_name, "command",
+    #                          session_id, tool_call_id,
+    #                          replace_arguments=False, block_and_suggest=True)
+    (
+        "build_pre_tool_request",
+        ({}, "", "", "", "", ""),
+        {"replace_arguments": False, "block_and_suggest": True},
+    ),
+    # on_transform_tool_result:
+    #   build_post_tool_request(content, AGENT_ID, tool_name, protocol_status,
+    #                           content_origin, output_optimization,
+    #                           result_kind=..., recovery=..., session_id=...,
+    #                           tool_use_id=..., replace_output=True,
+    #                           replace_with_text=True)
+    (
+        "build_post_tool_request",
+        ("", "", "", "", "", ""),
+        {
+            "result_kind": "tool",
+            "recovery": {"kind": "none"},
+            "session_id": "",
+            "tool_use_id": "",
+            "replace_output": True,
+            "replace_with_text": True,
+        },
+    ),
+    # Both hooks: run_compress(tokenless_bin, request, timeout, operation)
+    ("run_compress", ("", {}, 0, ""), {}),
+    # on_transform_tool_result: is_tokenless_retrieve_command(tool_name, args)
+    ("is_tokenless_retrieve_command", ("", {}), {}),
+    # on_transform_tool_result: tokenless_retrieve_command_available()
+    ("tokenless_retrieve_command_available", (), {}),
+)
+
+_HOOK_UTILS_REQUIRED_SYMBOLS = tuple(name for name, _, _ in _HOOK_UTILS_CALL_SHAPES)
+
+
+def _restore_cached_hook_utils(saved: Any) -> None:
+    """Reinstate the module cached before a trial import, or drop the trial."""
+    if saved is not None:
+        sys.modules["hook_utils"] = saved
+    else:
+        sys.modules.pop("hook_utils", None)
+
+
+def _call_shape_rejection(
+    symbol: Any, name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> str | None:
+    """Return why *symbol* cannot take the adapter call shape, else ``None``."""
+    try:
+        signature = inspect.signature(symbol)
+    except (TypeError, ValueError) as exc:
+        return f"{name} is not an introspectable callable ({exc})"
+    try:
+        signature.bind(*args, **kwargs)
+    except TypeError as exc:
+        # Name the shape the adapter needs, not only what the module offers:
+        # a renamed keyword (retrieval_available -> recovery) reports as a
+        # missing argument on some Python versions, which alone would not tell
+        # the reader which side of the contract moved.
+        return (
+            f"{name}{signature} rejects the adapter call shape "
+            f"({len(args)} positional, kwargs: {', '.join(sorted(kwargs)) or 'none'}): "
+            f"{exc}"
+        )
+    return None
+
+
+def _check_api_compat(candidate_dir: str) -> str | None:
+    """Trial-import hook_utils from *candidate_dir* and verify its API.
+
+    Returns ``None`` when the module loads, exposes every symbol in
+    :data:`_HOOK_UTILS_REQUIRED_SYMBOLS`, and every one of them accepts the
+    matching call shape in :data:`_HOOK_UTILS_CALL_SHAPES`; otherwise a
+    human-readable rejection reason.  On success the freshly imported module is
+    kept in ``sys.modules`` so the subsequent ``from hook_utils import …``
+    reuses it rather than a stale cached copy.  On rejection the ``sys.path``
+    mutation is cleaned up and the previously cached module (if any) is
+    restored so later candidates start from a clean state.
+    """
+    sys.path.insert(0, candidate_dir)
+    saved = sys.modules.pop("hook_utils", None)
+    try:
+        import hook_utils as _trial  # type: ignore[import-not-found]
+        missing = [s for s in _HOOK_UTILS_REQUIRED_SYMBOLS
+                   if not hasattr(_trial, s)]
+        if missing:
+            _restore_cached_hook_utils(saved)
+            return f"API mismatch: missing {', '.join(missing)}"
+        mismatched = []
+        for name, args, kwargs in _HOOK_UTILS_CALL_SHAPES:
+            reason = _call_shape_rejection(getattr(_trial, name), name, args, kwargs)
+            if reason is not None:
+                mismatched.append(reason)
+        if mismatched:
+            _restore_cached_hook_utils(saved)
+            return "API mismatch: " + "; ".join(mismatched)
+        # Success — keep the freshly imported module in sys.modules.
+        return None
+    except Exception as exc:
+        _restore_cached_hook_utils(saved)
+        return f"import failed: {exc}"
+    finally:
+        sys.path.pop(0)
+
+
+
 def _resolve_hook_utils() -> tuple[str, list[str]]:
     """Locate a trusted shared hooks directory and make it importable.
 
     Returns ``(resolved_path, candidate_list)``.  The resolved path is
     inserted at the front of ``sys.path`` so the shared ``hook_utils``
     module can be imported.  Raises :exc:`ImportError` when no candidate
-    passes the trust policy.
+    passes both the trust policy and the API compatibility check.
     """
     # Resolve real home from passwd DB for user-install fallback path
     # (NOT $HOME — env-controllable).
@@ -119,11 +254,17 @@ def _resolve_hook_utils() -> tuple[str, list[str]]:
     rejections: list[str] = []
     for candidate in candidates:
         reason = _validate_hooks_dir(candidate)
-        if reason is None:
-            resolved = os.path.realpath(candidate)
-            sys.path.insert(0, resolved)
-            return resolved, candidates
-        rejections.append(f"  - {candidate}: {reason}")
+        if reason is not None:
+            rejections.append(f"  - {candidate}: {reason}")
+            continue
+        # Trust check passed — verify API compat (version mismatch guard).
+        resolved = os.path.realpath(candidate)
+        api_reason = _check_api_compat(resolved)
+        if api_reason is not None:
+            rejections.append(f"  - {candidate}: {api_reason}")
+            continue
+        sys.path.insert(0, resolved)
+        return resolved, candidates
 
     raise ImportError(
         "tokenless: no trusted shared hook_utils module (common/hooks/) found.\n"
