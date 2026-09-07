@@ -19,6 +19,7 @@ VERSION_RE = re.compile(
     r'^\s*(?:"version"|version)\s*[:=]\s*"([^"]+)"\s*,?\s*$', re.MULTILINE
 )
 TOML_CONTRACTS = (
+    ("src/agent-memory/Cargo.toml", "src/anolisa/manifests/components/agent-memory/component.toml"),
     ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/.anolisa/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.toml"),
