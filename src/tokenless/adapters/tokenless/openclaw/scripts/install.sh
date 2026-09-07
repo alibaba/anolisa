@@ -45,7 +45,7 @@ if [ ! -f "$PLUGIN_SRC/dist/index.js" ]; then
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
-    echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force --dangerously-force-unsafe-install"
+    echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force --dangerously-force-unsafe-install --accept-capabilities"
     exit 0
 fi
 
@@ -65,8 +65,14 @@ echo "[${COMPONENT}] Note: --dangerously-force-unsafe-install is required becaus
 echo "[${COMPONENT}]       this plugin wraps tokenless/rtk system binaries via child_process."
 echo "[${COMPONENT}]       See https://github.com/alibaba/anolisa for source."
 
+# OpenClaw 2026.9.2 gates plugins that declare capabilities behind a
+# capability-consent prompt (the tokenless plugin manifest's
+# activation.onCapabilities includes "hook"). `openclaw plugins install`
+# without --accept-capabilities refuses to activate: rc=1, "Plugin tokenless
+# requires capability consent". Accept capabilities explicitly so the plugin
+# installs and the openclaw CLI can start.
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
-    --force --dangerously-force-unsafe-install || {
+    --force --dangerously-force-unsafe-install --accept-capabilities || {
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
     exit 1
 }
