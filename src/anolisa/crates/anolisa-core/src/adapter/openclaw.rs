@@ -2797,24 +2797,45 @@ fn invalid_state_dir_claim(claim: &AdapterClaim, reason: &str) -> AdapterError {
     }
 }
 
-/// True only for OpenClaw's exact idempotent-uninstall failure. Other
-/// non-zero exits must keep the receipt so cleanup can be retried.
+/// True only for OpenClaw's idempotent-uninstall failures: the plugin is
+/// already gone in one of two durable ways:
+///   - `plugin not found: <id>` — the exact idempotent-uninstall wording, or
+///   - `plugin "<id>" is not associated with a tracked package install` — the
+///     plugin is absent from the registry but no longer tracked by a package
+///     install, so OpenClaw refuses the uninstall.
+///
+/// Other non-zero exits must keep the receipt so cleanup can be retried.
 fn uninstall_reports_missing_plugin(output: &CliOutput, plugin_id: &str) -> bool {
     if output.timed_out {
         return false;
     }
-    let expected = format!("plugin not found: {}", plugin_id.to_ascii_lowercase());
+    let lowercase_id = plugin_id.to_ascii_lowercase();
+    let expected = format!("plugin not found: {lowercase_id}");
     let combined = format!(
         "{}\n{}",
         strip_ansi(&output.stdout),
         strip_ansi(&output.stderr)
     );
-    let mut lines = combined
+    let lines: Vec<String> = combined
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(str::to_ascii_lowercase);
-    matches!(lines.next(), Some(line) if line == expected) && lines.next().is_none()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if lines.len() == 1 && lines[0] == expected {
+        return true;
+    }
+    // OpenClaw reports a plugin that was unregistered but is no longer
+    // tracked by a package install with the phrasing below. Treating it as a
+    // real failure would keep the receipt as `cleanup_failed` forever, which
+    // then deadlocks `adapter disable` / `uninstall` / `forget` behind the
+    // enabled-adapters guard.
+    let untracked =
+        format!("plugin \"{lowercase_id}\" is not associated with a tracked package install");
+    if lines.len() == 1 && lines[0].starts_with(&untracked) {
+        return true;
+    }
+    false
 }
 
 /// Extract skill names from a claim's `skill_resources` by parsing the
@@ -3017,6 +3038,27 @@ mod tests {
             ..missing
         };
         assert!(!uninstall_reports_missing_plugin(&timed_out, "tokenless"));
+    }
+
+    #[test]
+    fn untracked_plugin_uninstall_is_idempotent() {
+        let untracked = CliOutput {
+            status: Some(1),
+            timed_out: false,
+            stdout: String::new(),
+            stderr: "Plugin \"tokenless\" is not associated with a tracked package install. Refresh the plugin registry, then reinstall the package or run openclaw doctor before retrying.\n".to_string(),
+        };
+        assert!(uninstall_reports_missing_plugin(&untracked, "tokenless"));
+
+        let wrong_plugin = CliOutput {
+            stderr: "Plugin \"other-plugin\" is not associated with a tracked package install.\n"
+                .to_string(),
+            ..untracked.clone()
+        };
+        assert!(!uninstall_reports_missing_plugin(
+            &wrong_plugin,
+            "tokenless"
+        ));
     }
 
     #[test]
