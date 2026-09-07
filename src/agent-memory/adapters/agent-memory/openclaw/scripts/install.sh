@@ -42,10 +42,17 @@ fi
 # subprocess communication and malicious shell usage, we bypass it
 # by default. Set AGENT_MEMORY_SAFE_INSTALL=1 to go through the
 # regular (blocking) safe-install path instead.
-INSTALL_ARGS=("--force" "--dangerously-force-unsafe-install")
+# OpenClaw 2026.9.2 gates plugins that declare capabilities behind a
+# capability-consent prompt: `openclaw plugins install` without
+# `--accept-capabilities` refuses to install (rc=1, "Plugin ... requires
+# capability consent"). The memory-anolisa plugin manifests capabilities
+# (conversation hooks + sandboxed MCP tool forwarding), so the install
+# must accept them explicitly or the plugin never leaves the install
+# step and every OpenClaw E2E test errors at fixture setup.
+INSTALL_ARGS=("--force" "--dangerously-force-unsafe-install" "--accept-capabilities")
 if [ "${AGENT_MEMORY_SAFE_INSTALL:-0}" = "1" ]; then
     echo "[${COMPONENT}] AGENT_MEMORY_SAFE_INSTALL=1: using OpenClaw safe-install path (may block on child_process scan)." >&2
-    INSTALL_ARGS=("--force")
+    INSTALL_ARGS=("--force" "--accept-capabilities")
 fi
 
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_DIR" \
