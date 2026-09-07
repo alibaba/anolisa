@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.12.0
+
+### Features
+- Add `--no-ebpf` trajectory-only trace mode for environments where eBPF is unavailable.
+- Support the DashScope/Bailian native protocol. (#2954)
+- Add Kubernetes DaemonSet packaging. (#2976)
+- Monitor agent resource usage. (#3005)
+- Ground causal attribution in deterministic, re-checkable evidence. (#3011)
+- Add an LSM-only agent file-delete guard profile and report its capability. (#2979)
+- Add a vendored ABI guard, one-click audit protection, and Dashboard linkage. (#2775)
+
+### Fixes
+- Avoid cgroup OOM during database purge by skipping VACUUM. (#2916)
+- Merge Anthropic SSE token usage across events. (#2920)
+- Warn when the data directory is on overlay storage. (#2977)
+- Resolve PID lookups through a configurable procfs root.
+- Keep conversation counts scoped by session. (#3014)
+- Preserve tool results for causal attribution.
+- Synchronize ActPlane policy deltas and prevent fail-open enforcement. (#2979, #3016)
+- Reject oversized enforcement file paths instead of truncating them.
+- Extract container IDs from systemd cgroup driver layouts. (#2997)
+- Recognize modern OOM-kill dmesg format. (#3001)
+- Resolve the PID namespace before seeding BPF `cap_task` state. (#3022)
+- Pin Dockerfile RPM package selection to `TARGETARCH`. (#3025)
+
+### Docs
+- Document `--no-ebpf` trace mode.
+
 ## 0.11.2
 
 ### Features

@@ -1,5 +1,33 @@
 # 更新日志
 
+## 0.12.0
+
+### 新功能
+- 新增 `--no-ebpf` 仅轨迹采集模式，支持 eBPF 不可用的环境。
+- 支持 DashScope/Bailian 原生协议。(#2954)
+- 新增 Kubernetes DaemonSet 打包。(#2976)
+- 监控 Agent 资源使用情况。(#3005)
+- 因果归因基于确定性、可复核的证据进行判断。(#3011)
+- 新增仅依赖 LSM 的 Agent 文件删除防护 profile，并上报其能力。(#2979)
+- 新增 vendored ABI guard、一键审计防护和 Dashboard 联动。(#2775)
+
+### 修复
+- 数据库清理跳过 VACUUM，避免触发 cgroup OOM。(#2916)
+- 合并跨事件的 Anthropic SSE Token 用量。(#2920)
+- 数据目录位于 overlay 存储时输出告警。(#2977)
+- 通过可配置 procfs 根目录解析 PID。
+- 按 session 统计 conversation 数量。(#3014)
+- 为因果归因保留 tool 结果。
+- 同步 ActPlane policy delta，并防止 enforcement fail-open。(#2979, #3016)
+- 拒绝超长 enforcement 文件路径，避免静默截断。
+- 从 systemd cgroup driver 布局提取容器 ID。(#2997)
+- 识别现代 OOM-kill dmesg 格式。(#3001)
+- 在初始化 BPF `cap_task` 状态前解析 PID namespace。(#3022)
+- 将 Dockerfile RPM 包选择固定为 `TARGETARCH`。(#3025)
+
+### 文档
+- 补充 `--no-ebpf` trace 模式文档。
+
 ## 0.11.2
 
 ### 新功能
