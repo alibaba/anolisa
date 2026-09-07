@@ -24,6 +24,14 @@ export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 # fast.
 DETECT_RETRIES="${TOKENLESS_DETECT_RETRIES:-3}"
 DETECT_RETRY_DELAY="${TOKENLESS_DETECT_RETRY_DELAY:-1}"
+# Separate, smaller budget for one result that only looks definitive: a
+# `plugin list` that succeeds but omits the plugin. `claude plugin install`
+# writes marketplace.json/plugin.json, yet the CLI's plugin registry index
+# only picks them up on a later scan, so the very first list right after
+# provisioning can succeed and still omit the just-installed plugin (GH
+# #3082). Kept apart from DETECT_RETRIES so a genuinely absent plugin pays a
+# couple of cheap re-lists rather than the whole settling budget.
+DETECT_PLUGIN_RELISTS="${TOKENLESS_DETECT_PLUGIN_RELISTS:-2}"
 
 # settle <cmd...> — run cmd once; if it reports a retryable failure (exit
 # status 1), sleep DETECT_RETRY_DELAY and retry, up to DETECT_RETRIES retries
@@ -97,13 +105,21 @@ else
     field "plugin.json"       "missing (run: make stamp-adapter-templates)"
 fi
 
+# plugin_manifests_staged — true when the local manifests that
+# `claude plugin install` consumes (the single-plugin marketplace plus the
+# stamped plugin manifest) are both on disk. Their presence is what makes an
+# omitted plugin ambiguous: the installer had something to register, so the
+# CLI's registry index may simply not have caught up with it yet.
+plugin_manifests_staged() {
+    [ -f "$PLUGIN_SRC/.claude-plugin/marketplace.json" ] \
+        && [ -f "$PLUGIN_SRC/.claude-plugin/plugin.json" ]
+}
+
 # claude_plugin_listed — probe the plugin registry, using the settle()
 # exit-status contract: 0 = plugin listed; 1 = `claude plugin list` itself
 # failed (the CLI may still be initializing ~/.claude on first run, so a
 # retry may still succeed); 2 = `plugin list` ran successfully but did not
-# list the plugin. That is a definitive absent result — no retry can change
-# it — so settle() must return immediately instead of sleeping out the
-# retry budget and invoking the CLI DETECT_RETRIES + 1 times.
+# list the plugin.
 claude_plugin_listed() {
     local listing
     if ! listing="$("$CLAUDE_BIN" plugin list 2>&1)"; then
@@ -115,12 +131,39 @@ claude_plugin_listed() {
     return 2
 }
 
+# settle_plugin_listed — settle() for the plugin probe, extended with a
+# bounded re-list of the "list succeeded but omitted the plugin" case.
+#
+# With nothing staged on disk that omission is definitive — there was no
+# plugin for the registry to index — so it is returned immediately (status
+# 2) without spending any budget. With the manifests staged it is also the
+# shape of the GH #3082 first-run race, where the registry index lags one
+# scan behind the installer and the just-installed plugin is missing from an
+# otherwise successful list. Re-list up to DETECT_PLUGIN_RELISTS times to
+# ride out that refresh window; a genuinely absent plugin still ends up
+# reported as "not installed", only a few cheap calls later.
+#
+# Like settle(), this must be called in a condition context so that `set -e`
+# stays suppressed while the probe reports a non-zero status.
+settle_plugin_listed() {
+    local relist=0 rc=0
+    settle claude_plugin_listed; rc=$?
+    while [ "$rc" -eq 2 ] && [ "$relist" -lt "$DETECT_PLUGIN_RELISTS" ] \
+        && plugin_manifests_staged; do
+        relist=$((relist + 1))
+        sleep "$DETECT_RETRY_DELAY"
+        settle claude_plugin_listed; rc=$?
+    done
+    return "$rc"
+}
+
 if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
     # First-run race: `claude plugin list` may transiently fail while the CLI
-    # initializes ~/.claude; settle() retries while that failure (status 1)
-    # persists. A successful list that simply omits the plugin is definitive
-    # (status 2) and is reported as "not installed" without further retries.
-    if settle claude_plugin_listed; then
+    # initializes ~/.claude (status 1), and may transiently omit a plugin
+    # whose manifests were staged only moments ago (status 2). Both are
+    # retried within their own bounded budgets, and "not installed" is
+    # reported only once those budgets are exhausted.
+    if settle_plugin_listed; then
         field "plugin install"    "installed ($PLUGIN_ID)"
     else
         field "plugin install"    "not installed"
