@@ -176,9 +176,16 @@ fn response_sse_stream_ended(payload: &[u8]) -> bool {
         b"data: [END]",
         b"data:[END]",
     ];
-    TERMINATORS
-        .iter()
-        .any(|t| payload.windows(t.len()).any(|w| w == *t))
+    // Match only at SSE field boundaries: the terminator must sit at the very
+    // start of the payload or be preceded by a newline. A bare substring search
+    // would false-positive on model output that happens to contain the literal
+    // text (e.g. a JSON delta whose `content` is `"data: [DONE]"`).
+    TERMINATORS.iter().any(|t| {
+        payload
+            .windows(t.len())
+            .enumerate()
+            .any(|(i, w)| w == *t && (i == 0 || payload[i - 1] == b'\n'))
+    })
 }
 
 /// A complete or partial HTTP/2 stream
@@ -1507,6 +1514,12 @@ mod tests {
         ));
         assert!(!response_sse_stream_ended(b"data: {\"delta\":\"x\"}\n\n"));
         assert!(!response_sse_stream_ended(b""));
+        // Model output whose content is the literal terminator text must NOT
+        // close the stream — the `data: [DONE]` sits mid-JSON, not at a line
+        // start. This is the false-positive the line-boundary check prevents.
+        assert!(!response_sse_stream_ended(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"data: [DONE]\"}}]}\n\n"
+        ));
     }
 
     #[test]

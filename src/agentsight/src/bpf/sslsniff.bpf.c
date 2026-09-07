@@ -390,4 +390,277 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     return 0;
 }
 
+/* ─── rustls plaintext taps (#3042) ──────────────────────────────────────────
+ *
+ * rustls is pure Rust and exports no SSL_read/SSL_write, so every probe above
+ * is unattachable on a rustls process. The hooks here are its two plaintext
+ * chokepoints on `CommonState`, taken at function entry:
+ *
+ *   buffer_plaintext(&mut self, payload: OutboundChunks, sendable: &mut _) -> usize
+ *     rdi = &mut CommonState, rsi = &OutboundChunks
+ *   take_received_plaintext(&mut self, bytes: Payload)
+ *     rdi = &mut CommonState, rsi = &Payload
+ *
+ * Why this layer and not the AEAD one (`MessageEncrypter/Decrypter::encrypt`,
+ * which is also reachable): the encrypter and decrypter are two separate heap
+ * objects, so hooking them yields a different `self` per direction. Userspace
+ * keys connections on (pid, ssl_ptr), and the HTTP/2 aggregator correlates a
+ * request with its response inside one connection -- with split identities the
+ * request never completes and no token usage is ever extracted. Both hooks here
+ * take the *same* `&mut CommonState`, so one connection stays one connection.
+ *
+ * Hooking above the record layer also means: application data only, so no
+ * content-type filtering; independent of the negotiated cipher suite, so one
+ * probe per direction instead of one per suite; and the plaintext is an
+ * argument, so neither direction needs a uretprobe.
+ *
+ * The offsets below are NOT part of rustls' stable API. They were measured on a
+ * real build with `offset_of!` and cross-checked against the disassembly rather
+ * than inferred from the type declarations, because both types are niche-encoded
+ * in ways the source does not show. Nothing is trusted blindly: a NULL pointer
+ * or an implausible length is dropped, so a layout change degrades to capturing
+ * nothing rather than to emitting garbage.
+ */
+
+/* OutboundChunks (write direction) is niche-encoded: eightbyte 0 is Multiple's
+ * `chunks` pointer, and NULL there means the Single variant. The two variants
+ * overlap, so each eightbyte has a different meaning per variant and the names
+ * below are kept distinct on purpose -- reading Multiple's chunk count from
+ * Single's `len` slot silently yields `start`, which is 0 in practice and makes
+ * every gather write look empty.
+ *
+ *   Single   { tag = 0  @0, ptr @8, len   @16 }
+ *   Multiple { chunks   @0, n   @8, start @16, end @24 }
+ */
+#define RUSTLS_CHUNKS_TAG_OFF 0
+#define RUSTLS_SINGLE_PTR_OFF 8
+#define RUSTLS_SINGLE_LEN_OFF 16
+#define RUSTLS_MULTI_N_OFF 8
+#define RUSTLS_MULTI_START_OFF 16
+#define RUSTLS_MULTI_END_OFF 24
+/* Fat-pointer stride inside the `&[&[u8]]` array. */
+#define RUSTLS_SLICE_STRIDE 16
+/* Chunks emitted per gather write. HTTP/2 writes a frame header and its payload
+ * as separate slices, so a handful covers real traffic, and the bound keeps the
+ * unrolled loop inside the verifier's complexity budget. Overflow is counted
+ * rather than silently dropped. */
+#define RUSTLS_MAX_GATHER_CHUNKS 4
+/* Payload (read direction) needs no variant branch: Borrowed and Owned keep the
+ * slice pointer and length at the same offsets, because the discriminant is
+ * niche-encoded into the eightbyte that Owned uses as Vec's capacity (Borrowed
+ * stores 0x8000000000000000 there, which no real capacity can be). */
+#define RUSTLS_PAYLOAD_PTR_OFF 8
+#define RUSTLS_PAYLOAD_LEN_OFF 16
+
+/* Gather writes (OutboundChunks::Multiple) whose chunk count exceeded
+ * RUSTLS_MAX_GATHER_CHUNKS, so part of the payload was not emitted. Exposed
+ * through the skeleton's .bss so the gap is measurable instead of silent. */
+__u64 rustls_gather_skips = 0;
+
+/* Emit one plaintext buffer belonging to connection `conn`.
+ *
+ * `len` is the caller's full plaintext, which at this layer is a whole
+ * application write rather than a single TLS record, so it is bounded by the
+ * capture cap and not by the record size. SSL_EMIT_TIERED clamps the copy and
+ * flags truncation, exactly as it does for a large SSL_write.
+ */
+static __always_inline int rustls_emit(void *conn, u64 ptr, u64 len, int rw)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+    u32 uid = bpf_get_current_uid_gid();
+    u64 ts = bpf_ktime_get_ns();
+
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid)
+        return 0;
+    if (!ptr || len == 0 || len > MAX_BUF_SIZE)
+        return 0;
+
+    /* Captured at function entry, so there is no paired uretprobe and hence no
+     * measurable in-function duration. */
+    SSL_EMIT_TIERED((const char *)ptr, len, rw, ts, 0, ns_pid, tid, uid, (u64)conn, 0);
+    return 0;
+}
+
+/* Largest single chunk the gather path copies. Both bounds must be compile-time
+ * constants for the verifier to prove `off + take` stays inside the reservation,
+ * and HTTP/2's default max frame size is 16 KiB, so a per-frame slice fits. */
+#define RUSTLS_GATHER_CHUNK_MAX SSL_TIER_SMALL
+#define RUSTLS_GATHER_TIER SSL_TIER_MEDIUM
+
+/* Concatenate a gather write's chunks into a single ring-buffer record.
+ *
+ * `chunks` is rustls' `&[&[u8]]` data pointer, `n` its (already bounded) length,
+ * and [start,end) the logical window over the concatenation.
+ *
+ * Anything that would not fit is dropped whole and counted, never truncated:
+ * these bytes feed a framed protocol parser, so a short copy desynchronises the
+ * frame stream and produces garbage rather than partial data.
+ *
+ * Only one tier is used. Unrolling the copy loop once per tier multiplies
+ * program size, and a gather write is one request body per LLM call rather than
+ * a hot path. The medium tier is the smallest that holds a realistic chat
+ * request (an 18 KiB body was observed) without reserving the 4 MiB worst case
+ * that #759 removed.
+ */
+static __always_inline int rustls_gather_emit(void *conn, const char *chunks, u64 n, u64 start,
+                                             u64 end)
+{
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+    u32 uid = bpf_get_current_uid_gid();
+    u64 ts = bpf_ktime_get_ns();
+
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid)
+        return 0;
+
+    u64 total = end - start;
+    if (total == 0 || total > RUSTLS_GATHER_TIER) {
+        /* Too large for one reservation; a partial copy would corrupt framing. */
+        if (total)
+            __sync_fetch_and_add(&rustls_gather_skips, 1);
+        return 0;
+    }
+
+    struct probe_SSL_data_medium *d = bpf_ringbuf_reserve(&rb, sizeof(*d), 0);
+    if (!d)
+        return 0;
+
+    d->source = EVENT_SOURCE_SSL;
+    d->timestamp_ns = ts;
+    d->delta_ns = 0;
+    d->pid = ns_pid;
+    d->tid = tid;
+    d->uid = uid;
+    d->len = (u32)total;
+    d->rw = 1;
+    d->is_handshake = 0;
+    d->ssl_ptr = (u64)conn;
+    d->truncated = 0;
+    bpf_get_current_comm(&d->comm, sizeof(d->comm));
+
+    /* `pos` is the logical offset of the current chunk's first byte. */
+    u64 pos = 0;
+    u32 written = 0;
+    bool complete = true;
+#pragma unroll
+    for (int i = 0; i < RUSTLS_MAX_GATHER_CHUNKS; i++) {
+        if ((u64)i >= n || pos >= end)
+            break;
+
+        u64 cptr = 0;
+        u64 clen = 0;
+        const char *slot = chunks + (u64)i * RUSTLS_SLICE_STRIDE;
+        if (bpf_probe_read_user(&cptr, sizeof(cptr), slot) ||
+            bpf_probe_read_user(&clen, sizeof(clen), slot + 8)) {
+            complete = false;
+            break;
+        }
+
+        /* Intersect [pos, pos+clen) with the [start, end) window. */
+        u64 chunk_end = pos + clen;
+        u64 lo = pos > start ? pos : start;
+        u64 hi = chunk_end < end ? chunk_end : end;
+        u64 skip = lo - pos; /* bytes of this chunk before the window */
+        pos = chunk_end;
+        if (hi <= lo || !cptr)
+            continue;
+
+        u64 want = hi - lo;
+        /* Both operands of the bounds check are constants, which is what lets the
+         * verifier carry `off + take <= sizeof(buf)` across the spill that the
+         * helper call forces (same trap SSL_EMIT_ONE documents). */
+        if (want > RUSTLS_GATHER_CHUNK_MAX || written > RUSTLS_GATHER_TIER - RUSTLS_GATHER_CHUNK_MAX) {
+            complete = false;
+            break;
+        }
+        u32 off = written;
+        u32 take = (u32)want;
+        /* Re-clamp behind a barrier: the value is spilled across the call above,
+         * and the verifier reloads it as an unbounded scalar otherwise. */
+        asm volatile("" : "+r"(take));
+        if (take > RUSTLS_GATHER_CHUNK_MAX)
+            take = RUSTLS_GATHER_CHUNK_MAX;
+        asm volatile("" : "+r"(take));
+        if (take == 0)
+            continue;
+        if (bpf_probe_read_user(&d->buf[off], take, (const char *)(cptr + skip))) {
+            complete = false;
+            break;
+        }
+        written += take;
+    }
+
+    /* A hole anywhere makes the remaining bytes unparseable, so drop the record
+     * rather than hand the frame parser a corrupt stream. */
+    if (!complete || written != (u32)total) {
+        __sync_fetch_and_add(&rustls_gather_skips, 1);
+        bpf_ringbuf_discard(d, 0);
+        return 0;
+    }
+    d->buf_filled = 1;
+    d->buf_size = written;
+    bpf_ringbuf_submit(d, 0);
+    return 0;
+}
+
+SEC("uprobe/rustls_buffer_plaintext")
+int BPF_UPROBE(probe_rustls_write_plaintext, void *conn, void *chunks) {
+    u64 tag = 0;
+    if (bpf_probe_read_user(&tag, sizeof(tag), (const char *)chunks + RUSTLS_CHUNKS_TAG_OFF))
+        return 0;
+
+    if (tag == 0) {
+        u64 ptr = 0;
+        u64 len = 0;
+        if (bpf_probe_read_user(&ptr, sizeof(ptr), (const char *)chunks + RUSTLS_SINGLE_PTR_OFF))
+            return 0;
+        if (bpf_probe_read_user(&len, sizeof(len), (const char *)chunks + RUSTLS_SINGLE_LEN_OFF))
+            return 0;
+        return rustls_emit(conn, ptr, len, 1);
+    }
+
+    /* Multiple: a gather write. `tag` is the &[&[u8]] data pointer and the
+     * logical payload is the concatenation of the chunks sliced by [start,end).
+     *
+     * The chunks MUST be concatenated into one event rather than emitted one per
+     * chunk. HTTP/2 is framed, and `parse_ssl_event` parses each event on its
+     * own: a chunk that starts mid-frame is unparseable and degrades to RawData,
+     * which only the HTTP/1.1 path knows how to continue. Verified the hard way —
+     * per-chunk emission delivered every byte in order and still produced zero
+     * parsed frames.
+     */
+    u64 n = 0;
+    u64 start = 0;
+    u64 end = 0;
+    if (bpf_probe_read_user(&n, sizeof(n), (const char *)chunks + RUSTLS_MULTI_N_OFF))
+        return 0;
+    if (bpf_probe_read_user(&start, sizeof(start), (const char *)chunks + RUSTLS_MULTI_START_OFF))
+        return 0;
+    if (bpf_probe_read_user(&end, sizeof(end), (const char *)chunks + RUSTLS_MULTI_END_OFF))
+        return 0;
+    if (end <= start)
+        return 0;
+    if (n > RUSTLS_MAX_GATHER_CHUNKS) {
+        __sync_fetch_and_add(&rustls_gather_skips, 1);
+        n = RUSTLS_MAX_GATHER_CHUNKS;
+    }
+    return rustls_gather_emit(conn, (const char *)tag, n, start, end);
+}
+
+SEC("uprobe/rustls_take_received_plaintext")
+int BPF_UPROBE(probe_rustls_read_plaintext, void *conn, void *payload) {
+    u64 ptr = 0;
+    u64 len = 0;
+    if (bpf_probe_read_user(&ptr, sizeof(ptr), (const char *)payload + RUSTLS_PAYLOAD_PTR_OFF))
+        return 0;
+    if (bpf_probe_read_user(&len, sizeof(len), (const char *)payload + RUSTLS_PAYLOAD_LEN_OFF))
+        return 0;
+    return rustls_emit(conn, ptr, len, 0);
+}
+
 char LICENSE[] SEC("license") = "GPL";
