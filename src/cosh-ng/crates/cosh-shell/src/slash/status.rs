@@ -69,7 +69,7 @@ pub(super) fn render_status_command<W: Write>(
                 ("analysis", state.analysis_mode.label()),
                 (
                     "plan",
-                    crate::runtime::mode::plan_mode_label(state.plan_mode),
+                    crate::runtime::mode_plan::plan_mode_label(state.plan_mode),
                 ),
             ],
         ),
