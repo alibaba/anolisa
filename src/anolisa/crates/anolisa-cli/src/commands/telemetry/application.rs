@@ -1,12 +1,14 @@
 //! Application orchestration for telemetry mutations.
 
 use std::fs;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use anolisa_core::execution::{CommandOutcome, CommandOutcomeStatus, ExecutionIntent};
 use anolisa_core::{
     RegistrationManager, TelemetryChannel, Uploader, generate_link_id, require_root,
 };
+use anolisa_platform::command::CommandRunner;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::systemd::{Systemd, SystemdError};
 
@@ -233,10 +235,7 @@ impl TelemetryEffects for SystemTelemetryEffects {
     }
 
     fn disable_service(&self) -> Result<(), String> {
-        match Systemd::system().disable_unit_deferred(SERVICE_NAME) {
-            Ok(()) | Err(SystemdError::NotFound(_)) => Ok(()),
-            Err(error) => Err(error.to_string()),
-        }
+        disable_service_with(&Systemd::system())
     }
 
     fn spawn_uploader(&self) -> Result<(), String> {
@@ -518,10 +517,22 @@ fn runtime(command: &str, error: impl std::fmt::Display) -> CliError {
 }
 
 fn install_and_enable_service(ctx: &CliContext) -> Result<(), CliError> {
+    install_and_enable_service_with(ctx, &Systemd::system(), std::env::current_exe)
+}
+
+fn install_and_enable_service_with<R, F>(
+    ctx: &CliContext,
+    systemd: &Systemd<R>,
+    current_exe: F,
+) -> Result<(), CliError>
+where
+    R: CommandRunner,
+    F: FnOnce() -> io::Result<PathBuf>,
+{
     const UNIT_TEMPLATE: &str = include_str!("../../../../../systemd/anolisa-telemetry.service.in");
 
     const COMMAND: &str = "telemetry enable";
-    let executable = std::env::current_exe().map_err(|error| runtime(COMMAND, error))?;
+    let executable = current_exe().map_err(|error| runtime(COMMAND, error))?;
     let unit_content = UNIT_TEMPLATE.replace("@@ANOLISA_BIN@@", &executable.display().to_string());
     let layout = FsLayout::system(ctx.prefix.clone());
     let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
@@ -530,32 +541,95 @@ fn install_and_enable_service(ctx: &CliContext) -> Result<(), CliError> {
     }
     fs::write(&unit_path, unit_content).map_err(|error| runtime(COMMAND, error))?;
 
-    let output = std::process::Command::new("systemctl")
-        .arg("daemon-reload")
-        .output()
-        .map_err(|error| runtime(COMMAND, error))?;
-    if !output.status.success() {
-        return Err(runtime(
+    systemd.daemon_reload().map_err(|error| match error {
+        SystemdError::Spawn { source, .. } => runtime(COMMAND, source),
+        // Reload historically displays only trimmed stderr, unlike enable's
+        // combined-output SystemdError display. Preserve that warning contract.
+        SystemdError::NonZeroExit(failure) => runtime(
             COMMAND,
-            format!(
-                "systemctl daemon-reload failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
-    }
+            format!("systemctl daemon-reload failed: {}", failure.stderr.trim()),
+        ),
+        error => runtime(COMMAND, error),
+    })?;
 
-    Systemd::system()
+    systemd
         .enable_unit(SERVICE_NAME)
         .map_err(|error| runtime(COMMAND, error))
+}
+
+fn disable_service_with<R: CommandRunner>(systemd: &Systemd<R>) -> Result<(), String> {
+    match systemd.disable_unit_deferred(SERVICE_NAME) {
+        Ok(()) | Err(SystemdError::NotFound(_)) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::path::Path;
+    use std::rc::Rc;
+
+    use anolisa_platform::command::CommandOutput;
 
     use super::*;
-    use crate::test_support::{TestContextOptions, context_for_root};
+    use crate::test_support::{TestContextOptions, TestSandbox, context_for_root};
+
+    type ServiceCalls = Rc<RefCell<Vec<Vec<String>>>>;
+
+    struct ScriptedRunner {
+        calls: ServiceCalls,
+        outputs: RefCell<VecDeque<io::Result<CommandOutput>>>,
+        expected_unit: Option<(PathBuf, String)>,
+    }
+
+    impl ScriptedRunner {
+        fn new(outputs: Vec<io::Result<CommandOutput>>) -> Self {
+            Self {
+                calls: Default::default(),
+                outputs: RefCell::new(outputs.into()),
+                expected_unit: None,
+            }
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            assert_eq!(program, "systemctl");
+            if let Some((path, content)) = &self.expected_unit {
+                assert_eq!(fs::read_to_string(path).unwrap(), *content);
+            }
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|arg| (*arg).to_string()).collect());
+            self.outputs
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected systemctl call")
+        }
+    }
+
+    fn output(code: Option<i32>, stdout: &str, stderr: &str) -> io::Result<CommandOutput> {
+        Ok(CommandOutput {
+            code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        })
+    }
+
+    fn service_effects(outputs: Vec<io::Result<CommandOutput>>) -> (FakeEffects, ServiceCalls) {
+        let runner = ScriptedRunner::new(outputs);
+        let calls = runner.calls.clone();
+        (
+            FakeEffects {
+                systemd: true,
+                service: Some(Systemd::with_runner(runner)),
+                ..Default::default()
+            },
+            calls,
+        )
+    }
 
     #[derive(Default)]
     struct FakeEffects {
@@ -565,6 +639,7 @@ mod tests {
         enable_error: Option<&'static str>,
         disable_error: Option<&'static str>,
         systemd: bool,
+        service: Option<Systemd<ScriptedRunner>>,
         install_error: Option<&'static str>,
         disable_service_error: Option<&'static str>,
         spawn_error: Option<&'static str>,
@@ -622,14 +697,26 @@ mod tests {
             self.systemd
         }
 
-        fn install_and_enable_service(&self, _ctx: &CliContext) -> Result<(), String> {
+        fn install_and_enable_service(&self, ctx: &CliContext) -> Result<(), String> {
             self.record("install_and_enable_service");
-            Self::result(self.install_error)
+            if let Some(systemd) = &self.service {
+                install_and_enable_service_with(ctx, systemd, || {
+                    self.record("current_exe");
+                    Ok(ctx.layout().bin_dir.join("anolisa"))
+                })
+                .map_err(|error| error.to_string())
+            } else {
+                Self::result(self.install_error)
+            }
         }
 
         fn disable_service(&self) -> Result<(), String> {
             self.record("disable_service");
-            Self::result(self.disable_service_error)
+            if let Some(systemd) = &self.service {
+                disable_service_with(systemd)
+            } else {
+                Self::result(self.disable_service_error)
+            }
         }
 
         fn spawn_uploader(&self) -> Result<(), String> {
@@ -1051,5 +1138,585 @@ mod tests {
         .expect_err("scripted apply failure");
         assert_eq!(error.code(), "EXECUTION_FAILED");
         assert!(error.to_string().contains("scripted failure"));
+    }
+
+    #[test]
+    fn service_install_writes_unit_before_reload_and_enable() {
+        let sandbox = TestSandbox::new();
+        let ctx = sandbox.context(InstallMode::System);
+        let unit_path = ctx.layout().systemd_unit_dir.join(UNIT_FILENAME);
+        let executable = sandbox.root().join("bin with spaces/anolisa");
+        let expected = include_str!("../../../../../systemd/anolisa-telemetry.service.in")
+            .replace("@@ANOLISA_BIN@@", &executable.display().to_string());
+        let mut runner =
+            ScriptedRunner::new(vec![output(Some(0), "", ""), output(Some(0), "", "")]);
+        runner.expected_unit = Some((unit_path.clone(), expected.clone()));
+        let calls = runner.calls.clone();
+        let systemd = Systemd::with_runner(runner);
+        install_and_enable_service_with(&ctx, &systemd, || {
+            assert!(!unit_path.parent().unwrap().exists());
+            Ok(executable)
+        })
+        .unwrap();
+        assert_eq!(fs::read_to_string(&unit_path).unwrap(), expected);
+        assert_eq!(
+            *calls.borrow(),
+            vec![vec!["daemon-reload"], vec!["enable", "--now", SERVICE_NAME],]
+        );
+    }
+
+    #[test]
+    fn service_file_failures_never_call_systemd() {
+        for stage in ["executable", "directory", "unit"] {
+            let sandbox = TestSandbox::new();
+            let ctx = sandbox.context(InstallMode::System);
+            let unit_dir = &ctx.layout().systemd_unit_dir;
+            let unit_path = unit_dir.join(UNIT_FILENAME);
+            if stage == "directory" {
+                let blocker = unit_dir.parent().unwrap();
+                fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+                fs::write(blocker, "block directory creation").unwrap();
+            } else if stage == "unit" {
+                fs::create_dir_all(&unit_path).unwrap();
+            }
+            let runner = ScriptedRunner::new(vec![]);
+            let calls = runner.calls.clone();
+            let resolutions = std::cell::Cell::new(0);
+            let error =
+                install_and_enable_service_with(&ctx, &Systemd::with_runner(runner), || {
+                    resolutions.set(resolutions.get() + 1);
+                    if stage == "executable" {
+                        Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "executable unavailable",
+                        ))
+                    } else {
+                        Ok(ctx.layout().bin_dir.join("anolisa"))
+                    }
+                })
+                .unwrap_err();
+            assert_eq!(error.command(), "telemetry enable");
+            assert_eq!(error.code(), "EXECUTION_FAILED");
+            assert_eq!(error.exit_code(), 1);
+            if stage == "executable" {
+                assert_eq!(error.reason(), "executable unavailable");
+                assert!(!unit_dir.exists());
+            }
+            assert_eq!(resolutions.get(), 1);
+            assert!(calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn service_reload_preserves_stderr_only_and_spawn_diagnostics() {
+        for (result, reason) in [
+            (
+                Err(io::Error::new(io::ErrorKind::NotFound, "no systemctl")),
+                "no systemctl",
+            ),
+            (
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                "denied",
+            ),
+            (
+                output(Some(1), "ignored stdout", " \treload denied\n"),
+                "systemctl daemon-reload failed: reload denied",
+            ),
+            (
+                output(Some(1), "stdout only", ""),
+                "systemctl daemon-reload failed: ",
+            ),
+            (
+                output(Some(1), "", " \t\n"),
+                "systemctl daemon-reload failed: ",
+            ),
+            (
+                output(None, "ignored stdout", " killed\n"),
+                "systemctl daemon-reload failed: killed",
+            ),
+            (output(None, "", ""), "systemctl daemon-reload failed: "),
+        ] {
+            let sandbox = TestSandbox::new();
+            let ctx = sandbox.context(InstallMode::System);
+            let runner = ScriptedRunner::new(vec![result]);
+            let calls = runner.calls.clone();
+            let error =
+                install_and_enable_service_with(&ctx, &Systemd::with_runner(runner), || {
+                    Ok(ctx.layout().bin_dir.join("anolisa"))
+                })
+                .unwrap_err();
+            assert_eq!(error.reason(), reason);
+            assert_eq!(error.to_string(), format!("execution failed: {reason}"));
+            assert_eq!(error.code(), "EXECUTION_FAILED");
+            assert_eq!(error.exit_code(), 1);
+            assert_eq!(*calls.borrow(), vec![vec!["daemon-reload"]]);
+            assert!(ctx.layout().systemd_unit_dir.join(UNIT_FILENAME).is_file());
+        }
+    }
+
+    #[test]
+    fn real_service_failures_keep_application_fallback_and_warning_order() {
+        for (enable_reached, result, reason) in [
+            (
+                false,
+                Err(io::Error::new(io::ErrorKind::NotFound, "no systemctl")),
+                "no systemctl",
+            ),
+            (
+                false,
+                output(Some(1), "ignored", " reload denied\n"),
+                "systemctl daemon-reload failed: reload denied",
+            ),
+            (
+                true,
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                "systemctl command failed: failed to spawn systemctl: denied",
+            ),
+            (
+                true,
+                output(Some(1), "stdout", "stderr\n"),
+                "systemctl command failed: stderr\nstdout",
+            ),
+            (
+                true,
+                output(None, "", ""),
+                "systemctl command failed: systemctl exited with signal",
+            ),
+        ] {
+            let sandbox = TestSandbox::new();
+            let ctx = sandbox.context(InstallMode::System);
+            let mut outputs = Vec::new();
+            if enable_reached {
+                outputs.push(output(Some(0), "", ""));
+            }
+            outputs.push(result);
+            let (mut effects, calls) = service_effects(outputs);
+            effects.spawn_error = Some("spawn failed");
+            let result = run_with_effects(
+                TelemetryRequest::Enable {
+                    intent: ExecutionIntent::Apply,
+                },
+                &ctx,
+                &effects,
+            )
+            .unwrap();
+            let TelemetryApplicationOutcome::Applied { result, outcome } = result else {
+                panic!("expected applied result");
+            };
+            let warnings = [
+                format!(
+                    "could not enable {UNIT_FILENAME} (execution failed: {reason}); falling back to lazy start"
+                ),
+                "telemetry enabled, but uploader failed to start: spawn failed".to_string(),
+            ];
+            assert_eq!(outcome.warnings(), &warnings);
+            assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+            assert_eq!(outcome.operation_id(), None);
+            assert_eq!(outcome.changes(), &[TelemetryChange::CollectionEnabled]);
+            assert_eq!(
+                effects.calls(),
+                vec![
+                    "require_root",
+                    "read_link_id",
+                    "enable_collection_anonymous",
+                    "systemd_available",
+                    "install_and_enable_service",
+                    "current_exe",
+                    "spawn_uploader"
+                ]
+            );
+            let mut expected_calls = vec![vec!["daemon-reload"]];
+            if enable_reached {
+                expected_calls.push(vec!["enable", "--now", SERVICE_NAME]);
+            }
+            assert_eq!(*calls.borrow(), expected_calls);
+            assert_eq!(
+                super::super::applied_output(&result, outcome.warnings()),
+                vec![
+                    super::super::TelemetryOutput::Stderr(format!("warn: {}", warnings[0])),
+                    super::super::TelemetryOutput::Stderr(format!("warn: {}", warnings[1])),
+                    super::super::TelemetryOutput::Stdout(
+                        "Telemetry collection enabled.".to_string()
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn real_service_disable_preserves_deferred_stop_and_missing_unit_behavior() {
+        for (stop, disable, status, warning) in [
+            (output(Some(0), "", ""), output(Some(0), "", ""), None, None),
+            (
+                Err(io::Error::new(io::ErrorKind::NotFound, "stop spawn failed")),
+                output(Some(0), "", ""),
+                None,
+                None,
+            ),
+            (
+                output(Some(1), "", "stop failed"),
+                output(Some(0), "", ""),
+                None,
+                None,
+            ),
+            (output(None, "", ""), output(Some(0), "", ""), None, None),
+            (
+                output(Some(0), "", ""),
+                output(Some(1), "", "missing unit"),
+                Some(output(Some(0), "LoadState=not-found\n", "")),
+                None,
+            ),
+            (
+                output(Some(0), "", ""),
+                output(Some(1), "", "disable denied"),
+                Some(output(
+                    Some(0),
+                    "LoadState=loaded\nActiveState=active\n",
+                    "",
+                )),
+                Some("systemctl command failed: disable denied"),
+            ),
+            (
+                output(Some(0), "", ""),
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                None,
+                Some("systemctl command failed: failed to spawn systemctl: denied"),
+            ),
+            (
+                output(Some(0), "", ""),
+                output(Some(1), "", "disable denied"),
+                Some(Err(io::Error::new(io::ErrorKind::NotFound, "show failed"))),
+                Some("systemctl command failed: disable denied"),
+            ),
+            (
+                output(Some(0), "", ""),
+                output(None, "", ""),
+                Some(output(Some(1), "", "bus unavailable")),
+                Some("systemctl command failed: systemctl exited with signal"),
+            ),
+        ] {
+            let sandbox = TestSandbox::new();
+            let ctx = sandbox.context(InstallMode::System);
+            let mut expected_calls = vec![
+                vec!["stop", "--no-block", SERVICE_NAME],
+                vec!["disable", SERVICE_NAME],
+            ];
+            let mut outputs = vec![stop, disable];
+            if let Some(status) = status {
+                outputs.push(status);
+                expected_calls.push(vec![
+                    "show",
+                    SERVICE_NAME,
+                    "--no-pager",
+                    "--property=LoadState,ActiveState,UnitFileState,Description",
+                ]);
+            }
+            let (effects, calls) = service_effects(outputs);
+            let result = run_with_effects(
+                TelemetryRequest::Disable {
+                    intent: ExecutionIntent::Apply,
+                },
+                &ctx,
+                &effects,
+            )
+            .unwrap();
+            let TelemetryApplicationOutcome::Applied { result, outcome } = result else {
+                panic!("expected applied result");
+            };
+            assert_eq!(result, TelemetryApplied::Disabled);
+            assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+            assert_eq!(outcome.operation_id(), None);
+            assert_eq!(outcome.changes(), &[TelemetryChange::CollectionDisabled]);
+            assert_eq!(
+                outcome.warnings(),
+                &warning
+                    .map(|reason| format!("failed to disable {UNIT_FILENAME}: {reason}"))
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                effects.calls(),
+                vec![
+                    "require_root",
+                    "disable_collection",
+                    "systemd_available",
+                    "disable_service"
+                ]
+            );
+            assert_eq!(*calls.borrow(), expected_calls);
+            assert!(!ctx.layout().systemd_unit_dir.exists());
+        }
+    }
+
+    #[test]
+    fn service_guards_skip_executable_files_and_systemd() {
+        for enable in [true, false] {
+            for scenario in ["preview", "permission", "no-systemd"] {
+                let sandbox = TestSandbox::new();
+                let ctx = sandbox.context(InstallMode::System);
+                let (mut effects, calls) = service_effects(vec![]);
+                effects.root_error = (scenario == "permission").then_some("root required");
+                effects.systemd = scenario != "no-systemd";
+                let intent = if scenario == "preview" {
+                    ExecutionIntent::Plan
+                } else {
+                    ExecutionIntent::Apply
+                };
+                let request = if enable {
+                    TelemetryRequest::Enable { intent }
+                } else {
+                    TelemetryRequest::Disable { intent }
+                };
+                let result = run_with_effects(request, &ctx, &effects);
+                match scenario {
+                    "preview" => {
+                        assert!(matches!(
+                            result.unwrap(),
+                            TelemetryApplicationOutcome::Preview(_)
+                        ));
+                        assert!(effects.calls().is_empty());
+                    }
+                    "permission" => {
+                        let error = result.unwrap_err();
+                        assert_eq!(error.reason(), "root required");
+                        assert_eq!(error.code(), "EXECUTION_FAILED");
+                        assert_eq!(error.exit_code(), 1);
+                        assert_eq!(effects.calls(), vec!["require_root"]);
+                    }
+                    "no-systemd" => {
+                        let TelemetryApplicationOutcome::Applied { outcome, .. } = result.unwrap()
+                        else {
+                            panic!("expected applied");
+                        };
+                        assert!(outcome.warnings().is_empty());
+                        assert_eq!(
+                            effects.calls(),
+                            if enable {
+                                vec![
+                                    "require_root",
+                                    "read_link_id",
+                                    "enable_collection_anonymous",
+                                    "systemd_available",
+                                    "spawn_uploader",
+                                ]
+                            } else {
+                                vec!["require_root", "disable_collection", "systemd_available"]
+                            }
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!ctx.layout().systemd_unit_dir.exists());
+                assert!(calls.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn service_results_preserve_human_json_and_quiet_output() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for scenario in [
+            "enable",
+            "disable",
+            "enable-failure",
+            "disable-failure",
+            "preview-enable",
+            "preview-disable",
+        ] {
+            for mode in ["human", "json", "quiet"] {
+                // Keep stdout capture out of the process running parallel tests.
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        format!("{module}::service_output_child"),
+                        "--exact".to_string(),
+                        "--nocapture".to_string(),
+                    ])
+                    .env("ANOLISA_TEST_TELEMETRY_SERVICE_SCENARIO", scenario)
+                    .env("ANOLISA_TEST_TELEMETRY_SERVICE_OUTPUT", mode)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(0),
+                    "{scenario}/{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let (_, rendered) = stdout.split_once("TELEMETRY_OUTPUT_BEGIN\n").unwrap();
+                let (rendered, _) = rendered.split_once("TELEMETRY_OUTPUT_END\n").unwrap();
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                if scenario.starts_with("preview-") {
+                    let enable = scenario.ends_with("enable");
+                    let message = if enable {
+                        "would enable telemetry collection and start the uploader"
+                    } else {
+                        "would disable telemetry collection and stop the uploader"
+                    };
+                    match mode {
+                        "json" => {
+                            let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                            assert_eq!(json["ok"], true);
+                            assert_eq!(json["schema_version"], crate::response::SCHEMA_VERSION);
+                            assert_eq!(
+                                json["command"],
+                                if enable {
+                                    "telemetry enable"
+                                } else {
+                                    "telemetry disable"
+                                }
+                            );
+                            assert_eq!(
+                                json["data"],
+                                serde_json::json!({"dry_run": true, "message": message})
+                            );
+                        }
+                        "human" => assert_eq!(rendered, format!("[dry-run] {message}\n")),
+                        "quiet" => assert!(rendered.is_empty()),
+                        _ => unreachable!(),
+                    }
+                    assert!(stderr.is_empty());
+                } else {
+                    // Apply historically emits the same text for all output flags.
+                    // This injection slice must not change that compatibility behavior.
+                    assert_eq!(
+                        rendered,
+                        if scenario.starts_with("enable") {
+                            "Telemetry collection enabled.\n"
+                        } else {
+                            "Telemetry collection disabled.\n  The uploader stops shortly; buffered logs are preserved.\n"
+                        }
+                    );
+                    assert_eq!(
+                        stderr,
+                        match scenario {
+                            "enable-failure" =>
+                                "warn: could not enable anolisa-telemetry.service (execution failed: systemctl daemon-reload failed: reload denied); falling back to lazy start\nwarn: telemetry enabled, but uploader failed to start: spawn failed\n",
+                            "disable-failure" =>
+                                "warn: failed to disable anolisa-telemetry.service: systemctl command failed: disable denied\n",
+                            _ => "",
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn service_output_environment_does_not_short_circuit_suite() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for (scenario, mode) in [("enable", "human"), ("invalid", "invalid")] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "telemetry".to_string(),
+                    "--test-threads=1".to_string(),
+                    "--nocapture".to_string(),
+                    // Avoid recursively spawning this regression test.
+                    "--skip".to_string(),
+                    format!("{module}::service_output_environment_does_not_short_circuit_suite"),
+                ])
+                .env("ANOLISA_TEST_TELEMETRY_SERVICE_SCENARIO", scenario)
+                .env("ANOLISA_TEST_TELEMETRY_SERVICE_OUTPUT", mode)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("test result: ok."), "{stdout}");
+            assert!(
+                stdout.contains(&format!(
+                    "test {module}::service_results_preserve_human_json_and_quiet_output ... ok"
+                )),
+                "{stdout}"
+            );
+            assert!(!stdout.contains("TELEMETRY_OUTPUT_BEGIN"), "{stdout}");
+        }
+    }
+
+    #[test]
+    fn service_output_child() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        // Environment alone must not select this path in a broader test run.
+        if std::env::args().skip(1).collect::<Vec<_>>()
+            != [
+                format!("{module}::service_output_child"),
+                "--exact".to_string(),
+                "--nocapture".to_string(),
+            ]
+        {
+            return;
+        }
+        let Ok(scenario) = std::env::var("ANOLISA_TEST_TELEMETRY_SERVICE_SCENARIO") else {
+            return;
+        };
+        let mode = std::env::var("ANOLISA_TEST_TELEMETRY_SERVICE_OUTPUT").unwrap();
+        let sandbox = TestSandbox::new();
+        let preview = scenario.starts_with("preview-");
+        let ctx = sandbox.context_with(
+            InstallMode::System,
+            TestContextOptions {
+                json: mode == "json",
+                quiet: mode == "quiet",
+                dry_run: preview,
+                ..Default::default()
+            },
+        );
+        let outputs = match scenario.as_str() {
+            "enable" | "disable" => vec![output(Some(0), "", ""), output(Some(0), "", "")],
+            "enable-failure" => vec![output(Some(1), "ignored stdout", " reload denied\n")],
+            "disable-failure" => vec![
+                output(Some(0), "", ""),
+                output(Some(1), "", "disable denied"),
+                output(Some(0), "LoadState=loaded\n", ""),
+            ],
+            "preview-enable" | "preview-disable" => vec![],
+            _ => panic!("unknown service fixture"),
+        };
+        let (mut effects, calls) = service_effects(outputs);
+        effects.spawn_error = Some("spawn failed");
+        let intent = if preview {
+            ExecutionIntent::Plan
+        } else {
+            ExecutionIntent::Apply
+        };
+        let request = if scenario.contains("enable") {
+            TelemetryRequest::Enable { intent }
+        } else {
+            TelemetryRequest::Disable { intent }
+        };
+        let result = run_with_effects(request, &ctx, &effects).unwrap();
+        if preview {
+            assert!(effects.calls().is_empty());
+            assert!(calls.borrow().is_empty());
+            assert!(!ctx.layout().systemd_unit_dir.exists());
+        } else if let TelemetryApplicationOutcome::Applied { outcome, .. } = &result {
+            assert_eq!(outcome.status(), &CommandOutcomeStatus::Completed);
+            assert_eq!(outcome.operation_id(), None);
+            if scenario == "enable" {
+                assert!(outcome.warnings().is_empty());
+                assert_eq!(
+                    effects.calls(),
+                    vec![
+                        "require_root",
+                        "read_link_id",
+                        "enable_collection_anonymous",
+                        "systemd_available",
+                        "install_and_enable_service",
+                        "current_exe"
+                    ]
+                );
+                assert_eq!(
+                    *calls.borrow(),
+                    vec![vec!["daemon-reload"], vec!["enable", "--now", SERVICE_NAME]]
+                );
+            }
+        }
+        println!("TELEMETRY_OUTPUT_BEGIN");
+        super::super::render_mutation(result, &ctx).unwrap();
+        println!("TELEMETRY_OUTPUT_END");
+        drop(sandbox);
     }
 }
