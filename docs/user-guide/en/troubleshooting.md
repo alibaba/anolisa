@@ -41,7 +41,7 @@ View component logs:
 # View logs for a specific component
 anolisa logs <component>
 
-# Show warning and error records
+# Show warning and error records (--level is an alias for --severity)
 anolisa logs <component> --severity warn
 
 # Show last N lines

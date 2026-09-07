@@ -8,15 +8,20 @@ use tokio::io::AsyncBufReadExt;
 use crate::config::CoreConfig;
 use crate::protocol::{
     AuthReason, ControlResponseBody, InputMessage, OutputMessage, ShellControlRequest,
+    CONTROL_PROTOCOL_VERSION,
 };
 
-use super::{apply_auth_credentials, builtin_auth_providers, AuthResponse};
+use super::{builtin_auth_providers, prepare_auth_candidate, AuthConfigureError, AuthResponse};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(300);
 
 struct AuthWaitResult {
     response: Option<AuthResponse>,
     buffered_lines: Vec<String>,
+}
+
+pub(crate) struct ValidatedAuth {
+    pub(crate) candidate: CoreConfig,
 }
 
 pub(crate) async fn request_validated_auth<W, R>(
@@ -27,7 +32,7 @@ pub(crate) async fn request_validated_auth<W, R>(
     initial_reason: AuthReason,
     initial_error: Option<String>,
     buffered_lines: &mut Vec<String>,
-) -> Option<AuthResponse>
+) -> Option<ValidatedAuth>
 where
     W: Write,
     R: AsyncBufReadExt + Unpin,
@@ -54,8 +59,18 @@ where
         buffered_lines.extend(auth_result.buffered_lines);
         let response = auth_result.response?;
 
-        match apply_auth_credentials(config, &response) {
-            Ok(()) => return Some(response),
+        match prepare_auth_candidate(config, &response).await {
+            Ok(candidate) => {
+                if response.persist && crate::config::persist_config(&candidate).is_err() {
+                    let error = AuthConfigureError::Persistence;
+                    tracing::warn!("auth candidate could not be persisted");
+                    reason = AuthReason::Invalid;
+                    error_message = Some(error.to_string());
+                    attempt = attempt.saturating_add(1);
+                    continue;
+                }
+                return Some(ValidatedAuth { candidate });
+            }
             Err(error) => {
                 tracing::warn!("invalid auth response: {error}");
                 reason = AuthReason::Invalid;
@@ -92,6 +107,19 @@ async fn wait_for_auth_response<R: AsyncBufReadExt + Unpin>(
                     }
                 }
                 InputMessage::ControlRequest { request, .. } => {
+                    if matches!(
+                        &request,
+                        ShellControlRequest::Initialize {
+                            protocol_version: Some(version),
+                            ..
+                        } if *version != CONTROL_PROTOCOL_VERSION
+                    ) {
+                        // Replay through the headless dispatcher immediately;
+                        // it emits the version error and terminates before any
+                        // buffered user message can start a provider turn.
+                        buffered_lines.push(line);
+                        return None;
+                    }
                     if matches!(request, ShellControlRequest::Interrupt) {
                         return None;
                     }
@@ -143,7 +171,28 @@ fn emit<W: Write>(writer: &mut W, message: &OutputMessage) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use tokio::io::AsyncWriteExt;
+
+    fn model_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = r#"{"id":"test-model"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        format!("http://{address}/v1")
+    }
 
     #[tokio::test]
     async fn buffers_invalid_jsonl_during_auth_wait() {
@@ -172,13 +221,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn returns_unsupported_initialize_for_immediate_replay() {
+        let (mut input, output) = tokio::io::duplex(1024);
+        let line = r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":9}}"#;
+        input
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .expect("write initialize request");
+
+        let mut lines = tokio::io::BufReader::new(output).lines();
+        let result = wait_for_auth_response("auth-init", &mut lines).await;
+
+        assert_eq!(result.buffered_lines, vec![line]);
+        assert!(result.response.is_none());
+    }
+
+    #[tokio::test]
     async fn invalid_response_requests_retry_before_returning_success() {
         let (mut input, output) = tokio::io::duplex(4096);
+        let valid_base_url = model_server();
         input
             .write_all(
-                br#"{"type":"control_response","response":{"subtype":"auth","request_id":"auth-test","response":{"provider_id":"test","provider_type":"openai_compat","values":{"base_url":"bad-url","api_key":"test-key","model":"test-model"},"persist":false}}}
-{"type":"control_response","response":{"subtype":"auth","request_id":"auth-test-retry-1","response":{"provider_id":"test","provider_type":"openai_compat","values":{"base_url":"https://api.example.com/v1","api_key":"test-key","model":"test-model"},"persist":false}}}
-"#,
+                format!(
+                    "{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"auth\",\"request_id\":\"auth-test\",\"response\":{{\"provider_id\":\"test\",\"provider_type\":\"openai_compat\",\"values\":{{\"base_url\":\"bad-url\",\"api_key\":\"test-key\",\"model\":\"test-model\"}},\"persist\":false}}}}}}\n{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"auth\",\"request_id\":\"auth-test-retry-1\",\"response\":{{\"provider_id\":\"test\",\"provider_type\":\"openai_compat\",\"values\":{{\"base_url\":{valid_base_url:?},\"api_key\":\"test-key\",\"model\":\"test-model\"}},\"persist\":false}}}}}}\n"
+                )
+                .as_bytes(),
             )
             .await
             .expect("write auth responses");
@@ -199,14 +266,17 @@ mod tests {
         .await
         .expect("valid retry response");
 
-        assert_eq!(response.provider_id, "test");
+        assert_eq!(
+            response.candidate.ai.active_provider.as_deref(),
+            Some("test")
+        );
         let messages = String::from_utf8(protocol_output).expect("protocol output");
         let lines = messages.lines().collect::<Vec<_>>();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains(r#""reason":"not_configured""#));
         assert!(lines[1].contains(r#""reason":"invalid""#));
         assert!(lines[1].contains("invalid base_url"));
-        assert!(config.ai.providers.contains_key("test"));
+        assert!(!config.ai.providers.contains_key("test"));
     }
 
     #[test]

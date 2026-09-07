@@ -39,8 +39,19 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 /// Default purge check interval (every N inserts)
 pub const DEFAULT_PURGE_INTERVAL: u64 = 1000;
 
+/// Default max database file size in MB (0 = no size-based limit)
+pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
+
 /// Default bounded channel capacity for probe → event loop events.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 10_000;
+
+/// Default byte budget for probe events queued in the event channel (64 MiB).
+///
+/// A slot count cannot bound memory on its own: one SSL record carries up to
+/// `MAX_BUF_SIZE` (4 MiB) of payload, so the 10 000 default slots admit
+/// gigabytes of in-flight data under real HTTPS traffic. Admission is therefore
+/// gated on bytes as well.
+pub const DEFAULT_EVENT_CHANNEL_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Default maximum number of pending GenAI events waiting for session_id resolution.
 pub const DEFAULT_PENDING_GENAI_MAX_COUNT: usize = 1_000;
@@ -316,6 +327,8 @@ pub struct JsonFeatures {
     pub session_mapping: Option<JsonSessionMappingFeature>,
     /// Local SQLite persistence of GenAI events.
     pub sqlite_storage: Option<JsonSqliteStorageFeature>,
+    /// Periodic Agent process CPU and RSS resource sampling.
+    pub resource_sampling: Option<bool>,
     /// Interruption / DeadLoop detection.
     pub interruption_detection: Option<JsonInterruptionFeature>,
     /// Audit event storage.
@@ -387,6 +400,9 @@ pub struct JsonRuntimeLimits {
     pub event_channel_capacity: Option<usize>,
     #[serde(default)]
     pub event_channel_policy: Option<String>,
+    /// Byte budget for events queued in the probe event channel, in MiB.
+    /// Bounds in-flight memory that the slot count alone cannot (#2888).
+    pub event_channel_max_bytes_mb: Option<usize>,
     pub pending_genai_max_count: Option<usize>,
     pub pending_genai_max_bytes_mb: Option<usize>,
     pub pid_cache_size: Option<usize>,
@@ -674,6 +690,8 @@ pub struct FeatureFlags {
     pub session_mapping_max_entries: usize,
     /// Local SQLite persistence of GenAI events.
     pub sqlite_storage_enabled: bool,
+    /// Periodic Agent process CPU and RSS resource sampling.
+    pub resource_sampling_enabled: bool,
     /// Optional SQLite batch insert config.
     pub sqlite_batch: Option<BatchConfig>,
     /// Interruption / DeadLoop detection.
@@ -705,6 +723,7 @@ impl Default for FeatureFlags {
             session_mapping_enabled: false,
             session_mapping_max_entries: 10_000,
             sqlite_storage_enabled: false,
+            resource_sampling_enabled: false,
             sqlite_batch: None,
             interruption_detection_enabled: false,
             interruption_retention_days: 30,
@@ -742,6 +761,12 @@ pub struct RuntimeLimits {
     pub event_channel_capacity: usize,
     /// Policy when the event channel is full.
     pub event_channel_policy: ChannelPolicy,
+    /// Byte budget for events queued in the event channel.
+    ///
+    /// Enforced alongside `event_channel_capacity`: whichever limit is reached
+    /// first stops admission. Needed because event sizes span four orders of
+    /// magnitude (a 16 KiB SSL record vs. a 4 MiB one).
+    pub event_channel_max_bytes: usize,
     /// Max pending GenAI events waiting for session_id resolution.
     pub pending_genai_max_count: usize,
     /// Max bytes for pending GenAI events.
@@ -761,6 +786,7 @@ impl Default for RuntimeLimits {
         Self {
             event_channel_capacity: DEFAULT_EVENT_CHANNEL_CAPACITY,
             event_channel_policy: ChannelPolicy::Backpressure,
+            event_channel_max_bytes: DEFAULT_EVENT_CHANNEL_MAX_BYTES,
             pending_genai_max_count: DEFAULT_PENDING_GENAI_MAX_COUNT,
             pending_genai_max_bytes: DEFAULT_PENDING_GENAI_MAX_BYTES,
             pid_cache_size: DEFAULT_PID_CACHE_SIZE,
@@ -796,6 +822,8 @@ pub struct AgentsightConfig {
     pub retention_days: u64,
     /// Purge check interval (run purge every N inserts, 0 = never auto-purge)
     pub purge_interval: u64,
+    /// Max database file size in MB (0 = no size-based limit)
+    pub max_db_size_mb: u64,
 
     // --- Trace Control ---
     /// Controls whether SLS-uploaded `LLMCall` records carry conversation
@@ -876,6 +904,16 @@ pub struct AgentsightConfig {
     /// Local enforcer socket used by the optional FFI security subscription.
     pub ffi_enforcer_socket: PathBuf,
 
+    // --- Procfs Root ---
+    /// Procfs mount point that pid-keyed lookups resolve through.
+    ///
+    /// Defaults to `/proc`. Point it at a bind-mounted host procfs
+    /// (`/logtail_host/proc`) to observe processes living in other pid
+    /// namespaces without joining them -- a DaemonSet then needs no
+    /// `hostPID: true`. Applied process-wide at startup; see
+    /// [`crate::utils::procfs`] for what does and does not follow it.
+    pub procfs_root: PathBuf,
+
     // --- Config File Path ---
     /// Path to JSON configuration file
     pub config_path: Option<PathBuf>,
@@ -920,6 +958,7 @@ impl Default for AgentsightConfig {
             http_table: DEFAULT_HTTP_TABLE.to_string(),
             retention_days: DEFAULT_RETENTION_DAYS,
             purge_interval: DEFAULT_PURGE_INTERVAL,
+            max_db_size_mb: DEFAULT_MAX_DB_SIZE_MB,
 
             // Trace control defaults
             // Default = false (privacy-safe): SLS uploads carry only token /
@@ -965,6 +1004,9 @@ impl Default for AgentsightConfig {
             ffi_enable_raw_https: false,
             ffi_enable_security_audit: false,
             ffi_enforcer_socket: PathBuf::from("/run/agentsight/enforcer.sock"),
+
+            // Read our own procfs unless a deployment points us elsewhere.
+            procfs_root: PathBuf::from(crate::utils::procfs::DEFAULT_PROC_ROOT),
 
             // Config file path default
             config_path: None,
@@ -1176,6 +1218,7 @@ impl AgentsightConfig {
                     .as_ref()
                     .and_then(|f| f.enabled)
                     .unwrap_or(false),
+                resource_sampling_enabled: features.resource_sampling.unwrap_or(false),
                 sqlite_batch: features.sqlite_storage.as_ref().and_then(|f| {
                     f.batch.as_ref().map(|b| BatchConfig {
                         max_size: b.max_size.unwrap_or(100),
@@ -1228,6 +1271,10 @@ impl AgentsightConfig {
                     .as_deref()
                     .map(ChannelPolicy::from)
                     .unwrap_or_default(),
+                event_channel_max_bytes: limits
+                    .event_channel_max_bytes_mb
+                    .map(|mb| mb * 1024 * 1024)
+                    .unwrap_or(DEFAULT_EVENT_CHANNEL_MAX_BYTES),
                 pending_genai_max_count: limits
                     .pending_genai_max_count
                     .unwrap_or(DEFAULT_PENDING_GENAI_MAX_COUNT),
@@ -1532,6 +1579,7 @@ mod tests {
         assert!(!config.cgroup_filter_enabled);
         assert_eq!(config.retention_days, 30);
         assert_eq!(config.purge_interval, 1000);
+        assert_eq!(config.max_db_size_mb, 500);
     }
 
     /// `traceEnabled` is **off** by default (privacy-safe). Conversation
@@ -1694,8 +1742,14 @@ mod tests {
     fn test_default_cmdline_rules() {
         let rules = default_cmdline_rules();
         assert!(!rules.is_empty());
-        // All should be allow rules
-        assert!(rules.iter().all(|r| r.allow));
+        // Contains both allow rules and the default deny rules (e.g. the
+        // sftp-server subprocess exclusion).
+        assert!(rules.iter().any(|r| r.allow));
+        assert!(
+            rules
+                .iter()
+                .any(|r| !r.allow && r.patterns.iter().any(|p| p.contains("sftp-server")))
+        );
         // Should contain Hermes, Cosh, OpenClaw agent names
         let names: Vec<&str> = rules
             .iter()
@@ -1711,8 +1765,18 @@ mod tests {
         let (cmdline_rules, https_rules, http_targets) =
             parse_json_rules(DEFAULT_AGENTS_JSON).unwrap();
         assert!(!cmdline_rules.is_empty());
-        // https rules: dashscope.aliyuncs.com + api.openai.com configured by default
-        assert_eq!(https_rules.len(), 2);
+        // https rules configured by default: the DashScope compatible-mode host,
+        // the Bailian native-protocol wildcard (`{WorkspaceId}.{region}.maas.
+        // aliyuncs.com`), and api.openai.com.
+        let patterns: Vec<&str> = https_rules.iter().map(|r| r.pattern.as_str()).collect();
+        assert_eq!(
+            patterns,
+            vec![
+                "dashscope.aliyuncs.com",
+                "*.maas.aliyuncs.com",
+                "api.openai.com"
+            ]
+        );
         assert!(http_targets.is_empty());
     }
 
@@ -1903,6 +1967,10 @@ mod tests {
             DEFAULT_EVENT_CHANNEL_CAPACITY
         );
         assert_eq!(
+            limits.event_channel_max_bytes,
+            DEFAULT_EVENT_CHANNEL_MAX_BYTES
+        );
+        assert_eq!(
             limits.pending_genai_max_count,
             DEFAULT_PENDING_GENAI_MAX_COUNT
         );
@@ -1930,6 +1998,7 @@ mod tests {
         assert_eq!(flags.tokenizer_cache_size, DEFAULT_TOKENIZER_CACHE_SIZE);
         assert!(!flags.session_mapping_enabled);
         assert!(!flags.sqlite_storage_enabled);
+        assert!(!flags.resource_sampling_enabled);
         assert!(!flags.interruption_detection_enabled);
         assert!(!flags.audit_enabled);
         assert!(!flags.token_consumption_enabled);
@@ -1942,6 +2011,7 @@ mod tests {
             "runtime_limits": {
                 "event_channel_capacity": 5000,
                 "event_channel_policy": "drop_newest",
+                "event_channel_max_bytes_mb": 16,
                 "pending_genai_max_count": 500,
                 "pending_genai_max_bytes_mb": 32,
                 "pid_cache_size": 256,
@@ -1958,6 +2028,10 @@ mod tests {
             ChannelPolicy::DropNewest
         ));
         assert_eq!(config.runtime_limits.pending_genai_max_count, 500);
+        assert_eq!(
+            config.runtime_limits.event_channel_max_bytes,
+            16 * 1024 * 1024
+        );
         assert_eq!(
             config.runtime_limits.pending_genai_max_bytes,
             32 * 1024 * 1024
@@ -1979,6 +2053,7 @@ mod tests {
                 "tokenizer": { "enabled": true, "cache_size": 8 },
                 "session_mapping": { "enabled": false, "max_entries": 5000 },
                 "sqlite_storage": { "enabled": false },
+                "resource_sampling": true,
                 "interruption_detection": { "enabled": false },
                 "audit": false,
                 "token_consumption": true,
@@ -1992,6 +2067,7 @@ mod tests {
         assert!(!config.features.session_mapping_enabled);
         assert_eq!(config.features.session_mapping_max_entries, 5000);
         assert!(!config.features.sqlite_storage_enabled);
+        assert!(config.features.resource_sampling_enabled);
         assert!(!config.features.interruption_detection_enabled);
         assert!(!config.features.audit_enabled);
         assert!(config.features.token_consumption_enabled);

@@ -164,6 +164,55 @@ pub fn capability_manifest(path: Option<&str>, caps: &[&str], optional: bool) ->
     toml
 }
 
+/// Publish a generation-2 component index at `v1/components-v2.toml`.
+///
+/// Entries are identity-only (no backend rows): identity resolution accepts
+/// the names while package resolution keeps flowing through `package_map`
+/// and RPM `Provides` exactly as before the index existed.
+pub fn write_component_index_v2(v1: &Path, components: &[&str]) {
+    let env = anolisa_env::EnvService::detect();
+    let mut index = String::from("schema_version = 2\n");
+    for component in components {
+        index.push_str(&format!(
+            "\n[[components]]\nname = \"{component}\"\ntargets = [{{ os = \"{os}\", arch = \"{arch}\" }}]\n",
+            os = env.os,
+            arch = env.arch,
+        ));
+    }
+    std::fs::create_dir_all(v1).expect("create repo dirs");
+    std::fs::write(v1.join("components-v2.toml"), index).expect("write component index");
+}
+
+/// Component names the shared unit-test contexts accept as supported
+/// identities. Covers the targets exercised across install/adopt/repair
+/// fixtures; tests probing unsupported names use targets outside this set.
+pub const TEST_INDEX_COMPONENTS: &[&str] = &[
+    "agentsight",
+    "cosh",
+    "cosh-ng",
+    "copilot-shell",
+    "tokenless",
+    "sec-core",
+];
+
+/// Seed `<etc>/repo.toml` with a raw backend whose file:// repository
+/// publishes a component index naming `components`, so identity resolution
+/// can validate fresh targets inside the test sandbox.
+pub fn seed_repo_config_with_index(layout: &FsLayout, components: &[&str]) -> String {
+    let v1 = layout.etc_dir.join("test-index-repo").join("v1");
+    write_component_index_v2(&v1, components);
+    let base_url = format!("file://{}", v1.display());
+    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{base_url}\"\n"
+        ),
+    )
+    .expect("write repo.toml");
+    base_url
+}
+
 pub fn write_empty_repo(root: &Path) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
@@ -175,6 +224,7 @@ publisher = "test"
 "#,
     )
     .expect("write index");
+    write_component_index_v2(&v1, &[]);
     format!("file://{}", v1.display())
 }
 
@@ -192,6 +242,7 @@ pub fn write_local_repo_component_versions(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let env = anolisa_env::EnvService::detect();
     let modes_arr = toml_string_array(modes);
@@ -242,6 +293,7 @@ pub fn write_local_repo_component_with_modes(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let artifact = build_component_artifact(component, version, manifest_modes);
     let artifact_name = format!("{component}.tar.gz");
@@ -324,6 +376,7 @@ sha256 = "{sha}"
         arch = env.arch,
     );
     std::fs::write(root.join("v1/index.toml"), index).expect("write index");
+    write_component_index_v2(&root.join("v1"), &[component]);
     format!("file://{}", root.join("v1").display())
 }
 
@@ -335,6 +388,7 @@ pub fn write_binary_repo_component(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let artifact = format!("#!/bin/sh\necho {component}\n").into_bytes();
     let artifact_name = component.to_string();
@@ -374,6 +428,7 @@ pub fn write_conventional_repo(root: &Path) -> String {
         .join(&env.os)
         .join(&env.arch);
     std::fs::create_dir_all(&artifact_dir).expect("create repo dirs");
+    write_component_index_v2(&root.join("v1"), &["agentsight"]);
 
     let artifact = build_component_artifact("agentsight", "0.2.0", &["system"]);
     let file_name = format!("agentsight-0.2.0-{}-{}.tar.gz", env.os, env.arch);
@@ -451,6 +506,7 @@ pub fn write_local_repo_component_with_capability(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let artifact = build_component_artifact_with_capability(
         component, version, modes, cap_path, caps, optional,
@@ -540,6 +596,7 @@ pub fn write_local_repo_component_with_service(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let artifact =
         build_component_artifact_with_service(component, version, modes, unit, enable, start);
@@ -583,6 +640,7 @@ pub fn write_local_repo_component_with_hook(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let script_rel = format!("hooks/{component}/{}.sh", phase.replace('_', "-"));
     let mut manifest = component_manifest_toml(component, version, &["system"]);
@@ -1046,11 +1104,21 @@ impl PackageQuery for FakeQuery {
                 command: "rpm".to_string(),
             });
         }
+        // Same convention as `provided_capabilities_installed`: unless a
+        // fixture says otherwise, every installed package provides
+        // `anolisa-component(<its own name>)`.
         Ok(self
             .provides
             .iter()
             .find(|(cap, _)| cap == capability)
             .map(|(_, names)| names.clone())
+            .or_else(|| {
+                self.installed
+                    .iter()
+                    .map(|(name, _)| name)
+                    .find(|name| rpm_component_provide(name) == capability)
+                    .map(|name| vec![name.clone()])
+            })
             .unwrap_or_default())
     }
 
@@ -1155,13 +1223,10 @@ pub fn system_ctx_with_raw_repo(dry_run: bool) -> (tempfile::TempDir, CliContext
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().to_path_buf();
     let layout = FsLayout::system(Some(prefix.clone()));
-    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
     std::fs::create_dir_all(&layout.state_dir).expect("state dir");
-    std::fs::write(
-        layout.etc_dir.join("repo.toml"),
-        "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/anolisa\"\n",
-    )
-    .expect("write repo.toml");
+    // The raw backend points at a local index repo so identity resolution
+    // can validate the standard fixture components offline.
+    seed_repo_config_with_index(&layout, TEST_INDEX_COMPONENTS);
     let mut ctx = ctx_with_prefix(false, Some(prefix));
     ctx.dry_run = dry_run;
     (tmp, ctx)
@@ -1171,20 +1236,24 @@ pub fn system_ctx_with_configured_rpm_repo(dry_run: bool) -> (tempfile::TempDir,
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().to_path_buf();
     let layout = FsLayout::system(Some(prefix.clone()));
-    std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
     std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+    let v1 = layout.etc_dir.join("test-index-repo").join("v1");
+    write_component_index_v2(&v1, TEST_INDEX_COMPONENTS);
     std::fs::write(
         layout.etc_dir.join("repo.toml"),
-        r#"schema_version = 1
+        format!(
+            r#"schema_version = 1
 default_backend = "raw"
 
 [backends.raw]
-base_url = "https://example.com/anolisa"
+base_url = "file://{}"
 
 [backends.rpm]
 base_url = "https://repo.example/anolisa"
 gpgcheck = false
 "#,
+            v1.display()
+        ),
     )
     .expect("write repo.toml");
     let mut ctx = ctx_with_prefix(false, Some(prefix));
@@ -1244,6 +1313,24 @@ pub fn rpm_host_env() -> anolisa_env::EnvFacts {
         os_id: Some("alinux".to_string()),
         os_id_like: None,
         os_version: Some("4".to_string()),
+        ..anolisa_env::EnvService::detect()
+    }
+}
+
+/// Host facts for a macOS/aarch64 target, so raw resolution can select a
+/// macOS index entry deterministically on a Linux CI runner. macOS carries
+/// no libc or pkg_base selector, and no BPF facts.
+pub fn macos_arm_env() -> anolisa_env::EnvFacts {
+    anolisa_env::EnvFacts {
+        os: "macos".to_string(),
+        arch: "aarch64".to_string(),
+        libc: None,
+        pkg_base: None,
+        os_id: Some("macos".to_string()),
+        os_id_like: None,
+        os_version: Some("15.0".to_string()),
+        btf: None,
+        cap_bpf: None,
         ..anolisa_env::EnvService::detect()
     }
 }

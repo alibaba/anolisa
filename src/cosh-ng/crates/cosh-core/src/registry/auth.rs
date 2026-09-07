@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn handle_auth(
+pub(super) async fn handle_auth(
     request_id: &str,
     action: &str,
     params: &Value,
@@ -79,19 +79,20 @@ pub(super) fn handle_auth(
             if provider_id.is_empty() || !config.ai.providers.contains_key(provider_id) {
                 return registry_error(request_id, "provider not found");
             }
-            config.ai.active_provider = Some(provider_id.to_string());
-            config.user_ai.active_provider = Some(provider_id.to_string());
-            if let Some(model) = config
+            let mut candidate = config.clone();
+            candidate.ai.active_provider = Some(provider_id.to_string());
+            candidate.user_ai.active_provider = Some(provider_id.to_string());
+            let model = candidate
                 .ai
                 .providers
                 .get(provider_id)
-                .and_then(|provider| provider.model.clone())
-            {
-                config.ai.active_model = Some(model);
-            }
-            if let Err(e) = crate::config::persist_config(config) {
+                .and_then(|provider| provider.model.clone());
+            candidate.ai.active_model.clone_from(&model);
+            candidate.user_ai.active_model = model;
+            if let Err(e) = crate::config::persist_config(&candidate) {
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
+            *config = candidate;
             OutputMessage::RegistryResponse {
                 request_id: request_id.to_string(),
                 success: true,
@@ -107,13 +108,15 @@ pub(super) fn handle_auth(
             if provider_id.is_empty() {
                 return registry_error(request_id, "missing provider_id");
             }
-            let removed = match crate::auth::remove_auth_provider(config, provider_id) {
+            let mut candidate = config.clone();
+            let removed = match crate::auth::remove_auth_provider(&mut candidate, provider_id) {
                 Ok(removed) => removed,
                 Err(error) => return registry_error(request_id, &error.to_string()),
             };
-            if let Err(error) = crate::config::persist_config(config) {
+            if let Err(error) = crate::config::persist_config(&candidate) {
                 return registry_error(request_id, &format!("failed to persist config: {error}"));
             }
+            *config = candidate;
             OutputMessage::RegistryResponse {
                 request_id: request_id.to_string(),
                 success: true,
@@ -200,9 +203,6 @@ pub(super) fn handle_auth(
             if provider_id.is_empty() || provider_type.is_empty() {
                 return registry_error(request_id, "missing provider_id or provider_type");
             }
-            if !is_valid_provider_id(provider_id) {
-                return registry_error(request_id, "invalid provider_id");
-            }
             if config.ai.providers.contains_key(provider_id)
                 && !config.user_ai.providers.contains_key(provider_id)
             {
@@ -244,12 +244,17 @@ pub(super) fn handle_auth(
                 values,
                 persist: true,
             };
-            if let Err(error) = crate::auth::apply_auth_credentials(config, &response) {
-                return registry_error(request_id, &error.to_string());
-            }
-            if let Err(e) = crate::config::persist_config(config) {
-                return registry_error(request_id, &format!("failed to persist config: {e}"));
-            }
+            let candidate = match crate::auth::prepare_and_persist_auth_candidate(
+                config,
+                &response,
+                crate::config::persist_config,
+            )
+            .await
+            {
+                Ok(candidate) => candidate,
+                Err(error) => return auth_registry_error(request_id, &error),
+            };
+            *config = candidate;
             OutputMessage::RegistryResponse {
                 request_id: request_id.to_string(),
                 success: true,
@@ -264,11 +269,13 @@ pub(super) fn handle_auth(
     }
 }
 
-fn is_valid_provider_id(provider_id: &str) -> bool {
-    !provider_id.is_empty()
-        && provider_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+fn auth_registry_error(request_id: &str, error: &crate::auth::AuthConfigureError) -> OutputMessage {
+    OutputMessage::RegistryResponse {
+        request_id: request_id.to_string(),
+        success: false,
+        data: Some(serde_json::json!({ "error_code": error.code() })),
+        error: Some(error.to_string()),
+    }
 }
 
 fn preserve_masked_secret(

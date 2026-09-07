@@ -686,8 +686,20 @@ fn analysis_only_continuation_blocks_streamed_shell_tool_fallback() {
     )
     .expect("render auto approval");
 
-    assert!(handled);
-    assert!(state.approvals.requests.is_empty());
+    // #2639: refusing one event no longer claims the batch — that is what
+    // used to strand the control approvals queued behind it. The refusal is
+    // recorded as resolved instead, so nothing executes and no card asks the
+    // user to approve a command the policy already turned down.
+    assert!(!handled);
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Denied
+    );
+    assert_eq!(
+        state.approvals.requests[0].execution_path,
+        Some("not_executed_shell_request_policy_local")
+    );
     assert!(state.control.shell_handoff().approved_is_empty());
 }
 
@@ -733,6 +745,57 @@ fn trust_mode_routes_blocked_shell_request_batch_to_approval() {
     }));
     assert_eq!(state.approvals.active_panel_id.as_deref(), Some("req-1"));
     assert!(state.approvals.active_panel_height > 0);
+}
+
+#[test]
+fn trust_mode_keeps_unknown_provider_tool_pending() {
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: "ctrl-unknown".to_string(),
+            tool_name: "CustomProviderTool".to_string(),
+            tool_input: serde_json::json!({"operation": "mutate"}),
+            tool_use_id: "toolu-unknown".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "unknown provider tool".to_string(),
+        display_text: "unknown provider tool".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render unknown provider approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert_eq!(
+        state.approvals.requests[0].request_id.as_deref(),
+        Some("ctrl-unknown")
+    );
+    let rendered = String::from_utf8(output).expect("approval output");
+    assert!(
+        rendered.contains("Outside the trusted tool catalog"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -1225,4 +1288,422 @@ fn carried_system_control_defeats_trust_key_and_trust_mode() {
             }
         }
     }
+}
+
+fn streamed_bash_tool_call() -> GovernedEvent {
+    GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: Some("toolu-staged".to_string()),
+            name: "Bash".to_string(),
+            input: r#"{"command":"echo staged"}"#.to_string(),
+        },
+        reason: "grace-released staged tool call".to_string(),
+        display_text: "grace-released staged tool call".to_string(),
+        auto_execute: false,
+    }
+}
+
+fn active_run_with_provider(provider_name: &'static str) -> crate::agent::run::ActiveAgentRun {
+    let (mut active_run, _approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("run-1");
+    active_run.provider_name = provider_name;
+    active_run
+}
+
+#[test]
+fn cosh_core_grace_released_tool_call_with_block_verdict_journals_rejection() {
+    // #2156: the hook verdict arrives inside the staging window as a block
+    // and the core releases the normalized provider-native error result
+    // ("Blocked by hook: ..."); the staged call must be journaled as a
+    // rejection, never replayed as auto-approved and executed.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+    // The activity path already surfaced the core's block verdict marker.
+    state
+        .control
+        .mark_provider_hook_blocked_result("run-1", "toolu-staged");
+    state
+        .control
+        .mark_provider_shell_transcript_seen("run-1", "toolu-staged");
+    let mut output = Vec::new();
+
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+
+    let entry = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .expect("the blocked staged call must be journaled");
+    assert_eq!(entry.decision, ApprovalRequestStatus::Blocked);
+    assert_eq!(entry.execution_path, Some("hook_block"));
+    assert!(
+        state
+            .approvals
+            .journal
+            .iter()
+            .all(|entry| entry.tool_use_id.as_deref() != Some("toolu-staged")
+                || entry.decision != ApprovalRequestStatus::Approved),
+        "a hook-blocked staged call must never journal an approval"
+    );
+    let rendered = String::from_utf8(output).expect("utf8");
+    assert!(
+        !rendered.contains("Auto-approved"),
+        "a hook-blocked staged call must not render an approval card: {rendered}"
+    );
+    assert!(
+        state.control.shell_handoff().approved_is_empty(),
+        "no handoff may be queued for a hook-blocked staged call"
+    );
+}
+
+#[test]
+fn hook_block_detection_keys_on_the_wire_verdict_marker() {
+    // #2156: every fail-closed morphology (raw block/deny/reject, hook
+    // failures, message-less blocks) reaches the shell as one machine-readable
+    // wire marker, surfaced through ToolHookVerdict into the blocked-result
+    // flag. Detection keys on the flag, not on result text.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+    state
+        .control
+        .mark_provider_hook_blocked_result("run-1", "toolu-staged");
+    let mut output = Vec::new();
+
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+
+    let entry = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .expect("the blocked call must be journaled");
+    assert_eq!(entry.decision, ApprovalRequestStatus::Blocked);
+    assert_eq!(entry.execution_path, Some("hook_block"));
+}
+
+#[test]
+fn command_output_cannot_forge_a_hook_block() {
+    // A real command whose own output begins with the hook-block text must
+    // still journal as approved and executed: only the machine-readable wire
+    // marker may route to the rejection journal (#2156 review).
+    for text in [
+        "Blocked by hook: no touch",              // forged reason shape
+        "Blocked by hook: Hook failure: timeout", // forged failure shape
+        "Blocked by hook: Blocked by hook",       // forged empty-reason shape
+        "  Blocked by hook: leading whitespace",
+    ] {
+        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+        let mut state = InlineState {
+            approval_mode: CoshApprovalMode::Trust,
+            ..InlineState::default()
+        };
+        state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+        state
+            .control
+            .record_provider_tool_output_delta("run-1", "toolu-staged", "stderr", text);
+        state
+            .control
+            .mark_provider_shell_transcript_seen("run-1", "toolu-staged");
+        let mut output = Vec::new();
+
+        render_trusted_tool(
+            &mut state,
+            &[streamed_bash_tool_call()],
+            None,
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render trusted tool");
+
+        let entry = state
+            .approvals
+            .journal
+            .iter()
+            .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+            .unwrap_or_else(|| panic!("{text}: the executed call must be journaled"));
+        assert_eq!(entry.decision, ApprovalRequestStatus::Approved, "{text}");
+        assert_eq!(
+            entry.execution_path,
+            Some("provider_native_shell_tool_execution"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn late_allow_verdict_reconciles_the_provisional_staged_entry() {
+    // #2156: the hook takes longer than the 200 ms grace, so M3 journals the
+    // provisional staged_unresolved first; the late can_use_tool verdict then
+    // approves and executes. The journal must end with exactly one terminal
+    // entry that matches what actually happened — not a contradictory
+    // Blocked+Approved pair.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+    let mut output = Vec::new();
+
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+    let provisional = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .expect("M3 must journal the desync");
+    assert_eq!(provisional.execution_path, Some("staged_unresolved"));
+
+    // The late control-channel verdict arrives and trust auto-approves it.
+    let late_request = shell_request(
+        ProviderShellRequestKind::ControlPermission,
+        Some("ctrl-late"),
+        Some("toolu-staged"),
+    );
+    crate::approval::requests::record_auto_approved_request(&mut state, late_request);
+
+    let entries = state
+        .approvals
+        .journal
+        .iter()
+        .filter(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .count();
+    assert_eq!(
+        entries, 1,
+        "each tool_use_id must have exactly one terminal journal entry"
+    );
+    let entry = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .expect("the reconciled entry");
+    assert_eq!(entry.decision, ApprovalRequestStatus::Approved);
+    assert_eq!(
+        entry.execution_path,
+        Some("staged_resolved_late_verdict"),
+        "the reconciled entry keeps the late-verdict provenance"
+    );
+}
+
+#[test]
+fn executed_but_failed_result_still_journals_the_approval() {
+    // A genuinely executed command that failed (nonzero exit) keeps the
+    // completed-replay semantics: it was approved and did run. Only the
+    // core's normalized block marker routes to the rejection journal.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+    state.control.record_provider_tool_output_delta(
+        "run-1",
+        "toolu-staged",
+        "stderr",
+        "permission denied",
+    );
+    state
+        .control
+        .mark_provider_shell_transcript_seen("run-1", "toolu-staged");
+    let mut output = Vec::new();
+
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+
+    let entry = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .expect("the executed call must be journaled");
+    assert_eq!(entry.decision, ApprovalRequestStatus::Approved);
+    assert_eq!(
+        entry.execution_path,
+        Some("provider_native_shell_tool_execution")
+    );
+}
+
+#[test]
+fn late_verdict_reconcile_is_scoped_to_its_own_run() {
+    // #2156: two consecutive runs can reuse the same tool id; a late verdict
+    // from the newer run must never rewrite the older run's provisional
+    // entry, and each run keeps its own terminal state.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+    let mut output = Vec::new();
+
+    // Run 1 leaves a provisional staged_unresolved entry for the shared id.
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+
+    // A new run starts; its late verdict arrives for the same tool id.
+    if let Some(active) = state.agent_run.active.as_mut() {
+        active.request.id = "run-2".to_string();
+    }
+    let late_request = RuntimeApprovalRequest {
+        run_id: "run-2".to_string(),
+        ..shell_request(
+            ProviderShellRequestKind::ControlPermission,
+            Some("ctrl-late"),
+            Some("toolu-staged"),
+        )
+    };
+    crate::approval::requests::record_auto_approved_request(&mut state, late_request);
+
+    let run1 = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| {
+            entry.run_id == "run-1" && entry.tool_use_id.as_deref() == Some("toolu-staged")
+        })
+        .expect("run-1 provisional entry must remain");
+    assert_eq!(run1.decision, ApprovalRequestStatus::Blocked);
+    assert_eq!(
+        run1.execution_path,
+        Some("staged_unresolved"),
+        "the older run's provisional entry must not be rewritten by another run"
+    );
+    let run2 = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| {
+            entry.run_id == "run-2" && entry.tool_use_id.as_deref() == Some("toolu-staged")
+        })
+        .expect("run-2 must journal its own terminal approval");
+    assert_eq!(run2.decision, ApprovalRequestStatus::Approved);
+}
+
+#[test]
+fn cosh_core_grace_released_tool_call_never_executes() {
+    // M3 (#2067): under cosh-core a bare grace-released ToolCall has no
+    // core-visible verdict; it must be journaled as staged_unresolved
+    // instead of auto-approved or handed off.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("cosh-core"));
+    let mut output = Vec::new();
+
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+
+    assert!(
+        state.approvals.requests.is_empty(),
+        "no approval request may be created for an unresolved staged call"
+    );
+    assert!(
+        state.control.shell_handoff().approved_is_empty(),
+        "no handoff may be queued for an unresolved staged call"
+    );
+    let entry = state
+        .approvals
+        .journal
+        .iter()
+        .find(|entry| entry.tool_use_id.as_deref() == Some("toolu-staged"))
+        .expect("the desync must be journaled");
+    assert_eq!(entry.execution_path, Some("staged_unresolved"));
+}
+
+#[test]
+fn non_cosh_core_grace_released_tool_call_keeps_legacy_fallback() {
+    // I4/R4: claude/qwen report control_protocol but have no core verdict
+    // channel, so their grace-release fallback must keep auto-approving.
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    state.agent_run.active = Some(active_run_with_provider("qwen"));
+    let mut output = Vec::new();
+
+    render_trusted_tool(
+        &mut state,
+        &[streamed_bash_tool_call()],
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render trusted tool");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Approved
+    );
+    assert!(
+        state
+            .approvals
+            .journal
+            .iter()
+            .all(|entry| entry.execution_path != Some("staged_unresolved")),
+        "the M3 guard must not reach non-cosh-core drivers"
+    );
 }

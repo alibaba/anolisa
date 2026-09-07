@@ -22,9 +22,10 @@
 |---|---|---|---|
 | `trust` | 执行 | 执行 | 执行 |
 | `auto` | 执行 | 执行 | 询问 |
-| `balanced`、`suggest`、`strict` | 执行 | 询问 | 询问 |
+| `recommend` | 执行 | 询问 | 询问 |
 
-未知工具名会被拒绝。交互式 Shell 将 `recommend` 映射为严格审批，将 `auto` 映射为自动策略，将 `trust` 映射为信任策略。
+未知工具名会被拒绝。Core 和交互式 Shell 统一使用 `recommend`、`auto` 和
+`trust`；旧的 `balanced`、`suggest` 和 `strict` 输入会归一为 `recommend`。
 
 ## 限制模型可见工具
 

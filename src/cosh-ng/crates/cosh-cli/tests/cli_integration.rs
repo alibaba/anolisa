@@ -396,6 +396,74 @@ fn test_audit_check_pkg_search_is_allow() {
 }
 
 #[test]
+fn test_audit_check_allows_allow_when_v1_storage_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    // Point the v1 storage root at a regular file so record_to_log fails.
+    let unavailable_root = dir.path().join("not-a-directory");
+    std::fs::write(&unavailable_root, []).unwrap();
+
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .env("COSH_AUDIT_DIR", unavailable_root)
+        .args(["audit", "check", "--action-string", "echo hello"])
+        .output()
+        .unwrap();
+
+    let json = assert_audit_success(&output);
+    assert_eq!(json["data"]["outcome"], "Allow");
+    assert_eq!(
+        json["data"]["matched_rule"],
+        "shell-allow-readonly-singletons"
+    );
+}
+
+#[test]
+fn test_audit_check_fails_closed_when_required_storage_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let config_dir = dir.path().join(".copilot-shell");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[audit]\nmode = \"required\"\n",
+    )
+    .unwrap();
+    let unavailable_root = dir.path().join("not-a-directory");
+    std::fs::write(&unavailable_root, []).unwrap();
+
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .env("COSH_AUDIT_DIR", unavailable_root)
+        .args(["audit", "check", "--action-string", "echo hello"])
+        .output()
+        .unwrap();
+
+    let json = assert_audit_failure(&output);
+    assert_eq!(json["error"]["code"], "AuditUnavailable");
+    assert_eq!(json["error"]["details"]["decision"]["outcome"], "Allow");
+}
+
+#[test]
+fn test_audit_check_fails_closed_for_non_allow_when_storage_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("audit.log");
+    let unavailable_root = dir.path().join("not-a-directory");
+    std::fs::write(&unavailable_root, []).unwrap();
+
+    let output = cosh_bin_with_audit_sandbox(&log)
+        .env("COSH_AUDIT_DIR", unavailable_root)
+        .args(["audit", "check", "--action-string", "touch /tmp/test"])
+        .output()
+        .unwrap();
+
+    let json = assert_audit_failure(&output);
+    assert_eq!(json["error"]["code"], "AuditUnavailable");
+    assert_eq!(
+        json["error"]["details"]["decision"]["outcome"],
+        "RequireApproval"
+    );
+}
+
+#[test]
 fn test_audit_check_missing_required_flags_is_403() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");

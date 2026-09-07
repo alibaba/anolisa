@@ -1,9 +1,10 @@
 //! `anolisa uninstall <COMPONENT>` (with optional `--purge` /
 //! `--remove-system-package`).
 //!
-//! Teardown runs the thin-shell pipeline: assemble facts, ask the planner
-//! (decision rows X1–X6), and hand the step sequence to the matching
-//! executor. The plan shape follows the record's authority:
+//! The command handler maps CLI input into the lifecycle application layer
+//! and renders its typed outcome. The application layer observes a component
+//! snapshot, asks the planner (decision rows X1–X6), and hands the step
+//! sequence to the matching executor. The plan shape follows record authority:
 //!
 //!   * **Owned** (raw) — X1: pre-uninstall hooks, stop services, remove the
 //!     recorded files, post-uninstall hooks, drop the record. Executed by
@@ -27,40 +28,33 @@
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 
+use anolisa_core::LifecyclePlan;
+#[cfg(test)]
+use anolisa_core::ObjectKind;
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
-use anolisa_core::domain::{InstallationScope, NativePm, ProviderBinding};
-use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
-use anolisa_core::facts::{JournalEvidence, ObserveRequest, assemble_facts};
-use anolisa_core::lock::InstallLock;
-use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
-use anolisa_core::planner::{
-    HookKind, Intent, InvocationForm, Plan, PlanError, PlanNote, RecordFacts, Step,
-    UninstallRequest, plan,
-};
-use anolisa_core::providers::DelegatedProvider;
-use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
-use anolisa_core::state::OperationRecord;
+use anolisa_core::domain::InstallationScope;
+#[cfg(test)]
+use anolisa_core::domain::{NativePm, ProviderBinding};
+use anolisa_core::owned_executor::OwnedExecutionError;
+use anolisa_core::planner::{HookKind, PlanError, PlanNote, Step};
 use anolisa_core::state_store::StateStore;
-use anolisa_core::{
-    ComponentManifest, HookPhase, LifecycleOperation, LifecyclePlan, ObjectKind,
-    ResolvedLifecycleHooks, resolve_manifest_hooks,
-};
+#[cfg(test)]
 use anolisa_platform::pkg_query::PackageQuery;
+#[cfg(test)]
 use anolisa_platform::pkg_transaction::PackageTransaction;
-use anolisa_platform::privilege;
-use anolisa_platform::rpm_query::RpmPackageQuery;
-use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use crate::color::Palette;
 use crate::commands::common;
-use crate::commands::tier1::install::RawTeardownOps;
-use crate::commands::tier1::recovery::LockedJournalGate;
-use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
-use crate::progress::{self, Activity, ProgressReporter};
+use crate::progress;
+#[cfg(test)]
+use crate::progress::{Activity, ProgressReporter};
 use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "uninstall";
+
+mod application;
+use self::application::ApplicationOutcome;
 
 #[derive(Parser)]
 pub struct UninstallArgs {
@@ -80,23 +74,28 @@ pub struct UninstallArgs {
     pub force: bool,
 }
 
-/// Dispatch `uninstall <component>`: build the real rpm/dnf-backed query and
-/// transaction, then route by recorded ownership.
+/// Map `uninstall <component>` into the lifecycle application and render it.
 ///
 /// # Errors
 ///
 /// Returns [`CliError`] when the component is absent, has enabled adapter
 /// receipts, or teardown fails. See the module docs for the ownership matrix.
 pub fn handle(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let query = RpmPackageQuery::system();
-    let txn = RpmTransaction::system();
-    handle_with_deps(args, ctx, &query, &txn, privilege::is_root())
+    let outcome = application::run(
+        application::ApplicationRequest {
+            args: &args,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+    )?;
+    render_outcome(ctx, outcome)
 }
 
 /// Core of [`handle`] with the package query, transaction, and root status
 /// injected so the delegated path is testable without a live rpmdb/dnf or
 /// real privileges. The purge path ignores the injected dependencies.
 // pub(crate): driven by cross-command lifecycle tests.
+#[cfg(test)]
 pub(crate) fn handle_with_deps(
     args: UninstallArgs,
     ctx: &CliContext,
@@ -111,6 +110,7 @@ pub(crate) fn handle_with_deps(
     handle_with_deps_and_progress(args, ctx, query, txn, is_root, &mut activity)
 }
 
+#[cfg(test)]
 fn handle_with_deps_and_progress(
     args: UninstallArgs,
     ctx: &CliContext,
@@ -119,800 +119,106 @@ fn handle_with_deps_and_progress(
     is_root: bool,
     reporter: &mut dyn ProgressReporter,
 ) -> Result<(), CliError> {
-    reporter.report(&format!("Preparing to uninstall {}...", args.component));
-    if args.purge {
-        reporter.finish();
-        return handle_purge(&args, ctx);
-    }
-    uninstall_component(&args, ctx, query, txn, is_root, reporter)
+    let outcome = application::run_with_dependencies(
+        application::ApplicationRequest {
+            args: &args,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+        query,
+        txn,
+        is_root,
+        reporter,
+    )?;
+    render_outcome(ctx, outcome)
 }
 
-/// The plain-uninstall pipeline: observe, plan (rows X1–X6), execute through
-/// the matching step-family executor.
-fn uninstall_component(
-    args: &UninstallArgs,
-    ctx: &CliContext,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-    reporter: &mut dyn ProgressReporter,
-) -> Result<(), CliError> {
-    let input = args.component.as_str();
-    let command = format!("{COMMAND} {input}");
-    let scope_command = scope_guard_command(args, input);
-    let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let journal_dir = rpm_install::journal_dir(&layout);
-    let uid = privilege::effective_uid();
-    let scope = match ctx.install_mode {
-        crate::context::InstallMode::System => InstallationScope::System,
-        crate::context::InstallMode::User => InstallationScope::User { uid },
-    };
-    let now = now_iso8601();
-
-    let (resolved, view) = common::resolve_mutation_target(input, ctx, &scope_command)?;
-    let store = view.writable.state;
-    let target = resolved.as_str();
-    reporter.report(&format!("Resolving {target}..."));
-
-    if store.find(ObjectKind::Component, target).is_none() {
-        // A name that only matched a legacy `kind = "capability"` row was
-        // dropped by the state migration — say so instead of a bare "not
-        // installed".
-        if store.dropped_capabilities.iter().any(|name| name == target) {
-            return Err(CliError::InvalidArgument {
-                command,
-                reason: format!(
-                    "'{target}' is a legacy capability state entry from an older release; \
-                     the capability concept is removed. The entry is pruned automatically \
-                     on the next install/uninstall; use `anolisa list` to see components"
-                ),
-            });
-        }
-    }
-
-    // `--force` is a wire stub; surface it on real runs so users do not
-    // assume it changes behavior. Dry-run stays quiet.
-    if args.force && !ctx.dry_run {
-        progress::suspend_output(|| {
-            eprintln!("warning: --force is a spec stub today and has no behavioral effect yet");
-        });
-    }
-
-    // `--remove-system-package` only governs delegated records. Flag it on
-    // an owned record instead of silently ignoring it.
-    if args.remove_system_package
-        && !ctx.json
-        && matches!(
-            store
-                .find(ObjectKind::Component, target)
-                .map(|r| &r.binding),
-            Some(ProviderBinding::Owned { .. })
-        )
-    {
-        progress::suspend_output(|| {
-            eprintln!(
-                "warning: --remove-system-package has no effect for raw component '{target}' (there is no system RPM to remove)"
-            );
-        });
-    }
-
-    // The probe target comes from the record; uninstall never resolves a
-    // new package.
-    let native_package = match store.find(ObjectKind::Component, target) {
-        Some(installation) => match &installation.binding {
-            ProviderBinding::Delegated { package, .. } => match package.resolved_name() {
-                Some(name) => Some(name.to_string()),
-                None => {
-                    return Err(CliError::Runtime {
-                        command,
-                        reason: format!(
-                            "the record for '{target}' has no resolved package name; run `anolisa repair {target}` first"
-                        ),
-                    });
-                }
-            },
-            ProviderBinding::Owned { .. } => None,
-        },
-        None => None,
-    };
-
-    // Whether the record's relation grants removal authority by itself —
-    // drives the missing-tooling guidance and the locked re-validation.
-    let record_is_managed = matches!(
-        store
-            .find(ObjectKind::Component, target)
-            .map(|r| &r.binding),
-        Some(ProviderBinding::Delegated {
-            relation: anolisa_core::domain::ManagementRelation::Managed { .. },
-            ..
-        })
-    );
-
-    let provider = DelegatedProvider::new(query, txn);
-    let observe_request = ObserveRequest {
-        kind: ObjectKind::Component,
-        name: target,
-        scope,
-        native_package: native_package.as_deref(),
-        observed_at: &now,
-        verify_owned_files: false,
-    };
-    let facts = match assemble_facts(
-        &observe_request,
-        &store,
-        Some(&provider),
-        &layout,
-        &journal_dir,
-    ) {
-        Ok(facts) => facts,
-        // rpm missing on PATH. When this uninstall would run a package
-        // operation, steer at the actionable fallback; a record-only drop
-        // consults no native authority, so re-observe without the probe and
-        // keep going.
-        Err(anolisa_core::facts::FactsError::Probe(
-            anolisa_core::providers::ProviderError::Query(
-                anolisa_platform::pkg_query::PackageQueryError::CommandMissing { command: bin },
-            ),
-        )) => {
-            if record_is_managed || args.remove_system_package {
-                return Err(tooling_missing_err(
-                    &command,
-                    &bin,
-                    native_package.as_deref().unwrap_or(target),
-                    target,
-                    record_is_managed,
-                ));
-            }
-            assemble_facts(&observe_request, &store, None, &layout, &journal_dir).map_err(
-                |err| CliError::Runtime {
-                    command: command.clone(),
-                    reason: err.to_string(),
-                },
-            )?
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command: command.clone(),
-                reason: err.to_string(),
-            });
-        }
-    };
-
-    let intent = Intent::Uninstall(UninstallRequest {
-        remove_system_package: args.remove_system_package,
-        invocation: InvocationForm::SingleNamed,
-    });
-    let (steps, notes) = match plan(&intent, &facts) {
-        Ok(Plan::Execute { steps, notes }) => (steps, notes),
-        Ok(Plan::NoOp { .. }) => {
-            // The uninstall table has no NoOp rows today; render an honest
-            // "nothing to do" if the planner ever grows one.
-            reporter.finish();
-            return render_result(
-                ctx,
-                target,
-                None,
-                &UninstallDisposition::StateOnly,
-                true,
-                &[],
-                None,
-            );
-        }
-        Err(err) => return Err(plan_error_to_cli(err, target, &command, &store)),
-    };
-
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-    let disposition = disposition_for(&steps, &notes);
-
+fn execution_intent(ctx: &CliContext) -> anolisa_core::execution::ExecutionIntent {
     if ctx.dry_run {
-        reporter.finish();
-        return render_result(
+        anolisa_core::execution::ExecutionIntent::Plan
+    } else {
+        anolisa_core::execution::ExecutionIntent::Apply
+    }
+}
+
+fn render_outcome(ctx: &CliContext, outcome: ApplicationOutcome) -> Result<(), CliError> {
+    match outcome {
+        ApplicationOutcome::NoOp { subject } => render_result(
             ctx,
-            target,
-            native_package.as_deref(),
-            &disposition,
-            true,
-            &plan_labels,
+            &subject.component,
             None,
-        );
-    }
-
-    // Route by step family: delegated plans (including record-only drops)
-    // run through the delegated executor, owned plans through the teardown
-    // port.
-    let is_delegated_plan = steps.iter().all(|step| {
-        matches!(
-            step,
-            Step::NativeTransaction { .. }
-                | Step::Observe { .. }
-                | Step::WriteRecord(_)
-                | Step::DropRecord
-        )
-    });
-    if !is_delegated_plan {
-        reporter.report(&format!("Uninstalling {target}..."));
-        return uninstall_owned(
-            target,
-            ctx,
-            &layout,
-            &state_path,
-            &journal_dir,
-            scope,
-            &now,
-            &intent,
-            &command,
-            reporter,
-        );
-    }
-
-    // A native removal runs dnf and requires root; a record-only drop does
-    // not (mirroring `forget`).
-    let runs_native_txn = steps
-        .iter()
-        .any(|step| matches!(step, Step::NativeTransaction { .. }));
-    if runs_native_txn && !is_root {
-        let flag_suffix = if args.remove_system_package {
-            " --remove-system-package"
-        } else {
-            ""
-        };
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "removing system RPM '{}' requires root privileges; re-run with sudo: `sudo anolisa uninstall {target}{flag_suffix}`",
-                native_package.as_deref().unwrap_or(target)
-            ),
-        });
-    }
-    reporter.report(&format!("Uninstalling {target}..."));
-
-    // Real run under the install lock, with state re-read and the adapter
-    // guard re-checked inside it — a concurrent `adapter enable` must not
-    // slip past the pre-lock plan and strand a removed package's plugin.
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(&state_path, uid, &layout).map_err(|err| {
-        CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    ensure_no_adapter_claims(&store, target, &command)?;
-    let legacy_manifest_dir = store
-        .find(ObjectKind::Component, target)
-        .map(|installation| {
-            common::legacy_component_manifest_dir_for_installation(&layout, installation, &command)
-        })
-        .transpose()?
-        .flatten();
-    let (native_package, record_is_managed) = match store
-        .find(ObjectKind::Component, target)
-        .map(|record| &record.binding)
-    {
-        Some(ProviderBinding::Delegated {
-            package, relation, ..
-        }) => {
-            let package = package.resolved_name().ok_or_else(|| CliError::Runtime {
-                command: command.clone(),
-                reason: format!(
-                    "the locked record for '{target}' has no resolved package name; run `anolisa repair {target}` first"
-                ),
-            })?;
-            (
-                Some(package.to_string()),
-                matches!(
-                    relation,
-                    anolisa_core::domain::ManagementRelation::Managed { .. }
-                ),
+            &UninstallDisposition::StateOnly,
+            true,
+            &[],
+            None,
+        ),
+        ApplicationOutcome::Preview {
+            subject,
+            disposition,
+            steps,
+        } => {
+            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                &disposition,
+                true,
+                &plan_labels,
+                None,
             )
         }
-        Some(ProviderBinding::Owned { .. }) => {
-            return Err(CliError::Runtime {
-                command,
-                reason: format!(
-                    "component '{target}' changed provider authority while this uninstall was waiting for the lock; nothing was changed — re-run `anolisa uninstall {target}`"
-                ),
-            });
-        }
-        None if store.record_facts(ObjectKind::Component, target) != RecordFacts::Absent => {
-            (None, false)
-        }
-        None => {
-            return Err(CliError::Runtime {
-                command,
-                reason: format!(
-                    "component '{target}' disappeared from state during uninstall; nothing removed"
-                ),
-            });
-        }
-    };
-
-    // Re-observe and re-plan after taking the lock. Package identity,
-    // relation, pending recovery and disposition now come from one locked
-    // fact set; no pre-lock package or record-only plan can reach execution.
-    let locked_request = ObserveRequest {
-        kind: ObjectKind::Component,
-        name: target,
-        scope,
-        native_package: native_package.as_deref(),
-        observed_at: &now,
-        verify_owned_files: false,
-    };
-    let facts = match assemble_facts(
-        &locked_request,
-        &store,
-        Some(&provider),
-        &layout,
-        &journal_dir,
-    ) {
-        Ok(facts) => facts,
-        Err(anolisa_core::facts::FactsError::Probe(
-            anolisa_core::providers::ProviderError::Query(
-                anolisa_platform::pkg_query::PackageQueryError::CommandMissing { command: bin },
-            ),
-        )) => {
-            if record_is_managed || args.remove_system_package {
-                return Err(tooling_missing_err(
-                    &command,
-                    &bin,
-                    native_package.as_deref().unwrap_or(target),
-                    target,
-                    record_is_managed,
-                ));
-            }
-            assemble_facts(&locked_request, &store, None, &layout, &journal_dir).map_err(|err| {
-                CliError::Runtime {
-                    command: command.clone(),
-                    reason: err.to_string(),
-                }
-            })?
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command: command.clone(),
-                reason: err.to_string(),
-            });
-        }
-    };
-    let (steps, notes) = match plan(&intent, &facts) {
-        Ok(Plan::Execute { steps, notes }) => (steps, notes),
-        Ok(Plan::NoOp { .. }) => {
-            return Err(CliError::Runtime {
-                command,
-                reason: format!(
-                    "component '{target}' changed while this uninstall was waiting for the lock; nothing was changed — re-run `anolisa uninstall {target}`"
-                ),
-            });
-        }
-        Err(err) => return Err(plan_error_to_cli(err, target, &command, &store)),
-    };
-    if !steps.iter().all(|step| {
-        matches!(
-            step,
-            Step::NativeTransaction { .. }
-                | Step::Observe { .. }
-                | Step::WriteRecord(_)
-                | Step::DropRecord
-        )
-    }) {
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "component '{target}' changed provider authority while this uninstall was waiting for the lock; nothing was changed — re-run `anolisa uninstall {target}`"
-            ),
-        });
-    }
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-    let disposition = disposition_for(&steps, &notes);
-    let runs_native_txn = steps
-        .iter()
-        .any(|step| matches!(step, Step::NativeTransaction { .. }));
-    if runs_native_txn && !is_root {
-        let flag_suffix = if args.remove_system_package {
-            " --remove-system-package"
-        } else {
-            ""
-        };
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "removing system RPM '{}' requires root privileges; re-run with sudo: `sudo anolisa uninstall {target}{flag_suffix}`",
-                native_package.as_deref().unwrap_or(target)
-            ),
-        });
-    }
-
-    let evidence = JournalEvidence::new(&journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, &command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.clone(), &command)?;
-    let operation_id = journal.operation_id.clone();
-
-    let context = RecordContext {
-        kind: ObjectKind::Component,
-        name: target.to_string(),
-        scope,
-        now: now.clone(),
-        operation_id: Some(operation_id.clone()),
-        delegated: native_package.as_deref().map(|package| DelegatedIdentity {
-            pm: NativePm::Rpm,
-            package: package.to_string(),
-        }),
-        owned_artifact: None,
-    };
-    {
-        let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
-        execute_delegated_steps(
-            &steps,
-            DelegatedExecutionTarget::new(NativePm::Rpm, native_package.as_deref()),
-            &provider,
-            &mut sink,
-            &mut journal,
-            &now,
-        )
-    }
-    .map_err(|err| match err {
-        // dnf missing even though the rpmdb query above succeeded: give the
-        // same ownership-aware guidance as the query-missing branch rather
-        // than a generic failure.
-        anolisa_core::executor::ExecutionError::TransactionFailed {
-            source:
-                anolisa_core::providers::ProviderError::Transaction(
-                    anolisa_platform::pkg_transaction::PackageTransactionError::CommandMissing {
-                        command: bin,
-                    },
-                ),
-            ..
-        } => tooling_missing_err(
-            &command,
-            &bin,
-            native_package.as_deref().unwrap_or(target),
-            target,
-            record_is_managed,
-        ),
-        other => CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "uninstall of '{target}' failed: {other}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
-            ),
-        },
-    })?;
-    reporter.report(&format!("Finalizing {target} uninstall..."));
-
-    // The manifest snapshot travels with the record. Best-effort: the
-    // record drop is already committed.
-    if let Err(err) = remove_component_manifest_snapshot(&layout, target, &command) {
-        progress::suspend_output(|| eprintln!("warning: {err}"));
-    }
-    if let Some(dir) = legacy_manifest_dir
-        && let Err(err) = remove_manifest_snapshot_dir(&dir, &command)
-    {
-        progress::suspend_output(|| eprintln!("warning: {err}"));
-    }
-
-    // Operation history is best-effort bookkeeping on top of the committed
-    // record drop.
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.clone(),
-        status: "ok".to_string(),
-        started_at: now.clone(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    if let Err(err) = store.save(&state_path) {
-        progress::suspend_output(|| {
-            eprintln!("warning: failed to record operation history: {err}");
-        });
-    }
-
-    if matches!(disposition, UninstallDisposition::AlreadyAbsent) && !ctx.json && !ctx.quiet {
-        let color = Palette::new(ctx.no_color);
-        progress::suspend_output(|| {
-            eprintln!(
-                "{} RPM package '{}' is not present in rpmdb (already removed by a manual `rpm -e`); dropping ANOLISA state only",
-                color.warn("warning:"),
-                native_package.as_deref().unwrap_or(target),
+        ApplicationOutcome::Applied {
+            subject,
+            disposition,
+            steps,
+            outcome,
+        } => {
+            debug_assert_eq!(
+                outcome.status(),
+                &anolisa_core::execution::CommandOutcomeStatus::Completed
             );
-        });
-    }
-
-    append_uninstall_log(
-        &layout,
-        ctx,
-        target,
-        &command,
-        &operation_id,
-        &now,
-        &disposition,
-        native_package.as_deref(),
-    );
-    reporter.finish();
-
-    render_result(
-        ctx,
-        target,
-        native_package.as_deref(),
-        &disposition,
-        false,
-        &plan_labels,
-        Some(&operation_id),
-    )
-}
-
-/// Execute an owned teardown plan (X1) through the raw teardown port.
-#[expect(clippy::too_many_arguments)]
-fn uninstall_owned(
-    target: &str,
-    ctx: &CliContext,
-    layout: &anolisa_platform::fs_layout::FsLayout,
-    state_path: &std::path::Path,
-    journal_dir: &std::path::Path,
-    scope: InstallationScope,
-    now: &str,
-    intent: &Intent,
-    command: &str,
-    reporter: &mut dyn ProgressReporter,
-) -> Result<(), CliError> {
-    // No root pre-check for owned teardown: `--prefix` may point at a
-    // user-writable tree, and a genuine permission problem fails the exact
-    // step with an honest journal status instead of a blanket refusal.
-
-    // Lock, then re-read state under the lock: the file and service sets to
-    // tear down must reflect what is recorded now, and the adapter guard
-    // must hold at the moment of removal.
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
-        .map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        })?;
-    ensure_no_adapter_claims(&store, target, command)?;
-    let prior = match store
-        .find(ObjectKind::Component, target)
-        .map(|r| &r.binding)
-    {
-        Some(ProviderBinding::Owned { artifact }) => artifact.clone(),
-        _ => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "component '{target}' is no longer an owned installation; nothing was changed — re-run `anolisa uninstall {target}`"
-                ),
-            });
-        }
-    };
-
-    let facts = assemble_facts(
-        &ObserveRequest {
-            kind: ObjectKind::Component,
-            name: target,
-            scope,
-            native_package: None,
-            observed_at: now,
-            verify_owned_files: false,
-        },
-        &store,
-        None,
-        layout,
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: err.to_string(),
-    })?;
-    let (steps, notes) = match plan(intent, &facts) {
-        Ok(Plan::Execute { steps, notes }) => (steps, notes),
-        Ok(Plan::NoOp { .. }) => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "component '{target}' changed while this uninstall was waiting for the lock; nothing was changed — re-run `anolisa uninstall {target}`"
-                ),
-            });
-        }
-        Err(err) => return Err(plan_error_to_cli(err, target, command, &store)),
-    };
-    if steps
-        .iter()
-        .any(|step| matches!(step, Step::NativeTransaction { .. } | Step::Observe { .. }))
-    {
-        return Err(CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "component '{target}' changed provider authority while this uninstall was waiting for the lock; nothing was changed — re-run `anolisa uninstall {target}`"
-            ),
-        });
-    }
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-    let disposition = disposition_for(&steps, &notes);
-
-    // Contract-driven uninstall hooks from the installed manifest snapshot.
-    // Best-effort: a missing or unreadable snapshot means no hooks, never a
-    // failed uninstall.
-    let hooks = match common::installed_component_manifest_path(layout, target, COMMAND)
-        .ok()
-        .and_then(|path| ComponentManifest::from_file(&path).ok())
-    {
-        Some(manifest) => ResolvedLifecycleHooks {
-            pre_uninstall: resolve_manifest_hooks(
-                &manifest.install.hooks,
-                layout,
-                target,
-                HookPhase::PreUninstall,
+            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                &disposition,
+                false,
+                &plan_labels,
+                outcome.operation_id(),
             )
-            .unwrap_or_default(),
-            post_uninstall: resolve_manifest_hooks(
-                &manifest.install.hooks,
-                layout,
-                target,
-                HookPhase::PostUninstall,
-            )
-            .unwrap_or_default(),
-        },
-        None => ResolvedLifecycleHooks::default(),
-    };
-
-    let evidence = JournalEvidence::new(journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
-    let operation_id = journal.operation_id.clone();
-
-    let outcome = {
-        let mut ops = RawTeardownOps::new(
-            ctx,
-            layout,
-            target.to_string(),
-            operation_id.clone(),
-            prior,
-            hooks,
-            &mut store,
-            state_path,
-        );
-        execute_owned_steps(&steps, &mut ops, &mut journal)
-    }
-    .map_err(|err| owned_teardown_error_to_cli(err, target, scope, command))?;
-    reporter.report(&format!("Finalizing {target} uninstall..."));
-
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: now.to_string(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    if let Err(err) = store.save(state_path) {
-        progress::suspend_output(|| {
-            eprintln!("warning: failed to record operation history: {err}");
-        });
-    }
-
-    if !ctx.json && !ctx.quiet {
-        let color = Palette::new(ctx.no_color);
-        for warning in &outcome.warnings {
-            progress::suspend_output(|| eprintln!("{} {warning}", color.warn("warning:")));
         }
-    }
-
-    append_uninstall_log(
-        layout,
-        ctx,
-        target,
-        command,
-        &operation_id,
-        now,
-        &disposition,
-        None,
-    );
-    reporter.finish();
-
-    render_result(
-        ctx,
-        target,
-        None,
-        &disposition,
-        false,
-        &plan_labels,
-        Some(&operation_id),
-    )
-}
-
-/// The `--purge` pipeline: plan-only pending manifest-driven
-/// config/cache/state discovery.
-fn handle_purge(args: &UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let operation = LifecycleOperation::Purge;
-    let input = args.component.as_str();
-    let command = format!("{} {}", operation.as_str(), input);
-    let scope_command = scope_guard_command(args, input);
-
-    // Resolve against the full visible identity set, then plan only against
-    // the writable root returned by the same snapshot.
-    let (resolved, view) = common::resolve_mutation_target(input, ctx, &scope_command)?;
-    let installed = view.writable.state;
-    let target = resolved.as_str();
-
-    if installed.find(ObjectKind::Component, target).is_none()
-        && installed
-            .dropped_capabilities
-            .iter()
-            .any(|name| name == target)
-    {
-        return Err(CliError::InvalidArgument {
-            command,
-            reason: format!(
-                "'{target}' is a legacy capability state entry from an older release; \
-                 the capability concept is removed. The entry is pruned automatically \
-                 on the next install/uninstall; use `anolisa list` to see components"
-            ),
-        });
-    }
-    // Adapter receipts must be released before the component is removed.
-    if !ctx.dry_run {
-        let claims: Vec<_> = installed
-            .adapter_claims
-            .iter()
-            .filter(|claim| claim.component == target)
-            .collect();
-        if !claims.is_empty() {
-            let mut frameworks: Vec<&str> = claims.iter().map(|c| c.framework.as_str()).collect();
-            frameworks.sort_unstable();
-            frameworks.dedup();
-            return Err(CliError::InvalidArgument {
+        ApplicationOutcome::PurgePreview { plan } => {
+            if ctx.json {
+                render_json(
+                    COMMAND,
+                    &PlanDryRunPayload {
+                        dry_run: true,
+                        plan: &plan,
+                    },
+                )
+            } else {
+                if !ctx.quiet {
+                    render_plan_human(&plan, ctx.no_color);
+                }
+                Ok(())
+            }
+        }
+        ApplicationOutcome::PurgeUnsupported { command, hint } => {
+            if !ctx.json {
+                let palette = Palette::new(ctx.no_color);
+                eprintln!(
+                    "{} purge execute is currently plan-only; only --dry-run is supported in this release",
+                    palette.warn("warning:"),
+                );
+            }
+            Err(CliError::NotImplemented {
                 command,
-                reason: format!(
-                    "'{target}' has enabled adapters ({}); run `anolisa adapter disable {target}` \
-                     for each framework before uninstalling",
-                    frameworks.join(", ")
-                ),
-            });
+                hint: Some(hint),
+            })
         }
     }
-
-    if args.force && !ctx.dry_run {
-        eprintln!("warning: --force is a spec stub today and has no behavioral effect yet");
-    }
-
-    let plan = LifecyclePlan::for_component_purge(target, &installed);
-
-    if ctx.dry_run {
-        if ctx.json {
-            let payload = PlanDryRunPayload {
-                dry_run: true,
-                plan: &plan,
-            };
-            return render_json(COMMAND, &payload);
-        }
-        if !ctx.quiet {
-            render_plan_human(&plan, ctx.no_color);
-        }
-        return Ok(());
-    }
-
-    // `purge` execute stays gated pending manifest-driven config /
-    // cache / state discovery — print the same plan-only warning the
-    // previous release emitted so wrappers continue to see the boundary
-    // on stderr, then refuse with the gate's lift-condition hint.
-    if !ctx.json {
-        let palette = Palette::new(ctx.no_color);
-        eprintln!(
-            "{} purge execute is currently plan-only; only --dry-run is supported in this release",
-            palette.warn("warning:"),
-        );
-    }
-
-    Err(CliError::NotImplemented {
-        command,
-        hint: Some(
-            "purge execute is gated pending manifest-driven config/cache/state              discovery; run with --dry-run to preview the plan, or use              `anolisa uninstall <component>` for the file-removal subset"
-                .to_string(),
-        ),
-    })
 }
 
 fn scope_guard_command(args: &UninstallArgs, input: &str) -> String {
@@ -1434,6 +740,30 @@ mod tests {
         }
     }
 
+    struct BeforeApplyProgress {
+        hook: RefCell<Option<Box<dyn FnOnce()>>>,
+    }
+
+    impl BeforeApplyProgress {
+        fn new(hook: impl FnOnce() + 'static) -> Self {
+            Self {
+                hook: RefCell::new(Some(Box::new(hook))),
+            }
+        }
+    }
+
+    impl ProgressReporter for BeforeApplyProgress {
+        fn report(&self, message: &str) {
+            if message.starts_with("Uninstalling ")
+                && let Some(hook) = self.hook.borrow_mut().take()
+            {
+                hook();
+            }
+        }
+
+        fn finish(&mut self) {}
+    }
+
     fn ctx_with_prefix(
         json: bool,
         dry_run: bool,
@@ -1443,6 +773,14 @@ mod tests {
         let root = prefix
             .as_deref()
             .expect("stateful uninstall tests require an isolated prefix");
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(root.to_path_buf())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             root,
             install_mode,
@@ -2105,6 +1443,8 @@ mod tests {
             enabled_at: "2026-06-01T10:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp/anolisa-uninstall-test"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -2159,7 +1499,7 @@ mod tests {
         let layout = common::resolve_layout(ctx);
         let repo_v1 = layout.prefix.join("repo").join("v1");
         fs::create_dir_all(&repo_v1).expect("mkdir repo");
-        fs::write(repo_v1.join("components.toml"), index).expect("write components.toml");
+        fs::write(repo_v1.join("components-v2.toml"), index).expect("write components-v2.toml");
         fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
         fs::write(
             layout.etc_dir.join("repo.toml"),
@@ -2258,6 +1598,67 @@ mod tests {
         is_root: bool,
     ) -> Result<(), CliError> {
         handle_with_deps(args, ctx, rpm, rpm, is_root)
+    }
+
+    #[test]
+    fn plan_intent_returns_typed_preview_without_effects() {
+        let tmp = tempdir().expect("tmpdir");
+        let ctx = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                Ownership::RpmObserved,
+            )],
+            Vec::new(),
+        );
+        let args = args_rm("copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
+        let mut progress = RecordingProgress::default();
+
+        let outcome = application::run_with_dependencies(
+            application::ApplicationRequest {
+                args: &args,
+                intent: anolisa_core::execution::ExecutionIntent::Plan,
+            },
+            &ctx,
+            &rpm,
+            &rpm,
+            true,
+            &mut progress,
+        )
+        .expect("preview");
+
+        let application::ApplicationOutcome::Preview {
+            subject,
+            disposition,
+            steps,
+        } = outcome
+        else {
+            panic!("plan intent must return a preview")
+        };
+        assert_eq!(subject.component, "copilot-shell");
+        assert_eq!(subject.package.as_deref(), Some("copilot-shell"));
+        assert!(matches!(disposition, UninstallDisposition::NativeRemove));
+        assert!(
+            steps
+                .iter()
+                .any(|step| matches!(step, Step::NativeTransaction { .. }))
+        );
+        assert_eq!(rpm.remove_calls.get(), 0, "plan intent must not run dnf");
+        assert!(
+            load_state(&ctx)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "plan intent must not drop state",
+        );
+        assert!(progress.finished, "preview must finish progress");
     }
 
     #[test]
@@ -2954,6 +2355,112 @@ mod tests {
     }
 
     #[test]
+    fn adapter_claim_created_after_preflight_blocks_locked_uninstall() {
+        let tmp = tempdir().expect("tmpdir");
+        let ctx = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                Ownership::RpmObserved,
+            )],
+            Vec::new(),
+        );
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let mutate_path = state_path.clone();
+        let mut progress = BeforeApplyProgress::new(move || {
+            let mut store = StateStore::load(&mutate_path, 0).expect("load for race");
+            store
+                .adapter_claims
+                .push(sample_claim("copilot-shell", "openclaw"));
+            store.save(&mutate_path).expect("persist adapter race");
+        });
+        let rpm = FakeRpm::present("copilot-shell");
+
+        let err = handle_with_deps_and_progress(
+            args_rm("copilot-shell"),
+            &ctx,
+            &rpm,
+            &rpm,
+            true,
+            &mut progress,
+        )
+        .expect_err("locked adapter claim must block uninstall");
+
+        assert!(err.reason().contains("adapter disable"), "{err}");
+        assert_eq!(rpm.remove_calls.get(), 0, "dnf must not run");
+        assert!(
+            StateStore::load(&state_path, 0)
+                .expect("reload")
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "the component record must remain",
+        );
+    }
+
+    #[test]
+    fn pending_journal_created_after_preflight_blocks_locked_uninstall() {
+        let tmp = tempdir().expect("tmpdir");
+        let ctx = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                Ownership::RpmObserved,
+            )],
+            Vec::new(),
+        );
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = crate::commands::tier1::rpm_install::journal_dir(&layout);
+        let pending_state_path = state_path.clone();
+        let mut progress = BeforeApplyProgress::new(move || {
+            let journal = anolisa_core::transaction::Transaction::begin_with_subject(
+                "update",
+                Some("copilot-shell"),
+                pending_state_path,
+                &journal_dir,
+            )
+            .expect("inject pending journal");
+            drop(journal);
+        });
+        let rpm = FakeRpm::present("copilot-shell");
+
+        let err = handle_with_deps_and_progress(
+            args_rm("copilot-shell"),
+            &ctx,
+            &rpm,
+            &rpm,
+            true,
+            &mut progress,
+        )
+        .expect_err("locked pending recovery must block uninstall");
+
+        assert!(err.reason().contains("pending recovery"), "{err}");
+        assert_eq!(rpm.remove_calls.get(), 0, "dnf must not run");
+        assert!(
+            StateStore::load(&state_path, 0)
+                .expect("reload")
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "the component record must remain",
+        );
+    }
+
+    #[test]
     fn locked_replan_uses_the_current_package_identity() {
         let tmp = tempdir().expect("tmpdir");
         let c = ctx_with_prefix(
@@ -3099,10 +2606,11 @@ mod tests {
         seed_component_index(
             &c,
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "rpm"

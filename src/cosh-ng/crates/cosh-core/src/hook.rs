@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::de::{value::MapAccessDeserializer, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::config::{HookDefinition, HooksConfig};
@@ -56,6 +57,13 @@ pub struct HookInput {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct HookOutput {
+    #[serde(rename = "continue")]
+    pub should_continue: Option<bool>,
+    #[serde(alias = "stopReason")]
+    pub stop_reason: Option<String>,
+    #[serde(alias = "suppressOutput")]
+    pub suppress_output: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
     pub decision: Option<String>,
     pub reason: Option<String>,
     #[serde(alias = "systemMessage")]
@@ -64,12 +72,100 @@ pub struct HookOutput {
     pub hook_specific_output: Option<Value>,
 }
 
+fn deserialize_present_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+struct ObjectOnlyHookOutput(HookOutput);
+
+impl<'de> Deserialize<'de> for ObjectOnlyHookOutput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ObjectVisitor;
+
+        impl<'de> Visitor<'de> for ObjectVisitor {
+            type Value = ObjectOnlyHookOutput;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a hook output JSON object")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                HookOutput::deserialize(MapAccessDeserializer::new(map)).map(ObjectOnlyHookOutput)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+fn decode_hook_output(raw: &[u8]) -> Option<HookOutput> {
+    serde_json::from_slice::<ObjectOnlyHookOutput>(raw)
+        .ok()
+        .map(|output| output.0)
+}
+
+/// Classifies why a hook could not produce a valid protocol response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookFailureKind {
+    /// The child process could not be started.
+    Spawn,
+    /// The child process failed during I/O.
+    Io,
+    /// The hook exceeded its configured deadline.
+    Timeout,
+    /// The hook exited with an unexpected non-zero status.
+    NonZero,
+    /// The hook terminated because it received a signal.
+    Signaled,
+    /// The hook emitted malformed or non-object JSON.
+    InvalidJson,
+    /// The hook exited successfully without output.
+    EmptyOutput,
+    /// The hook's output exceeded the per-pipe size limit.
+    OutputTruncated,
+}
+
+impl HookFailureKind {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Spawn => "failed to start",
+            Self::Io => "failed during execution",
+            Self::Timeout => "timed out",
+            Self::NonZero => "exited with a non-zero status",
+            Self::Signaled => "terminated by signal",
+            Self::InvalidJson => "returned invalid JSON",
+            Self::EmptyOutput => "returned empty output",
+            Self::OutputTruncated => "output exceeded the size limit",
+        }
+    }
+}
+
+/// A hook execution failure captured alongside the aggregate decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookFailure {
+    /// Stable configured hook name.
+    pub hook_name: String,
+    /// Failure category, without exposing hook output or stderr.
+    pub kind: HookFailureKind,
+}
+
 // ─── Aggregated Results ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookDecision {
     Allow,
     Block(String),
+    /// The hook failed and the action was blocked for safety.
+    HookFailure(String),
     Ask,
     Passthrough,
 }
@@ -89,6 +185,8 @@ pub struct PreToolUseResult {
     pub decision: HookDecision,
     pub tool_input_patch: Option<Value>,
     pub notifications: Vec<HookNotification>,
+    /// Hook execution failures, including explicitly configured fail-open hooks.
+    pub hook_failures: Vec<HookFailure>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,10 +254,29 @@ pub struct AfterModelResult {
 
 pub struct HookSystem {
     enabled: bool,
+    allow_extension_auto_enable: bool,
     disabled: HashSet<String>,
-    hooks: HashMap<HookEventName, Vec<HookDefinition>>,
+    hooks: HashMap<HookEventName, Vec<RegisteredHook>>,
     /// Current run_id, set at the start of each agent run.
     run_id: Option<String>,
+}
+
+struct RegisteredHook {
+    definition: HookDefinition,
+    accepts_empty_output: bool,
+}
+
+impl std::ops::Deref for RegisteredHook {
+    type Target = HookDefinition;
+
+    fn deref(&self) -> &Self::Target {
+        &self.definition
+    }
+}
+
+struct HookExecution {
+    output: HookOutput,
+    failure: Option<HookFailureKind>,
 }
 
 impl HookSystem {
@@ -170,7 +287,7 @@ impl HookSystem {
         let disabled = crate::state::load_disabled(crate::state::HOOKS_STATE);
 
         // Filter out hooks without name (enforced for all sources).
-        let filter_named = |defs: &[HookDefinition]| -> Vec<HookDefinition> {
+        let filter_named = |defs: &[HookDefinition]| -> Vec<RegisteredHook> {
             defs.iter()
                 .filter(|d| {
                     if d.name.is_none() {
@@ -182,10 +299,14 @@ impl HookSystem {
                     }
                 })
                 .cloned()
+                .map(|definition| RegisteredHook {
+                    definition,
+                    accepts_empty_output: false,
+                })
                 .collect()
         };
 
-        let mut hooks: HashMap<HookEventName, Vec<HookDefinition>> = HashMap::new();
+        let mut hooks: HashMap<HookEventName, Vec<RegisteredHook>> = HashMap::new();
         hooks.insert(
             HookEventName::PreToolUse,
             filter_named(&config.pre_tool_use),
@@ -215,6 +336,7 @@ impl HookSystem {
 
         Self {
             enabled,
+            allow_extension_auto_enable: config.enabled_override != Some(false),
             disabled,
             hooks,
             run_id: None,
@@ -224,6 +346,7 @@ impl HookSystem {
     pub fn new_disabled() -> Self {
         Self {
             enabled: false,
+            allow_extension_auto_enable: true,
             disabled: HashSet::new(),
             hooks: HashMap::new(),
             run_id: None,
@@ -248,7 +371,7 @@ impl HookSystem {
     pub fn register_extension_hooks(&mut self, hooks: &crate::extension::ExtensionHooks) {
         use crate::extension::config::flatten_hook_groups;
 
-        if hooks.is_empty() {
+        if hooks.is_empty() || !self.allow_extension_auto_enable {
             return;
         }
 
@@ -271,41 +394,37 @@ impl HookSystem {
                 .collect()
         };
 
-        self.hooks
-            .entry(HookEventName::PreToolUse)
-            .or_default()
-            .extend(filter_named(&hooks.pre_tool_use));
-        self.hooks
-            .entry(HookEventName::PostToolUse)
-            .or_default()
-            .extend(filter_named(&hooks.post_tool_use));
-        self.hooks
-            .entry(HookEventName::UserPromptSubmit)
-            .or_default()
-            .extend(filter_named(&hooks.user_prompt_submit));
-        self.hooks
-            .entry(HookEventName::SessionStart)
-            .or_default()
-            .extend(filter_named(&hooks.session_start));
-        self.hooks
-            .entry(HookEventName::Stop)
-            .or_default()
-            .extend(filter_named(&hooks.stop));
-        self.hooks
-            .entry(HookEventName::PostToolUseFailure)
-            .or_default()
-            .extend(filter_named(&hooks.post_tool_use_failure));
-        self.hooks
-            .entry(HookEventName::BeforeModel)
-            .or_default()
-            .extend(filter_named(&hooks.before_model));
-        self.hooks
-            .entry(HookEventName::AfterModel)
-            .or_default()
-            .extend(filter_named(&hooks.after_model));
+        for (event, groups) in [
+            (HookEventName::PreToolUse, hooks.pre_tool_use.as_slice()),
+            (HookEventName::PostToolUse, hooks.post_tool_use.as_slice()),
+            (
+                HookEventName::UserPromptSubmit,
+                hooks.user_prompt_submit.as_slice(),
+            ),
+            (HookEventName::SessionStart, hooks.session_start.as_slice()),
+            (HookEventName::Stop, hooks.stop.as_slice()),
+            (
+                HookEventName::PostToolUseFailure,
+                hooks.post_tool_use_failure.as_slice(),
+            ),
+            (HookEventName::BeforeModel, hooks.before_model.as_slice()),
+            (HookEventName::AfterModel, hooks.after_model.as_slice()),
+        ] {
+            self.hooks
+                .entry(event)
+                .or_default()
+                .extend(
+                    filter_named(groups)
+                        .into_iter()
+                        .map(|definition| RegisteredHook {
+                            definition,
+                            accepts_empty_output: true,
+                        }),
+                );
+        }
     }
 
-    fn active_hooks(&self, event: HookEventName) -> Vec<&HookDefinition> {
+    fn active_hooks(&self, event: HookEventName) -> Vec<&RegisteredHook> {
         self.hooks
             .get(&event)
             .map(|defs| {
@@ -385,7 +504,7 @@ impl HookSystem {
         }
     }
 
-    fn is_sequential(defs: &[&HookDefinition]) -> bool {
+    fn is_sequential(defs: &[&RegisteredHook]) -> bool {
         defs.iter().any(|d| d.sequential.unwrap_or(false))
     }
 
@@ -413,10 +532,11 @@ impl HookSystem {
                 decision: HookDecision::Passthrough,
                 tool_input_patch: None,
                 notifications: vec![],
+                hook_failures: vec![],
             };
         }
 
-        let defs: Vec<&HookDefinition> = self
+        let defs: Vec<&RegisteredHook> = self
             .active_hooks(HookEventName::PreToolUse)
             .into_iter()
             .filter(|d| Self::matches_tool(d, tool_name))
@@ -427,6 +547,7 @@ impl HookSystem {
                 decision: HookDecision::Passthrough,
                 tool_input_patch: None,
                 notifications: vec![],
+                hook_failures: vec![],
             };
         }
 
@@ -463,7 +584,7 @@ impl HookSystem {
             };
         }
 
-        let defs: Vec<&HookDefinition> = self
+        let defs: Vec<&RegisteredHook> = self
             .active_hooks(HookEventName::PostToolUse)
             .into_iter()
             .filter(|d| Self::matches_tool(d, tool_name))
@@ -586,7 +707,7 @@ impl HookSystem {
             };
         }
 
-        let defs: Vec<&HookDefinition> = self
+        let defs: Vec<&RegisteredHook> = self
             .active_hooks(HookEventName::PostToolUseFailure)
             .into_iter()
             .filter(|d| Self::matches_tool(d, tool_name))
@@ -618,7 +739,8 @@ impl HookSystem {
 
         let mut notifications = Vec::new();
         let mut sandbox_bypass_request = None;
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
             // Extract sandbox_bypass_request from hookSpecificOutput (last valid wins).
@@ -697,7 +819,8 @@ impl HookSystem {
 
         let mut notifications = Vec::new();
         let mut updated_tools = None;
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
             // Last valid full array in configuration order wins; a rejected
@@ -786,7 +909,8 @@ impl HookSystem {
         let outputs = self.run_hooks(&defs, &input).await;
 
         let mut notifications = Vec::new();
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
         }
@@ -815,9 +939,9 @@ impl HookSystem {
 
     async fn run_hooks(
         &self,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
         input: &HookInput,
-    ) -> Vec<(usize, HookOutput)> {
+    ) -> Vec<(usize, HookExecution)> {
         let input_json = crate::redaction::to_redacted_json_with_schemas(
             input,
             crate::redaction::TOOL_DECLARATION_PATHS,
@@ -839,8 +963,11 @@ impl HookSystem {
                     let cmd = def.command.clone();
                     let env = def.env.clone();
                     let timeout = Self::timeout_for(def);
+                    let accepts_empty_output = def.accepts_empty_output;
                     async move {
-                        let output = Self::run_hook_cmd(&cmd, &env, &json, timeout).await;
+                        let output =
+                            Self::run_hook_cmd(&cmd, &env, &json, timeout, accepts_empty_output)
+                                .await;
                         (i, output)
                     }
                 })
@@ -849,8 +976,15 @@ impl HookSystem {
         }
     }
 
-    async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookOutput {
-        Self::run_hook_cmd(&def.command, &def.env, input_json, Self::timeout_for(def)).await
+    async fn run_single_hook(def: &RegisteredHook, input_json: &str) -> HookExecution {
+        Self::run_hook_cmd(
+            &def.command,
+            &def.env,
+            input_json,
+            Self::timeout_for(def),
+            def.accepts_empty_output,
+        )
+        .await
     }
 
     async fn run_hook_cmd(
@@ -858,10 +992,11 @@ impl HookSystem {
         env: &BTreeMap<String, String>,
         input_json: &str,
         timeout: Duration,
-    ) -> HookOutput {
+        accepts_empty_output: bool,
+    ) -> HookExecution {
         use tokio::process::Command;
 
-        use crate::process::{output_with_timeout, OutputError};
+        use crate::process::{output_with_timeout, OutputError, MAX_PIPE_OUTPUT_BYTES};
 
         let safe_command = crate::redaction::redact_text(command);
         let mut cmd = Command::new("sh");
@@ -894,66 +1029,129 @@ impl HookSystem {
 
         // The deadline covers the stdin write as well: a hook that never
         // reads stdin must not stall the session, and on timeout the whole
-        // process group is killed instead of leaking grandchildren.
+        // process group is killed instead of leaking grandchildren. Output
+        // collection is size-capped per pipe so a runaway hook cannot
+        // exhaust memory (issue #2841).
         let result = output_with_timeout(cmd, Some(input_json.as_bytes().to_vec()), timeout).await;
 
         let output = match result {
             Ok(o) => o,
             Err(OutputError::Spawn(e)) => {
                 tracing::error!(target: "cosh_hook", "Failed to spawn hook '{safe_command}': {e}");
-                return HookOutput::default();
+                return HookExecution {
+                    output: HookOutput::default(),
+                    failure: Some(HookFailureKind::Spawn),
+                };
             }
             Err(OutputError::Io(e)) => {
                 tracing::error!(target: "cosh_hook", "Hook '{safe_command}' execution failed: {e}");
-                return HookOutput::default();
+                return HookExecution {
+                    output: HookOutput::default(),
+                    failure: Some(HookFailureKind::Io),
+                };
             }
             Err(OutputError::Timeout) => {
                 tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' timed out");
-                return HookOutput::default();
+                return HookExecution {
+                    output: HookOutput::default(),
+                    failure: Some(HookFailureKind::Timeout),
+                };
             }
         };
 
-        let exit_code = output.status.code().unwrap_or(1);
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if output.stdout_truncated || output.stderr_truncated {
+            tracing::warn!(
+                target: "cosh_hook",
+                "Hook '{safe_command}' output exceeded {MAX_PIPE_OUTPUT_BYTES} bytes; \
+                 the process group was killed and the output was cut short"
+            );
+            return HookExecution {
+                output: HookOutput::default(),
+                failure: Some(HookFailureKind::OutputTruncated),
+            };
+        }
+
+        let Some(exit_code) = output.status.code() else {
+            tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' terminated by signal");
+            return HookExecution {
+                output: HookOutput::default(),
+                failure: Some(HookFailureKind::Signaled),
+            };
+        };
 
         match exit_code {
             0 => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let trimmed = stdout.trim();
-                if trimmed.is_empty() {
-                    return HookOutput::default();
+                if output.stdout.iter().all(u8::is_ascii_whitespace) {
+                    if accepts_empty_output {
+                        return HookExecution {
+                            output: HookOutput::default(),
+                            failure: None,
+                        };
+                    }
+                    tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' returned empty output");
+                    return HookExecution {
+                        output: HookOutput::default(),
+                        failure: Some(HookFailureKind::EmptyOutput),
+                    };
                 }
-                let output = serde_json::from_str::<HookOutput>(trimmed).unwrap_or_else(|e| {
-                    tracing::warn!(target: "cosh_hook", "Failed to parse output from '{safe_command}': {e}");
-                    HookOutput::default()
-                });
-                Self::redact_hook_output(output)
+                match decode_hook_output(&output.stdout) {
+                    Some(output)
+                        if classify_hook_decision(output.decision.as_deref())
+                            != HookDecisionClass::Invalid =>
+                    {
+                        HookExecution {
+                            output: Self::redact_hook_output(output),
+                            failure: None,
+                        }
+                    }
+                    Some(_) | None => {
+                        tracing::warn!(
+                            target: "cosh_hook",
+                            "Hook '{safe_command}' returned invalid JSON"
+                        );
+                        HookExecution {
+                            output: HookOutput::default(),
+                            failure: Some(HookFailureKind::InvalidJson),
+                        }
+                    }
+                }
             }
             2 => {
                 // System block via exit code 2
-                Self::redact_hook_output(HookOutput {
-                    decision: Some("block".to_string()),
-                    reason: Some(if stderr.is_empty() {
-                        "Blocked by hook".to_string()
-                    } else {
-                        stderr.trim().to_string()
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = if stderr.trim().is_empty() {
+                    "Blocked by hook (exit 2)".to_string()
+                } else {
+                    stderr.trim().to_string()
+                };
+                HookExecution {
+                    output: Self::redact_hook_output(HookOutput {
+                        decision: Some("block".to_string()),
+                        reason: Some(reason),
+                        ..Default::default()
                     }),
-                    system_message: None,
-                    hook_specific_output: None,
-                })
+                    failure: None,
+                }
             }
             _ => {
-                // Non-zero (not 2) = warning, do not block
-                if !stderr.is_empty() {
-                    let stderr = crate::redaction::redact_text(stderr.trim());
-                    tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' warning: {stderr}");
+                // Non-zero (not 2) is a hook execution failure. Keep stderr
+                // out of the result and logs because hooks may write secrets.
+                tracing::warn!(
+                    target: "cosh_hook",
+                    "Hook '{safe_command}' exited with unexpected status"
+                );
+                HookExecution {
+                    output: HookOutput::default(),
+                    failure: Some(HookFailureKind::NonZero),
                 }
-                HookOutput::default()
             }
         }
     }
 
     fn redact_hook_output(mut output: HookOutput) -> HookOutput {
+        output.stop_reason = output
+            .stop_reason
+            .map(|value| crate::redaction::redact_text(&value));
         output.reason = output
             .reason
             .map(|value| crate::redaction::redact_text(&value));
@@ -973,15 +1171,32 @@ impl HookSystem {
 
     fn aggregate_pre_tool_use(
         &self,
-        outputs: Vec<(usize, HookOutput)>,
-        defs: &[&HookDefinition],
+        outputs: Vec<(usize, HookExecution)>,
+        defs: &[&RegisteredHook],
     ) -> PreToolUseResult {
         let mut decision = HookDecision::Passthrough;
         let mut tool_input_patch: Option<Value> = None;
         let mut notifications = Vec::new();
+        let mut hook_failures = Vec::new();
 
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
             let name = Self::hook_name(defs[i], i);
+            if let Some(kind) = execution.failure {
+                hook_failures.push(HookFailure {
+                    hook_name: name.clone(),
+                    kind,
+                });
+                notifications.push(HookNotification {
+                    hook_name: name,
+                    message: format!("Hook failed: {}", kind.reason()),
+                    decision: Some("hook_failure".to_string()),
+                });
+                if !defs[i].fail_open {
+                    decision = fold_hook_failure(decision, kind.reason());
+                }
+                continue;
+            }
+            let out = execution.output;
             self.collect_notifications(&out, &name, &mut notifications);
 
             decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
@@ -1000,20 +1215,22 @@ impl HookSystem {
             decision,
             tool_input_patch,
             notifications,
+            hook_failures,
         }
     }
 
     fn aggregate_post_tool_use(
         &self,
-        outputs: Vec<(usize, HookOutput)>,
-        defs: &[&HookDefinition],
+        outputs: Vec<(usize, HookExecution)>,
+        defs: &[&RegisteredHook],
     ) -> PostToolUseResult {
         let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
         let mut updated_tool_response: Option<String> = None;
         let mut notifications = Vec::new();
 
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
@@ -1038,14 +1255,15 @@ impl HookSystem {
 
     fn aggregate_user_prompt(
         &self,
-        outputs: Vec<(usize, HookOutput)>,
-        defs: &[&HookDefinition],
+        outputs: Vec<(usize, HookExecution)>,
+        defs: &[&RegisteredHook],
     ) -> UserPromptResult {
         let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
         let mut notifications = Vec::new();
 
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
@@ -1062,13 +1280,14 @@ impl HookSystem {
 
     fn aggregate_session_start(
         &self,
-        outputs: Vec<(usize, HookOutput)>,
-        defs: &[&HookDefinition],
+        outputs: Vec<(usize, HookExecution)>,
+        defs: &[&RegisteredHook],
     ) -> SessionStartResult {
         let mut additional_context: Option<String> = None;
         let mut notifications = Vec::new();
 
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
@@ -1083,13 +1302,14 @@ impl HookSystem {
 
     fn aggregate_stop(
         &self,
-        outputs: Vec<(usize, HookOutput)>,
-        defs: &[&HookDefinition],
+        outputs: Vec<(usize, HookExecution)>,
+        defs: &[&RegisteredHook],
     ) -> StopResult {
         let mut decision = HookDecision::Passthrough;
         let mut notifications = Vec::new();
 
-        for (i, out) in outputs {
+        for (i, execution) in outputs {
+            let out = execution.output;
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
@@ -1146,29 +1366,57 @@ pub fn merge_json_pub(a: Value, b: Value) -> Value {
 
 // ─── Decision Aggregation Primitives ─────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookDecisionClass {
+    Passthrough,
+    Block,
+    Ask,
+    Allow,
+    Invalid,
+}
+
+fn classify_hook_decision(raw: Option<&str>) -> HookDecisionClass {
+    match raw {
+        None | Some("") => HookDecisionClass::Passthrough,
+        Some("block") | Some("deny") | Some("reject") => HookDecisionClass::Block,
+        Some("ask") => HookDecisionClass::Ask,
+        Some("approve") | Some("allow") => HookDecisionClass::Allow,
+        Some(_) => HookDecisionClass::Invalid,
+    }
+}
+
+fn fold_hook_failure(current: HookDecision, reason: &str) -> HookDecision {
+    match current {
+        HookDecision::HookFailure(_) => current,
+        _ => HookDecision::HookFailure(format!("Hook failure: {reason}")),
+    }
+}
+
 /// Fold a raw hook output decision string into the running `HookDecision`.
 ///
 /// Priority (highest wins): Block > Ask > Allow > Passthrough.
 /// "reject" is treated as equivalent to "block"/"deny" (used by Stop hooks).
 fn fold_decision(current: HookDecision, raw: Option<&str>, reason: Option<String>) -> HookDecision {
-    match raw {
-        Some("block") | Some("deny") | Some("reject") => {
+    match classify_hook_decision(raw) {
+        HookDecisionClass::Block => {
             // Preserve the first non-empty block reason; don't let a later
             // hook without a reason overwrite an existing detailed message.
             match (&current, &reason) {
+                (HookDecision::HookFailure(_), _) => current,
                 (HookDecision::Block(_), None) => current,
                 _ => HookDecision::Block(reason.unwrap_or_else(|| "Blocked by hook".to_string())),
             }
         }
-        Some("ask") => match current {
-            HookDecision::Block(_) => current,
+        HookDecisionClass::Ask => match current {
+            HookDecision::Block(_) | HookDecision::HookFailure(_) => current,
             _ => HookDecision::Ask,
         },
-        Some("approve") | Some("allow") => match current {
+        HookDecisionClass::Allow => match current {
             HookDecision::Passthrough => HookDecision::Allow,
             _ => current,
         },
-        _ => current,
+        HookDecisionClass::Passthrough => current,
+        HookDecisionClass::Invalid => fold_hook_failure(current, "returned invalid decision"),
     }
 }
 
@@ -1293,9 +1541,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_hook_output_accepts_camel_case_aliases() {
+        let json = r#"{"continue":false,"stopReason":"stop","suppressOutput":true,"systemMessage":"notice","hookSpecificOutput":{"additionalContext":"context"}}"#;
+        let out = decode_hook_output(json.as_bytes()).unwrap();
+        assert_eq!(out.should_continue, Some(false));
+        assert_eq!(out.stop_reason.as_deref(), Some("stop"));
+        assert_eq!(out.suppress_output, Some(true));
+        assert_eq!(out.system_message.as_deref(), Some("notice"));
+        assert_eq!(
+            out.hook_specific_output.unwrap()["additionalContext"],
+            "context"
+        );
+    }
+
+    #[test]
+    fn parse_hook_output_accepts_unknown_fields() {
+        let json = r#"{"decision":"block","metadata":{"severity":"high"}}"#;
+        let out = decode_hook_output(json.as_bytes()).unwrap();
+        assert_eq!(out.decision.as_deref(), Some("block"));
+    }
+
+    #[test]
+    fn parse_hook_output_rejects_null_decision() {
+        let json = r#"{"decision":null}"#;
+        assert!(decode_hook_output(json.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn hook_decision_classification_matches_protocol() {
+        for (raw, expected) in [
+            (None, HookDecisionClass::Passthrough),
+            (Some(""), HookDecisionClass::Passthrough),
+            (Some("block"), HookDecisionClass::Block),
+            (Some("deny"), HookDecisionClass::Block),
+            (Some("reject"), HookDecisionClass::Block),
+            (Some("ask"), HookDecisionClass::Ask),
+            (Some("approve"), HookDecisionClass::Allow),
+            (Some("allow"), HookDecisionClass::Allow),
+            (Some("blok"), HookDecisionClass::Invalid),
+        ] {
+            assert_eq!(classify_hook_decision(raw), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn hook_fail_open_defaults_closed_and_accepts_explicit_true() {
+        let default: HookDefinition = serde_json::from_str(r#"{"command":"true"}"#).unwrap();
+        assert!(!default.fail_open);
+
+        let explicit: HookDefinition =
+            serde_json::from_str(r#"{"command":"true","fail_open":true}"#).unwrap();
+        assert!(explicit.fail_open);
+    }
+
+    #[test]
     fn hook_output_is_redacted_before_aggregation() {
         let secret = "short-hook-secret";
         let output = HookOutput {
+            stop_reason: Some(format!("token={secret}")),
             decision: Some("block".to_string()),
             reason: Some(format!("password={secret}")),
             system_message: Some(format!("Bearer {secret}")),
@@ -1303,11 +1606,13 @@ mod tests {
                 "additionalContext": format!("api_key={secret}"),
                 "tool_input": {"token": secret}
             })),
+            ..Default::default()
         };
 
         let output = HookSystem::redact_hook_output(output);
         let serialized = format!(
-            "{} {} {}",
+            "{} {} {} {}",
+            output.stop_reason.as_deref().unwrap_or_default(),
             output.reason.as_deref().unwrap_or_default(),
             output.system_message.as_deref().unwrap_or_default(),
             output
@@ -1341,6 +1646,150 @@ mod tests {
         assert_eq!(result.decision, HookDecision::Passthrough);
     }
 
+    fn extension_pre_tool_hook(command: &str) -> crate::extension::ExtensionHooks {
+        serde_json::from_value(serde_json::json!({
+            "PreToolUse": [{
+                "hooks": [{
+                    "type": "command",
+                    "name": "extension-probe",
+                    "command": command
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn extension_post_tool_hook(command: &str) -> crate::extension::ExtensionHooks {
+        serde_json::from_value(serde_json::json!({
+            "PostToolUse": [{
+                "hooks": [{
+                    "type": "command",
+                    "name": "extension-post-probe",
+                    "command": command
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn extension_empty_output_is_passthrough() {
+        let mut system = HookSystem::from_config(&HooksConfig::default());
+        system.register_extension_hooks(&extension_pre_tool_hook("true"));
+        assert!(system.enabled, "extension registration must enable hooks");
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert_eq!(result.decision, HookDecision::Passthrough);
+        assert!(result.hook_failures.is_empty());
+        assert!(result.notifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extension_errors_remain_fail_closed() {
+        for (command, expected) in [
+            ("printf 'not-json'", HookFailureKind::InvalidJson),
+            ("printf '{\"decision\":null}'", HookFailureKind::InvalidJson),
+            ("exit 7", HookFailureKind::NonZero),
+        ] {
+            let mut system = HookSystem::from_config(&HooksConfig::default());
+            system.register_extension_hooks(&extension_pre_tool_hook(command));
+            assert!(system.enabled, "extension registration must enable hooks");
+
+            let result = system
+                .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+                .await;
+
+            assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+            assert_eq!(result.hook_failures.len(), 1);
+            assert_eq!(result.hook_failures[0].kind, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_output_truncated_returns_failure() {
+        let mut system = HookSystem::from_config(&HooksConfig::default());
+        // Produce just over 32 MiB on stdout so the per-pipe cap triggers
+        // before the natural deadline.
+        system.register_extension_hooks(&extension_pre_tool_hook("yes | head -c 33554433"));
+        assert!(system.enabled, "extension registration must enable hooks");
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+        assert_eq!(result.hook_failures.len(), 1);
+        assert_eq!(
+            result.hook_failures[0].kind,
+            HookFailureKind::OutputTruncated
+        );
+        assert!(result.notifications[0]
+            .message
+            .contains("output exceeded the size limit"));
+    }
+
+    #[tokio::test]
+    async fn explicit_hooks_disable_prevents_extension_auto_enable() {
+        let config = HooksConfig {
+            enabled: false,
+            enabled_override: Some(false),
+            ..Default::default()
+        };
+        let mut system = HookSystem::from_config(&config);
+        system.register_extension_hooks(&extension_pre_tool_hook(
+            "printf '{\"decision\":\"block\",\"reason\":\"must not run\"}'",
+        ));
+        assert!(!system.enabled, "explicit disable must prevent auto-enable");
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert_eq!(result.decision, HookDecision::Passthrough);
+        assert!(result.hook_failures.is_empty());
+        assert!(result.notifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_hook_collision_remains_fail_closed() {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![HookDefinition {
+                command: "true".to_string(),
+                name: Some("extension-probe".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut system = HookSystem::from_config(&config);
+        system.register_extension_hooks(&extension_pre_tool_hook("true"));
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+        assert_eq!(result.hook_failures.len(), 1);
+        assert_eq!(result.hook_failures[0].kind, HookFailureKind::EmptyOutput);
+    }
+
+    #[tokio::test]
+    async fn extension_post_tool_empty_output_has_no_failure() {
+        let mut system = HookSystem::from_config(&HooksConfig::default());
+        system.register_extension_hooks(&extension_post_tool_hook("true"));
+        assert!(system.enabled, "extension registration must enable hooks");
+
+        let definitions = system.active_hooks(HookEventName::PostToolUse);
+        let input = system.build_input("s1", "/tmp", HookEventName::PostToolUse, Value::Null);
+        let outputs = system.run_hooks(&definitions, &input).await;
+
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].1.failure.is_none());
+    }
+
     #[test]
     fn matcher_regex_works() {
         let def = HookDefinition {
@@ -1349,6 +1798,7 @@ mod tests {
             matcher: Some("run_shell.*".to_string()),
             timeout: None,
             sequential: None,
+            fail_open: false,
             env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "run_shell_command"));
@@ -1363,6 +1813,7 @@ mod tests {
             matcher: None,
             timeout: None,
             sequential: None,
+            fail_open: false,
             env: Default::default(),
         };
         assert!(HookSystem::matches_tool(&def, "any_tool"));
@@ -1372,6 +1823,7 @@ mod tests {
     async fn fire_pre_tool_use_with_blocking_hook() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![HookDefinition {
                 command: "echo '{\"decision\":\"block\",\"reason\":\"no rm allowed\"}'".to_string(),
@@ -1379,6 +1831,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use: vec![],
@@ -1411,6 +1864,7 @@ mod tests {
     async fn fire_pre_tool_use_no_match() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![HookDefinition {
                 command: "echo '{\"decision\":\"block\",\"reason\":\"no\"}'".to_string(),
@@ -1418,6 +1872,7 @@ mod tests {
                 matcher: Some("run_shell_command".to_string()),
                 timeout: None,
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use: vec![],
@@ -1447,6 +1902,7 @@ mod tests {
         let secret = "sk-user-prompt-hook-secret";
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1458,6 +1914,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             session_start: vec![],
@@ -1482,13 +1939,15 @@ mod tests {
     async fn exit_code_2_means_block() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![HookDefinition {
-                command: "sh -c 'echo blocked >&2; exit 2'".to_string(),
+                command: "sh -c 'echo blocked: api_key=sk-exit2-secret >&2; exit 2'".to_string(),
                 name: Some("exit2-hook".to_string()),
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use: vec![],
@@ -1503,7 +1962,143 @@ mod tests {
         let result = sys
             .fire_pre_tool_use("s1", "/tmp", "tool-1", "any", &serde_json::json!({}), None)
             .await;
-        assert_eq!(result.decision, HookDecision::Block("blocked".to_string()));
+        let HookDecision::Block(reason) = result.decision else {
+            panic!("exit code 2 must block");
+        };
+        assert!(reason.starts_with("blocked:"), "{reason}");
+        assert!(reason.contains("<redacted>"), "{reason}");
+        assert!(!reason.contains("sk-exit2-secret"), "{reason}");
+        assert!(result.hook_failures.is_empty());
+    }
+
+    async fn run_pre_hook(
+        command: &str,
+        timeout: Option<u64>,
+        fail_open: bool,
+    ) -> PreToolUseResult {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![HookDefinition {
+                command: command.to_string(),
+                name: Some("failure-probe".to_string()),
+                matcher: None,
+                timeout,
+                sequential: None,
+                fail_open,
+                env: Default::default(),
+            }],
+            ..Default::default()
+        };
+        HookSystem::from_config(&config)
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await
+    }
+
+    #[tokio::test]
+    async fn exit_code_2_without_stderr_uses_fallback_reason() {
+        let result = run_pre_hook("sh -c 'exit 2'", Some(5000), false).await;
+        assert_eq!(
+            result.decision,
+            HookDecision::Block("Blocked by hook (exit 2)".to_string())
+        );
+        assert!(result.hook_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_failures_block_without_leaking_output() {
+        let cases = [
+            ("exit 7", HookFailureKind::NonZero),
+            ("printf 'not-json'", HookFailureKind::InvalidJson),
+            ("printf '{\"decision\":null}'", HookFailureKind::InvalidJson),
+            ("true", HookFailureKind::EmptyOutput),
+            (
+                "printf 'secret-output' >&2; exit 7",
+                HookFailureKind::NonZero,
+            ),
+        ];
+        for (command, kind) in cases {
+            let result = run_pre_hook(command, Some(500), false).await;
+            assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+            assert_eq!(result.hook_failures[0].kind, kind);
+            assert!(!result.notifications[0].message.contains("secret-output"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_tool_use_timeout_and_signal_fail_closed() {
+        let timeout = run_pre_hook("sleep 2", Some(20), false).await;
+        assert!(matches!(timeout.decision, HookDecision::HookFailure(_)));
+        assert_eq!(timeout.hook_failures[0].kind, HookFailureKind::Timeout);
+
+        let signal = run_pre_hook("kill -TERM $$", Some(500), false).await;
+        assert!(matches!(signal.decision, HookDecision::HookFailure(_)));
+        assert_eq!(signal.hook_failures[0].kind, HookFailureKind::Signaled);
+    }
+
+    #[tokio::test]
+    async fn explicit_fail_open_records_failure_without_authorizing_it() {
+        let result = run_pre_hook("printf 'secret-output'", Some(500), true).await;
+        assert_eq!(result.decision, HookDecision::Passthrough);
+        assert_eq!(result.hook_failures[0].kind, HookFailureKind::InvalidJson);
+        assert_eq!(
+            result.notifications[0].decision.as_deref(),
+            Some("hook_failure")
+        );
+        assert!(!result.notifications[0].message.contains("secret-output"));
+    }
+
+    #[tokio::test]
+    async fn valid_allow_has_no_hook_failure_metadata() {
+        let result = run_pre_hook("printf '{\"decision\":\"allow\"}'", Some(500), false).await;
+        assert_eq!(result.decision, HookDecision::Allow);
+        assert!(result.hook_failures.is_empty());
+    }
+
+    #[test]
+    fn all_hook_failure_kinds_fail_closed_without_detail_leakage() {
+        let definition = RegisteredHook {
+            definition: HookDefinition {
+                command: "probe".to_string(),
+                name: Some("failure-probe".to_string()),
+                matcher: None,
+                timeout: None,
+                sequential: None,
+                fail_open: false,
+                env: Default::default(),
+            },
+            accepts_empty_output: false,
+        };
+        let definitions = [&definition];
+        let system = HookSystem::new_disabled();
+
+        for kind in [
+            HookFailureKind::Spawn,
+            HookFailureKind::Io,
+            HookFailureKind::Timeout,
+            HookFailureKind::NonZero,
+            HookFailureKind::Signaled,
+            HookFailureKind::InvalidJson,
+            HookFailureKind::EmptyOutput,
+            HookFailureKind::OutputTruncated,
+        ] {
+            let result = system.aggregate_pre_tool_use(
+                vec![(
+                    0,
+                    HookExecution {
+                        output: HookOutput::default(),
+                        failure: Some(kind),
+                    },
+                )],
+                &definitions,
+            );
+            assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+            assert_eq!(result.hook_failures[0].kind, kind);
+            assert_eq!(
+                result.notifications[0].message,
+                format!("Hook failed: {}", kind.reason())
+            );
+        }
     }
 
     // ===== Task 1: matcher 双向工具名兼容 =====
@@ -1515,6 +2110,7 @@ mod tests {
             matcher: Some(matcher.to_string()),
             timeout: None,
             sequential: None,
+            fail_open: false,
             env: Default::default(),
         }
     }
@@ -1710,6 +2306,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(10_000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             ..Default::default()
@@ -1738,6 +2335,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(10_000),
                     sequential: None,
+                    fail_open: false,
                     env: Default::default(),
                 },
                 HookDefinition {
@@ -1746,6 +2344,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(10_000),
                     sequential: None,
+                    fail_open: false,
                     env: Default::default(),
                 },
             ],
@@ -1778,6 +2377,7 @@ mod tests {
                     },
                 },
             }])),
+            ..Default::default()
         };
 
         let output = HookSystem::redact_hook_output(output);
@@ -1804,6 +2404,7 @@ mod tests {
             hook_specific_output: Some(serde_json::json!({
                 "api_key": "leaked-value",
             })),
+            ..Default::default()
         };
 
         let output = HookSystem::redact_hook_output(output);
@@ -1869,6 +2470,7 @@ mod tests {
         // hook 脚本输出使用输入中的 tool_name 与 tool_use_id 作为上下文验证。
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
@@ -1877,6 +2479,7 @@ mod tests {
                 matcher: Some("^run_shell_command$".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],
@@ -1911,6 +2514,7 @@ mod tests {
         // PostToolUse 路径验证（不同处理器但同样读 skill_context）。
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
@@ -1919,6 +2523,7 @@ mod tests {
                 matcher: Some("skill".to_string()),
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],
@@ -1961,11 +2566,16 @@ mod tests {
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let out =
-            HookSystem::run_hook_cmd(&script, &BTreeMap::new(), "{}", Duration::from_millis(300))
-                .await;
+        let out = HookSystem::run_hook_cmd(
+            &script,
+            &BTreeMap::new(),
+            "{}",
+            Duration::from_millis(300),
+            false,
+        )
+        .await;
         assert!(
-            out.decision.is_none(),
+            out.output.decision.is_none(),
             "timed-out hook must fall back to the default output"
         );
 
@@ -1990,9 +2600,10 @@ mod tests {
             &BTreeMap::new(),
             &payload,
             Duration::from_millis(300),
+            false,
         )
         .await;
-        assert!(out.decision.is_none());
+        assert!(out.output.decision.is_none());
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "stdin write must be bounded by the hook deadline"
@@ -2162,6 +2773,7 @@ mod tests {
     async fn post_tool_use_hook_emits_updated_tool_response() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
                 command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "compressed!", "additionalContext": "env-hint"}}))'"#.to_string(),
@@ -2169,6 +2781,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],
@@ -2207,6 +2820,7 @@ mod tests {
         // Two hooks both emit updatedToolResponse; last one in config order wins.
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![
                 HookDefinition {
@@ -2215,6 +2829,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                    fail_open: false,
                     env: Default::default(),
                 },
                 HookDefinition {
@@ -2223,6 +2838,7 @@ mod tests {
                     matcher: None,
                     timeout: Some(5000),
                     sequential: None,
+                    fail_open: false,
                     env: Default::default(),
                 },
             ],
@@ -2256,6 +2872,7 @@ mod tests {
     async fn post_tool_use_no_replacement_when_absent() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
                 command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"additionalContext": "just context"}}))'"#.to_string(),
@@ -2263,6 +2880,7 @@ mod tests {
                 matcher: None,
                 timeout: Some(5000),
                 sequential: None,
+                fail_open: false,
                 env: Default::default(),
             }],
             post_tool_use_failure: vec![],

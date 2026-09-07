@@ -87,11 +87,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onAuthenticated }) => {
             <code className="bg-gray-100 px-1 rounded">agentsight dashboard</code>
             {t('login.tokenHintSuffix')}
           </p>
-          <p className="mt-1">
-            {t('login.fullTokenHintPrefix')}
-            <code className="bg-gray-100 px-1 rounded">--full-token</code>
-            {t('login.fullTokenHintSuffix')}
-          </p>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 use super::*;
 
 mod approval_modes;
+mod composer;
 mod evidence;
 mod host_executed;
 mod lifecycle;

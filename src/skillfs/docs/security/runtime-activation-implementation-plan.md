@@ -219,16 +219,148 @@ event log.
 
 Scope:
 
-- Emit best-effort startup reconcile notifications for known skills after the
-  mount is ready.
-- Run reconcile on a background thread so mount startup is not blocked by a
-  slow or unavailable daemon.
+- Queue one startup reconcile notification per known skill after the mount is
+  ready, and let the shared notify worker own delivery.
+- Do not block mount startup on the daemon: enqueueing touches no socket, so a
+  slow or unavailable daemon cannot delay startup.
+- Retry a reconcile whose delivery failed transiently, with exponential
+  backoff, jitter, and a capped maximum interval, until the daemon
+  acknowledges it. See "Reconcile delivery durability" below.
 - Add `reloadOutcome` to protocol events for activation reload results:
   `activation_updated`, `activation_unchanged`, `activation_timeout`, and
   `activation_invalid_hidden`.
 - Provide explicit runtime reload helpers for one skill or known skills.
 - Preserve fd-pinned read consistency: old file handles keep their open-time
   target; new opens observe the updated active mapping.
+
+#### Reconcile Delivery Durability
+
+The first A4 implementation sent each reconcile exactly once from a detached
+thread and only logged a failed send. That lost the notification whenever
+SkillFS won the startup race against the daemon, and nothing recovered it: the
+A5 activation watcher consumes activation state the daemon has *already*
+written, so it cannot make the daemon scan a skill it has never seen. A skill
+absent from the daemon's `managedSkillDirs` would therefore stay fail-safe
+hidden until an unrelated filesystem event or a manual reconcile arrived.
+
+Reconcile delivery is therefore durable:
+
+- Each skill enters the notify worker's `pending` map as an immediately due
+  `eventKind="reconcile"` entry with empty `paths`, deduplicated by canonical
+  Skill identity.
+- A transient failure requeues the entry with exponential backoff, jitter, and
+  a capped maximum interval. Retries continue at the capped rate for as long as
+  the failure persists, so convergence does not depend on an attempt limit.
+- An ambiguous authentication failure retries under one endpoint/controller
+  budget shared by every skill. Transient transport failures do not consume
+  this budget. See "Ambiguous handshake outcomes" below.
+- A permanent failure is logged at `error` and dropped. Retrying an untrusted
+  endpoint, a rejected authentication proof, or a daemon rejection can only
+  reproduce the same result, so it needs an operator, not another attempt.
+- A reconcile failure that proves the business request was never sent skips
+  activation reload polling. Post-delivery failures retain the poll, while the
+  activation watcher remains the fallback for late repair in either case.
+- Shutdown forbids requeueing, and also abandons the remainder of an
+  already-drained batch rather than walking it entry by entry — each entry can
+  cost a full socket timeout plus an activation reload poll. The retry loop
+  lives in the worker rather than in a thread holding an
+  `Arc<NotifyController>`, so `Drop` still triggers shutdown even while a skill
+  is unconverged.
+
+Failures are classified by error variant, never by rendered message:
+
+| Condition | Class |
+| --- | --- |
+| Parent directory or socket not created yet (`NotFound`) | retry |
+| `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`, `BrokenPipe`, `NotConnected`, `UnexpectedEof` | retry |
+| Read/write timeout, `WouldBlock`, `Interrupted` | retry |
+| Authentication handshake I/O error, handshake timeout | retry |
+| Peer closed the connection or sent an unparseable frame during authentication | endpoint-scoped bounded retry |
+| Endpoint owner, mode, or file type unsafe (including `PermissionDenied` on stat) | permanent |
+| Authentication proof verification reported failed, unusable key material | permanent |
+| Complete malformed notify acknowledgement, notify schema mismatch, oversized authentication frame, daemon rejection | permanent |
+
+##### Ambiguous Handshake Outcomes
+
+One condition cannot be classified from the wire. sec-core refuses a bad
+client proof by **closing the connection**, so the SkillFS client observes EOF
+while waiting for `auth.ok`; `read_frame` maps that `Ok(0)` to
+`AuthError::InvalidFrame`. A daemon restarting at any handshake phase produces
+the same error variant. The client therefore never sees `VerificationFailed`
+for a wrong notify authentication key — that variant only covers proofs the
+peer explicitly answered.
+
+Neither pure classification is acceptable: treating it as transient retries a
+permanently wrong key forever, and treating it as permanent silently drops a
+reconcile lost to a genuine restart — the exact failure mode this section
+exists to remove. It is therefore its own class, retried with the normal
+backoff under an endpoint/controller-level budget of eight inconclusive
+handshakes, a nominal 31.75-second window before jitter. The budget is shared
+by every startup reconcile that uses the same notify client, rather than being
+multiplied by the number of skills. Another immediately due skill cannot bypass
+the endpoint backoff and consume the budget in a tight loop.
+
+Only an actual inconclusive authentication handshake consumes the ambiguous
+budget. Socket lifecycle and other transient transport failures retain their
+normal retry state but neither consume nor reset it. An acknowledged delivery
+proves that authentication is working and resets the budget. If the budget is
+exhausted, the worker emits one endpoint-level `error` naming the notify key as
+the thing to check and abandons the current and remaining queued startup
+reconciles without making one more authentication attempt per skill. This caps
+the total wrong-key handshake cost for the controller, independent of skill
+count, while still giving a daemon restart a bounded convergence window.
+The exhausted gate applies to that reconcile generation rather than disabling
+the controller forever: a later explicit startup-reconcile enqueue starts a
+new generation and clears the gate and its ambiguous count. Any acknowledged
+delivery also clears the gate and count; after exhaustion it advances the
+generation so entries already drained from the abandoned cycle remain stale.
+
+Retry is scoped to reconcile. Ordinary FUSE mutations keep their best-effort,
+single-attempt semantics, because the daemon re-derives the same state from the
+next reconcile or the next mutation in the same skill, and requeueing them
+would change the latency behaviour of the hot write path.
+
+Dedup handles the in-flight race. If a mutation for the same skill arrives
+while its reconcile is being delivered, the requeue merges rather than
+overwrites: the merged entry stays a reconcile with empty `paths`, because a
+reconcile is a full rescan of current on-disk state and already covers any path
+list.
+
+Ordinary mutation scheduling is untouched by all of this. A mutation landing on
+a queued reconcile leaves the entry completely alone — it neither downgrades
+`eventKind` nor moves `fireAt`, because the reconcile already covers it.
+Mutation-on-mutation keeps its original trailing-edge debounce, where each
+mutation pushes the deadline out so a continuous write burst dispatches once
+after it goes quiet rather than mid-write.
+
+Delivery observability replaces the previous single emitted-event count:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `attempted` | counter | Delivery attempts, counting every retry separately. |
+| `succeeded` | counter | Attempts the daemon acknowledged. |
+| `failed` | counter | Attempts that failed, counting every retry separately. |
+| `pending` | gauge | Skills currently queued for a delivery attempt. |
+
+`pending` is not derivable from the counters. A skill whose reconcile fails
+transiently increments `failed` **and** goes back into `pending`, because it is
+queued for another attempt.
+
+`pending` counts the queue, not in-flight work: the worker drains an entry
+before dispatching it and only requeues it if the attempt failed retryably, so
+`pending` reads 0 during the send window even when the skill has not converged.
+Alert on it being non-zero across a window rather than on a single sample.
+
+The counters describe actual delivery attempts. An inconclusive handshake
+increments both `attempted` and `failed` once, regardless of which skill was
+selected for that endpoint attempt. Reconciles abandoned after the shared
+authentication budget is exhausted are not additional attempts and therefore
+do not increment either counter; removing them from the queue updates
+`pending`. The endpoint-level terminal `error` is the signal that those queued
+skills were abandoned.
+
+The daemon wire protocol is unchanged, and no Kubernetes startup ordering
+constraint is introduced: SkillFS may start before or after the daemon.
 
 ### A5: Activation State Watcher And Continuous Convergence
 

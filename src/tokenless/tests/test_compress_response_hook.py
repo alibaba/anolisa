@@ -38,42 +38,102 @@ def _make_large_json_payload(char_target: int = 500) -> dict:
 
 
 def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
-    """Create a mock tokenless binary that simulates compression behavior."""
+    """Create a mock `tokenless` speaking the Protocol v2 PostTool operation.
+
+    Every invocation appends its argv to a `spawn_log` file next to the
+    binary, so tests can assert the one-subprocess contract (§5.6). The
+    mock also validates the request shape: a malformed request from the
+    hook exits non-zero, which the hook fails open on — surfacing
+    request-construction bugs as envelope mismatches.
+
+    Behaviors: "compress" applies string-truncation (>20 chars → first 20)
+    to the content and responds applied; "no-savings" and "passthrough"
+    return the original content under the matching disposition.
+    """
     mock_script = os.path.join(tmpdir, "tokenless")
 
+    prologue = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "spawn_log"), "a") as log:
+            log.write(" ".join(sys.argv[1:]) + "\\n")
+        if sys.argv[1:] != ["compress"]:
+            sys.exit(2)
+        request = json.loads(sys.stdin.read())
+        if (request.get("protocol_version") != 2
+                or request.get("operation") != "post_tool"
+                or "capabilities" not in request.get("input", {})):
+            sys.exit(2)
+        operation_input = request["input"]
+        content = operation_input["content"]
+
+        def respond(output, disposition, additional_context=None):
+            result = {
+                "output": output,
+                "disposition": disposition,
+                "content_type": "json",
+                "applied_operations": ["json_cleanup"] if disposition == "applied" else [],
+                "recoverability": "lossless",
+                "before_tokens": 100,
+                "after_tokens": 50 if disposition == "applied" else 100,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+            }
+            if additional_context:
+                result["additional_context"] = additional_context
+            print(json.dumps({
+                "protocol_version": 2,
+                "operation": "post_tool",
+                "attribution": request["attribution"],
+                "result": result,
+            }))
+
+        if operation_input["status"] == "error":
+            context = None
+            if "command not found" in content.lower():
+                context = "[tokenless:env] tool failed: ENV_DEPENDENCY_MISSING."
+            respond(content, "tool_error", context)
+            sys.exit(0)
+        if (not operation_input["capabilities"]["replace_output"]
+                or operation_input["content_origin"] == "file_content"
+                or len(content) < 200):
+            respond(content, "passthrough")
+            sys.exit(0)
+    """)
+
     if behavior == "compress":
-        script = textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import json, sys
-            if sys.argv[1] == "compress-response":
-                data = json.loads(sys.stdin.read())
-                compressed = {}
-                for k, v in data.items():
-                    if isinstance(v, str) and len(v) > 20:
-                        compressed[k] = v[:20]
-                    else:
-                        compressed[k] = v
-                print(json.dumps(compressed))
-            elif sys.argv[1] == "compress-toon":
-                sys.exit(1)
+        script = prologue + textwrap.dedent("""\
+            data = json.loads(content)
+            if isinstance(data, str):
+                data = json.loads(data)
+            compressed = {
+                k: (v[:20] if isinstance(v, str) and len(v) > 20 else v)
+                for k, v in data.items()
+            }
+            respond(json.dumps(compressed, separators=(",", ":")), "applied")
+        """)
+    elif behavior == "compress-text":
+        # Text-slot path: the hook must have declared replace_with_text for
+        # the unwrapped shell field; the deterministic head-truncation lets
+        # tests assert exactly which field's text was sent.
+        script = prologue + textwrap.dedent("""\
+            if operation_input["capabilities"].get("replace_with_text") is not True:
+                sys.exit(2)
+            respond(content[:40], "applied")
         """)
     elif behavior == "no-savings":
-        script = textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import json, sys
-            if sys.argv[1] == "compress-response":
-                data = json.loads(sys.stdin.read())
-                data["extra_padding"] = "x" * 200
-                print(json.dumps(data))
-            elif sys.argv[1] == "compress-toon":
-                sys.exit(1)
-        """)
+        script = prologue + 'respond(content, "no_savings")\n'
     elif behavior == "passthrough":
-        script = textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import sys
-            data = sys.stdin.read()
-            print(data)
+        script = prologue + 'respond(content, "passthrough")\n'
+    elif behavior == "wrong-protocol-version":
+        script = prologue + textwrap.dedent("""\
+            print(json.dumps({
+                "protocol_version": 1,
+                "operation": "post_tool",
+                "attribution": request["attribution"],
+                "result": {},
+            }))
         """)
     else:
         raise ValueError(f"Unknown behavior: {behavior}")
@@ -82,6 +142,16 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
         f.write(script)
     os.chmod(mock_script, os.stat(mock_script).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return mock_script
+
+
+def _spawn_log_lines(mock_tokenless_path: str) -> list:
+    """The argv lines the mock recorded, one per tokenless invocation."""
+    log_path = os.path.join(os.path.dirname(mock_tokenless_path), "spawn_log")
+    try:
+        with open(log_path) as f:
+            return [line.strip() for line in f if line.strip()]
+    except OSError:
+        return []
 
 
 def _create_mock_claude(tmpdir: str, version: str = "2.1.121") -> str:
@@ -122,6 +192,8 @@ def _run_hook(stdin_data: dict, agent_id: str, mock_tokenless_path: str,
 
     env = os.environ.copy()
     env["TOKENLESS_AGENT_ID"] = agent_id
+    if agent_id == "cosh-ng":
+        env["COSH_NG_VERSION"] = "0.5.0"
     env["PATH"] = os.path.dirname(mock_tokenless_path) + ":" + env.get("PATH", "")
     # Isolate HOME so hook doesn't read/write ~/.tokenless/.claude-version
     if isolated_home:
@@ -297,6 +369,62 @@ class TestBinaryFallbackPaths(unittest.TestCase):
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestRetrieveCommandClassifier(unittest.TestCase):
+    @staticmethod
+    def _classify(tool_name: str, command: object) -> bool:
+        hook_utils = TestBinaryFallbackPaths._hook_utils()
+        return hook_utils.is_tokenless_retrieve_command(
+            tool_name, {"command": command}
+        )
+
+    def test_accepts_generated_and_direct_retrieve_commands(self):
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+        commands = (
+            f"tokenless retrieve '{marker}'",
+            f'tokenless retrieve "{marker}"',
+            "tokenless retrieve ABCDEF0123456789ABCDEF01",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(self._classify("Bash", command))
+
+    def test_rejects_non_retrieve_shell_syntax_and_invalid_boundaries(self):
+        marker = "<<tokenless:0123456789abcdef01234567>>"
+        cases = (
+            ("Read", f"tokenless retrieve '{marker}'"),
+            ("Bash", f"relative/tokenless retrieve '{marker}'"),
+            ("Bash", f"/usr/bin/tokenless retrieve '{marker}'"),
+            ("Bash", f"'/usr/local/bin/tokenless' retrieve '{marker}'"),
+            ("Bash", f"'/tmp/tokenless test/tokenless' retrieve '{marker}'"),
+            ("Bash", f"tokenless retrieve {marker}"),
+            ("Bash", "tokenless retrieve 0123456789abcdef01234567 # comment"),
+            ("Bash", "tokenless retrieve 0123456789abcdef0123456\\7"),
+            ("Bash", "tokenless retrieve $'0123456789abcdef01234567'"),
+            ("Bash", "tokenless retrieve\n0123456789abcdef01234567"),
+            ("Bash", "tokenless retrieve 0123456789abcdef01234567\u00a0"),
+            ("Bash", f"tokenless retrieve '{marker}' | jq ."),
+            ("Bash", f"tokenless retrieve '{marker}' > recovered.json"),
+            ("Bash", f"tokenless retrieve '{marker}'; echo done"),
+            ("Bash", f"tokenless retrieve '{marker}' extra"),
+            ("Bash", "tokenless retrieve <<tokenless:not-a-hash>>"),
+            ("Bash", "tokenless retrieve 'unterminated"),
+            ("Bash", 42),
+        )
+        for tool_name, command in cases:
+            with self.subTest(tool_name=tool_name, command=command):
+                self.assertFalse(self._classify(tool_name, command))
+
+    def test_recovery_requires_bare_tokenless_on_path(self):
+        hook_utils = TestBinaryFallbackPaths._hook_utils()
+        with mock.patch.object(hook_utils.shutil, "which", return_value=None):
+            self.assertFalse(hook_utils.tokenless_retrieve_command_available())
+        with mock.patch.object(
+            hook_utils.shutil, "which", return_value="/usr/bin/tokenless"
+        ):
+            self.assertTrue(hook_utils.tokenless_retrieve_command_available())
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestReplacementProtocol(unittest.TestCase):
     """Verify updatedToolOutput replacement semantics."""
 
@@ -394,6 +522,56 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertIsInstance(hso.get("updatedToolOutput"), str)
         self.assertNotIn("additionalContext", hso,
                          "OpenCode compressed content must not be additive")
+
+    def test_business_exit_code_is_not_a_process_failure(self):
+        payload = {
+            "exitCode": 1,
+            "error": "business status, not a host execution failure",
+            "message": "permission denied is a documented business status " * 12,
+        }
+        result = _run_hook(
+            {
+                "tool_name": "mcp__analytics_report",
+                "tool_response": payload,
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("updatedToolOutput", hso)
+        self.assertNotIn("additionalContext", hso)
+
+    def test_cosh_ng_nested_shell_failure_uses_llm_content_status(self):
+        result = _run_hook(
+            {
+                "tool_name": "run_shell_command",
+                "tool_response": {
+                    "llmContent": {
+                        "stdout": "",
+                        "stderr": "sh: rg: command not found",
+                        "exitCode": 127,
+                    },
+                    "returnDisplay": "ran `rg pattern` (exit 127)",
+                },
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="cosh-ng",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("ENV_DEPENDENCY_MISSING", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolResponse", hso)
 
     def test_replacement_is_smaller(self):
         """The replacement output should be smaller than the original."""
@@ -522,6 +700,92 @@ class TestReplacementProtocol(unittest.TestCase):
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestShellEnvelopeUnwrap(unittest.TestCase):
+    """Shell envelopes ride the text slot: the dominant stdout/stderr field
+    is sent as plain text and the compressed text is re-injected into a
+    same-shaped envelope — the host's tool protocol stays intact."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+        self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress-text")
+        self.mock_claude = _create_mock_claude(self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
+
+    @staticmethod
+    def _bash_envelope(stdout: str, stderr: str) -> dict:
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "interrupted": False,
+            "isImage": False,
+        }
+
+    def test_stderr_dominant_envelope_is_rewrapped_in_place(self):
+        log = "error: build failed\n" + "junk line\n" * 300
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope("", log),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(updated, self._bash_envelope("", log[:40]),
+                         "Compressed text must replace exactly the sent field")
+        self.assertEqual(len(_spawn_log_lines(self.mock_bin)), 1,
+                         "Unwrapping must not add a second subprocess")
+
+    def test_largest_field_wins_and_the_other_stays_verbatim(self):
+        stdout = "info: routine progress line\n" * 100
+        stderr = "warn: something odd\n" * 110
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(stdout, stderr),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertEqual(updated, self._bash_envelope(stdout[:40], stderr))
+
+    def test_qoder_rewrapped_envelope_is_a_compact_json_string(self):
+        log = "npm ERR! code ELIFECYCLE\n" + "npm verbose stack line\n" * 150
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": self._bash_envelope(log, ""),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        updated = result["hookSpecificOutput"]["updatedToolOutput"]
+        self.assertIsInstance(updated, str,
+                              "Qoder requires a string updatedToolOutput")
+        self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestPassthrough(unittest.TestCase):
     """Verify pass-through when compression yields no size reduction."""
 
@@ -555,6 +819,30 @@ class TestPassthrough(unittest.TestCase):
                          f"Hook subprocess failed: {result}")
         self.assertEqual(result, {},
                          "Should skip when compression yields no savings")
+
+    def test_version_skewed_response_fails_open(self):
+        """A response declaring a protocol version this adapter does not
+        speak must never replace model-visible output."""
+        mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
+        mock_bin = _create_mock_tokenless(mock_dir, "wrong-protocol-version")
+        _create_mock_claude(mock_dir)
+
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": _make_large_json_payload(),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {},
+                         "Version-skewed responses must fail open")
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
@@ -595,10 +883,31 @@ class TestSkipTools(unittest.TestCase):
         self.assertNotIn("updatedToolOutput", hso,
                          "Skip-tools should not replace tool output")
 
+    def test_skip_tools_are_classified_by_core(self):
+        """File-content policy belongs to the PostTool service."""
+        result = _run_hook(
+            {
+                "tool_name": "Read",
+                "tool_response": _make_large_json_payload(),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {})
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestNonReplacementAdapters(unittest.TestCase):
-    """Verify non-Claude-Code adapters still get the legacy additionalContext."""
+    """additionalContext-only hosts pass through (roadmap: additive
+    injection would append the compressed copy beside the still-visible
+    original, a net token increase)."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -610,8 +919,8 @@ class TestNonReplacementAdapters(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         shutil.rmtree(self.isolated_home, ignore_errors=True)
 
-    def test_qwencode_uses_additional_context(self):
-        """Qwen Code should use additionalContext (legacy path)."""
+    def test_qwencode_passes_through_via_core(self):
+        """Qwen Code declares no replacement capability to Core."""
         large_payload = _make_large_json_payload()
 
         result = _run_hook(
@@ -628,11 +937,109 @@ class TestNonReplacementAdapters(unittest.TestCase):
 
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {},
+                         "Hosts without true replacement remain passthrough")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
+
+    def test_qwencode_still_receives_env_attribution(self):
+        """Environment attribution is genuinely additive and stays."""
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "", "stderr": "bash: rg: command not found",
+                                  "exit_code": 127},
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qwencode",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
-        self.assertIn("additionalContext", hso,
-                       "Non-replacement adapters should use additionalContext")
-        self.assertNotIn("updatedToolOutput", hso,
-                         "Non-replacement adapters should not use updatedToolOutput")
+        self.assertIn("[tokenless:env]", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolOutput", hso)
+
+    def test_shell_diagnostic_uses_short_stderr_not_large_stdout(self):
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {
+                    "stdout": "routine output\n" * 1_000,
+                    "stderr": "bash: rg: command not found",
+                    "exit_code": 127,
+                },
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qwencode",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertIn("ENV_DEPENDENCY_MISSING", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolOutput", hso)
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestSingleSubprocess(unittest.TestCase):
+    """One Tokenless subprocess per hook invocation (roadmap §5.6).
+
+    TOON selection and its 500-char gate live behind the entry point now
+    (see the Rust entry tests, including the non-BMP code-point cases);
+    what the hook owes the contract is that everything happens in a single
+    `tokenless compress` spawn.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+        self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
+        self.mock_claude = _create_mock_claude(self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
+
+    def test_compressible_payload_spawns_exactly_once(self):
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": _make_large_json_payload(1000),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertIn("updatedToolOutput", result.get("hookSpecificOutput", {}))
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "exactly one tokenless subprocess per invocation")
+
+    def test_small_payload_is_gated_by_core(self):
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "short", "exit_code": 0},
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {})
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"])
 
 
 if __name__ == "__main__":

@@ -1,9 +1,16 @@
 //! Component identity resolution across install backends.
 //!
-//! This module owns the mapping from user input to two identities: the stable
-//! ANOLISA component name and the selected backend's native package name.
-//! Command handlers should consume this resolved pair instead of duplicating
-//! backend-specific candidate chains.
+//! Two questions are answered here, deliberately kept apart (issue #2630):
+//!
+//! 1. **Identity** — is this input a supported component? Exact identities
+//!    already recorded in local state are settled by the caller; every other
+//!    identity resolves only through the repo-side component index
+//!    ([`resolve_index_identity`]). Site-local `package_map` entries and RPM
+//!    `Provides: anolisa-component(...)` metadata never establish an identity.
+//! 2. **Package** — which backend package implements a known component?
+//!    [`ComponentResolver`] answers this for a *settled* component identity,
+//!    where `package_map`, explicit package overrides, and RPM `Provides`
+//!    may select, validate, or discover the backend package.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -11,13 +18,13 @@ use std::path::Path;
 use anolisa_core::download::DownloadCache;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_url};
+use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_v2_url};
 
-/// On-disk schema version for repo-side `components.toml`.
-pub(crate) const COMPONENT_INDEX_SCHEMA_VERSION: u32 = 1;
+/// On-disk schema version for repo-side `components-v2.toml`.
+pub(crate) const COMPONENT_INDEX_SCHEMA_VERSION: u32 = 2;
 
 /// Repository-side component identity and backend mapping index.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -26,8 +33,7 @@ pub(crate) struct ComponentIndex {
     pub(crate) schema_version: u32,
     /// Optional publish timestamp for diagnostics.
     ///
-    /// This is not required in v1 indexes, so absent fields deserialize as
-    /// `None` to keep hand-authored indexes small.
+    /// Absent fields deserialize as `None` to keep hand-authored indexes small.
     #[serde(default)]
     pub(crate) generated_at: Option<String>,
     /// Optional publishing party for diagnostics.
@@ -48,12 +54,14 @@ pub(crate) struct ComponentIndex {
 pub(crate) struct ComponentIndexEntry {
     /// Stable ANOLISA component name.
     pub(crate) name: String,
-    /// Optional human label; not used by resolution v1.
+    /// Optional human label; not used by identity resolution.
     #[serde(default)]
     pub(crate) display_name: Option<String>,
-    /// Optional one-line summary; not used by resolution v1.
+    /// Optional one-line summary; not used by identity resolution.
     #[serde(default)]
     pub(crate) summary: Option<String>,
+    /// Supported host OS/architecture combinations.
+    pub(crate) targets: Vec<ComponentTarget>,
     /// Backend-native package names for this component.
     ///
     /// Components may initially ship on only one backend, so the list defaults
@@ -65,6 +73,15 @@ pub(crate) struct ComponentIndexEntry {
     /// Alias rows are optional and mainly cover historical RPM package names.
     #[serde(default)]
     pub(crate) aliases: Vec<ComponentAliasEntry>,
+}
+
+/// One host target supported by a component.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ComponentTarget {
+    /// Operating system identifier used by distribution indexes.
+    pub(crate) os: String,
+    /// CPU architecture identifier used by distribution indexes.
+    pub(crate) arch: String,
 }
 
 /// Backend-native identity for a component.
@@ -98,7 +115,27 @@ pub(crate) struct ComponentAliasEntry {
     pub(crate) name: String,
 }
 
-/// Parse or validation failures for `components.toml`.
+fn is_canonical_os(os: &str) -> bool {
+    let bytes = os.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn is_canonical_architecture(architecture: &str) -> bool {
+    let bytes = architecture.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-' || *byte == b'_'
+        })
+}
+
+/// Parse or validation failures for `components-v2.toml`.
 #[derive(Debug, Error)]
 pub(crate) enum ComponentIndexError {
     /// TOML parse or read error.
@@ -136,23 +173,10 @@ impl BackendKind {
     }
 }
 
-/// Command context for a resolution request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResolutionUse {
-    /// `install` may install or adopt.
-    Install,
-    /// `adopt` only records an already-installed RPM.
-    Adopt,
-    /// `status` observes without writing state.
-    StatusObserved,
-    /// `repair` only migrates existing legacy RPM state rows.
-    RepairLegacy,
-}
-
 /// Source that produced a resolved component/package pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResolutionSource {
-    /// Repository `components.toml`.
+    /// Repository component index.
     ComponentIndex,
     /// Site-local `[backends.rpm.package_map]`.
     RepoPackageMap,
@@ -195,7 +219,7 @@ impl ResolvedTarget {
 /// Cardinality result for resolving an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResolutionSet {
-    /// No ANOLISA component identity could be proven.
+    /// No backend package could be resolved for the component.
     None,
     /// Exactly one target.
     Unique(ResolvedTarget),
@@ -210,7 +234,13 @@ pub(crate) struct ResolveOptions<'a> {
     pub(crate) package_override: Option<&'a str>,
 }
 
-/// Resolver over a repository component index plus backend-specific fallbacks.
+/// Backend package resolver for a settled component identity.
+///
+/// Every `resolve` input must already be a component identity established by
+/// the caller — an exact name from local state or an index-resolved canonical
+/// name. The resolver never returns a target whose `component` differs from
+/// the input: `package_map`, package overrides, and RPM `Provides` select or
+/// validate the backing package, they do not create identities.
 pub(crate) struct ComponentResolver<'a> {
     component_index: Option<&'a ComponentIndex>,
     rpm_backend: Option<&'a BackendConfig>,
@@ -230,31 +260,33 @@ impl<'a> ComponentResolver<'a> {
         }
     }
 
-    /// Resolve `input` for `backend`.
+    /// Resolve the backend package for component identity `component`.
     pub(crate) fn resolve(
         &self,
-        input: &str,
+        component: &str,
         backend: BackendKind,
-        use_case: ResolutionUse,
         opts: ResolveOptions<'_>,
     ) -> Result<ResolutionSet, PackageQueryError> {
         match backend {
-            BackendKind::Rpm => self.resolve_rpm(input, use_case, opts),
-            BackendKind::Raw => Ok(self.resolve_raw(input)),
+            BackendKind::Rpm => self.resolve_rpm(component, opts),
+            BackendKind::Raw => Ok(self.resolve_raw(component)),
             BackendKind::Other => Ok(ResolutionSet::None),
         }
     }
 
-    fn resolve_raw(&self, input: &str) -> ResolutionSet {
+    fn resolve_raw(&self, component: &str) -> ResolutionSet {
         let targets = self
             .component_index
-            .map(|idx| idx.targets_for_backend(input, BackendKind::Raw, "raw-package"))
+            .map(|idx| idx.targets_for_component(component, BackendKind::Raw))
             .unwrap_or_default();
         normalize_resolution_set(if targets.is_empty() {
+            // Not an identity claim: the component is already settled, and a
+            // same-named distribution entry is the raw backend's default
+            // package guess. The distribution index refuses unknown packages.
             vec![ResolvedTarget::new(
-                input,
+                component,
                 BackendKind::Raw,
-                input,
+                component,
                 ResolutionSource::RawDistributionIndex,
                 false,
             )]
@@ -265,20 +297,19 @@ impl<'a> ComponentResolver<'a> {
 
     fn resolve_rpm(
         &self,
-        input: &str,
-        use_case: ResolutionUse,
+        component: &str,
         opts: ResolveOptions<'_>,
     ) -> Result<ResolutionSet, PackageQueryError> {
         let query = self
             .rpm_query
             .expect("rpm resolution requires a PackageQuery");
-        let mapped = self.rpm_backend.and_then(|b| b.package_map.get(input));
+        let mapped = self.rpm_backend.and_then(|b| b.package_map.get(component));
 
         if let Some(package) = opts.package_override {
             let mut targets = Vec::new();
             if mapped.is_some_and(|mapped| mapped == package) {
                 targets.push(ResolvedTarget::new(
-                    input,
+                    component,
                     BackendKind::Rpm,
                     package,
                     ResolutionSource::RepoPackageMap,
@@ -286,16 +317,20 @@ impl<'a> ComponentResolver<'a> {
                 ));
             }
             if let Some(idx) = self.component_index {
-                targets.extend(idx.targets_for_component_package(input, BackendKind::Rpm, package));
+                targets.extend(idx.targets_for_component_package(
+                    component,
+                    BackendKind::Rpm,
+                    package,
+                ));
             }
-            if let Some(target) = rpm_package_provides_component(query, package, input)? {
+            if let Some(target) = rpm_package_provides_component(query, package, component)? {
                 targets.push(target);
             }
             return Ok(normalize_resolution_set(targets));
         }
 
         if let Some(idx) = self.component_index {
-            let targets = idx.targets_for_backend(input, BackendKind::Rpm, "rpm-package");
+            let targets = idx.targets_for_component(component, BackendKind::Rpm);
             if !targets.is_empty() {
                 return Ok(normalize_resolution_set(targets));
             }
@@ -303,7 +338,7 @@ impl<'a> ComponentResolver<'a> {
 
         if let Some(package) = mapped {
             return Ok(ResolutionSet::Unique(ResolvedTarget::new(
-                input,
+                component,
                 BackendKind::Rpm,
                 package,
                 ResolutionSource::RepoPackageMap,
@@ -311,7 +346,7 @@ impl<'a> ComponentResolver<'a> {
             )));
         }
 
-        let provide = rpm_component_provide(input);
+        let provide = rpm_component_provide(component);
         let installed_providers = query.what_provides_installed(&provide)?;
         if !installed_providers.is_empty() {
             return Ok(normalize_resolution_set(
@@ -319,7 +354,7 @@ impl<'a> ComponentResolver<'a> {
                     .into_iter()
                     .map(|package| {
                         ResolvedTarget::new(
-                            input,
+                            component,
                             BackendKind::Rpm,
                             package,
                             ResolutionSource::InstalledRpmProvides,
@@ -332,92 +367,82 @@ impl<'a> ComponentResolver<'a> {
 
         let available_providers = query.what_provides_available(&provide)?;
         if !available_providers.is_empty() {
-            let repo_backed_legacy = matches!(
-                use_case,
-                ResolutionUse::Install
-                    | ResolutionUse::Adopt
-                    | ResolutionUse::StatusObserved
-                    | ResolutionUse::RepairLegacy
-            );
             return Ok(normalize_resolution_set(
                 available_providers
                     .into_iter()
                     .map(|package| {
                         ResolvedTarget::new(
-                            input,
+                            component,
                             BackendKind::Rpm,
                             package,
                             ResolutionSource::AvailableRpmProvides,
-                            repo_backed_legacy,
+                            true,
                         )
                     })
                     .collect(),
             ));
         }
 
-        Ok(normalize_resolution_set(rpm_package_name_targets(
-            query, input,
-        )?))
+        Ok(ResolutionSet::None)
     }
 }
 
-/// Resolve an RPM-oriented user input to a stable component name.
+/// Identity verdict for an input not backed by exact local state.
 ///
-/// This is a read-only projection used by tests that need to exercise the full
-/// RPM resolution chain (component index + package_map + rpmdb provides).
-/// Production code uses [`lookup_component_alias`] which is in-memory only.
-#[cfg(test)]
-pub(crate) fn resolve_rpm_component_name(
-    input: &str,
-    rpm_backend: Option<&BackendConfig>,
-    component_index: Option<&ComponentIndex>,
-    query: &dyn PackageQuery,
-    use_case: ResolutionUse,
-) -> Option<String> {
-    let resolver = ComponentResolver::new(component_index, rpm_backend, Some(query));
-    match resolver.resolve(input, BackendKind::Rpm, use_case, ResolveOptions::default()) {
-        Ok(ResolutionSet::Unique(target)) => Some(target.component),
-        _ => None,
-    }
+/// Produced by [`resolve_index_identity`]; callers translate the two failure
+/// verdicts into their command's public errors so "the index rejected this
+/// name" and "no index was available to consult" stay distinguishable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IndexIdentity {
+    /// The index recognizes the input and names this canonical component.
+    Resolved(String),
+    /// The index is authoritative and has no entry matching the input.
+    Unsupported,
+    /// No index was available, so the input cannot be validated.
+    Unavailable,
 }
 
-/// In-memory alias resolution only — no rpmdb/dnf queries.
+/// Resolve an input to a component identity through the component index.
 ///
-/// Used by [`common::lookup_component_name_in_store`](crate::commands::common::lookup_component_name_in_store)
-/// for commands that address existing state. Checks the component index for
-/// component-name, backend-package, and alias matches across both RPM and Raw
-/// backends. Returns `None` when no match is found or the match is ambiguous
-/// (multiple distinct components share the same alias/package name) so the
-/// caller can fall back to the literal input.
-pub(crate) fn lookup_component_alias(
+/// The index is the sole authority for identities that are not already
+/// present in exact local state (issue #2630): canonical component names,
+/// declared aliases, and backend package names resolve to the entry's
+/// canonical name; anything else is [`IndexIdentity::Unsupported`]. Without
+/// an index no new identity can be established at all.
+pub(crate) fn resolve_index_identity(
     input: &str,
     component_index: Option<&ComponentIndex>,
-) -> Option<String> {
-    let idx = component_index?;
-
-    // Collect unique component names from both backends. A single input
-    // may match across RPM and Raw backends (e.g., the component name plus
-    // an alias), but all matches must resolve to the same component — if two
-    // distinct components share the same alias/package name, the lookup is
-    // ambiguous and must not silently pick one.
-    let mut components: BTreeSet<String> = BTreeSet::new();
-    for target in idx.targets_for_backend(input, BackendKind::Rpm, "rpm-package") {
-        components.insert(target.component);
+) -> IndexIdentity {
+    let Some(index) = component_index else {
+        return IndexIdentity::Unavailable;
+    };
+    // Name-level matching over canonical names, declared aliases, and backend
+    // package names, deliberately ignoring alias kinds and backend rows:
+    // identity is about what the index calls the name, not which backends
+    // exist for it. Canonical spelling earns no precedence — if two distinct
+    // components claim the same name in any role, the lookup is ambiguous and
+    // must not silently pick one.
+    let mut matches: BTreeSet<&str> = BTreeSet::new();
+    for entry in &index.components {
+        if entry.name == input
+            || entry.aliases.iter().any(|alias| alias.name == input)
+            || entry
+                .backends
+                .iter()
+                .any(|backend| backend.package == input)
+        {
+            matches.insert(entry.name.as_str());
+        }
     }
-    for target in idx.targets_for_backend(input, BackendKind::Raw, "raw-package") {
-        components.insert(target.component);
-    }
-
-    // Return only when the lookup resolves to exactly one unique component.
-    if components.len() == 1 {
-        components.into_iter().next()
-    } else {
-        None
+    let mut names = matches.into_iter();
+    match (names.next(), names.next()) {
+        (Some(component), None) => IndexIdentity::Resolved(component.to_string()),
+        _ => IndexIdentity::Unsupported,
     }
 }
 
 impl ComponentIndex {
-    /// Parse and validate `components.toml`.
+    /// Parse and validate a component index.
     pub(crate) fn from_toml_str(
         s: &str,
         path: impl AsRef<Path>,
@@ -462,6 +487,30 @@ impl ComponentIndex {
                     reason: format!("duplicate component '{name}'"),
                 });
             }
+            if entry.targets.is_empty() {
+                return Err(ComponentIndexError::Invalid {
+                    reason: format!("component '{name}' must declare at least one target"),
+                });
+            }
+            let mut targets = BTreeSet::new();
+            for target in &entry.targets {
+                if !is_canonical_os(&target.os) || !is_canonical_architecture(&target.arch) {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' target '{}/{}' must use canonical lowercase OS and architecture identifiers",
+                            target.os, target.arch
+                        ),
+                    });
+                }
+                if !targets.insert((target.os.as_str(), target.arch.as_str())) {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' declares duplicate target '{}/{}'",
+                            target.os, target.arch
+                        ),
+                    });
+                }
+            }
             for backend in &entry.backends {
                 if backend.kind.trim().is_empty() {
                     return Err(ComponentIndexError::Invalid {
@@ -496,24 +545,19 @@ impl ComponentIndex {
         Ok(())
     }
 
-    fn targets_for_backend(
-        &self,
-        input: &str,
-        backend: BackendKind,
-        alias_kind: &str,
-    ) -> Vec<ResolvedTarget> {
+    /// Backend targets for the entry whose canonical name is `component`.
+    ///
+    /// Package-resolution matching: aliases and backend package names are
+    /// deliberately not consulted, so a settled identity can never be
+    /// remapped to another component by its backend rows.
+    fn targets_for_component(&self, component: &str, backend: BackendKind) -> Vec<ResolvedTarget> {
         let mut targets = Vec::new();
         for entry in &self.components {
-            let matches_component = entry.name == input;
-            let matches_alias = entry
-                .aliases
-                .iter()
-                .any(|alias| alias.kind == alias_kind && alias.name == input);
+            if entry.name != component {
+                continue;
+            }
             for backend_entry in entry.backends_for(backend) {
-                let matches_package = backend_entry.package == input;
-                if matches_component || matches_alias || matches_package {
-                    targets.push(index_target(entry, backend, backend_entry));
-                }
+                targets.push(index_target(entry, backend, backend_entry));
             }
         }
         targets
@@ -541,6 +585,13 @@ impl ComponentIndex {
 }
 
 impl ComponentIndexEntry {
+    /// Whether the component index permits installation on `os`/`arch`.
+    pub(crate) fn supports_target(&self, os: &str, arch: &str) -> bool {
+        self.targets
+            .iter()
+            .any(|candidate| candidate.os == os && candidate.arch == arch)
+    }
+
     fn backends_for(&self, backend: BackendKind) -> impl Iterator<Item = &ComponentBackendEntry> {
         self.backends
             .iter()
@@ -606,53 +657,7 @@ fn rpm_package_provides_component(
         .then(|| ResolvedTarget::new(component, BackendKind::Rpm, package, source, true)))
 }
 
-fn rpm_package_name_targets(
-    query: &dyn PackageQuery,
-    package: &str,
-) -> Result<Vec<ResolvedTarget>, PackageQueryError> {
-    let installed = query.query_installed(package)?.is_some();
-    let capabilities = if installed {
-        query.provided_capabilities_installed(package)?
-    } else {
-        query.provided_capabilities_available(package)?
-    };
-    Ok(rpm_components_from_capabilities(&capabilities)
-        .into_iter()
-        .map(|component| {
-            ResolvedTarget::new(
-                component,
-                BackendKind::Rpm,
-                package,
-                if installed {
-                    ResolutionSource::InstalledRpmProvides
-                } else {
-                    ResolutionSource::AvailableRpmProvides
-                },
-                true,
-            )
-        })
-        .collect())
-}
-
-pub(crate) fn rpm_components_from_capabilities(capabilities: &[String]) -> Vec<String> {
-    let mut components = Vec::new();
-    for capability in capabilities {
-        let Some(rest) = capability.trim().strip_prefix("anolisa-component(") else {
-            continue;
-        };
-        let Some(end) = rest.find(')') else {
-            continue;
-        };
-        let component = rest[..end].trim();
-        if component.is_empty() || components.iter().any(|c| c == component) {
-            continue;
-        }
-        components.push(component.to_string());
-    }
-    components
-}
-
-/// Load repo-side `components.toml`, returning a structured error on failure.
+/// Load repo-side `components-v2.toml`, returning a structured error on failure.
 ///
 /// Used by commands (`ls`, `install --all`) that require the component index
 /// to function. For best-effort usage where a missing index is acceptable,
@@ -677,7 +682,18 @@ pub(crate) fn load_component_index(
         .map_err(|err| ComponentIndexError::Fetch {
             reason: format!("cannot resolve base_url for raw backend: {err}"),
         })?;
-    let url = component_index_url(&base_url);
+    load_component_index_from_base(layout, &base_url)
+}
+
+/// Load `components-v2.toml` published under an explicit repository base URL.
+///
+/// Used directly for a CLI `--repo` override, where the named repository is
+/// the identity authority for that invocation.
+pub(crate) fn load_component_index_from_base(
+    layout: &FsLayout,
+    base_url: &str,
+) -> Result<ComponentIndex, ComponentIndexError> {
+    let url = component_index_v2_url(base_url);
 
     let cache = DownloadCache::new(layout.cache_dir.clone());
     #[cfg(test)]
@@ -694,7 +710,7 @@ pub(crate) fn load_component_index(
     ComponentIndex::load(&downloaded.cached_path)
 }
 
-/// Best-effort load of repo-side `components.toml`.
+/// Best-effort load of repo-side `components-v2.toml`.
 pub(crate) fn load_optional_component_index(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
@@ -795,13 +811,14 @@ mod tests {
     fn index() -> ComponentIndex {
         ComponentIndex::from_toml_str(
             r#"
-schema_version = 1
+schema_version = 2
 publisher = "anolisa"
 
 [[components]]
 name = "cosh"
 display_name = "Copilot Shell"
 summary = "shell"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "raw"
@@ -825,25 +842,122 @@ name = "copilot-shell"
     #[test]
     fn repository_component_index_template_is_valid() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         ComponentIndex::load(&index_path).expect("component index template must parse");
+    }
+
+    #[test]
+    fn component_index_requires_at_least_one_target() {
+        let source = r#"
+schema_version = 2
+
+[[components]]
+name = "test"
+targets = []
+"#;
+
+        let err = ComponentIndex::from_toml_str(source, "components.toml")
+            .expect_err("empty targets must be rejected");
+        assert!(
+            matches!(
+                err,
+                ComponentIndexError::Invalid { ref reason }
+                    if reason.contains("at least one target")
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_or_duplicate_targets_are_rejected() {
+        for (targets, expected) in [
+            (
+                r#"[{ os = "Linux", arch = "x86_64" }]"#,
+                "canonical lowercase",
+            ),
+            (
+                r#"[{ os = "linux", arch = "X86_64" }]"#,
+                "canonical lowercase",
+            ),
+            (
+                r#"[{ os = "linux", arch = "x86_64" }, { os = "linux", arch = "x86_64" }]"#,
+                "duplicate target",
+            ),
+        ] {
+            let source = format!(
+                r#"
+schema_version = 2
+
+[[components]]
+name = "test"
+targets = {targets}
+"#
+            );
+
+            let err = ComponentIndex::from_toml_str(&source, "components.toml")
+                .expect_err("invalid target must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    ComponentIndexError::Invalid { ref reason }
+                        if reason.contains(expected)
+                ),
+                "unexpected error for {targets}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_component_index_declares_current_target_matrix() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
+        let index = ComponentIndex::load(&index_path).expect("component index template must parse");
+
+        assert!(
+            index
+                .components
+                .iter()
+                .all(|component| component.supports_target("linux", "x86_64"))
+        );
+        let macos_components = index
+            .components
+            .iter()
+            .filter(|component| component.targets.iter().any(|target| target.os == "macos"))
+            .map(|component| component.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(macos_components, ["cosh-ng", "agentsight", "tokenless"]);
+
+        let agentsight = index
+            .components
+            .iter()
+            .find(|component| component.name == "agentsight")
+            .expect("agentsight entry");
+        assert!(agentsight.supports_target("macos", "aarch64"));
+        assert!(!agentsight.supports_target("macos", "x86_64"));
+        assert!(!agentsight.supports_target("linux", "aarch64"));
+
+        for name in ["cosh-ng", "tokenless"] {
+            let component = index
+                .components
+                .iter()
+                .find(|component| component.name == name)
+                .expect("component entry");
+            assert!(component.supports_target("linux", "aarch64"));
+            assert!(component.supports_target("macos", "aarch64"));
+            assert!(!component.supports_target("macos", "x86_64"));
+        }
     }
 
     #[test]
     fn repository_component_index_uses_sec_core_as_canonical_name() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         let idx = ComponentIndex::load(&index_path).expect("component index template must parse");
         let query = FakeQuery::default();
         let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
 
         let got = resolver
-            .resolve(
-                "sec-core",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("sec-core", BackendKind::Rpm, ResolveOptions::default())
             .expect("resolve sec-core");
         match got {
             ResolutionSet::Unique(target) => {
@@ -854,39 +968,23 @@ name = "copilot-shell"
             other => panic!("expected unique, got {other:?}"),
         }
 
-        let package_name = resolver
-            .resolve(
-                "agent-sec-core",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
-            .expect("resolve package name");
-        match package_name {
-            ResolutionSet::Unique(target) => {
-                assert_eq!(target.component, "sec-core");
-                assert_eq!(target.package, "agent-sec-core");
-                assert_eq!(target.source, ResolutionSource::ComponentIndex);
-            }
-            other => panic!("expected unique, got {other:?}"),
-        }
+        assert_eq!(
+            resolve_index_identity("agent-sec-core", Some(&idx)),
+            IndexIdentity::Resolved("sec-core".to_string()),
+            "the rpm package name is an index-declared identity for sec-core",
+        );
     }
 
     #[test]
     fn repository_component_index_maps_cosh_ng_rpm_to_cosh_ng() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         let idx = ComponentIndex::load(&index_path).expect("component index template must parse");
         let query = FakeQuery::default();
         let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
 
         let got = resolver
-            .resolve(
-                "cosh-ng",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("cosh-ng", BackendKind::Rpm, ResolveOptions::default())
             .expect("resolve cosh-ng");
 
         match got {
@@ -900,7 +998,7 @@ name = "copilot-shell"
     }
 
     #[test]
-    fn load_optional_component_index_uses_raw_index_for_rpm_resolution() {
+    fn load_optional_component_index_uses_generation_2_raw_index_for_rpm_resolution() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let layout =
             anolisa_platform::fs_layout::FsLayout::system(Some(tmp.path().join("install-root")));
@@ -915,20 +1013,33 @@ name = "copilot-shell"
 schema_version = 1
 
 [[components]]
-name = "raw-index"
+name = "legacy-index"
+platforms = ["linux"]
 "#,
         )
-        .expect("write raw components.toml");
+        .expect("write generation-1 component index");
         std::fs::write(
-            rpm_root.join("components.toml"),
+            raw_v1.join("components-v2.toml"),
             r#"
-schema_version = 1
+schema_version = 2
+
+[[components]]
+name = "raw-index"
+targets = [{ os = "linux", arch = "x86_64" }]
+"#,
+        )
+        .expect("write generation-2 component index");
+        std::fs::write(
+            rpm_root.join("components-v2.toml"),
+            r#"
+schema_version = 2
 
 [[components]]
 name = "rpm-ignored"
+targets = [{ os = "linux", arch = "x86_64" }]
 "#,
         )
-        .expect("write rpm components.toml");
+        .expect("write rpm component index");
         let repo_config = RepoConfig::from_toml_str(&format!(
             r#"
 schema_version = 1
@@ -974,12 +1085,7 @@ base_url = "file://{}"
         let query = FakeQuery::default();
         let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
         let got = resolver
-            .resolve(
-                "cosh",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("cosh", BackendKind::Rpm, ResolveOptions::default())
             .expect("resolve");
         match got {
             ResolutionSet::Unique(target) => {
@@ -1011,12 +1117,7 @@ cosh = "site-copilot"
         let query = FakeQuery::default();
         let resolver = ComponentResolver::new(Some(&idx), repo.backends.get("rpm"), Some(&query));
         let got = resolver
-            .resolve(
-                "cosh",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("cosh", BackendKind::Rpm, ResolveOptions::default())
             .expect("resolve");
         match got {
             ResolutionSet::Unique(target) => {
@@ -1028,51 +1129,92 @@ cosh = "site-copilot"
     }
 
     #[test]
-    fn component_index_resolves_rpm_package_alias_to_component() {
+    fn index_identity_resolves_canonical_alias_and_package_names() {
         let idx = index();
-        let query = FakeQuery::default();
-        let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
-        let got = resolver
-            .resolve(
-                "copilot-shell",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
+        assert_eq!(
+            resolve_index_identity("cosh", Some(&idx)),
+            IndexIdentity::Resolved("cosh".to_string()),
+        );
+        assert_eq!(
+            resolve_index_identity("copilot-shell", Some(&idx)),
+            IndexIdentity::Resolved("cosh".to_string()),
+        );
+        assert_eq!(
+            resolve_index_identity("unknown-component", Some(&idx)),
+            IndexIdentity::Unsupported,
+        );
+        assert_eq!(
+            resolve_index_identity("cosh", None),
+            IndexIdentity::Unavailable,
+        );
+    }
+
+    #[test]
+    fn index_identity_resolves_entries_without_backend_rows() {
+        let idx = ComponentIndex::from_toml_str(
+            r#"
+schema_version = 2
+
+[[components]]
+name = "backendless"
+targets = [{ os = "linux", arch = "x86_64" }]
+"#,
+            "components.toml",
+        )
+        .expect("parse index");
+        assert_eq!(
+            resolve_index_identity("backendless", Some(&idx)),
+            IndexIdentity::Resolved("backendless".to_string()),
+        );
+    }
+
+    #[test]
+    fn index_identity_refuses_canonical_names_claimed_by_another_component() {
+        // Canonical spelling earns no precedence: when a second component
+        // also claims the name — through an alias or a backend package —
+        // the lookup is ambiguous and must not silently pick the canonical
+        // entry. The claimant's own canonical name stays unambiguous.
+        for claim in [
+            r#"aliases = [{ kind = "legacy", name = "cosh" }]"#,
+            "[[components.backends]]\nkind = \"raw\"\npackage = \"cosh\"",
+        ] {
+            let idx = ComponentIndex::from_toml_str(
+                &format!(
+                    r#"
+schema_version = 2
+
+[[components]]
+name = "cosh"
+targets = [{{ os = "linux", arch = "x86_64" }}]
+
+[[components]]
+name = "claimant"
+targets = [{{ os = "linux", arch = "x86_64" }}]
+{claim}
+"#
+                ),
+                "components.toml",
             )
-            .expect("resolve");
-        match got {
-            ResolutionSet::Unique(target) => {
-                assert_eq!(target.component, "cosh");
-                assert_eq!(target.package, "copilot-shell");
-            }
-            other => panic!("expected unique, got {other:?}"),
+            .expect("parse index");
+            assert_eq!(
+                resolve_index_identity("cosh", Some(&idx)),
+                IndexIdentity::Unsupported,
+            );
+            assert_eq!(
+                resolve_index_identity("claimant", Some(&idx)),
+                IndexIdentity::Resolved("claimant".to_string()),
+            );
         }
     }
 
     #[test]
-    fn component_index_resolves_raw_component() {
+    fn package_resolution_never_remaps_a_settled_identity() {
+        // `copilot-shell` is an alias/package name of `cosh` in the index and
+        // its installed RPM declares the cosh component capability. Neither
+        // may turn the settled identity `copilot-shell` into `cosh` at the
+        // package layer — identity resolution happens before, through
+        // `resolve_index_identity`.
         let idx = index();
-        let resolver = ComponentResolver::new(Some(&idx), None, None);
-        let got = resolver
-            .resolve(
-                "cosh",
-                BackendKind::Raw,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
-            .expect("resolve");
-        match got {
-            ResolutionSet::Unique(target) => {
-                assert_eq!(target.component, "cosh");
-                assert_eq!(target.package, "cosh");
-                assert_eq!(target.source, ResolutionSource::ComponentIndex);
-            }
-            other => panic!("expected unique, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rpm_package_name_falls_back_to_package_own_provides() {
         let query = FakeQuery {
             installed: vec![("copilot-shell".to_string(), pkg_info("copilot-shell"))],
             package_provides: vec![(
@@ -1081,20 +1223,25 @@ cosh = "site-copilot"
             )],
             ..Default::default()
         };
-        let resolver = ComponentResolver::new(None, None, Some(&query));
+        let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
         let got = resolver
-            .resolve(
-                "copilot-shell",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("copilot-shell", BackendKind::Rpm, ResolveOptions::default())
+            .expect("resolve");
+        assert_eq!(got, ResolutionSet::None);
+    }
+
+    #[test]
+    fn component_index_resolves_raw_component() {
+        let idx = index();
+        let resolver = ComponentResolver::new(Some(&idx), None, None);
+        let got = resolver
+            .resolve("cosh", BackendKind::Raw, ResolveOptions::default())
             .expect("resolve");
         match got {
             ResolutionSet::Unique(target) => {
                 assert_eq!(target.component, "cosh");
-                assert_eq!(target.package, "copilot-shell");
-                assert_eq!(target.source, ResolutionSource::InstalledRpmProvides);
+                assert_eq!(target.package, "cosh");
+                assert_eq!(target.source, ResolutionSource::ComponentIndex);
             }
             other => panic!("expected unique, got {other:?}"),
         }
@@ -1111,12 +1258,7 @@ cosh = "site-copilot"
         };
         let resolver = ComponentResolver::new(None, None, Some(&query));
         let got = resolver
-            .resolve(
-                "cosh",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("cosh", BackendKind::Rpm, ResolveOptions::default())
             .expect("resolve");
         match got {
             ResolutionSet::Unique(target) => {
@@ -1136,23 +1278,24 @@ cosh = "site-copilot"
         };
         let resolver = ComponentResolver::new(None, None, Some(&query));
         let got = resolver
-            .resolve(
-                "bash",
-                BackendKind::Rpm,
-                ResolutionUse::Install,
-                ResolveOptions::default(),
-            )
+            .resolve("bash", BackendKind::Rpm, ResolveOptions::default())
             .expect("resolve");
         assert_eq!(got, ResolutionSet::None);
     }
 
     #[test]
     fn unsupported_schema_is_rejected() {
-        let err = ComponentIndex::from_toml_str("schema_version = 99", "components.toml")
-            .expect_err("unsupported schema");
-        assert!(matches!(
-            err,
-            ComponentIndexError::UnsupportedSchema { actual: 99, .. }
-        ));
+        for actual in [1, 99] {
+            let source = format!("schema_version = {actual}");
+            let err = ComponentIndex::from_toml_str(&source, "components.toml")
+                .expect_err("unsupported schema");
+            assert!(matches!(
+                err,
+                ComponentIndexError::UnsupportedSchema {
+                    actual: rejected,
+                    ..
+                } if rejected == actual
+            ));
+        }
     }
 }

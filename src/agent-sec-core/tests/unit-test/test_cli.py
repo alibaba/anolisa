@@ -1,11 +1,13 @@
 """Unit tests for the top-level CLI entry points."""
 
+import json
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from agent_sec_cli.asset_verify.verifier import format_verification_result
 from agent_sec_cli.cli import (
     _extract_trace_context_arg,
     _is_read_only_skill_analyze,
@@ -21,6 +23,29 @@ from agent_sec_cli.correlation_context import (
 from agent_sec_cli.security_middleware.result import ActionResult
 from click import unstyle
 from typer.testing import CliRunner
+
+
+@patch("agent_sec_cli.cli.invoke")
+def test_verify_preserves_shared_formatter_output(mock_invoke):
+    rendered = format_verification_result(
+        {
+            "outcome": "no_candidates",
+            "checked": 0,
+            "passed": [],
+            "failed": [],
+        }
+    )
+    mock_invoke.return_value = ActionResult(
+        success=True,
+        exit_code=0,
+        stdout=rendered,
+    )
+
+    result = CliRunner().invoke(app, ["verify"])
+
+    assert result.exit_code == 0
+    assert result.output == rendered
+    mock_invoke.assert_called_once_with("verify", skill=None)
 
 
 @patch("agent_sec_cli.cli.invoke")
@@ -184,6 +209,49 @@ def test_resolve_time_range_last_hours_returns_utc_iso(
         ).isoformat()
     )
     assert until == "2027-01-15T08:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (["--last-hours", "-1", "--count"], "--last-hours must be non-negative"),
+        (["--limit", "0", "--count"], "--limit must be positive"),
+        (["--offset", "-5", "--count"], "--offset must be non-negative"),
+    ],
+)
+def test_events_rejects_out_of_range_query_values_before_opening_reader(
+    args: list[str], error: str
+) -> None:
+    with patch("agent_sec_cli.cli.get_reader") as get_reader:
+        result = CliRunner().invoke(app, ["events", *args])
+
+    assert result.exit_code == 1
+    assert error in result.output
+    get_reader.assert_not_called()
+
+
+def test_events_accepts_query_value_boundaries() -> None:
+    reader = Mock()
+    reader.count.return_value = 0
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app,
+            [
+                "events",
+                "--last-hours",
+                "0",
+                "--limit",
+                "1",
+                "--offset",
+                "0",
+                "--count",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert result.output == "0\n"
+    reader.count.assert_called_once()
 
 
 def test_extract_trace_context_arg_stops_at_posix_double_dash():
@@ -508,6 +576,86 @@ def test_events_help_lists_session_and_run_filters():
     help_text = unstyle(result.output)
     assert "--session-id" in help_text
     assert "--run-id" in help_text
+
+
+def test_capabilities_json_filter_outputs_current_environment(monkeypatch):
+    monkeypatch.setenv("CODE_SCANNER_HOOK_ENABLED", "false")
+    result = CliRunner().invoke(
+        app,
+        [
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "code-scan",
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["agent"] == "qoder"
+    assert payload[0]["capability"] == "code-scan"
+    assert payload[0]["enabled"] == "disabled"
+    assert payload[0]["mode"] == "observe"
+    assert payload[0]["scan_mode"] == "-"
+    assert payload[0]["timeout"] == "10"
+    assert "hooks" not in payload[0]
+    assert "source" not in payload[0]
+    assert "config" not in payload[0]
+    assert "config_path" not in payload[0]
+    assert "raw" not in payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]
+    assert payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]["effective"] is False
+
+
+def test_capabilities_rejects_control_characters_without_terminal_escape():
+    result = CliRunner().invoke(
+        app,
+        ["capabilities", "--agent", "\x1b[31m" + "x" * 100],
+    )
+
+    assert result.exit_code == 1
+    assert "\x1b" not in result.output
+    assert "\\x1b[31m" in result.output
+    assert "x" * 80 not in result.output
+
+
+def test_capabilities_default_table_output(monkeypatch):
+    monkeypatch.delenv("OPENCLAW_CONFIG_PATH", raising=False)
+    result = CliRunner().invoke(app, ["capabilities", "--agent", "cosh"])
+
+    assert result.exit_code == 0
+    lines = result.output.strip().split("\n")
+    assert lines[0] == "[cosh]"
+    assert lines[1].startswith("CAPABILITY")
+    assert "AGENT" not in lines[1]
+    assert "CAPABILITY" in lines[1]
+    assert "ENABLED" in lines[1]
+    assert "MODE" in lines[1]
+    assert "SCAN_MODE" in lines[1]
+    assert "TIMEOUT(s)" in lines[1]
+    assert "HOOKS" not in lines[1]
+    assert "SOURCE" not in lines[1]
+    assert "code-scan" in result.output
+
+
+def test_capabilities_rejects_plugin_capability_alias():
+    result = CliRunner().invoke(
+        app,
+        ["capabilities", "--capability", "scan-code"],
+    )
+
+    assert result.exit_code == 1
+    assert "unknown capability" in result.stderr
+
+
+def test_capabilities_rejects_invalid_output_format():
+    result = CliRunner().invoke(app, ["capabilities", "--output", "yaml"])
+
+    assert result.exit_code == 1
+    assert "--output must be one of" in result.stderr
 
 
 class TestHardenCli(unittest.TestCase):

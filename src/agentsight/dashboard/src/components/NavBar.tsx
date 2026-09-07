@@ -19,7 +19,7 @@ const navItems: NavItem[] = [
   { path: '/optimization', labelKey: 'nav.optimization', icon: '🔬', capability: 'optimization' },
   { path: '/skills', labelKey: 'nav.skillMetrics', icon: '🧩', capability: 'skills' },
   { path: '/security', labelKey: 'nav.securityObservability', icon: '🛡️', capability: 'security' },
-  { path: '/audit', labelKey: 'nav.systemAudit', icon: '📋', capability: 'security' },
+  { path: '/audit', labelKey: 'nav.systemAudit', icon: '📋', capability: 'system_audit' },
   { path: '/enforcement', labelKey: 'nav.riskEnforcement', icon: '⛔', capability: 'enforcement' },
   { path: '/atif', labelKey: 'nav.trajectoryViewer', icon: '🔍', capability: 'atif' },
   { path: '/settings', labelKey: 'nav.settings', icon: '⚙️', capability: 'settings' },

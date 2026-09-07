@@ -346,6 +346,9 @@ disable all observability hook work without changing plugin configuration. An
 unset or invalid value keeps it enabled; restart the gateway after changing the
 variable. Setting `capabilities.observability.enabled` to `false` also disables
 the capability, so either setting can turn observability off.
+`OBSERVABILITY_TIMEOUT` controls the timeout in seconds for each PII redaction
+and observability record CLI call and defaults to `5`. Empty, invalid, or
+non-positive values also use `5`, and larger values are capped at `5`.
 
 Each hook emits one JSON record with `hook`, `observedAt`, `metadata`, and hook-specific `metrics`. The plugin registers OpenClaw hook names, but sends the generic `agent-sec-cli` hook name in `payload.hook`. Failures, missing CLI, malformed output, and timeouts are fail-open and never block OpenClaw behavior.
 
@@ -421,9 +424,10 @@ Default behavior:
 
 Deployment environment variables override capability configuration. Use
 `SKILL_LEDGER_HOOK_ENABLED`, `PII_CHECKER_HOOK_ENABLED`,
-`PROMPT_SCANNER_HOOK_ENABLED`, `SKILL_LEDGER_MODE`,
-`PII_CHECKER_MODE`, and `PROMPT_SCANNER_MODE` for deployment-level
-control. Disabling Skill Ledger short-circuits before key initialization;
+`PROMPT_SCANNER_HOOK_ENABLED`, `SKILL_LEDGER_MODE`, and `PII_CHECKER_MODE` for
+deployment-level control. This plugin does not read `PROMPT_SCANNER_MODE`; its
+prompt policy is governed by `promptScanBlock`.
+Disabling Skill Ledger short-circuits before key initialization;
 disabling prompt-scan short-circuits before hook registration.
   `blockStatuses` is accepted as deprecated configuration metadata but no longer controls runtime decisions.
 

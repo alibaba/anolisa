@@ -350,10 +350,10 @@ impl Uploader {
         if let Ok(entries) = fs::read_dir(&self.config.ops_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        names.push(stem.to_string());
-                    }
+                if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    names.push(stem.to_string());
                 }
             }
         }
@@ -411,23 +411,22 @@ impl Uploader {
                 // limit and retry forever. When the cap is hit the offset stays
                 // on the rotated file so the remainder drains next round.
                 let rotated = self.rotated_path(component);
-                if rotated.exists() {
-                    if let Ok((mut residue, res_consumed)) =
+                if rotated.exists()
+                    && let Ok((mut residue, res_consumed)) =
                         read_from(&rotated, o.offset, MAX_LINES_PER_ROUND)
-                    {
-                        lines.append(&mut residue);
-                        if lines.len() >= MAX_LINES_PER_ROUND {
-                            // Cap hit: keep the offset on the rotated file so
-                            // the remainder is drained next round instead of
-                            // being skipped.
-                            return Ok(Some((
-                                lines,
-                                FileOffset {
-                                    inode: o.inode,
-                                    offset: o.offset + res_consumed,
-                                },
-                            )));
-                        }
+                {
+                    lines.append(&mut residue);
+                    if lines.len() >= MAX_LINES_PER_ROUND {
+                        // Cap hit: keep the offset on the rotated file so
+                        // the remainder is drained next round instead of
+                        // being skipped.
+                        return Ok(Some((
+                            lines,
+                            FileOffset {
+                                inode: o.inode,
+                                offset: o.offset + res_consumed,
+                            },
+                        )));
                     }
                 }
                 0

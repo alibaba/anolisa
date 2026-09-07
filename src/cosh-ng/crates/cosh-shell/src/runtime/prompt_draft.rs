@@ -2,22 +2,30 @@
 //!
 //! Consumes the `component == "prompt_draft"` lifecycle events forwarded by
 //! the shell host (open/changed/submit/cancel), keeps the card state on
-//! [`InlineState`], and redraws the V2 rounded card in place with the same
-//! height-accounting approach as the question panel: cyan border while
-//! editing, dim frozen card after submit/cancel (D15).
+//! [`InlineState`], and redraws the editor in place. General drafts use the
+//! V2 rounded card; Agent composition uses a borderless `◆` prompt so input
+//! ownership is visible before submission.
 
 use std::io::Write;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::agent::composer::{
+    ComposerCompletion, ComposerReferenceRejection, RejectedComposerReference,
+};
 use crate::i18n::MessageId;
 use crate::runtime::state::InlineState;
-use crate::types::{ShellEvent, ShellEventKind};
+use crate::types::{InputOwner, ShellEvent, ShellEventKind};
 
 /// Active draft card bookkeeping (viewport snapshot + rendered height).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PromptDraftCardState {
     pub(crate) id: String,
+    pub(crate) kind: PromptDraftKind,
+    pub(crate) runtime: String,
+    pub(crate) workspace_cwd: Option<String>,
+    pub(crate) skill_names: Vec<String>,
+    pub(crate) completions: Vec<ComposerCompletion>,
     pub(crate) text: String,
     pub(crate) rows: Vec<String>,
     pub(crate) hidden_above: usize,
@@ -27,6 +35,19 @@ pub(crate) struct PromptDraftCardState {
     /// First paint opens on a fresh line below the bash prompt (relay
     /// path); the slash path starts at a fresh column already (#1932).
     pub(crate) line_break_before: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingAgentComposerSubmission {
+    pub(crate) text: String,
+    pub(crate) workspace_cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PromptDraftKind {
+    #[default]
+    Draft,
+    AgentComposer,
 }
 
 /// Discoverability state for the multi-line prompt entries: the one-time
@@ -57,9 +78,9 @@ enum CardPhase {
     Cancelled,
 }
 
-/// Opens a fresh prompt-draft card immediately (#1932): shared by the
-/// relay-driven `open` lifecycle event and the `/draft` slash entry. The
-/// pending card capture picks the draft up on the next controller pass.
+/// Opens a fresh prompt-draft card immediately (#1932) for relay-driven
+/// multiline input. The pending card capture picks the draft up on the next
+/// controller pass.
 /// `line_break_before` distinguishes the relay path (cursor still sits on
 /// the bash prompt line, the card must open on a fresh line) from the
 /// slash path (the dispatcher already left the cursor at a fresh column).
@@ -68,6 +89,48 @@ pub(crate) fn open_prompt_draft<W: Write>(
     output: &mut W,
     text: String,
     line_break_before: bool,
+    runtime: &str,
+) -> std::io::Result<()> {
+    open_prompt_editor(
+        state,
+        output,
+        text,
+        line_break_before,
+        runtime,
+        None,
+        Vec::new(),
+        PromptDraftKind::Draft,
+    )
+}
+
+pub(crate) fn open_agent_composer<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    runtime: &str,
+    workspace_cwd: Option<&str>,
+    skill_names: Vec<String>,
+) -> std::io::Result<()> {
+    open_prompt_editor(
+        state,
+        output,
+        String::new(),
+        false,
+        runtime,
+        workspace_cwd,
+        skill_names,
+        PromptDraftKind::AgentComposer,
+    )
+}
+
+fn open_prompt_editor<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+    text: String,
+    line_break_before: bool,
+    runtime: &str,
+    workspace_cwd: Option<&str>,
+    skill_names: Vec<String>,
+    kind: PromptDraftKind,
 ) -> std::io::Result<()> {
     state.prompt_draft_seq += 1;
     let id = format!("draft-{}", state.prompt_draft_seq);
@@ -77,6 +140,11 @@ pub(crate) fn open_prompt_draft<W: Write>(
     let view = editor.viewport();
     let mut card = PromptDraftCardState {
         id,
+        kind,
+        runtime: runtime.to_string(),
+        workspace_cwd: workspace_cwd.map(str::to_string),
+        skill_names,
+        completions: Vec::new(),
         text,
         rows: view.rows,
         hidden_above: view.hidden_above,
@@ -94,6 +162,7 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
     events: &[ShellEvent],
     state: &mut InlineState,
     output: &mut W,
+    runtime: &str,
 ) -> std::io::Result<()> {
     for event in events {
         if event.kind != ShellEventKind::UserInputIntercepted
@@ -106,7 +175,7 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
         match event.message.as_deref() {
             Some("open") => {
                 let text = value["text"].as_str().unwrap_or_default().to_string();
-                open_prompt_draft(state, output, text, true)?;
+                open_prompt_draft(state, output, text, true, runtime)?;
             }
             Some("changed") => {
                 let Some(mut card) = state.prompt_draft.take() else {
@@ -131,6 +200,17 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
                     value["cursor_row"].as_u64().unwrap_or(0) as usize,
                     value["cursor_col"].as_u64().unwrap_or(0) as usize,
                 );
+                if card.kind == PromptDraftKind::AgentComposer {
+                    let cursor_row =
+                        value["first_row"].as_u64().unwrap_or(0) as usize + card.cursor.0;
+                    card.completions = crate::agent::composer::completions(
+                        &card.text,
+                        cursor_row,
+                        card.cursor.1,
+                        card.workspace_cwd.as_deref(),
+                        &card.skill_names,
+                    );
+                }
                 draw_card(&mut card, state, output, CardPhase::Editing)?;
                 state.prompt_draft = Some(card);
             }
@@ -138,6 +218,17 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
                 let Some(mut card) = state.prompt_draft.take() else {
                     continue;
                 };
+                if card.kind == PromptDraftKind::AgentComposer {
+                    state.pending_agent_composer_submission =
+                        Some(PendingAgentComposerSubmission {
+                            text: value["text"]
+                                .as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| card.text.clone()),
+                            workspace_cwd: card.workspace_cwd.clone(),
+                        });
+                }
+                card.completions.clear();
                 // The agent turn starts via the intercept event pushed in the
                 // same batch; here the card just freezes as history.
                 draw_card(&mut card, state, output, CardPhase::Submitted)?;
@@ -146,7 +237,9 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
                 let Some(mut card) = state.prompt_draft.take() else {
                     continue;
                 };
+                card.completions.clear();
                 draw_card(&mut card, state, output, CardPhase::Cancelled)?;
+                state.pending_agent_composer_submission = None;
                 // D15: restore the bash prompt after cancelling composition.
                 state.trigger_pty_prompt = true;
             }
@@ -154,6 +247,51 @@ pub(crate) fn handle_prompt_draft_events<W: Write>(
         }
     }
     Ok(())
+}
+
+pub(crate) fn render_agent_composer_rejections<W: Write>(
+    state: &InlineState,
+    output: &mut W,
+    rejected: &[RejectedComposerReference],
+) -> std::io::Result<()> {
+    if rejected.is_empty() {
+        return Ok(());
+    }
+
+    let i18n = state.i18n();
+    let body = rejected
+        .iter()
+        .map(|reference| {
+            let message = match reference.reason {
+                ComposerReferenceRejection::WorkspaceUnavailable => {
+                    MessageId::AgentComposerRejectedWorkspaceUnavailableLine
+                }
+                ComposerReferenceRejection::InvalidPath => {
+                    MessageId::AgentComposerRejectedInvalidPathLine
+                }
+                ComposerReferenceRejection::UnavailablePath => {
+                    MessageId::AgentComposerRejectedUnavailablePathLine
+                }
+                ComposerReferenceRejection::OutsideWorkspace => {
+                    MessageId::AgentComposerRejectedOutsideWorkspaceLine
+                }
+                ComposerReferenceRejection::LimitExceeded => {
+                    MessageId::AgentComposerRejectedLimitLine
+                }
+            };
+            let path = serde_json::to_string(&reference.path)
+                .unwrap_or_else(|_| "\"<invalid>\"".to_string());
+            i18n.format(message, &[("path", path.as_str())])
+        })
+        .collect();
+    crate::ui::RatatuiInlineRenderer::for_terminal().write_notice_panel(
+        output,
+        crate::ui::NoticePanelModel {
+            title: i18n.t(MessageId::AgentComposerRejectedTitle),
+            body,
+            footer: Some(i18n.t(MessageId::AgentComposerRejectedFooter)),
+        },
+    )
 }
 
 fn columns(text: &str) -> usize {
@@ -204,6 +342,10 @@ fn draw_card<W: Write>(
     output: &mut W,
     phase: CardPhase,
 ) -> std::io::Result<()> {
+    if card.kind == PromptDraftKind::AgentComposer {
+        return draw_agent_composer(card, state, output, phase);
+    }
+
     let i18n = state.i18n();
     let title = i18n.t(MessageId::PromptDraftTitle);
     let footer = match phase {
@@ -257,18 +399,81 @@ fn draw_card<W: Write>(
         "─".repeat(footer_pad)
     ));
 
-    // In-place redraw: climb over the previous frame, clear, repaint. The
-    // frame may shrink (viewport, hidden markers), so clear the leftovers.
+    repaint_editor(card, output, phase, &lines)
+}
+
+fn draw_agent_composer<W: Write>(
+    card: &mut PromptDraftCardState,
+    state: &mut InlineState,
+    output: &mut W,
+    phase: CardPhase,
+) -> std::io::Result<()> {
+    let i18n = state.i18n();
+    let width = card_width();
+    let budget = width.saturating_sub(2);
+    let dim_body = phase != CardPhase::Editing;
+    let mut lines = Vec::new();
+
+    if card.hidden_above > 0 {
+        lines.push(format!("  \x1b[2m… ↑ {}\x1b[22m", card.hidden_above));
+    }
+    for (row_index, row) in card.rows.iter().enumerate() {
+        let cursor_col = if phase == CardPhase::Editing && row_index == card.cursor.0 {
+            Some(card.cursor.1)
+        } else {
+            None
+        };
+        let prefix = if row_index == 0 {
+            format!("{} ", InputOwner::Agent.symbol())
+        } else {
+            "  ".to_string()
+        };
+        let body = content_row(row, cursor_col, budget, dim_body);
+        lines.push(format!("{prefix}{body}"));
+    }
+    if phase == CardPhase::Editing {
+        for (index, completion) in card.completions.iter().enumerate() {
+            let marker = if index == 0 { "›" } else { " " };
+            let suggestion = format!("{marker} {}", completion.display);
+            let body = content_row(&suggestion, None, budget, index != 0);
+            lines.push(format!("  {body}"));
+        }
+    }
+    if card.hidden_below > 0 {
+        lines.push(format!("  \x1b[2m… ↓ {}\x1b[22m", card.hidden_below));
+    }
+
+    let footer = match phase {
+        CardPhase::Editing => i18n.t(MessageId::AgentComposerFooterEditing),
+        CardPhase::Submitted => i18n.t(MessageId::PromptDraftFooterSubmitted),
+        CardPhase::Cancelled => i18n.t(MessageId::PromptDraftFooterCancelled),
+    };
+    let status = format!(
+        "{} · {}: {} · {footer}",
+        i18n.t(MessageId::AgentComposerTitle),
+        i18n.t(MessageId::PromptDraftRuntimeLabel),
+        card.runtime
+    );
+    lines.push(format!("  {}", content_row(&status, None, budget, true)));
+
+    repaint_editor(card, output, phase, &lines)
+}
+
+fn repaint_editor<W: Write>(
+    card: &mut PromptDraftCardState,
+    output: &mut W,
+    phase: CardPhase,
+    lines: &[String],
+) -> std::io::Result<()> {
+    // Climb over the previous render, clear, and repaint. The editor may
+    // shrink as viewport markers or completions disappear.
     if card.panel_height > 0 {
         write!(output, "\x1b[{}A", card.panel_height)?;
     } else if card.line_break_before {
-        // First paint: leave the bash prompt line untouched above the card
-        // (the inline candidate echo was already erased by the relay) and
-        // open the card on a fresh line.
+        // Relay-driven drafts start with the cursor on the Shell prompt line.
         write!(output, "\x1b[?25l\r\n")?;
     } else {
-        // First paint from the slash dispatcher: the cursor already sits
-        // at a fresh column, so only hide it (no extra blank line).
+        // Slash dispatch already left the cursor at a fresh column.
         write!(output, "\x1b[?25l")?;
     }
     let repaint_rows = card.panel_height.max(lines.len());
@@ -297,6 +502,11 @@ mod tests {
     fn card_with_rows(rows: &[&str], cursor: (usize, usize)) -> PromptDraftCardState {
         PromptDraftCardState {
             id: "draft-1".to_string(),
+            kind: PromptDraftKind::Draft,
+            runtime: "fake".to_string(),
+            workspace_cwd: None,
+            skill_names: Vec::new(),
+            completions: Vec::new(),
             text: rows.join("\n"),
             rows: rows.iter().map(|row| row.to_string()).collect(),
             hidden_above: 0,
@@ -318,6 +528,20 @@ mod tests {
         assert!(
             rendered.starts_with("\x1b[?25l\r\x1b[2K"),
             "slash-opened card must not emit a leading blank line: {rendered:?}"
+        );
+        assert!(!rendered.contains("Runtime: fake"), "{rendered:?}");
+
+        let mut composer = card_with_rows(&[""], (0, 0));
+        composer.kind = PromptDraftKind::AgentComposer;
+        composer.line_break_before = false;
+        let mut out: Vec<u8> = Vec::new();
+        draw_card(&mut composer, &mut state, &mut out, CardPhase::Editing).expect("draw");
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains("Runtime: fake"), "{rendered:?}");
+        assert!(rendered.contains("◆ "), "{rendered:?}");
+        assert!(
+            !rendered.contains("╭"),
+            "composer input is borderless: {rendered:?}"
         );
 
         let mut relay_card = card_with_rows(&[""], (0, 0));
@@ -366,5 +590,48 @@ mod tests {
         let rendered = String::from_utf8_lossy(&out).into_owned();
         assert!(rendered.contains("… ↑ 2"), "above marker: {rendered}");
         assert!(rendered.contains("… ↓ 3"), "below marker: {rendered}");
+    }
+
+    #[test]
+    fn composer_renders_bounded_completion_rows_inside_the_card() {
+        let mut state = InlineState::default();
+        let mut card = card_with_rows(&["review @Car"], (0, 11));
+        card.kind = PromptDraftKind::AgentComposer;
+        card.completions = vec![ComposerCompletion {
+            display: "@Cargo.toml".to_string(),
+            replacement: "@Cargo.toml ".to_string(),
+        }];
+        let mut out = Vec::new();
+
+        draw_card(&mut card, &mut state, &mut out, CardPhase::Editing).expect("draw");
+
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains("◆ review @Car"), "{rendered}");
+        assert!(rendered.contains("› @Cargo.toml"), "{rendered}");
+        assert_eq!(card.panel_height, 3, "input + result + status");
+    }
+
+    #[test]
+    fn composer_rejection_notice_names_the_path_and_reason() {
+        let state = InlineState::default();
+        let rejected = [RejectedComposerReference {
+            path: "../Cargo.toml".to_string(),
+            reason: ComposerReferenceRejection::InvalidPath,
+        }];
+        let mut out = Vec::new();
+
+        render_agent_composer_rejections(&state, &mut out, &rejected).expect("render notice");
+
+        let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains("References skipped"), "{rendered}");
+        assert!(rendered.contains("\"../Cargo.toml\""), "{rendered}");
+        assert!(
+            rendered.contains("invalid workspace-relative path"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("were not sent as Agent context"),
+            "{rendered}"
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::tools::{known_provider_tool, KnownProviderTool};
 use crate::types::{
     AgentContextBinding, AgentEvent, AgentRequest, CommandBlock, CommandOrigin, CommandStatus,
 };
@@ -160,31 +161,26 @@ fn push_tool_category(categories: &mut Vec<ToolCategory>, category: ToolCategory
 }
 
 fn classify_tool(name: &str) -> ToolCategory {
-    let name = name.to_ascii_lowercase();
-    if ["shell", "bash", "terminal", "execute", "run_command"]
-        .iter()
-        .any(|token| name.contains(token))
-    {
-        ToolCategory::Shell
-    } else if ["read", "search", "grep", "glob", "find", "list"]
-        .iter()
-        .any(|token| name.contains(token))
-    {
-        ToolCategory::FilesystemRead
-    } else if ["edit", "write", "patch", "create", "delete"]
-        .iter()
-        .any(|token| name.contains(token))
-    {
-        ToolCategory::FilesystemWrite
-    } else if name.contains("skill") {
-        ToolCategory::Skill
-    } else if ["mcp", "api", "http", "web", "fetch", "network"]
-        .iter()
-        .any(|token| name.contains(token))
-    {
-        ToolCategory::ExternalService
-    } else {
-        ToolCategory::Other
+    match known_provider_tool(name) {
+        Some(KnownProviderTool::Shell) => ToolCategory::Shell,
+        Some(
+            KnownProviderTool::ReadFile
+            | KnownProviderTool::Grep
+            | KnownProviderTool::Glob
+            | KnownProviderTool::ListDirectory
+            | KnownProviderTool::ReadManyFiles,
+        ) => ToolCategory::FilesystemRead,
+        Some(
+            KnownProviderTool::WriteFile
+            | KnownProviderTool::Edit
+            | KnownProviderTool::NotebookEdit
+            | KnownProviderTool::SaveMemory,
+        ) => ToolCategory::FilesystemWrite,
+        Some(KnownProviderTool::Skill) => ToolCategory::Skill,
+        Some(KnownProviderTool::WebFetch | KnownProviderTool::WebSearch) => {
+            ToolCategory::ExternalService
+        }
+        Some(_) | None => ToolCategory::Other,
     }
 }
 

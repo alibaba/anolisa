@@ -39,6 +39,29 @@ struct IngestionState {
     generation: u64,
 }
 
+#[derive(Default)]
+struct AvailabilityLogTransitions {
+    unavailable: bool,
+}
+
+impl AvailabilityLogTransitions {
+    fn unavailable(&mut self, detail: &str) -> Option<String> {
+        if self.unavailable {
+            return None;
+        }
+        self.unavailable = true;
+        Some(format!("AgentSight enforcement unavailable: {detail}"))
+    }
+
+    fn recovered(&mut self) -> Option<String> {
+        if std::mem::take(&mut self.unavailable) {
+            Some("AgentSight enforcement recovered".into())
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 struct IngestionReadiness {
     state: Arc<Mutex<IngestionState>>,
@@ -337,6 +360,20 @@ pub enum EnforcementCoordinatorError {
     /// Desired state or evidence persistence failed.
     #[error(transparent)]
     Store(#[from] EnforcementStoreError),
+    /// Desired state was persisted, but the enforcer did not acknowledge it.
+    ///
+    /// Distinguishes persisted-but-unacknowledged applies from failures that
+    /// happened before persistence, so callers can report store truth.
+    #[error("binding {binding_id} persisted as {state:?}: {source}")]
+    PersistedUnacknowledged {
+        /// Persisted binding identifier.
+        binding_id: Uuid,
+        /// Terminal persisted state at failure time.
+        state: BindingState,
+        /// Underlying apply failure.
+        #[source]
+        source: Box<EnforcementCoordinatorError>,
+    },
     /// The ingestion worker could not be created.
     #[error("start enforcement ingestion: {0}")]
     Thread(#[from] std::io::Error),
@@ -374,7 +411,10 @@ impl EnforcementCoordinator {
     ///
     /// Returns a persistence error or the enforcer rejection after recording a
     /// sanitized failed state. Returns an availability error before persisting
-    /// when combined backend and violation-ingestion health is not ready.
+    /// when combined backend and violation-ingestion health is not ready. Once
+    /// the pending state is persisted, later failures return
+    /// [`EnforcementCoordinatorError::PersistedUnacknowledged`] so callers can
+    /// see that the binding remains in the store.
     pub fn apply(&self, request: ApplyPolicy) -> Result<Binding, EnforcementCoordinatorError> {
         let _lifecycle = self.lifecycle();
         if let Some(existing) = self.store.binding(request.binding_id)?
@@ -430,22 +470,35 @@ impl EnforcementCoordinator {
                         } else {
                             let message =
                                 "violation ingestion readiness changed during policy apply";
+                            let binding_id = binding.request.binding_id;
                             self.persist_degraded_binding(binding, message)?;
-                            Err(EnforcementCoordinatorError::EnforcementUnavailable(
-                                message.into(),
+                            Err(persisted_unacknowledged(
+                                binding_id,
+                                BindingState::Degraded,
+                                EnforcementCoordinatorError::EnforcementUnavailable(message.into()),
                             ))
                         }
                     }
                     Ok(health) => {
                         let detail = health_message(&health);
                         log::error!("enforcement became unavailable after policy apply: {detail}");
+                        let binding_id = binding.request.binding_id;
                         self.persist_degraded_binding(binding, &detail)?;
-                        Err(EnforcementCoordinatorError::EnforcementUnavailable(detail))
+                        Err(persisted_unacknowledged(
+                            binding_id,
+                            BindingState::Degraded,
+                            EnforcementCoordinatorError::EnforcementUnavailable(detail),
+                        ))
                     }
                     Err(error) => {
                         log::error!("enforcement health check failed after policy apply: {error}");
+                        let binding_id = binding.request.binding_id;
                         self.persist_degraded_binding(binding, DEGRADED_BINDING_MESSAGE)?;
-                        Err(error.into())
+                        Err(persisted_unacknowledged(
+                            binding_id,
+                            BindingState::Degraded,
+                            error.into(),
+                        ))
                     }
                 }
             }
@@ -455,25 +508,35 @@ impl EnforcementCoordinator {
                 log::error!("required violation subscription unavailable: {message}");
                 self.ingestion_readiness
                     .invalidate_lease(&lease, INGESTION_UNAVAILABLE_MESSAGE.into());
+                let binding_id = request.binding_id;
                 self.store.upsert_binding(&Binding {
                     request,
                     state: BindingState::Degraded,
                     message: Some(DEGRADED_BINDING_MESSAGE.into()),
                     domain_id: None,
                 })?;
-                Err(EnforcementCoordinatorError::EnforcementUnavailable(
-                    INGESTION_UNAVAILABLE_MESSAGE.into(),
+                Err(persisted_unacknowledged(
+                    binding_id,
+                    BindingState::Degraded,
+                    EnforcementCoordinatorError::EnforcementUnavailable(
+                        INGESTION_UNAVAILABLE_MESSAGE.into(),
+                    ),
                 ))
             }
             Err(error) => {
                 log::error!("enforcement policy apply failed: {error}");
+                let binding_id = request.binding_id;
                 self.store.upsert_binding(&Binding {
                     request,
                     state: BindingState::Failed,
                     message: Some(FAILED_BINDING_MESSAGE.into()),
                     domain_id: None,
                 })?;
-                Err(error.into())
+                Err(persisted_unacknowledged(
+                    binding_id,
+                    BindingState::Failed,
+                    error.into(),
+                ))
             }
         }
     }
@@ -646,11 +709,32 @@ impl EnforcementCoordinator {
 
     /// Lists persisted binding state.
     ///
+    /// Returns every persisted binding, including detached terminal state;
+    /// containment and reconciliation rely on the full snapshot.
+    ///
     /// # Errors
     ///
     /// Returns a persistence error.
     pub fn bindings(&self) -> Result<Vec<Binding>, EnforcementCoordinatorError> {
         Ok(self.store.bindings()?)
+    }
+
+    /// Lists persisted bindings for API consumers, hiding detached bindings.
+    ///
+    /// Detached bindings acknowledge successful deletion and would otherwise
+    /// resurface as zombie rows in the bindings list. Failed and degraded
+    /// bindings stay visible so operators can still inspect them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error.
+    pub fn active_bindings(&self) -> Result<Vec<Binding>, EnforcementCoordinatorError> {
+        Ok(self
+            .store
+            .bindings()?
+            .into_iter()
+            .filter(|binding| binding.state != BindingState::Detached)
+            .collect())
     }
 
     /// Reads immutable structured provenance for one credential binding.
@@ -799,6 +883,18 @@ fn unavailable_from_health(health: HealthStatus) -> EnforcementCoordinatorError 
     EnforcementCoordinatorError::EnforcementUnavailable(health_message(&health))
 }
 
+fn persisted_unacknowledged(
+    binding_id: Uuid,
+    state: BindingState,
+    source: EnforcementCoordinatorError,
+) -> EnforcementCoordinatorError {
+    EnforcementCoordinatorError::PersistedUnacknowledged {
+        binding_id,
+        state,
+        source: Box::new(source),
+    }
+}
+
 fn health_message(health: &HealthStatus) -> String {
     health
         .message
@@ -839,6 +935,7 @@ fn ingest_loop(
     worker: Arc<WorkerToken>,
 ) {
     let mut backoff = Duration::from_millis(100);
+    let mut availability_log = AvailabilityLogTransitions::default();
     while ingestion_readiness.is_current(&worker) {
         ingestion_readiness.mark_not_ready(&worker);
         match client.subscribe_required() {
@@ -879,7 +976,10 @@ fn ingest_loop(
                 };
                 if let Err(error) = reconciliation {
                     if ingestion_readiness.is_current(&worker) {
-                        eprintln!("AgentSight enforcement reconciliation failed: {error}");
+                        let detail = format!("reconciliation failed: {error}");
+                        if let Some(message) = availability_log.unavailable(&detail) {
+                            eprintln!("{message}");
+                        }
                         if let Err(store_error) =
                             store.mark_active_degraded(DEGRADED_BINDING_MESSAGE)
                         {
@@ -891,6 +991,9 @@ fn ingest_loop(
                     sleep_until_superseded(&ingestion_readiness, &worker, backoff);
                     backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
                     continue;
+                }
+                if let Some(message) = availability_log.recovered() {
+                    eprintln!("{message}");
                 }
                 backoff = Duration::from_millis(100);
                 while ingestion_readiness.is_subscription_current(&worker, subscription_id) {
@@ -917,7 +1020,10 @@ fn ingest_loop(
                             if !ingestion_readiness.is_current(&worker) {
                                 break;
                             }
-                            eprintln!("AgentSight enforcement subscription lost: {error}");
+                            let detail = format!("subscription lost: {error}");
+                            if let Some(message) = availability_log.unavailable(&detail) {
+                                eprintln!("{message}");
+                            }
                             if let Err(store_error) =
                                 store.mark_active_degraded(DEGRADED_BINDING_MESSAGE)
                             {
@@ -933,7 +1039,9 @@ fn ingest_loop(
             Err(error) => {
                 ingestion_readiness.mark_not_ready(&worker);
                 if ingestion_readiness.is_current(&worker) {
-                    eprintln!("AgentSight enforcement unavailable: {error}");
+                    if let Some(message) = availability_log.unavailable(&error.to_string()) {
+                        eprintln!("{message}");
+                    }
                     if let Err(store_error) = store.mark_active_degraded(DEGRADED_BINDING_MESSAGE) {
                         eprintln!(
                             "AgentSight could not persist enforcement unavailability: {store_error}"
@@ -990,7 +1098,36 @@ fn sleep_until_superseded(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    use agentsight_enforcement_protocol::{
+        PROTOCOL_VERSION, RemoteError, Request, Response, ResponseBody, read_frame, write_frame,
+    };
+
     use super::*;
+
+    #[test]
+    fn availability_log_reports_only_state_transitions() {
+        let mut transitions = AvailabilityLogTransitions::default();
+
+        assert_eq!(
+            transitions.unavailable("socket missing"),
+            Some("AgentSight enforcement unavailable: socket missing".into())
+        );
+        assert_eq!(transitions.unavailable("socket missing"), None);
+        assert_eq!(transitions.unavailable("connection refused"), None);
+        assert_eq!(
+            transitions.recovered(),
+            Some("AgentSight enforcement recovered".into())
+        );
+        assert_eq!(transitions.recovered(), None);
+        assert_eq!(
+            transitions.unavailable("socket missing"),
+            Some("AgentSight enforcement unavailable: socket missing".into())
+        );
+    }
 
     fn make_ready(readiness: &IngestionReadiness, worker: &Arc<WorkerToken>) -> Uuid {
         let subscription_id = Uuid::new_v4();
@@ -1178,5 +1315,204 @@ mod tests {
                 "violation event buffer overflow: dropped_events=1; violation persistence failed: database is locked"
             )
         );
+    }
+
+    fn fixture_policy(binding_id: Uuid) -> ApplyPolicy {
+        ApplyPolicy {
+            binding_id,
+            agent_id: "agent-1".into(),
+            session_id: None,
+            root_pid: 42,
+            process_start_time: 7,
+            policy_id: "policy-1".into(),
+            policy_revision: "revision-1".into(),
+            policy_dsl: "label AGENT".into(),
+            policy_mode: None,
+        }
+    }
+
+    fn fixture_health(ready: bool, message: Option<&str>) -> HealthStatus {
+        HealthStatus {
+            ready,
+            backend: "fixture".into(),
+            capabilities:
+                agentsight_enforcement_protocol::EnforcementCapabilities::mock_development(),
+            message: message.map(str::to_string),
+        }
+    }
+
+    /// Serves one response per client connection, mirroring the request-reply UDS protocol.
+    fn fixture_enforcer(
+        responses: Vec<Result<ResponseBody, RemoteError>>,
+    ) -> (EnforcementClient, thread::JoinHandle<()>, PathBuf) {
+        let socket_path =
+            std::env::temp_dir().join(format!("enforcement-coordinator-{}.sock", Uuid::new_v4()));
+        let listener = UnixListener::bind(&socket_path).expect("fixture listener should bind");
+        let server = thread::spawn(move || {
+            for result in responses {
+                let (mut stream, _) = listener.accept().expect("fixture client should connect");
+                let request: Request = read_frame(&mut BufReader::new(
+                    stream
+                        .try_clone()
+                        .expect("fixture stream should clone for reading"),
+                ))
+                .expect("fixture request should decode")
+                .expect("fixture request should exist");
+                let response = Response {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    result,
+                };
+                let mut bytes = Vec::new();
+                write_frame(&mut bytes, &response).expect("fixture response should encode");
+                stream
+                    .write_all(&bytes)
+                    .expect("fixture response should write");
+                stream.flush().expect("fixture response should flush");
+            }
+        });
+        (EnforcementClient::new(&socket_path), server, socket_path)
+    }
+
+    #[test]
+    fn active_bindings_hide_detached_terminal_state_only() {
+        let coordinator = EnforcementCoordinator::new(
+            EnforcementClient::new("/tmp/unused-enforcement.sock"),
+            EnforcementStore::open(":memory:").expect("test store should open"),
+        );
+        let states = [
+            BindingState::Pending,
+            BindingState::Enforced,
+            BindingState::Failed,
+            BindingState::Degraded,
+            BindingState::Detaching,
+            BindingState::Detached,
+        ];
+        for state in states {
+            let binding = Binding {
+                request: fixture_policy(Uuid::new_v4()),
+                state,
+                message: None,
+                domain_id: None,
+            };
+            coordinator
+                .store
+                .upsert_binding(&binding)
+                .expect("fixture binding should persist");
+        }
+
+        let listed = coordinator
+            .active_bindings()
+            .expect("active bindings should list");
+        assert_eq!(listed.len(), 5);
+        assert!(
+            listed
+                .iter()
+                .all(|binding| binding.state != BindingState::Detached)
+        );
+
+        // The store keeps detached rows: containment and reconciliation
+        // consume the full snapshot through `bindings`.
+        assert_eq!(
+            coordinator
+                .store
+                .bindings()
+                .expect("store bindings should list")
+                .len(),
+            6
+        );
+    }
+
+    #[test]
+    fn apply_rejection_persists_failed_state_and_reports_it() {
+        let (client, server, socket_path) = fixture_enforcer(vec![
+            Ok(ResponseBody::Health(fixture_health(true, None))),
+            Err(RemoteError {
+                code: "internal_error".into(),
+                message: "fixture apply rejection".into(),
+            }),
+        ]);
+        let coordinator = EnforcementCoordinator::new(
+            client,
+            EnforcementStore::open(":memory:").expect("test store should open"),
+        );
+        let worker = coordinator.ingestion_readiness.candidate();
+        coordinator.ingestion_readiness.install(Arc::clone(&worker));
+        make_ready(&coordinator.ingestion_readiness, &worker);
+
+        let binding_id = Uuid::new_v4();
+        let result = coordinator.apply(fixture_policy(binding_id));
+        server.join().expect("fixture server should join");
+        std::fs::remove_file(&socket_path).expect("fixture socket should be removed");
+
+        match result {
+            Err(EnforcementCoordinatorError::PersistedUnacknowledged {
+                binding_id: persisted_id,
+                state,
+                ..
+            }) => {
+                assert_eq!(persisted_id, binding_id);
+                assert_eq!(state, BindingState::Failed);
+            }
+            other => panic!("expected persisted-unacknowledged failure, got {other:?}"),
+        }
+        let stored = coordinator
+            .store
+            .binding(binding_id)
+            .expect("store read should succeed")
+            .expect("rejected binding should stay persisted");
+        assert_eq!(stored.state, BindingState::Failed);
+        assert!(
+            coordinator
+                .active_bindings()
+                .expect("active bindings should list")
+                .iter()
+                .any(|binding| binding.request.binding_id == binding_id)
+        );
+    }
+
+    #[test]
+    fn apply_degraded_after_backend_loss_reports_persisted_state() {
+        let request = fixture_policy(Uuid::new_v4());
+        let applied = Binding {
+            request: request.clone(),
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: None,
+        };
+        let (client, server, socket_path) = fixture_enforcer(vec![
+            Ok(ResponseBody::Health(fixture_health(true, None))),
+            Ok(ResponseBody::Applied(applied)),
+            Ok(ResponseBody::Health(fixture_health(
+                false,
+                Some("fixture backend lost"),
+            ))),
+        ]);
+        let coordinator = EnforcementCoordinator::new(
+            client,
+            EnforcementStore::open(":memory:").expect("test store should open"),
+        );
+        let worker = coordinator.ingestion_readiness.candidate();
+        coordinator.ingestion_readiness.install(Arc::clone(&worker));
+        make_ready(&coordinator.ingestion_readiness, &worker);
+
+        let result = coordinator.apply(request);
+        server.join().expect("fixture server should join");
+        std::fs::remove_file(&socket_path).expect("fixture socket should be removed");
+
+        match result {
+            Err(EnforcementCoordinatorError::PersistedUnacknowledged {
+                binding_id, state, ..
+            }) => {
+                assert_eq!(state, BindingState::Degraded);
+                let stored = coordinator
+                    .store
+                    .binding(binding_id)
+                    .expect("store read should succeed")
+                    .expect("degraded binding should stay persisted");
+                assert_eq!(stored.state, BindingState::Degraded);
+            }
+            other => panic!("expected persisted-unacknowledged failure, got {other:?}"),
+        }
     }
 }

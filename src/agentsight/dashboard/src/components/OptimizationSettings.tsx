@@ -1,21 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import { fetchOptimizeConfig, saveOptimizeConfig } from '../utils/apiClient';
 import type { OptimizeLlmConfig } from '../types/optimization';
+import { useI18n } from '../i18n';
+import type { MessageKey } from '../i18n';
 
-// ── Provider presets ──────────────────────────────────────────────────────
+//  Provider presets 
 
 interface Provider {
   id: string;
-  name: string;
+  nameKey: MessageKey;
   icon: string;
   base_url: string;
-  models: { id: string; name: string }[];
+  models: { id: string; name: string; nameKey?: MessageKey }[];
 }
 
 const PROVIDERS: Provider[] = [
   {
     id: 'dashscope',
-    name: '阿里云 DashScope',
+    nameKey: 'opt.llm.provider.dashscope',
     icon: '☁️',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     models: [
@@ -23,27 +25,27 @@ const PROVIDERS: Provider[] = [
       { id: 'qwen-max', name: 'Qwen Max' },
       { id: 'qwen-turbo', name: 'Qwen Turbo' },
       { id: 'qwen-long', name: 'Qwen Long' },
-      { id: 'glm-5.2', name: 'GLM 5.2 (推理)' },
+      { id: 'glm-5.2', name: 'GLM 5.2 (reasoning)', nameKey: 'opt.llm.model.glm52Reasoning' },
       { id: 'deepseek-chat', name: 'DeepSeek Chat' },
-      { id: 'deepseek-r1', name: 'DeepSeek R1 (推理)' },
+      { id: 'deepseek-r1', name: 'DeepSeek R1 (reasoning)', nameKey: 'opt.llm.model.deepseekR1Reasoning' },
     ],
   },
   {
     id: 'openai',
-    name: 'OpenAI',
+    nameKey: 'opt.llm.provider.openai',
     icon: '🟢',
     base_url: 'https://api.openai.com/v1',
     models: [
       { id: 'gpt-4o', name: 'GPT-4o' },
       { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-      { id: 'o3', name: 'o3 (推理)' },
+      { id: 'o3', name: 'o3 (reasoning)', nameKey: 'opt.llm.model.o3Reasoning' },
       { id: 'o3-mini', name: 'o3 Mini' },
       { id: 'gpt-4.1', name: 'GPT-4.1' },
     ],
   },
   {
     id: 'deepseek',
-    name: 'DeepSeek',
+    nameKey: 'opt.llm.provider.deepseek',
     icon: '🐋',
     base_url: 'https://api.deepseek.com/v1',
     models: [
@@ -53,18 +55,18 @@ const PROVIDERS: Provider[] = [
   },
   {
     id: 'zhipu',
-    name: '智谱 GLM',
+    nameKey: 'opt.llm.provider.zhipu',
     icon: '🔮',
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     models: [
       { id: 'glm-4-plus', name: 'GLM-4 Plus' },
-      { id: 'glm-5.2', name: 'GLM 5.2 (推理)' },
+      { id: 'glm-5.2', name: 'GLM 5.2 (reasoning)', nameKey: 'opt.llm.model.glm52Reasoning' },
       { id: 'glm-4-flash', name: 'GLM-4 Flash' },
     ],
   },
   {
     id: 'moonshot',
-    name: 'Moonshot 月之暗面',
+    nameKey: 'opt.llm.provider.moonshot',
     icon: '🌙',
     base_url: 'https://api.moonshot.cn/v1',
     models: [
@@ -74,14 +76,14 @@ const PROVIDERS: Provider[] = [
   },
   {
     id: 'custom',
-    name: '自定义端点',
+    nameKey: 'opt.llm.provider.custom',
     icon: '⚙️',
     base_url: '',
     models: [],
   },
 ];
 
-// ── Detect provider from base_url ─────────────────────────────────────────
+//  Detect provider from base_url 
 
 function detectProvider(baseUrl: string): string {
   for (const p of PROVIDERS) {
@@ -93,15 +95,16 @@ function detectProvider(baseUrl: string): string {
   return 'custom';
 }
 
-// ── Shared input styles ───────────────────────────────────────────────────
+//  Shared input styles 
 
 const inputCls =
   'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400';
 
-// ── Component ─────────────────────────────────────────────────────────────
+//  Component 
 
 /** LLM configuration form for the optimization analysis feature (rendered in the settings page). */
 export const LlmConfigForm: React.FC = () => {
+  const { t } = useI18n();
   const [config, setConfig] = useState<OptimizeLlmConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -117,7 +120,7 @@ export const LlmConfigForm: React.FC = () => {
   const [isKnownModel, setIsKnownModel] = useState(true);
   const [showKey, setShowKey] = useState(false);
 
-  const activeProvider = PROVIDERS.find(p => p.id === provider) ?? PROVIDERS[PROVIDERS.length - 1];
+  const activeProvider = PROVIDERS.find((p) => p.id === provider) ?? PROVIDERS[PROVIDERS.length - 1];
   const availableModels = activeProvider.models;
 
   useEffect(() => {
@@ -131,24 +134,25 @@ export const LlmConfigForm: React.FC = () => {
         // Auto-detect provider
         const pid = detectProvider(data.base_url);
         setProvider(pid);
-        const p = PROVIDERS.find(x => x.id === pid);
-        if (p && !p.models.some(m => m.id === data.model)) {
+        const p = PROVIDERS.find((x) => x.id === pid);
+        if (p && !p.models.some((m) => m.id === data.model)) {
           setIsKnownModel(false);
           setCustomModel(data.model);
         }
         setError(null);
       } catch (e) {
-        setError(`加载配置失败: ${e instanceof Error ? e.message : String(e)}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(t('opt.llm.loadFailed', { msg }));
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [t]);
 
   // When provider changes, update base URL
   function handleProviderChange(id: string) {
     setProvider(id);
-    const p = PROVIDERS.find(x => x.id === id);
+    const p = PROVIDERS.find((x) => x.id === id);
     if (p && p.id !== 'custom') {
       setBaseUrl(p.base_url);
     }
@@ -157,7 +161,7 @@ export const LlmConfigForm: React.FC = () => {
   // When provider changes, check if current model is in the list
   useEffect(() => {
     if (!model) return;
-    const found = availableModels.some(m => m.id === model);
+    const found = availableModels.some((m) => m.id === model);
     if (found) {
       setIsKnownModel(true);
       setCustomModel('');
@@ -192,7 +196,8 @@ export const LlmConfigForm: React.FC = () => {
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (e2) {
-      setError(`保存失败: ${e2 instanceof Error ? e2.message : String(e2)}`);
+      const msg = e2 instanceof Error ? e2.message : String(e2);
+      setError(t('opt.llm.saveFailed', { msg }));
     } finally {
       setSaving(false);
     }
@@ -203,9 +208,9 @@ export const LlmConfigForm: React.FC = () => {
       {/* Header */}
       <div className="px-6 py-4 border-b border-gray-200">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">LLM 配置</h2>
+          <h2 className="text-lg font-semibold text-gray-900">{t('opt.llm.title')}</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            选择云服务厂商和模型，修改后立即生效，无需重启。用于优化分析（性能策略 / 成本浪费 / 准确性维度）。
+            {t('opt.llm.subtitle')}
           </p>
         </div>
       </div>
@@ -213,21 +218,23 @@ export const LlmConfigForm: React.FC = () => {
       {loading ? (
         <div className="flex items-center gap-3 px-6 py-10 text-gray-500 text-sm">
           <span className="inline-block w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          加载配置中...
+          {t('opt.llm.loading')}
         </div>
       ) : (
         <form onSubmit={handleSave} className="px-6 py-5 space-y-4">
           {/* Provider */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">云服务商</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('opt.llm.providerLabel')}
+            </label>
             <select
               className={inputCls}
               value={provider}
               onChange={(e) => handleProviderChange(e.target.value)}
             >
-              {PROVIDERS.map(p => (
+              {PROVIDERS.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.icon} {p.name}
+                  {p.icon} {t(p.nameKey)}
                 </option>
               ))}
             </select>
@@ -261,7 +268,7 @@ export const LlmConfigForm: React.FC = () => {
                 className={inputCls}
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder={config?.api_key ?? '输入 API Key'}
+                placeholder={config?.api_key ?? t('opt.llm.apiKey.placeholder')}
                 spellCheck={false}
                 autoComplete="off"
               />
@@ -269,19 +276,21 @@ export const LlmConfigForm: React.FC = () => {
                 type="button"
                 className="flex-shrink-0 px-2.5 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm transition-colors"
                 onClick={() => setShowKey(!showKey)}
-                title={showKey ? '隐藏' : '显示'}
+                title={showKey ? t('opt.llm.apiKey.hide') : t('opt.llm.apiKey.show')}
               >
                 {showKey ? '🙈' : '👁'}
               </button>
             </div>
             <p className="text-xs text-gray-400 mt-1">
-              {config?.api_key ? '留空则保持当前配置不变' : '在对应厂商控制台获取 API Key'}
+              {config?.api_key ? t('opt.llm.apiKey.keepUnchanged') : t('opt.llm.apiKey.hint')}
             </p>
           </div>
 
           {/* Model */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('opt.llm.modelLabel')}
+            </label>
             {provider !== 'custom' && availableModels.length > 0 ? (
               <>
                 <select
@@ -296,10 +305,12 @@ export const LlmConfigForm: React.FC = () => {
                     }
                   }}
                 >
-                  {availableModels.map(m => (
-                    <option key={m.id} value={m.id}>{m.name} ({m.id})</option>
+                  {availableModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.nameKey ? t(m.nameKey) : m.name} ({m.id})
+                    </option>
                   ))}
-                  <option value="__custom__">✏️ 自定义模型名...</option>
+                  <option value="__custom__">{t('opt.llm.model.customOption')}</option>
                 </select>
                 {!isKnownModel && (
                   <input
@@ -307,7 +318,7 @@ export const LlmConfigForm: React.FC = () => {
                     className={`${inputCls} mt-1.5`}
                     value={customModel}
                     onChange={(e) => setCustomModel(e.target.value)}
-                    placeholder="输入模型 ID"
+                    placeholder={t('opt.llm.model.customPlaceholder')}
                     spellCheck={false}
                   />
                 )}
@@ -318,7 +329,7 @@ export const LlmConfigForm: React.FC = () => {
                 className={inputCls}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="输入模型 ID，如 gpt-4o"
+                placeholder={t('opt.llm.model.placeholder')}
                 spellCheck={false}
               />
             )}
@@ -337,10 +348,10 @@ export const LlmConfigForm: React.FC = () => {
               disabled={saving}
               className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
             >
-              {saving ? '保存中...' : '保存配置'}
+              {saving ? t('opt.llm.saving') : t('opt.llm.save')}
             </button>
             {saved && (
-              <span className="text-sm text-green-600">✓ 配置已保存并生效</span>
+              <span className="text-sm text-green-600">{t('opt.llm.saved')}</span>
             )}
           </div>
         </form>
@@ -348,3 +359,4 @@ export const LlmConfigForm: React.FC = () => {
     </div>
   );
 };
+

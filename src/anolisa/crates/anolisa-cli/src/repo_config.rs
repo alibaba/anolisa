@@ -230,6 +230,9 @@ pub struct RepoConfig {
     pub backends: BTreeMap<String, BackendConfig>,
     #[serde(skip)]
     legacy_rpm_backend: bool,
+    /// Discovery path that supplied this config; absent for in-memory parses.
+    #[serde(skip)]
+    source_path: Option<PathBuf>,
 }
 
 /// `[vars]` overrides for `base_url` substitution. Every field is
@@ -256,22 +259,21 @@ pub struct BackendConfig {
     #[serde(default)]
     pub insecure: bool,
     /// rpm: signature verification toggle, handed to dnf.
-    ///
-    /// This and the two raw cache knobs below are deserialized for the
-    /// executors that will consume them (rpm delegation / raw index
-    /// cache); nothing reads them during resolution, hence the narrow
-    /// dead-code allowance until those land.
     #[serde(default)]
-    #[allow(dead_code)]
     pub gpgcheck: Option<bool>,
     /// npm: default package scope (`@anolis` → `@anolis/<component>`).
     #[serde(default)]
     pub scope: Option<String>,
-    /// raw: index cache freshness window.
+    /// Accepted but ignored: the raw backend re-fetches the index every run.
+    ///
+    /// Both knobs were written for an index cache that no CLI path uses;
+    /// `deny_unknown_fields` means dropping them would reject configs already
+    /// on disk, so they stay parseable and inert. Shipped templates no longer
+    /// emit them.
     #[serde(default)]
     #[allow(dead_code)]
     pub cache_ttl_secs: Option<u64>,
-    /// raw: serve a stale cached index when the network is down.
+    /// Accepted but ignored; see [`BackendConfig::cache_ttl_secs`].
     #[serde(default)]
     #[allow(dead_code)]
     pub offline_fallback: Option<bool>,
@@ -333,7 +335,7 @@ impl RepoConfig {
             .clone()
             .ok_or(RepoConfigProvisionError::Load(RepoConfigError::NotFound))?;
         let body = fetch_repo_config_body(bootstrap_url)?;
-        let config = Self::from_toml_str(&body).map_err(|err| {
+        let mut config = Self::from_toml_str(&body).map_err(|err| {
             RepoConfigProvisionError::InvalidDownloaded {
                 reason: err.to_string(),
             }
@@ -350,13 +352,16 @@ impl RepoConfig {
         }
 
         match write_repo_config(&dest, &body) {
-            Ok(()) => Ok(RepoConfigLoadResult {
-                config,
-                provisioning: RepoConfigProvisioning::Downloaded {
-                    url: bootstrap_url.to_string(),
-                    dest,
-                },
-            }),
+            Ok(()) => {
+                config.source_path = Some(dest.clone());
+                Ok(RepoConfigLoadResult {
+                    config,
+                    provisioning: RepoConfigProvisioning::Downloaded {
+                        url: bootstrap_url.to_string(),
+                        dest,
+                    },
+                })
+            }
             Err(err) => Ok(RepoConfigLoadResult {
                 config,
                 provisioning: RepoConfigProvisioning::DownloadedPersistFailed {
@@ -374,8 +379,9 @@ impl RepoConfig {
             if let Some(path) = candidate.as_deref()
                 && path.is_file()
             {
-                let config = Self::from_path(path)?;
+                let mut config = Self::from_path(path)?;
                 config.emit_deprecation_warnings(path);
+                config.source_path = Some(path.to_path_buf());
                 return Ok(config);
             }
         }
@@ -399,6 +405,11 @@ impl RepoConfig {
         Self::parse_with_path(s, Path::new("<memory>"))
     }
 
+    /// Path selected by local config discovery, when this config came from disk.
+    pub(crate) fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
     fn parse_with_path(s: &str, path: &Path) -> Result<Self, RepoConfigError> {
         let mut parsed: RepoConfig =
             toml::from_str(s).map_err(|source| RepoConfigError::Parse {
@@ -416,6 +427,21 @@ impl RepoConfig {
         } else {
             name
         }
+    }
+
+    /// Canonical spelling of `name` when it is a known backend, otherwise the
+    /// same unknown-backend error [`Self::select_backend`] reports. Name
+    /// validation only — whether the backend is configured in repo.toml is a
+    /// separate question some callers (a `--repo` override) do not ask.
+    pub(crate) fn known_backend_name(name: &str) -> Result<&'static str, RepoConfigError> {
+        let canonical = Self::canonical_backend_name(name);
+        KNOWN_BACKENDS
+            .iter()
+            .find(|known| **known == canonical)
+            .copied()
+            .ok_or_else(|| RepoConfigError::UnknownBackend {
+                name: canonical.to_string(),
+            })
     }
 
     pub(crate) fn backend_name_deprecation_warning(name: &str) -> Option<&'static str> {
@@ -493,12 +519,7 @@ impl RepoConfig {
         &self,
         cli_override: Option<&str>,
     ) -> Result<(&str, &BackendConfig), RepoConfigError> {
-        let name = Self::canonical_backend_name(cli_override.unwrap_or(&self.default_backend));
-        if !KNOWN_BACKENDS.contains(&name) {
-            return Err(RepoConfigError::UnknownBackend {
-                name: name.to_string(),
-            });
-        }
+        let name = Self::known_backend_name(cli_override.unwrap_or(&self.default_backend))?;
         match self.backends.get_key_value(name) {
             Some((key, cfg)) => Ok((key.as_str(), cfg)),
             None => Err(RepoConfigError::BackendNotConfigured {
@@ -690,13 +711,21 @@ pub fn raw_index_v2_url(base_url: &str) -> String {
     format!("{}/index-v2.toml", raw_root(base_url))
 }
 
-/// Component identity index location under the raw repository root.
+/// Generation-1 component identity index location under the raw repository root.
 ///
-/// `components.toml` is separate from raw `index.toml`: the former resolves a
-/// stable ANOLISA component identity to backend-native package names, while the
-/// latter selects raw artifact versions and hashes.
+/// Released clients continue reading this path, so publishers must preserve its
+/// schema v1 contents when publishing later component-index generations.
+#[cfg(test)]
 pub fn component_index_url(base_url: &str) -> String {
     format!("{}/components.toml", raw_root(base_url))
+}
+
+/// Generation-2 component identity index location under the raw repository root.
+///
+/// Keeping v2 at a distinct path prevents its incompatible target rows from
+/// breaking released clients that parse `components.toml` atomically.
+pub fn component_index_v2_url(base_url: &str) -> String {
+    format!("{}/components-v2.toml", raw_root(base_url))
 }
 
 /// Root that repo-relative index-row `url`s join onto. Same prefix the
@@ -917,6 +946,44 @@ mod tests {
         let content = std::fs::read_to_string(&repo_path).expect("read repo manifest");
         let cfg = RepoConfig::from_toml_str(&content).expect("repo manifest");
         cfg.select_backend(Some("rpm")).expect("rpm backend");
+    }
+
+    /// Neither shipped file may advertise the inert raw cache knobs.
+    #[test]
+    fn shipped_repo_configs_omit_raw_cache_knobs() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in ["../../templates/repo.toml", "../../manifests/repo.toml"] {
+            let path = manifest_dir.join(relative);
+            let content = std::fs::read_to_string(&path).expect("read shipped repo config");
+            let cfg = RepoConfig::from_toml_str(&content).expect("shipped repo config");
+            let raw = cfg.backends.get("raw").expect("raw backend");
+            assert_eq!(raw.cache_ttl_secs, None, "{relative}");
+            assert_eq!(raw.offline_fallback, None, "{relative}");
+        }
+    }
+
+    /// Configs written by older releases still carry the knobs and must load.
+    #[test]
+    fn legacy_raw_cache_knobs_still_parse() {
+        let cfg = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "raw"
+[backends.raw]
+base_url = "https://repo.test/v1/"
+cache_ttl_secs = 3600
+offline_fallback = true
+"#,
+        )
+        .expect("legacy repo config must load");
+
+        let (name, backend) = cfg.select_backend(None).expect("default backend");
+        assert_eq!(name, "raw");
+        assert_eq!(backend.cache_ttl_secs, Some(3600));
+        assert_eq!(backend.offline_fallback, Some(true));
+        assert_eq!(
+            cfg.resolved_base_url(name, backend, &host()).expect("url"),
+            "https://repo.test/v1"
+        );
     }
 
     #[test]
@@ -1230,6 +1297,15 @@ base_url = "https://example.com/$typo_var/repo"
         assert!(matches!(err, RepoConfigError::UnknownBackend { name } if name == "pip"));
     }
 
+    #[test]
+    fn known_backend_name_validates_without_requiring_configuration() {
+        assert_eq!(RepoConfig::known_backend_name("raw").expect("raw"), "raw");
+        assert_eq!(RepoConfig::known_backend_name("yum").expect("yum"), "rpm");
+        assert_eq!(RepoConfig::known_backend_name("npm").expect("npm"), "npm");
+        let err = RepoConfig::known_backend_name("pip").expect_err("pip unknown");
+        assert!(matches!(err, RepoConfigError::UnknownBackend { name } if name == "pip"));
+    }
+
     fn artifact_values(libc: Option<&str>) -> BTreeMap<&'static str, Option<String>> {
         BTreeMap::from([
             ("component", Some("tokenless".to_string())),
@@ -1262,10 +1338,14 @@ base_url = "https://example.com/$typo_var/repo"
     }
 
     #[test]
-    fn component_index_url_uses_raw_repository_root() {
+    fn component_index_urls_are_generation_specific() {
         assert_eq!(
             component_index_url("file:///srv/repo"),
             "file:///srv/repo/v1/components.toml"
+        );
+        assert_eq!(
+            component_index_v2_url("file:///srv/repo"),
+            "file:///srv/repo/v1/components-v2.toml"
         );
     }
 

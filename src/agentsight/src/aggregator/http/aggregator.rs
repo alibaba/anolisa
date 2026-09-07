@@ -1152,7 +1152,7 @@ impl HttpConnectionAggregator {
         // 2. Determine which PIDs are dead
         let dead_pids: HashSet<u32> = pids
             .into_iter()
-            .filter(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists())
+            .filter(|pid| !crate::utils::procfs::proc_pid(pid).exists())
             .collect();
 
         if dead_pids.is_empty() {

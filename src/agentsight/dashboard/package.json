@@ -7,7 +7,8 @@
     "build:embed": "AGENTSIGHT_EMBED=1 webpack --mode production",
     "typecheck": "tsc --noEmit",
     "test:api-client": "node tests/run-api-client-regression.cjs",
-    "test:i18n": "node tests/run-i18n-regression.cjs"
+    "test:i18n": "node tests/run-i18n-regression.cjs",
+    "test:product-branding": "node --test tests/product-branding-regression.test.cjs"
   },
   "dependencies": {
     "react": "^18.2.0",

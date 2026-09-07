@@ -12,6 +12,11 @@
 //!
 //! # Interruption Types
 //!
+//! `--type` accepts every `InterruptionType` variant (see
+//! `src/interruption/types.rs`); the values are derived from
+//! `InterruptionType::ALL` so the filter cannot fall behind the detector.
+//! The most frequently filtered ones:
+//!
 //! | Type              | Description                                           | Default Severity |
 //! |-------------------|-------------------------------------------------------|-----------------|
 //! | llm_error         | HTTP status >= 400 or SSE body contains {"error":...} | high            |
@@ -19,6 +24,8 @@
 //! | context_overflow  | finish_reason=content_filter or context_length_exceeded| high            |
 //! | agent_crash       | Agent process disappeared mid-session (OOM/signal)    | critical        |
 //! | token_limit       | finish_reason=length and output_tokens >= max * 0.95  | medium          |
+//! | dead_loop         | Repeated tool sequences or similar outputs, no progress| critical        |
+//! | retry_storm       | Same error repeated past the retry threshold          | critical        |
 //!
 //! # Severity Levels
 //!
@@ -55,8 +62,19 @@
 //! agentsight interruption list --last 24 --json
 //! ```
 
+use agentsight::interruption::InterruptionType;
 use agentsight::storage::sqlite::{GenAISqliteStore, InterruptionRecord, InterruptionStore};
+use std::sync::OnceLock;
 use structopt::StructOpt;
+
+/// Type identifiers accepted by `--type`, derived from `InterruptionType::ALL`.
+///
+/// Deriving them keeps the filter from covering fewer types than the detector
+/// produces, which is what happened while the list was hand-written.
+fn interruption_type_values() -> &'static [&'static str] {
+    static VALUES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    VALUES.get_or_init(|| InterruptionType::ALL.iter().map(|t| t.as_str()).collect())
+}
 
 /// Query and manage AI agent session interruption events.
 ///
@@ -65,7 +83,8 @@ use structopt::StructOpt;
 ///
 /// Default database: /var/log/sysak/.agentsight/interruption_events.db
 ///
-/// Interruption types: llm_error, sse_truncated, context_overflow, agent_crash, token_limit
+/// Interruption types: every `InterruptionType` variant, listed by
+/// `agentsight interruption list --help`
 /// Severity levels: critical, high, medium, low
 #[derive(Debug, StructOpt, Clone)]
 pub struct InterruptionCommand {
@@ -90,8 +109,8 @@ pub enum InterruptionAction {
         last: u64,
 
         /// Filter by interruption type.
-        /// Values: llm_error, sse_truncated, context_overflow, agent_crash, token_limit
-        #[structopt(long = "type", possible_values = &["llm_error", "sse_truncated", "context_overflow", "agent_crash", "token_limit"])]
+        /// Accepts every type the detector can produce; see the values listed below.
+        #[structopt(long = "type", possible_values = interruption_type_values())]
         itype: Option<String>,
 
         /// Filter by severity level.
@@ -294,7 +313,9 @@ impl InterruptionCommand {
 
             InterruptionAction::Stats { last, json } => {
                 let (start_ns, end_ns) = time_range_ns(*last);
-                match store.stats(start_ns, end_ns) {
+                // `None`: the CLI reports what happened in the window,
+                // resolved or not, unlike the dashboard's unresolved-only card.
+                match store.stats(start_ns, end_ns, None) {
                     Ok(stats) => {
                         if *json {
                             print_json(&stats);

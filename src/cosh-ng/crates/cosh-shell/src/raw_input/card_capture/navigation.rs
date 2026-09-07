@@ -240,8 +240,13 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Evidence { .. } => None,
-            // Tab completion has no meaning inside the draft card; swallow it.
-            RawInputCapture::PromptDraft { .. } => None,
+            RawInputCapture::PromptDraft { .. } => {
+                let replacement = self.draft_completion.clone()?;
+                self.draft
+                    .replace_current_token(&replacement)
+                    .then(|| self.input_event(capture))
+                    .flatten()
+            }
         }
     }
 

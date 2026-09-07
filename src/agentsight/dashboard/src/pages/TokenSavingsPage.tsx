@@ -7,14 +7,16 @@ import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
 import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
+import { useI18n, useLocaleTag } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function fmtTokens(n: number): string {
-  return n.toLocaleString();
+function fmtTokens(n: number, locale: string): string {
+  return n.toLocaleString(locale);
 }
 
-/** Info tooltip: hover 显示解释文案，鼠标移到 tooltip 上也保持显示 */
+/** Info tooltip: stays visible while the pointer is over the tooltip */
 const InfoTooltip: React.FC<{ text: string }> = ({ text }) => {
   const [show, setShow] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,8 +45,9 @@ function shortId(id: string, len = 16): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
 }
 
-/** 复制按钮组件，点击后短暂显示「已复制」反馈 */
+/** Copy button with a brief "Copied" feedback */
 const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = (e: React.MouseEvent) => {
@@ -68,9 +71,9 @@ const CopyButton: React.FC<{ text: string }> = ({ text }) => {
           ? 'bg-green-100 text-green-600'
           : 'bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-gray-700'
       }`}
-      title="复制完整 ID"
+      title={t('common.copyFullId')}
     >
-      {copied ? '✓ 已复制' : '复制'}
+      {copied ? t('common.copied') : t('common.copy')}
     </button>
   );
 };
@@ -94,28 +97,39 @@ type OptimizationCategory = 'tool_output' | 'mcp_response';
 
 // ─── Category config ──────────────────────────────────────────────────────────
 
-const CATEGORY_CONFIG: Record<OptimizationCategory, { label: string; color: string; bg: string }> = {
-  tool_output: { label: '工具输出', color: 'text-orange-700', bg: 'bg-orange-100' },
-  mcp_response: { label: 'MCP输出', color: 'text-violet-700', bg: 'bg-violet-100' },
+const CATEGORY_CONFIG: Record<OptimizationCategory, { labelKey: MessageKey; color: string; bg: string }> = {
+  tool_output: { labelKey: 'ts.toolOutput', color: 'text-orange-700', bg: 'bg-orange-100' },
+  mcp_response: { labelKey: 'ts.mcpOutput', color: 'text-violet-700', bg: 'bg-violet-100' },
 };
 
 // ─── Strategy config ─────────────────────────────────────────────────────────
 
-const STRATEGY_CONFIG: Record<string, { label: string; color: string; bg: string; pie: string; tooltip: string }> = {
-  'compress-schema':   { label: 'Schema 压缩', color: 'text-blue-700',   bg: 'bg-blue-100',   pie: '#3b82f6', tooltip: '精简工具/MCP 接口定义，减少上下文体积' },
-  'compress-response': { label: '响应压缩',    color: 'text-violet-700', bg: 'bg-violet-100', pie: '#8b5cf6', tooltip: '清理响应冗余字段，保留语义关键内容' },
-  'rewrite-command':   { label: '命令重写',    color: 'text-orange-700', bg: 'bg-orange-100', pie: '#f59e0b', tooltip: '将工具命令重写为更精简的等价形式' },
-  'compress-toon':     { label: 'TOON 编码',   color: 'text-teal-700',  bg: 'bg-teal-100',  pie: '#14b8a6', tooltip: '将 JSON 输出转换为紧凑 TOON 表格文本' },
+const STRATEGY_CONFIG: Record<string, { labelKey: MessageKey; color: string; bg: string; pie: string; tooltipKey: MessageKey }> = {
+  'compress-schema':   { labelKey: 'ts.schemaCompression', color: 'text-blue-700',   bg: 'bg-blue-100',   pie: '#3b82f6', tooltipKey: 'ts.schemaCompressionTip' },
+  'compress-response': { labelKey: 'ts.responseCompression', color: 'text-violet-700', bg: 'bg-violet-100', pie: '#8b5cf6', tooltipKey: 'ts.responseCompressionTip' },
+  'rewrite-command':   { labelKey: 'ts.commandRewrite', color: 'text-orange-700', bg: 'bg-orange-100', pie: '#f59e0b', tooltipKey: 'ts.commandRewriteTip' },
+  'compress-toon':     { labelKey: 'ts.toonEncoding', color: 'text-teal-700',  bg: 'bg-teal-100',  pie: '#14b8a6', tooltipKey: 'ts.toonEncodingTip' },
 };
 
 // ─── Pie chart data ───────────────────────────────────────────────────────────
 
-const PIE_COLORS = ['#3b82f6', '#10b981']; // 输入蓝, 输出绿
-const SAVED_PIE_COLORS = ['#f59e0b', '#8b5cf6']; // 工具橙, MCP紫
+const PIE_COLORS = ['#3b82f6', '#10b981']; // input blue, output green
+const SAVED_PIE_COLORS = ['#f59e0b', '#8b5cf6']; // tool orange, MCP violet
+
+// ─── Time range presets ───────────────────────────────────────────────────────
+
+const TIME_PRESETS: { labelKey: MessageKey; ms: number }[] = [
+  { labelKey: 'common.last1h', ms: 3600 * 1000 },
+  { labelKey: 'common.last6h', ms: 6 * 3600 * 1000 },
+  { labelKey: 'common.last24h', ms: 24 * 3600 * 1000 },
+  { labelKey: 'common.last7d', ms: 7 * 24 * 3600 * 1000 },
+];
 
 // ─── Diff view (split / unified toggle) ──────────────────────────────────────
 
 const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const diffLines = item.diff_lines ?? [];
   const addedCount = diffLines.filter(l => l.type === 'add').length;
   const removedCount = diffLines.filter(l => l.type === 'remove').length;
@@ -146,11 +160,11 @@ const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
         <div>
           <p className="text-sm text-blue-800 font-medium">{item.explanation}</p>
           <p className="text-xs text-blue-600 mt-0.5">
-            压缩率 <span className="font-semibold">{item.compression_ratio.toFixed(1)}%</span>
+            {t('ts.compressionRatio')} <span className="font-semibold">{item.compression_ratio.toFixed(1)}%</span>
             {' · '}
-            影响后续 <span className="font-semibold">{item.compounding_turns}</span> 轮调用
+            {t('ts.affectsCalls', { n: item.compounding_turns })}
             {' · '}
-            复合节省 <span className="font-semibold text-green-700">{fmtTokens(item.compounded_saved)}</span> tokens
+            {t('ts.compoundedSavings', { n: fmtTokens(item.compounded_saved, locale) })}
           </p>
         </div>
       </div>
@@ -178,15 +192,15 @@ const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
         ) : (
           <div className="grid grid-cols-2 divide-x divide-gray-200">
             <div>
-              <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200">原始内容</div>
+              <div className="px-2 py-1 text-xs font-semibold text-red-600 bg-red-50 border-b border-gray-200">{t('common.original')}</div>
               <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-red-50 text-red-700">
-                {item.before_text || '无变更'}
+                {item.before_text || t('common.noChange')}
               </pre>
             </div>
             <div>
-              <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200">优化后</div>
+              <div className="px-2 py-1 text-xs font-semibold text-green-600 bg-green-50 border-b border-gray-200">{t('common.optimized')}</div>
               <pre className="font-mono text-xs px-2 py-1 break-all whitespace-pre-wrap bg-green-50 text-green-700">
-                {item.after_text || '无变更'}
+                {item.after_text || t('common.noChange')}
               </pre>
             </div>
           </div>
@@ -196,8 +210,8 @@ const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
       {/* Stats footer */}
       {diffLines.length > 0 && (
         <div className="px-4 py-2 bg-gray-50 border-t border-gray-200 flex gap-4 text-xs text-gray-500">
-          <span className="text-red-600">-{removedCount} 行移除</span>
-          <span className="text-green-600">+{addedCount} 行新增</span>
+          <span className="text-red-600">{t('common.linesRemoved', { n: removedCount })}</span>
+          <span className="text-green-600">{t('common.linesAdded', { n: addedCount })}</span>
         </div>
       )}
     </div>
@@ -213,11 +227,12 @@ const TIP_STYLE: Record<string, { icon: string; border: string; bg: string; text
 };
 
 const OptimizationTipsPanel: React.FC<{ tips: OptimizationTip[] }> = ({ tips }) => {
+  const { t } = useI18n();
   if (tips.length === 0) return null;
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
       <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-        <span>🎯</span> 优化建议
+        {t('ts.optimizationTips')}
       </h3>
       <div className="space-y-2">
         {tips.map((tip, idx) => {
@@ -240,6 +255,8 @@ const OptimizationTipsPanel: React.FC<{ tips: OptimizationTip[] }> = ({ tips }) 
 // ─── Savings Breakdown Panel ─────────────────────────────────────────────────
 
 const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessions }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   // Get top 5 optimization items across all sessions by compounded_saved
   const allItems = sessions.flatMap(s =>
     s.optimization_items.map(item => ({
@@ -259,7 +276,7 @@ const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessi
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
       <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-        <span>📊</span> 节省排行 Top 5（按复合节省量）
+        {t('ts.savingsTop5')}
       </h3>
       <div className="space-y-2">
         {topItems.map((item, idx) => {
@@ -269,7 +286,7 @@ const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessi
             <div key={item.id || idx} className="flex items-center gap-3">
               <span className="text-xs text-gray-400 w-4 text-right">#{idx + 1}</span>
               <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${cfg.bg} ${cfg.color} flex-shrink-0`}>
-                {cfg.label}
+                {t(cfg.labelKey)}
               </span>
               <div className="flex-1 min-w-0">
                 <div className="h-5 bg-gray-100 rounded-full overflow-hidden relative">
@@ -278,7 +295,7 @@ const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessi
                     style={{ width: `${pct}%` }}
                   />
                   <span className="absolute inset-0 flex items-center px-2 text-xs font-medium text-gray-700">
-                    {fmtTokens(item.compounded_saved)} tokens
+                    {t('common.tokens', { n: fmtTokens(item.compounded_saved, locale) })}
                   </span>
                 </div>
               </div>
@@ -296,13 +313,14 @@ const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessi
 // ─── Optimization table row ───────────────────────────────────────────────────
 
 const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(false);
   const cfg = CATEGORY_CONFIG[item.category];
-  const stratCfg = STRATEGY_CONFIG[item.strategy] ?? {
-    label: item.strategy_label || item.strategy,
-    color: 'text-gray-700', bg: 'bg-gray-100', pie: '#9ca3af',
-    tooltip: '',
-  };
+  const stratConfig = STRATEGY_CONFIG[item.strategy];
+  const stratStyle = stratConfig ?? { color: 'text-gray-700', bg: 'bg-gray-100', pie: '#9ca3af' };
+  const stratLabel = stratConfig ? t(stratConfig.labelKey) : (item.strategy_label || item.strategy);
+  const stratTooltip = stratConfig ? t(stratConfig.tooltipKey) : '';
   const savingsPercent = item.before_tokens > 0
     ? ((item.before_tokens - item.after_tokens) / item.before_tokens * 100).toFixed(0)
     : '0';
@@ -312,37 +330,37 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
       <tr className="hover:bg-gray-50 transition-colors">
         <td className="px-4 py-3">
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${cfg.bg} ${cfg.color}`}>
-            {cfg.label}
+            {t(cfg.labelKey)}
           </span>
           <span className="ml-2 text-xs text-gray-500">{item.title}</span>
         </td>
         <td className="px-4 py-3">
-          <span className={`relative group px-2 py-0.5 rounded text-xs font-medium ${stratCfg.bg} ${stratCfg.color} cursor-default`}>
-            {stratCfg.label}
-            {stratCfg.tooltip && (
+          <span className={`relative group px-2 py-0.5 rounded text-xs font-medium ${stratStyle.bg} ${stratStyle.color} cursor-default`}>
+            {stratLabel}
+            {stratTooltip && (
               <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block px-2 py-1.5 rounded bg-gray-800 text-white text-xs whitespace-nowrap shadow-lg z-50 pointer-events-none">
-                {stratCfg.tooltip}
+                {stratTooltip}
                 <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
               </span>
             )}
           </span>
         </td>
         <td className="px-4 py-3 text-sm text-gray-600 text-right">
-          {fmtTokens(item.before_tokens)}
+          {fmtTokens(item.before_tokens, locale)}
         </td>
         <td className="px-4 py-3 text-sm text-gray-600 text-right">
-          {fmtTokens(item.after_tokens)}
+          {fmtTokens(item.after_tokens, locale)}
         </td>
         <td className="px-4 py-3 text-sm font-semibold text-green-600 text-right">
-          {fmtTokens(item.compounded_saved)}
-          <span className="text-xs text-gray-400 ml-1">(单轮 {savingsPercent}%)</span>
+          {fmtTokens(item.compounded_saved, locale)}
+          <span className="text-xs text-gray-400 ml-1">{t('ts.singleTurn', { pct: savingsPercent })}</span>
         </td>
         <td className="px-4 py-3 text-center">
           <button
             onClick={() => setExpanded(!expanded)}
             className="text-xs text-blue-600 hover:text-blue-800 transition-colors"
           >
-            {expanded ? '收起' : '详情'}
+            {expanded ? t('common.collapse') : t('common.details')}
           </button>
         </td>
       </tr>
@@ -364,6 +382,8 @@ const SessionRow: React.FC<{
   initialExpanded?: boolean;
   rowRef?: React.Ref<HTMLTableRowElement>;
 }> = ({ session, initialExpanded = false, rowRef }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(initialExpanded);
 
   return (
@@ -395,24 +415,24 @@ const SessionRow: React.FC<{
           </span>
         </td>
         <td className="px-4 lg:px-6 py-4 text-sm text-gray-900 text-right">
-          {fmtTokens(session.total_input_tokens)}
+          {fmtTokens(session.total_input_tokens, locale)}
         </td>
         <td className="px-4 lg:px-6 py-4 text-sm text-gray-900 text-right">
-          {fmtTokens(session.total_output_tokens)}
+          {fmtTokens(session.total_output_tokens, locale)}
         </td>
         <td className="px-4 lg:px-6 py-4 text-sm font-semibold text-green-600 text-right">
-          {fmtTokens(session.compounded_saved)}
+          {fmtTokens(session.compounded_saved, locale)}
         </td>
         <td className="px-4 lg:px-6 py-4">
           <div className="flex items-center gap-2">
             <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden max-w-[80px]">
               <div
                 className="h-full bg-green-500 rounded-full"
-                style={{ width: `${Math.min(session.compounded_savings_rate, 100)}%` }}
+                style={{ width: `${Math.min(session.compounded_savings_rate * 100, 100)}%` }}
               />
             </div>
             <span className="text-xs font-semibold text-green-600">
-              {session.compounded_savings_rate.toFixed(1)}%
+              {(session.compounded_savings_rate * 100).toFixed(1)}%
             </span>
           </div>
         </td>
@@ -428,22 +448,22 @@ const SessionRow: React.FC<{
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[90px]">
-                      分类
+                      {t('ts.category')}
                     </th>
                     <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
-                      节省策略
+                      {t('ts.savingsStrategy')}
                     </th>
                     <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                      优化前
+                      {t('ts.before')}
                     </th>
                     <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                      优化后
+                      {t('ts.optimizedCol')}
                     </th>
                     <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                      节省
+                      {t('ts.savedCol')}
                     </th>
                     <th className="px-4 py-2 text-center text-xs font-semibold text-gray-600 uppercase tracking-wide w-[60px]">
-                      详情
+                      {t('ts.detailsCol')}
                     </th>
                   </tr>
                 </thead>
@@ -464,6 +484,8 @@ const SessionRow: React.FC<{
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export const TokenSavingsPage: React.FC = () => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const [searchParams] = useSearchParams();
   const now = Date.now();
 
@@ -513,11 +535,11 @@ export const TokenSavingsPage: React.FC = () => {
       setStatsAvailable(resp.stats_available);
       setTips(resp.optimization_tips ?? []);
     } catch (e: any) {
-      setError(e.message || 'Failed to fetch token savings');
+      setError(e.message || t('ts.fetchFailed'));
     } finally {
       setLoading(false);
     }
-  }, [startMs, endMs, selectedAgent]);
+  }, [startMs, endMs, selectedAgent, t]);
 
   // Auto-query on mount when navigated from homepage with URL params
   const hasAutoQueriedRef = useRef(false);
@@ -543,7 +565,6 @@ export const TokenSavingsPage: React.FC = () => {
   const totalCompoundedSaved = summary?.total_compounded_saved ?? 0;
   const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
   const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
-  const compoundedSavingsRate = summary?.compounded_savings_rate ?? 0;
   const savingsRate = baselineTokens > 0 ? (totalCompoundedSaved / baselineTokens) * 100 : 0;
 
   return (
@@ -551,19 +572,14 @@ export const TokenSavingsPage: React.FC = () => {
       {/* ── Filter bar ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
         {/* Time range */}
-        <DateTimePicker label="开始时间" value={startMs} onChange={setStartMs} />
-        <DateTimePicker label="结束时间" value={endMs} onChange={setEndMs} />
+        <DateTimePicker label={t('common.startTime')} value={startMs} onChange={setStartMs} />
+        <DateTimePicker label={t('common.endTime')} value={endMs} onChange={setEndMs} />
 
         {/* Quick presets */}
         <div className="flex gap-2 flex-wrap">
-          {[
-            { label: '最近 1h', ms: 3600 * 1000 },
-            { label: '最近 6h', ms: 6 * 3600 * 1000 },
-            { label: '最近 24h', ms: 24 * 3600 * 1000 },
-            { label: '最近 7d', ms: 7 * 24 * 3600 * 1000 },
-          ].map(({ label, ms }) => (
+          {TIME_PRESETS.map(({ labelKey, ms }) => (
             <button
-              key={label}
+              key={labelKey}
               onClick={() => {
                 const n = Date.now();
                 setEndMs(n);
@@ -571,20 +587,20 @@ export const TokenSavingsPage: React.FC = () => {
               }}
               className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-600 transition-colors"
             >
-              {label}
+              {t(labelKey)}
             </button>
           ))}
         </div>
 
         {/* Agent selector */}
         <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-600 whitespace-nowrap">Agent</label>
+          <label className="text-sm text-gray-600 whitespace-nowrap">{t('common.agent')}</label>
           <select
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 min-w-[160px]"
             value={selectedAgent}
             onChange={(e) => setSelectedAgent(e.target.value)}
           >
-            <option value="">全部 Agent</option>
+            <option value="">{t('common.allAgents')}</option>
             {agentNames.map((n) => (
               <option key={n} value={n}>{n}</option>
             ))}
@@ -597,7 +613,7 @@ export const TokenSavingsPage: React.FC = () => {
           disabled={loading}
           className="ml-auto px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
         >
-          {loading ? '查询中...' : '查询'}
+          {loading ? t('common.querying') : t('common.query')}
         </button>
       </div>
 
@@ -611,7 +627,7 @@ export const TokenSavingsPage: React.FC = () => {
       {/* ── Stats unavailable notice ── */}
       {hasQueried && !statsAvailable && (
         <div className="bg-yellow-50 border border-yellow-200 text-yellow-700 px-4 py-3 rounded-lg text-sm">
-          未发现优化记录
+          {t('ts.noOptimizationRecords')}
         </div>
       )}
 
@@ -623,17 +639,17 @@ export const TokenSavingsPage: React.FC = () => {
         {/* Card 1: Total consumption */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm text-gray-500 flex items-center">
-            实际 Token 消耗
-            <InfoTooltip text="即 LLM API 实际计费的 Token 量，已包含 Tokenless 优化效果" />
+            {t('ts.actualConsumption')}
+            <InfoTooltip text={t('ts.actualConsumptionTip')} />
           </p>
-          <p className="text-3xl font-bold text-gray-900 mt-1">{fmtTokens(totalTokens)}</p>
+          <p className="text-3xl font-bold text-gray-900 mt-1">{fmtTokens(totalTokens, locale)}</p>
           <div className="mt-3">
             <ResponsiveContainer width="100%" height={60}>
               <PieChart>
                 <Pie
                   data={[
-                    { name: '输入', value: totalInput },
-                    { name: '输出', value: totalOutput },
+                    { name: t('common.input'), value: totalInput },
+                    { name: t('common.output'), value: totalOutput },
                   ]}
                   cx="50%"
                   cy="50%"
@@ -652,11 +668,11 @@ export const TokenSavingsPage: React.FC = () => {
             <div className="flex justify-center gap-4 -mt-1">
               <span className="flex items-center gap-1 text-xs text-gray-500">
                 <span className="w-2 h-2 rounded-full bg-blue-500" />
-                输入 {fmtTokens(totalInput)}
+                {t('common.input')} {fmtTokens(totalInput, locale)}
               </span>
               <span className="flex items-center gap-1 text-xs text-gray-500">
                 <span className="w-2 h-2 rounded-full bg-green-500" />
-                输出 {fmtTokens(totalOutput)}
+                {t('common.output')} {fmtTokens(totalOutput, locale)}
               </span>
             </div>
           </div>
@@ -665,13 +681,13 @@ export const TokenSavingsPage: React.FC = () => {
         {/* Card 2: Saved tokens — strategy breakdown pie */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm text-gray-500 flex items-center">
-            已节省 Token
-            <InfoTooltip text="优化前预估 = 不开启 Tokenless 优化时本应消耗的 Token 总量。已节省 = 优化前预估 - 实际消耗" />
+            {t('ts.savedTokens')}
+            <InfoTooltip text={t('ts.savedTokensTip')} />
           </p>
           <p className="text-3xl font-bold text-green-600 mt-1">
-            {fmtTokens(totalCompoundedSaved)}
+            {fmtTokens(totalCompoundedSaved, locale)}
           </p>
-          <p className="text-xs text-gray-400 mt-0.5">优化前预估: {fmtTokens(baselineTokens)}</p>
+          <p className="text-xs text-gray-400 mt-0.5">{t('ts.baseline', { n: fmtTokens(baselineTokens, locale) })}</p>
           <div className="mt-3">
             {(() => {
               const breakdown = summary?.strategy_breakdown ?? [];
@@ -680,7 +696,7 @@ export const TokenSavingsPage: React.FC = () => {
                 const pieData = breakdown
                   .filter(b => b.compounded_saved > 0)
                   .map(b => ({
-                    name: (STRATEGY_CONFIG[b.strategy]?.label ?? b.label),
+                    name: (STRATEGY_CONFIG[b.strategy] ? t(STRATEGY_CONFIG[b.strategy].labelKey) : b.label),
                     value: b.compounded_saved,
                     color: (STRATEGY_CONFIG[b.strategy]?.pie ?? '#9ca3af'),
                   }));
@@ -708,7 +724,7 @@ export const TokenSavingsPage: React.FC = () => {
                       {pieData.map((d, i) => (
                         <span key={i} className="flex items-center gap-1 text-xs text-gray-500">
                           <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: d.color }} />
-                          {d.name} {fmtTokens(d.value)}
+                          {d.name} {fmtTokens(d.value, locale)}
                         </span>
                       ))}
                     </div>
@@ -722,8 +738,8 @@ export const TokenSavingsPage: React.FC = () => {
                     <PieChart>
                       <Pie
                         data={[
-                          { name: '工具', value: totalCompoundedToolSaved },
-                          { name: 'MCP', value: totalCompoundedMcpSaved },
+                          { name: t('ts.tool'), value: totalCompoundedToolSaved },
+                          { name: t('ts.mcp'), value: totalCompoundedMcpSaved },
                         ]}
                         cx="50%"
                         cy="50%"
@@ -742,11 +758,11 @@ export const TokenSavingsPage: React.FC = () => {
                   <div className="flex justify-center gap-4 -mt-1">
                     <span className="flex items-center gap-1 text-xs text-gray-500">
                       <span className="w-2 h-2 rounded-full bg-orange-500" />
-                      工具 {fmtTokens(totalCompoundedToolSaved)}
+                      {t('ts.tool')} {fmtTokens(totalCompoundedToolSaved, locale)}
                     </span>
                     <span className="flex items-center gap-1 text-xs text-gray-500">
                       <span className="w-2 h-2 rounded-full bg-violet-500" />
-                      MCP {fmtTokens(totalCompoundedMcpSaved)}
+                      {t('ts.mcp')} {fmtTokens(totalCompoundedMcpSaved, locale)}
                     </span>
                   </div>
                 </>
@@ -757,7 +773,7 @@ export const TokenSavingsPage: React.FC = () => {
 
         {/* Card 3: Savings rate */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-          <p className="text-sm text-gray-500">节省率</p>
+          <p className="text-sm text-gray-500">{t('ts.savingsRate')}</p>
           <div className="flex items-center gap-4 mt-1">
             <div className="relative w-20 h-20 flex-shrink-0">
               <svg viewBox="0 0 80 80" className="w-full h-full -rotate-90">
@@ -789,10 +805,10 @@ export const TokenSavingsPage: React.FC = () => {
                     : 'bg-orange-100 text-orange-700'
                 }`}
               >
-                {savingsRate >= 30 ? '优秀' : savingsRate >= 15 ? '良好' : '待优化'}
+                {savingsRate >= 30 ? t('ts.excellent') : savingsRate >= 15 ? t('ts.good') : t('ts.needsWork')}
               </span>
               <p className="text-xs text-gray-400 mt-1">
-                = 已节省 / 优化前预估 × 100%
+                {t('ts.savingsRateFormula')}
               </p>
             </div>
           </div>
@@ -806,8 +822,8 @@ export const TokenSavingsPage: React.FC = () => {
         return (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-5 py-4">
             <div className="flex items-baseline gap-2 mb-3">
-              <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">优化前预估消耗</span>
-              <span className="text-sm font-semibold text-gray-700">{fmtTokens(baselineTokens)}</span>
+              <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">{t('ts.baselineConsumption')}</span>
+              <span className="text-sm font-semibold text-gray-700">{fmtTokens(baselineTokens, locale)}</span>
             </div>
             <div className="flex h-3 rounded-full overflow-hidden bg-gray-100">
               <div className="bg-blue-500 transition-all" style={{ width: `${usedPct}%` }} />
@@ -816,12 +832,12 @@ export const TokenSavingsPage: React.FC = () => {
             <div className="flex items-center justify-between mt-2.5 text-xs text-gray-500">
               <span className="flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-sm bg-blue-500" />
-                实际消耗 {fmtTokens(totalTokens)}
+                {t('ts.actual')} {fmtTokens(totalTokens, locale)}
                 <span className="text-gray-300">({usedPct.toFixed(1)}%)</span>
               </span>
               <span className="flex items-center gap-1.5 text-emerald-600 font-medium">
                 <span className="w-2 h-2 rounded-sm bg-emerald-400" />
-                已节省 {fmtTokens(totalCompoundedSaved)}
+                {t('ts.saved')} {fmtTokens(totalCompoundedSaved, locale)}
                 <span className="font-normal text-emerald-500">({savedPct.toFixed(1)}%)</span>
               </span>
             </div>
@@ -843,24 +859,24 @@ export const TokenSavingsPage: React.FC = () => {
               <tr>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
                   <span className="inline-flex items-center gap-1.5">
-                    <span>Session ID</span>
+                    <span>{t('ts.sessionId')}</span>
                     <SessionIdHelp />
                   </span>
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  Agent
+                  {t('common.agent')}
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  输入 Token
+                  {t('ts.inputTokens')}
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  输出 Token
+                  {t('ts.outputTokens')}
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  <span className="inline-flex items-center gap-1" title="对比该会话优化前的预估消耗">已节省</span>
+                  <span className="inline-flex items-center gap-1" title={t('ts.savedComparedTooltip')}>{t('ts.savedCol')}</span>
                 </th>
                 <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                  节省率
+                  {t('ts.savingsRateCol')}
                 </th>
               </tr>
             </thead>
@@ -883,8 +899,8 @@ export const TokenSavingsPage: React.FC = () => {
         /* Prompt before first query */
         <div className="flex flex-col items-center justify-center py-20 text-gray-400">
           <div className="text-5xl mb-4">⚡</div>
-          <p className="text-base">请选择时间范围，然后点击「查询」</p>
-          <p className="text-xs mt-2">查看 Token 节省效果</p>
+          <p className="text-base">{t('ts.selectTimeRange')}</p>
+          <p className="text-xs mt-2">{t('ts.viewSavings')}</p>
         </div>
       )}
     </main>

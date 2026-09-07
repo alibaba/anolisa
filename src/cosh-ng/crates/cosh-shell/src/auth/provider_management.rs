@@ -187,12 +187,15 @@ pub(super) fn core_auth_delete(adapter: &AdapterInstance, provider_id: &str) -> 
 pub(super) fn core_auth_configure(
     adapter: &AdapterInstance,
     response: &AuthResponse,
-) -> Result<(), String> {
+) -> Result<(), AuthConfigureFailure> {
     let AdapterInstance::CoshCore(cosh_core) = adapter else {
-        return Err("auth registry requires cosh-core backend".to_string());
+        return Err(AuthConfigureFailure {
+            message: "auth registry requires cosh-core backend".to_string(),
+            code: None,
+        });
     };
     cosh_core
-        .registry_query(
+        .registry_query_classified(
             "auth",
             "configure",
             json!({
@@ -202,6 +205,109 @@ pub(super) fn core_auth_configure(
             }),
         )
         .map(|_| ())
+        .map_err(auth_configure_failure)
+}
+
+fn auth_configure_failure(error: crate::adapter::RegistryQueryError) -> AuthConfigureFailure {
+    match error {
+        crate::adapter::RegistryQueryError::Transport(message) => AuthConfigureFailure {
+            message,
+            code: None,
+        },
+        crate::adapter::RegistryQueryError::Response { message, code } => {
+            AuthConfigureFailure { message, code }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AuthConfigureFailure {
+    pub(super) message: String,
+    pub(super) code: Option<String>,
+}
+
+impl AuthConfigureFailure {
+    pub(super) fn focus_field(&self, provider_template_id: &str) -> Option<&'static str> {
+        match self.code.as_deref() {
+            Some("invalid_provider_id") => Some("provider_id"),
+            Some("missing_access_key_id") => Some("access_key_id"),
+            Some("missing_access_key_secret") => Some("access_key_secret"),
+            Some("invalid_credentials" | "missing_credentials" | "permission_denied")
+                if provider_template_id == "aliyun" =>
+            {
+                Some("access_key_id")
+            }
+            Some("invalid_credentials" | "missing_credentials" | "permission_denied") => {
+                Some("api_key")
+            }
+            Some("model_unavailable" | "missing_model") => Some("model"),
+            Some("invalid_base_url" | "missing_base_url" | "endpoint_unreachable" | "timeout") => {
+                Some("base_url")
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod auth_configure_failure_tests {
+    use super::{auth_configure_failure, AuthConfigureFailure};
+    use crate::adapter::RegistryQueryError;
+
+    fn failure(code: &str) -> AuthConfigureFailure {
+        AuthConfigureFailure {
+            message: "safe message".to_string(),
+            code: Some(code.to_string()),
+        }
+    }
+
+    #[test]
+    fn classified_failures_focus_actionable_fields() {
+        for code in [
+            "invalid_credentials",
+            "permission_denied",
+            "missing_credentials",
+        ] {
+            assert_eq!(failure(code).focus_field("dashscope"), Some("api_key"));
+            assert_eq!(failure(code).focus_field("aliyun"), Some("access_key_id"));
+        }
+        assert_eq!(
+            failure("missing_access_key_id").focus_field("aliyun"),
+            Some("access_key_id")
+        );
+        assert_eq!(
+            failure("missing_access_key_secret").focus_field("aliyun"),
+            Some("access_key_secret")
+        );
+        for code in ["model_unavailable", "missing_model"] {
+            assert_eq!(failure(code).focus_field("dashscope"), Some("model"));
+        }
+        for code in [
+            "invalid_base_url",
+            "missing_base_url",
+            "endpoint_unreachable",
+            "timeout",
+        ] {
+            assert_eq!(failure(code).focus_field("openai_compat"), Some("base_url"));
+        }
+        assert_eq!(
+            failure("provider_unavailable").focus_field("dashscope"),
+            None
+        );
+        for code in ["service_not_ready", "credential_source_unavailable"] {
+            assert_eq!(failure(code).focus_field("aliyun"), None);
+        }
+    }
+
+    #[test]
+    fn shell_core_transport_failures_do_not_impersonate_provider_network_errors() {
+        let failure = auth_configure_failure(RegistryQueryError::Transport(
+            "cosh-core output stream disconnected".to_string(),
+        ));
+
+        assert_eq!(failure.code, None);
+        assert_eq!(failure.focus_field("dashscope"), None);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

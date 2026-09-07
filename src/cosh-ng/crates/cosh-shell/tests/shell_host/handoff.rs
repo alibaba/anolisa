@@ -185,6 +185,52 @@ fn emit_pager_policy_handoff_after<W: Write>(
 }
 
 #[test]
+fn raw_relay_bash_handoff_preserves_top_level_shell_state() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-top-level-handoff-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let command = "declare -x COSH_HANDOFF_STATE=alive; set -- first second";
+    let config = ShellHostConfig::new("bash-top-level-handoff", &work_dir);
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line(
+                "printf '__HANDOFF_STATE__=%s:%s:%s\\n' \"$COSH_HANDOFF_STATE\" \"$#\" \"$1\"",
+            ),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        emit_pager_policy_handoff(command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("top-level Bash handoff");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("__HANDOFF_STATE__=alive:2:first"),
+        "{terminal}"
+    );
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandCompleted
+                && event.command.as_deref() == Some(command)
+                && event.exit_code == Some(0)
+        }),
+        "{:?}",
+        output.events
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
 fn raw_relay_bash_agent_git_handoff_does_not_enter_the_implicit_pager() {
     if Command::new("bash").arg("--version").output().is_err() || !git_available() {
         return;
@@ -702,9 +748,12 @@ fn raw_relay_zsh_handoff_keeps_an_export_attribute_change_the_command_made() {
     config.native_mode = false;
     pin_pager_env(&mut config, "user-git-pager");
     let input = DelayedInput::new(vec![
+        // Wake the relay so the initial observer can stage the handoff before
+        // the first assertion-bearing command reaches the PTY.
+        (b"\n".to_vec(), Duration::from_millis(100)),
         (
             b"printf 'pager-after=%s\\n' \"${PAGER-unset}\"\n".to_vec(),
-            Duration::from_millis(2_000),
+            Duration::from_millis(4_000),
         ),
         (
             b"sh -c 'printf \"child-pager=%s\\n\" \"${PAGER-unset}\"'\n".to_vec(),
@@ -912,6 +961,89 @@ fn routing_c3_provider_no_regression_approved_handoff_does_not_leak() {
         !output_text.contains("COSH_SHELL_HANDOFF_BYPASS"),
         "{output_text}"
     );
+}
+
+#[test]
+fn raw_relay_bash_handoff_preserves_user_scratch_variables() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-handoff-vars-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("handoff-vars-test", &work_dir);
+    let setup = "d=before-d; r=before-r; e=before-e; s=before-s; \
+                 __prompt_status=before-status";
+    let command = "d=after-d; r=after-r; e=after-e; s=after-s; \
+                   __prompt_status=after-status; printf handoff-vars-updated";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line(setup),
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line(
+                "printf '__HANDOFF_VARS__=%s|%s|%s|%s|%s\\n' \
+                 \"$d\" \"$r\" \"$e\" \"$s\" \"$__prompt_status\"",
+            ),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        emit_pager_policy_handoff_after(setup, command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("raw relay bash handoff variables");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("handoff-vars-updated"), "{terminal}");
+    assert!(
+        terminal.contains("__HANDOFF_VARS__=after-d|after-r|after-e|after-s|after-status"),
+        "{terminal}"
+    );
+}
+
+#[test]
+fn raw_relay_bash_handoff_does_not_assign_readonly_user_variables() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-handoff-readonly-vars-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("handoff-readonly-vars-test", &work_dir)
+        .with_env("LANG", "C.UTF-8")
+        .with_env("LC_ALL", "C.UTF-8");
+    let setup = "readonly d=readonly-d r=readonly-r e=readonly-e s=readonly-s";
+    let command = "printf handoff-readonly-vars";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line(setup),
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line(
+                "printf '__HANDOFF_READONLY_VARS__=%s|%s|%s|%s\\n' \
+                 \"$d\" \"$r\" \"$e\" \"$s\"",
+            ),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        emit_pager_policy_handoff_after(setup, command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("raw relay bash readonly handoff variables");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("handoff-readonly-vars"), "{terminal}");
+    assert!(
+        terminal.contains("__HANDOFF_READONLY_VARS__=readonly-d|readonly-r|readonly-e|readonly-s"),
+        "{terminal}"
+    );
+    assert!(!terminal.contains("readonly variable"), "{terminal}");
 }
 
 #[test]
@@ -1470,4 +1602,74 @@ fn raw_relay_zsh_secret_handoff_survives_a_bypass_prefixed_race() {
         Some(token.as_str()),
         "{terminal}"
     );
+}
+
+/// #2196 review regression: `ShellHostConfig::new()` leaves the hint card
+/// renderer unset (fail-quiet), so the public raw relay surface must offer
+/// a working opt-in path. Wires a marker frame through the public
+/// `set_hint_card_renderer` and drives an agent handoff into a blocked tty
+/// read via the public bash entry point; the marker proves the sentinel
+/// reached the injected renderer. The card is relay-injected into the
+/// output sink (never echoed back by the PTY), so the assertion reads the
+/// sink instead of `terminal_output`. Linux-only: the blocked-read
+/// classification needs /proc evidence.
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_relay_bash_public_config_renders_hint_card_for_waiting_handoff() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    struct SharedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-public-hint-card-work-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("public-hint-card-test", &work_dir);
+    config.native_mode = false;
+    config.set_hint_card_renderer(|title, body| {
+        let mut lines = vec![format!("[public-frame] {title}")];
+        lines.extend(body);
+        lines
+    });
+
+    // A forked child (`bash -c`) keeps the read outside the relay shell's
+    // own process group: the sentinel requires a foreign foreground pgid
+    // before it consults the /proc blocked-read evidence, and a bare
+    // `read` builtin would run inside the shell itself and never qualify.
+    let command = r#"bash -c 'read -p "Type y or n: " answer; echo "answer=$answer"'"#;
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            // The sentinel needs a 2s output-quiet window plus a 1s sample
+            // interval before it may emit; the margin covers loaded runners.
+            RawRelayAction::wait(Duration::from_millis(6_000)),
+            RawRelayAction::line("y"),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("exit"),
+        ],
+        SharedSink(sink.clone()),
+        emit_pager_policy_handoff(command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("raw relay bash public hint card handoff");
+
+    let relayed = String::from_utf8_lossy(&sink.lock().expect("sink lock")).into_owned();
+    assert!(
+        relayed.contains("[public-frame]"),
+        "hint card must reach the renderer injected through the public config path: {relayed}"
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("answer=y"), "{terminal}");
 }

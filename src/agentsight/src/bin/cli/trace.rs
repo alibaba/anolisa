@@ -1,6 +1,7 @@
 //! Trace subcommand - agent activity tracing
 //!
-//! Linux: full eBPF-based tracing (probes → parser → aggregator → storage).
+//! Linux: full eBPF-based tracing (probes → parser → aggregator → storage), or
+//! trajectory collection only when `--no-ebpf` is passed.
 //! macOS: trajectory collection only (JSONL file scanning → ATIF → SQLite).
 
 use structopt::StructOpt;
@@ -30,6 +31,17 @@ pub struct TraceCommand {
     #[cfg(target_os = "linux")]
     #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
     pub config: String,
+
+    /// Skip eBPF probes and collect trajectories only (Linux only)
+    ///
+    /// Loading probes needs root or CAP_BPF/CAP_PERFMON, so an unprivileged run
+    /// otherwise aborts at probe setup. Trajectory collection is pure user-space
+    /// and keeps working. This flag implies trajectory collection regardless of
+    /// `features.trajectory_collection.enabled`, since it is the only remaining
+    /// data source in this mode.
+    #[cfg(target_os = "linux")]
+    #[structopt(long)]
+    pub no_ebpf: bool,
 }
 
 impl TraceCommand {
@@ -56,7 +68,19 @@ impl TraceCommand {
             return;
         }
 
-        self.run_tracing();
+        self.run_selected_mode();
+    }
+
+    /// Dispatch to the eBPF pipeline or the probe-free trajectory collector.
+    ///
+    /// Shared by the foreground and daemon paths so `--no-ebpf` also applies
+    /// when running in the background.
+    fn run_selected_mode(&self) {
+        if self.no_ebpf {
+            self.run_trajectory_only();
+        } else {
+            self.run_tracing();
+        }
     }
 
     /// Run as daemon process
@@ -73,7 +97,7 @@ impl TraceCommand {
 
         match daemonize.start() {
             Ok(_) => {
-                self.run_tracing();
+                self.run_selected_mode();
             }
             Err(e) => {
                 eprintln!("Failed to daemonize: {e}");
@@ -129,5 +153,172 @@ impl TraceCommand {
             }
         }
         // `sight` drops here → Storage::drop → checkpoint
+    }
+
+    /// Collect trajectories without loading eBPF probes.
+    ///
+    /// Mirrors the macOS trace path (agent JSONL sessions → ATIF →
+    /// `trajectories.db`) so unprivileged Linux sandboxes still produce
+    /// trajectory data. Blocks until Ctrl+C.
+    fn run_trajectory_only(&self) {
+        use agentsight::AgentsightConfig;
+        use agentsight_trajectory_collector::{CollectorConfig, run_collector_loop};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let config_path = std::path::PathBuf::from(&self.config);
+        let mut config = AgentsightConfig::new()
+            .set_verbose(self.verbose)
+            .set_config_path(config_path.clone());
+        // Scan interval and directories still come from the config file.
+        // `ensure_default_agents_config` only materialises the default file; an
+        // unprivileged run cannot write /etc/agentsight, and the load result
+        // below reports whether any config was picked up.
+        let _ = agentsight::config::ensure_default_agents_config(&config_path);
+        let load_result = config.load_from_file(&config_path);
+        config.apply_verbose();
+        if let Err(e) = load_result {
+            log::warn!("Config {config_path:?} unavailable ({e}); using built-in defaults");
+        }
+
+        let Some(db_path) = Self::resolve_trajectory_db_path() else {
+            eprintln!(
+                "Failed to open a writable trajectories.db in either the shared \
+                 directory or $HOME; pass a writable HOME or grant write access."
+            );
+            std::process::exit(1);
+        };
+        // Warn about the directory the trajectory db will actually live in
+        // (the shared dir or the $HOME fallback), not the unused default.
+        if let Some(dir) = db_path.parent() {
+            agentsight::container::warn_if_data_dir_not_persistent(dir);
+        }
+
+        let collector_config = CollectorConfig {
+            scan_interval_secs: config.features.trajectory_scan_interval_secs,
+            scan_dirs: config
+                .features
+                .trajectory_scan_dirs
+                .as_ref()
+                .map(|dirs| dirs.iter().map(std::path::PathBuf::from).collect()),
+            db_path: db_path.clone(),
+        };
+
+        // `run_collector_loop` treats the flag as "keep running", so Ctrl+C
+        // clears it instead of setting it.
+        let running = Arc::new(AtomicBool::new(true));
+        let stop = Arc::clone(&running);
+        // A missing handler only costs the graceful stop, so the collector still
+        // runs; say so instead of aborting a working collection.
+        if let Err(e) = ctrlc::set_handler(move || {
+            stop.store(false, Ordering::SeqCst);
+        }) {
+            eprintln!("Could not install the Ctrl+C handler ({e}); stop with SIGTERM instead.");
+        }
+
+        // Printed rather than logged: the collector is the only output of this
+        // mode, and the log level may suppress info records.
+        println!("eBPF disabled (--no-ebpf): collecting trajectories only.");
+        println!(
+            "Database: {} (scan interval {}s)",
+            db_path.display(),
+            collector_config.scan_interval_secs
+        );
+        // `serve` derives trajectories.db from the --db directory, so a
+        // non-default location has to be passed through explicitly.
+        if let Some(dir) = db_path.parent() {
+            println!(
+                "View with: agentsight serve --db {}/genai_events.db",
+                dir.display()
+            );
+        }
+        println!("Press Ctrl+C to stop.");
+
+        run_collector_loop(&collector_config, &running);
+    }
+
+    /// Pick a writable location for `trajectories.db`.
+    ///
+    /// Prefers the shared directory so `agentsight serve` finds the file without
+    /// extra flags, then falls back to `$HOME/.local/share/agentsight` for
+    /// unprivileged runs. Returns `None` when neither can be opened.
+    fn resolve_trajectory_db_path() -> Option<std::path::PathBuf> {
+        use agentsight::storage::sqlite::sibling_db_path;
+
+        // The `private` flag marks the home-directory fallback: it is the only
+        // candidate whose parents may be traversable by other local users.
+        let mut candidates = vec![(sibling_db_path("trajectories.db"), false)];
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push((
+                std::path::PathBuf::from(home)
+                    .join(".local/share/agentsight")
+                    .join("trajectories.db"),
+                true,
+            ));
+        }
+
+        candidates
+            .into_iter()
+            .find(|(path, private)| Self::prepare_trajectory_db(path, *private))
+            .map(|(path, _)| path)
+    }
+
+    /// Report whether `path` can host the trajectory database, creating its
+    /// parent directory and verifying the database opens.
+    ///
+    /// Opening also creates the schema, so the collector's own open cannot then
+    /// fail on permissions. When `private` is set, the directory is restricted to
+    /// `0700` and the database to `0600` before opening: trajectories embed whole
+    /// conversations, which must not be readable by other local users. SQLite
+    /// derives WAL/SHM modes from the main database, so pre-creating it at `0600`
+    /// covers the sidecars as well.
+    fn prepare_trajectory_db(path: &std::path::Path, private: bool) -> bool {
+        use std::fs::{DirBuilder, OpenOptions, Permissions, set_permissions};
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+
+        let created = if private {
+            DirBuilder::new().recursive(true).mode(0o700).create(parent)
+        } else {
+            std::fs::create_dir_all(parent)
+        };
+        if let Err(e) = created {
+            log::warn!("Trajectory DB directory {parent:?} unusable: {e}");
+            return false;
+        }
+
+        if private {
+            // `DirBuilder`'s mode only applies to directories it creates, so an
+            // already-present directory from an earlier run needs tightening too.
+            if let Err(e) = set_permissions(parent, Permissions::from_mode(0o700)) {
+                log::warn!("Could not restrict {parent:?} to 0700: {e}");
+                return false;
+            }
+            if let Err(e) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+            {
+                log::warn!("Trajectory DB {path:?} unusable: {e}");
+                return false;
+            }
+            // The mode above is ignored for a file that already exists.
+            if let Err(e) = set_permissions(path, Permissions::from_mode(0o600)) {
+                log::warn!("Could not restrict {path:?} to 0600: {e}");
+                return false;
+            }
+        }
+
+        match agentsight_trajectory_collector::TrajectoryStore::new_with_path(path) {
+            Ok(_) => true,
+            Err(e) => {
+                log::warn!("Trajectory DB {path:?} unusable: {e}");
+                false
+            }
+        }
     }
 }

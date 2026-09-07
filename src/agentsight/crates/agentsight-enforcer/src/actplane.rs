@@ -29,6 +29,14 @@ use uuid::Uuid;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+// Compile-time guard: compiler and engine must agree on CConfig ABI size.
+// If this fails, one crate's CRule definition was modified without updating the other.
+const _: () = assert!(
+    actplane_ifc_compiler::COMPILED_CONFIG_BLOB_SIZE == ebpf_ifc_engine::EXPECTED_CONFIG_BLOB_SIZE,
+    "BPF ABI mismatch: actplane-ifc-compiler and ebpf-ifc-engine CConfig sizes diverged. \
+     Update both crates' CRule/CConfig definitions to match."
+);
+
 /// Exact official upstream revision compiled into this adapter.
 pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
 
@@ -36,6 +44,10 @@ pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
 struct ActiveBinding {
     binding: Binding,
     credential_policy: Option<CredentialExfiltrationPolicy>,
+    /// When the target process runs inside a PID namespace, this holds the
+    /// global kernel PID resolved by [`resolve_kernel_pid`].  `None` when
+    /// the namespace PID equals the kernel PID (root namespace).
+    kernel_pid: Option<i32>,
     reasons: Vec<String>,
     rule_names: Vec<String>,
     label_names: HashMap<u64, String>,
@@ -145,13 +157,21 @@ impl ActPlaneBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn cleanup_binding(&self, request: &ApplyPolicy, id: u32) -> Vec<String> {
+    fn cleanup_binding(
+        &self,
+        request: &ApplyPolicy,
+        id: u32,
+        kernel_pid: Option<i32>,
+    ) -> Vec<String> {
         let mut errors = Vec::new();
         let control_pid = std::process::id() as i32;
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
             errors.push(format!("unbind control pid: {error}"));
         }
-        if let Err(error) = self.engine.unbind_pid_from_domain(request.root_pid, id) {
+        // Use the resolved kernel PID when the target runs in a PID namespace;
+        // fall back to the namespace PID stored in the request otherwise.
+        let effective_pid = kernel_pid.unwrap_or(request.root_pid);
+        if let Err(error) = self.engine.unbind_pid_from_domain(effective_pid, id) {
             errors.push(format!("unbind target pid: {error}"));
         }
         if let Err(error) = self.reload.clear_runtime_state() {
@@ -211,8 +231,15 @@ impl ActPlaneBackend {
                 )
             })?;
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
+        let kernel_pid = resolve_kernel_pid(request.root_pid);
+        if kernel_pid != request.root_pid {
+            eprintln!(
+                "PID namespace detected: namespace pid {} -> kernel pid {}",
+                request.root_pid, kernel_pid
+            );
+        }
         self.engine
-            .seed_label_in_domain(request.root_pid, id, label)
+            .seed_label_in_domain(kernel_pid, id, label)
             .map_err(|error| kernel_error("seed target process domain", error))?;
 
         let control_pid = std::process::id() as i32;
@@ -230,8 +257,13 @@ impl ActPlaneBackend {
             label_mask: u64::MAX,
             ..CapState::default()
         };
+        let kpid = if kernel_pid != request.root_pid {
+            Some(kernel_pid)
+        } else {
+            None
+        };
         if let Err(error) = self.engine.bind_state(control_pid, id, control_state) {
-            let cleanup = self.cleanup_binding(&request, id);
+            let cleanup = self.cleanup_binding(&request, id, kpid);
             return Err(kernel_error_with_cleanup(
                 "bind control process",
                 error,
@@ -242,7 +274,7 @@ impl ActPlaneBackend {
             .reload
             .append_policy_delta(control_pid, id, &compiled.bytes)
         {
-            let cleanup = self.cleanup_binding(&request, id);
+            let cleanup = self.cleanup_binding(&request, id, kpid);
             return Err(kernel_error_with_cleanup(
                 "append policy delta",
                 error,
@@ -250,7 +282,7 @@ impl ActPlaneBackend {
             ));
         }
         if let Err(error) = self.engine.unbind_pid_from_domain(control_pid, id) {
-            let cleanup = self.cleanup_binding(&request, id);
+            let cleanup = self.cleanup_binding(&request, id, kpid);
             return Err(kernel_error_with_cleanup(
                 "unbind control process",
                 error,
@@ -269,6 +301,7 @@ impl ActPlaneBackend {
             ActiveBinding {
                 binding: binding.clone(),
                 credential_policy,
+                kernel_pid: kpid,
                 reasons: compiled.reasons,
                 rule_names: compiled.meta.into_iter().map(|meta| meta.name).collect(),
                 label_names: compiled
@@ -319,7 +352,7 @@ impl ActPlaneBackend {
         else {
             return Err(BackendError::MissingBinding(binding_id));
         };
-        let cleanup = self.cleanup_binding(&active.binding.request, id);
+        let cleanup = self.cleanup_binding(&active.binding.request, id, active.kernel_pid);
         if !cleanup.is_empty() {
             return Err(BackendError::KernelFailure(cleanup.join("; ")));
         }
@@ -331,10 +364,22 @@ impl ActPlaneBackend {
 impl EnforcementBackend for ActPlaneBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
         let runtime_error = self.state.runtime_error().clone();
+        // Report file-guard coverage from the profile actually loaded into the
+        // kernel, so callers can gate APPLY_READY on real enforcement capability
+        // rather than a static assumption (closes the silent-false-positive gap).
+        let mut capabilities = EnforcementCapabilities::actplane();
+        // supports_file_delete_guard() reflects the feature set the loaded profile
+        // reserves, but the enforce_path_unlink / enforce_path_rename LSM hooks are
+        // only attached when BPF-LSM is active at load time. AND in the live LSM
+        // state so a host without an active BPF-LSM reports file_delete_guard=false
+        // (fail-closed) instead of advertising a capability that silently enforces
+        // nothing.
+        capabilities.file_delete_guard =
+            self.engine.supports_file_delete_guard() && ebpf_ifc_engine::bpf_lsm_active();
         let health = self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
-            capabilities: EnforcementCapabilities::actplane(),
+            capabilities,
             message: runtime_error,
         });
         Ok(self.state.security_events.reflect_delivery_loss(health))
@@ -490,7 +535,8 @@ impl Drop for ActPlaneBackend {
             .map(|(domain_id, binding)| (*domain_id, binding.clone()))
             .collect::<Vec<_>>();
         for (domain_id, binding) in active {
-            let errors = self.cleanup_binding(&binding.binding.request, domain_id);
+            let errors =
+                self.cleanup_binding(&binding.binding.request, domain_id, binding.kernel_pid);
             if errors.is_empty() {
                 self.state.bindings().remove(&domain_id);
             } else {
@@ -670,10 +716,10 @@ fn unsupported_runtime_handoff(source: &Binding) -> ReplaceOutcome {
 /// Translates the stable credential-exfiltration model into pinned ActPlane DSL.
 ///
 /// The current ActPlane endpoint-condition ABI can represent one trusted target
-/// per rule but has no duration primitive. Observe and audit policies therefore
-/// use notify rules plus adapter-side TTL and `public_ipv4` filtering. Enforce
-/// mode is rejected because filtering after an LSM decision cannot restore an
-/// expired or out-of-scope connection.
+/// per rule. Observe and audit policies use notify rules plus adapter-side TTL
+/// and `public_ipv4` filtering. Enforce mode emits a `block` rule with an
+/// `expires` clause so the pinned ABI honours taint TTL directly, and requires
+/// at least one trusted endpoint to avoid blocking all outbound connections.
 ///
 /// # Errors
 ///
@@ -687,11 +733,6 @@ pub fn compile_credential_exfiltration_policy(
         .validate()
         .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
     validate_label(&policy.taint_label)?;
-    if policy.mode == PolicyMode::Enforce {
-        return Err(BackendError::CompileFailure(
-            "the pinned ActPlane ABI cannot enforce taint TTL and public_ipv4 destinations without weakening product semantics".into(),
-        ));
-    }
 
     let mut sources = policy.source_patterns.clone();
     sources.sort();
@@ -711,6 +752,16 @@ pub fn compile_credential_exfiltration_policy(
             "the pinned ActPlane ABI supports one trusted endpoint exception per rule".into(),
         ));
     }
+    // Enforce mode is rejected: the kernel LSM block rule uses `endpoint "*"`
+    // which denies ALL outbound (including private/loopback), and the public/private
+    // classification happens only after the kernel has already dropped the connection.
+    // Until the BPF engine can express public-only scope, enforce remains unsafe.
+    // TODO(roadmap): re-enable when ActPlane supports `scope public` or CIDR exclusions.
+    if policy.mode == PolicyMode::Enforce {
+        return Err(BackendError::CompileFailure(
+            "enforce mode is not yet supported: kernel cannot distinguish public vs private destinations".into(),
+        ));
+    }
 
     let mut dsl = String::from("source AGENT = exec \"**\"\n");
     for source in sources {
@@ -720,8 +771,7 @@ pub fn compile_credential_exfiltration_policy(
         ));
     }
     dsl.push_str("rule agentsight-credential-exfiltration:\n  ");
-    dsl.push_str("notify");
-    dsl.push_str(" connect endpoint \"*\" if ");
+    dsl.push_str("notify connect endpoint \"*\" if ");
     dsl.push_str(&policy.taint_label);
     if let Some(endpoint) = trusted.first() {
         dsl.push_str(" unless target \"");
@@ -1095,6 +1145,47 @@ fn kernel_error_with_cleanup(
     BackendError::KernelFailure(message)
 }
 
+/// Translate a potentially namespace-local PID to the global kernel PID.
+///
+/// When a process runs inside a PID namespace (containers, WSL2, etc.),
+/// `/proc/<pid>/status` contains an `NSpid:` line listing the PID at each
+/// nesting level — the first value is always the global kernel PID.  BPF
+/// helpers like `bpf_get_current_pid_tgid()` return that global PID, so
+/// `cap_task` entries must be keyed by it for `handle_fork` lookups to
+/// succeed.
+///
+/// Returns `ns_pid` unchanged when running in the root namespace (no
+/// `NSpid` line, or only one level listed).
+///
+/// **Assumption**: the enforcer process runs in the root PID namespace,
+/// so host `/proc/<pid>/status` exposes the full `NSpid` chain.  If the
+/// enforcer is ever deployed inside a sidecar container sharing the
+/// target's PID namespace, this function becomes a no-op and a
+/// different identity resolution strategy is needed.
+fn resolve_kernel_pid(ns_pid: i32) -> i32 {
+    let path = format!("/proc/{ns_pid}/status");
+    let status = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return ns_pid,
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            let mut parts = rest.split_whitespace();
+            if let Some(first) = parts.next() {
+                // Only translate when there are multiple levels (i.e. we are
+                // inside a nested PID namespace).
+                if parts.next().is_some() {
+                    if let Ok(global) = first.parse::<i32>() {
+                        return global;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    ns_pid
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
@@ -1129,6 +1220,7 @@ mod tests {
                 domain_id: Some(7),
             },
             credential_policy: Some(credential_policy()),
+            kernel_pid: None,
             reasons: vec!["credential reached an external sink".into()],
             rule_names: vec!["block-exfiltration".into()],
             label_names: HashMap::from([(1, "CREDENTIAL".into())]),
@@ -1185,12 +1277,25 @@ mod tests {
     }
 
     #[test]
-    fn enforce_policy_rejects_unrepresentable_ttl_and_public_scope() {
-        let error = compile_credential_exfiltration_policy(&credential_policy())
-            .expect_err("kernel enforcement must not weaken product semantics");
+    fn enforce_policy_compiles_block_rule_with_expires() {
+        let policy = credential_policy();
+        let dsl = compile_credential_exfiltration_policy(&policy)
+            .expect("enforce policy with a trusted endpoint should compile");
 
-        assert!(error.to_string().contains("taint TTL"));
-        assert!(error.to_string().contains("public_ipv4 destinations"));
+        assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
+        assert!(dsl.contains("unless target \"10.0.0.8\""));
+        assert!(dsl.contains("expires 900s"));
+        assert!(compile_str(&dsl).is_ok());
+    }
+
+    #[test]
+    fn enforce_policy_requires_trusted_endpoint() {
+        let mut policy = credential_policy();
+        policy.trusted_endpoints.clear();
+        let error = compile_credential_exfiltration_policy(&policy)
+            .expect_err("enforce mode without a trusted endpoint must fail closed");
+
+        assert!(error.to_string().contains("trusted_endpoint"));
     }
 
     #[test]

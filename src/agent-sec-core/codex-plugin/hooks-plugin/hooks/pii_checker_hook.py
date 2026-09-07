@@ -73,10 +73,6 @@ try:
 except (ValueError, TypeError):
     TIMEOUT = 5
 
-_MAX_EVIDENCE_ITEMS = 3
-_MAX_EVIDENCE_CHARS = 80
-
-
 # -- helpers ---------------------------------------------------------------
 
 
@@ -88,125 +84,98 @@ def _safe_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
-    value = " ".join(value.split())
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1] + "…"
+def _finding_risk(finding: Any, verdict: str) -> str:
+    """Return the user-facing risk for a structured scanner finding."""
+    if isinstance(finding, dict):
+        severity = _safe_text(finding.get("severity"))
+        if severity == "deny":
+            return "high"
+        if severity == "warn":
+            return "general"
+
+    return "high" if verdict == "deny" else "general"
+
+
+def _risk_summary(verdict: str, findings: list[Any]) -> str:
+    """Summarize finding counts without exposing scanner-internal fields."""
+    typed_findings = [finding for finding in findings if isinstance(finding, dict)]
+    high_count = sum(
+        1 for finding in typed_findings if _finding_risk(finding, verdict) == "high"
+    )
+    general_count = len(typed_findings) - high_count
+
+    if high_count and general_count:
+        return (
+            f"检测到 {len(typed_findings)} 项敏感信息"
+            f"（高风险 {high_count}、一般风险 {general_count}）"
+        )
+    if high_count:
+        return f"检测到 {high_count} 项高风险敏感信息"
+    return f"检测到 {general_count} 项一般风险敏感信息"
 
 
 # -- output helpers --------------------------------------------------------
 
 
-def _format_finding_details(findings: list[dict]) -> tuple[int, list[str]]:
-    """Build shared, audit-safe detail lines from structured PII findings."""
-    typed_findings = [item for item in findings if isinstance(item, dict)]
-    count = len(typed_findings)
-    pii_types = sorted(
-        {
-            finding_type
-            for finding in typed_findings
-            if (finding_type := _safe_text(finding.get("type")))
-        }
-    )
-    severities = sorted(
-        {
-            severity
-            for finding in typed_findings
-            if (severity := _safe_text(finding.get("severity")))
-        }
-    )
-    redacted_evidence: list[str] = []
-    for finding in typed_findings:
-        evidence = _safe_text(finding.get("evidence_redacted"))
-        if evidence and evidence not in redacted_evidence:
-            redacted_evidence.append(_shorten(evidence))
-        if len(redacted_evidence) >= _MAX_EVIDENCE_ITEMS:
-            break
-
-    lines = [f"  类型      : {', '.join(pii_types) if pii_types else 'unknown'}"]
-    if severities:
-        lines.append(f"  严重级别  : {', '.join(severities)}")
-    if redacted_evidence:
-        lines.append(f"  脱敏示例  : {', '.join(redacted_evidence)}")
-    return count, lines
+def _format_notice(verdict: str, findings: list[Any], action_message: str) -> str:
+    """Build a concise notice without exposing internal labels or evidence."""
+    return f"[pii-checker] {_risk_summary(verdict, findings)}；{action_message}"
 
 
-def _format_block_reason(
-    findings: list[dict], hook_event: str, source_desc: str
-) -> str:
-    """Build a human-readable block reason from structured PII findings.
-
-    The reason is shown to the user (UserPromptSubmit) or replaces tool
-    output visible to the model (PostToolUse). It contains only PII types
-    and redacted evidence — never the raw PII content itself.
-    """
-    count, details = _format_finding_details(findings)
-    lines = [
-        f"[pii-checker] 🔒 安全拦截：{source_desc}中检测到 {count} 项个人敏感信息",
-        *details,
-    ]
-    lines.append(f"  拦截环节  : {hook_event}")
-
+def _format_block_reason(findings: list[Any], hook_event: str, verdict: str) -> str:
+    """Build an event-specific block reason for the user."""
     if hook_event == "UserPromptSubmit":
-        lines.append("请移除敏感信息后重新提交。")
+        action_message = "当前策略已阻断本次请求。"
     elif hook_event == "PreToolUse":
-        lines.append("该工具调用已被阻止，敏感信息不会外发。")
+        action_message = "当前策略已阻断本次工具调用。"
     else:
-        lines.append("工具输出已被拦截，原始内容不会进入模型上下文。")
+        action_message = (
+            "工具已经执行；原始工具结果不会进入模型上下文，"
+            "已发生的外部副作用不会撤销。"
+        )
 
-    return "\n".join(lines)
+    return _format_notice(verdict, findings, action_message)
 
 
 def _format_warning_message(
-    findings: list[dict],
+    findings: list[Any],
     hook_event: str,
-    source_desc: str,
     verdict: str,
     policy: str,
 ) -> str:
-    """Build a non-blocking warning using only redacted finding evidence."""
-    count, details = _format_finding_details(findings)
-    if policy == "ask":
-        actual_handling = "当前 hook 不支持确认，fallback 为 warn，执行将继续。"
-    elif policy == "block":
-        actual_handling = (
-            "scanner verdict 未达到 block 条件，fallback 为 warn，执行将继续。"
-        )
+    """Build a concise warning that states the actual non-blocking behavior."""
+    if hook_event == "PostToolUse":
+        if verdict == "deny" and policy == "ask":
+            action_message = (
+                "工具已经执行；当前环节不支持确认/阻断，本次仅提醒，不会阻断；"
+                "原始工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
+            )
+        else:
+            action_message = (
+                "工具已经执行；本次仅提醒，未触发确认或阻断；"
+                "原始工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
+            )
+    elif verdict == "deny" and policy == "ask":
+        action_message = "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
     else:
-        actual_handling = "warn，执行将继续。"
-    lines = [
-        f"[pii-checker] ⚠️ 隐私告警：{source_desc}中检测到 {count} 项个人敏感信息",
-        *details,
-        f"  告警环节  : {hook_event}",
-        f"扫描判定：{verdict}",
-        f"Hook 策略：{policy}",
-        f"实际处理：{actual_handling}",
-    ]
-    return "\n".join(lines)
+        action_message = "本次仅提醒，未触发确认或阻断。"
+    return _format_notice(verdict, findings, action_message)
 
 
-def _block(findings: list[dict], hook_event: str, source_desc: str) -> None:
+def _block(findings: list[Any], hook_event: str, verdict: str) -> None:
     """Output block decision JSON to stdout."""
-    reason = _format_block_reason(findings, hook_event, source_desc)
+    reason = _format_block_reason(findings, hook_event, verdict)
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
 
 def _warn(
-    findings: list[dict],
+    findings: list[Any],
     hook_event: str,
-    source_desc: str,
     verdict: str,
     policy: str,
 ) -> None:
     """Output a user-visible warning without changing execution control."""
-    message = _format_warning_message(
-        findings,
-        hook_event,
-        source_desc,
-        verdict,
-        policy,
-    )
+    message = _format_warning_message(findings, hook_event, verdict, policy)
     print(json.dumps({"systemMessage": message}, ensure_ascii=False))
 
 
@@ -270,15 +239,6 @@ def _source_for_event(hook_event: str) -> str:
     if hook_event == "PostToolUse":
         return "tool_output"
     return "user_input"
-
-
-def _source_desc_for_event(hook_event: str) -> str:
-    """Return a human-readable source description for a PII notice."""
-    if hook_event == "PreToolUse":
-        return "工具输入"
-    if hook_event == "PostToolUse":
-        return "工具输出"
-    return "用户输入"
 
 
 # -- main ------------------------------------------------------------------
@@ -351,12 +311,11 @@ def main() -> None:
     policy = _effective_policy()
     if policy == "observe":
         return  # observe mode: don't block, audit only via CLI events
-    source_desc = _source_desc_for_event(hook_event)
     if policy == "block" and verdict == "deny":
-        _block(findings, hook_event, source_desc)
+        _block(findings, hook_event, verdict)
         return
     # Codex cannot request approval at all PII hook points; ask falls back to warn.
-    _warn(findings, hook_event, source_desc, verdict, policy)
+    _warn(findings, hook_event, verdict, policy)
 
 
 if __name__ == "__main__":

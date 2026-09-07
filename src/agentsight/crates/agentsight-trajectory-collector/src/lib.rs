@@ -13,7 +13,10 @@ pub mod discovery;
 pub mod qoder;
 pub mod store;
 
-pub use store::{TrajectoryFilters, TrajectoryRecord, TrajectoryStore, TrajectorySummary};
+pub use store::{
+    TrajectoryAgentActivitySummary, TrajectoryFilters, TrajectoryRecord, TrajectoryStore,
+    TrajectorySummary,
+};
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

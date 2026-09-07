@@ -429,8 +429,9 @@ fn containment_error(error: ContainmentError) -> HttpResponse {
             true,
         ),
         Store(error) => {
-            log::error!("containment security store failed: {error}");
-            return system_audit::store_unavailable();
+            // Same classification as the audit handlers: data corruption
+            // must not be reported as store unavailability.
+            return system_audit::store_error(error);
         }
         AlreadyRunning => (
             StatusCode::CONFLICT,

@@ -3,6 +3,7 @@
 
 mod audit;
 mod auth;
+mod brokered_profile;
 mod cli;
 mod compaction;
 mod compression;
@@ -31,10 +32,6 @@ mod truncator;
 
 use clap::Parser;
 use cosh_core::provider;
-#[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::Arc;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -122,11 +119,15 @@ async fn main() {
 
 #[cfg(unix)]
 async fn run_until_sigint() {
-    let sigint_received = install_sigint_handler();
-
     tokio::select! {
-        _ = wait_for_sigint(sigint_received) => {
-            tracing::info!("received SIGINT, shutting down cosh-core");
+        signal = wait_for_sigint() => {
+            match signal {
+                Ok(()) => tracing::info!("received SIGINT, shutting down cosh-core"),
+                Err(error) => {
+                    eprintln!("failed to install SIGINT handler: {error}");
+                    std::process::exit(1);
+                }
+            }
         }
         _ = run() => {}
     }
@@ -134,10 +135,25 @@ async fn run_until_sigint() {
 
 async fn run() {
     let args = cli::CliArgs::parse();
+    let agent_headless = is_agent_headless_mode(&args);
+    if args.execution_profile.is_brokered()
+        && (!agent_headless
+            || args.is_session_control()
+            || args.prompt.is_some()
+            || args.cosh_shell_transport
+            || args.enable_shell_evidence_tool
+            || args.approval_mode.is_some()
+            || args.allowed_tools.is_some()
+            || args.tools.is_some())
+    {
+        eprintln!(
+            "[cosh-core] gateway-brokered-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
+        );
+        std::process::exit(2);
+    }
     if args.is_session_control() {
         std::process::exit(session_control::run());
     }
-    let agent_headless = is_agent_headless_mode(&args);
     let (project_root, session_workspace) = if agent_headless {
         let requested_root = args.workspace_path();
         match tool::SessionWorkspace::try_new(&requested_root) {
@@ -153,7 +169,11 @@ async fn run() {
     } else {
         (args.workspace_root(), None)
     };
-    let config = if args.bare {
+    // The execution boundary is a launch property. Resolve it before reading
+    // any workspace project config or constructing hooks/extensions/MCP.
+    let config = if args.execution_profile.is_brokered() {
+        CoreConfig::load_gateway_brokered()
+    } else if args.bare {
         CoreConfig::load_bare()
     } else {
         CoreConfig::load_for_workspace(&project_root)
@@ -195,22 +215,8 @@ fn is_agent_headless_mode(args: &cli::CliArgs) -> bool {
 }
 
 #[cfg(unix)]
-fn install_sigint_handler() -> Arc<AtomicBool> {
-    let received = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&received)).unwrap_or_else(
-        |error| {
-            eprintln!("failed to install SIGINT handler: {error}");
-            std::process::exit(1);
-        },
-    );
-    received
-}
-
-#[cfg(unix)]
-async fn wait_for_sigint(received: Arc<AtomicBool>) {
-    while !received.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+async fn wait_for_sigint() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 #[cfg(test)]

@@ -5,6 +5,9 @@ use super::prompt::{
     provider_prompt_contract_with_evidence_access,
 };
 use crate::evidence::ShellEvidenceAccess;
+use crate::types::composer::{
+    replace_composer_submission, ComposerReference, ComposerReferenceKind, ComposerSubmission,
+};
 use crate::types::{
     AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, FindingSeverity,
     HookFinding, OutputRefs,
@@ -67,6 +70,65 @@ fn prompt_includes_recent_shell_context_refs_without_full_output() {
     assert!(
         prompt_without_context.contains("```cosh-request\nhistory\n```"),
         "{prompt_without_context}"
+    );
+
+    request.user_input =
+        Some("/skill:repo-review inspect @Cargo.toml @src and reject @../Cargo.toml".to_string());
+    replace_composer_submission(
+        &mut request,
+        &ComposerSubmission {
+            references: vec![
+                ComposerReference {
+                    path: "Cargo.toml".to_string(),
+                    kind: ComposerReferenceKind::File,
+                },
+                ComposerReference {
+                    path: "src".to_string(),
+                    kind: ComposerReferenceKind::Directory,
+                },
+            ],
+            selected_skill: Some("repo-review".to_string()),
+            rejected_references: 1,
+        },
+    );
+    let composer_prompt = prompt_from_request(&request);
+    assert!(
+        composer_prompt.contains("agent_composer:"),
+        "{composer_prompt}"
+    );
+    assert!(
+        composer_prompt.contains("selected_skill: \"repo-review\""),
+        "{composer_prompt}"
+    );
+    assert!(
+        composer_prompt.contains("- file: \"Cargo.toml\""),
+        "{composer_prompt}"
+    );
+    assert!(
+        composer_prompt.contains("- directory: \"src\""),
+        "{composer_prompt}"
+    );
+    assert!(
+        composer_prompt.contains("rejected_reference_count: 1"),
+        "{composer_prompt}"
+    );
+    assert!(
+        !composer_prompt.contains("__cosh_agent_composer="),
+        "{composer_prompt}"
+    );
+    request.user_input = Some("analyze this code".to_string());
+    replace_composer_submission(
+        &mut request,
+        &ComposerSubmission {
+            references: Vec::new(),
+            selected_skill: None,
+            rejected_references: 0,
+        },
+    );
+    let plain_composer_prompt = prompt_from_request(&request);
+    assert!(
+        !plain_composer_prompt.contains("agent_composer:"),
+        "{plain_composer_prompt}"
     );
 }
 

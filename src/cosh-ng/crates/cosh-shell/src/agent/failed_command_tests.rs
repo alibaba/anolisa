@@ -1207,3 +1207,73 @@ fn manual_mode_skips_user_interrupted_failed_command_card() {
 
     assert!(output.is_empty());
 }
+
+#[test]
+fn interrupted_substring_failure_is_not_cancel_classified_end_to_end() {
+    let mut block = failed_block(1, "curl https://example.com/api");
+    let output = "curl: (18) transfer was interrupted by peer\n";
+    block.output.terminal_output_ref = Some(write_output(output.as_bytes()));
+
+    // The skip gate must not swallow the block before classification.
+    assert!(!command_should_skip_failure_analysis(&[], &block));
+    let semantics = classify_failure(&block, &[], Some(output));
+    assert_ne!(semantics.class, FailureClass::InteractiveCancel);
+    assert!(!format!("{:?}", semantics.reasons).contains("InteractiveCancelOutput"));
+}
+
+#[test]
+fn access_key_error_failure_is_not_cancel_classified_end_to_end() {
+    let mut block = failed_block(1, "ossutil cp local oss://bucket/key");
+    let output = "Error: InvalidAccessKeyId, the access key id you provided does not exist\n";
+    block.output.terminal_output_ref = Some(write_output(output.as_bytes()));
+
+    assert!(!command_should_skip_failure_analysis(&[], &block));
+    let semantics = classify_failure(&block, &[], Some(output));
+    assert_ne!(semantics.class, FailureClass::InteractiveCancel);
+    assert!(!format!("{:?}", semantics.reasons).contains("InteractiveCancelOutput"));
+}
+
+#[test]
+fn credential_error_header_stays_analyzable_end_to_end() {
+    let mut block = failed_block(1, "ossutil ls oss://bucket");
+    let output =
+        "Error: failed to validate access key id:\n  the key contains invalid characters\n";
+    block.output.terminal_output_ref = Some(write_output(output.as_bytes()));
+
+    assert!(!command_should_skip_failure_analysis(&[], &block));
+    let semantics = classify_failure(&block, &[], Some(output));
+    assert_ne!(semantics.class, FailureClass::InteractiveCancel);
+    assert!(!format!("{:?}", semantics.reasons).contains("InteractiveCancelOutput"));
+}
+
+#[test]
+fn bare_interrupted_line_stays_silent_end_to_end() {
+    let mut block = failed_block(1, "pip install requests");
+    let output = "Collecting requests\nInterrupted\n";
+    block.output.terminal_output_ref = Some(write_output(output.as_bytes()));
+
+    assert_eq!(
+        classify_failure(&block, &[], Some(output)).class,
+        FailureClass::InteractiveCancel
+    );
+    assert_eq!(
+        failure_analysis_disposition(&[], &block, AnalysisMode::Smart, Some(output)),
+        FailureAnalysisDisposition::SilentRecord
+    );
+}
+
+#[test]
+fn credential_prompt_output_stays_silent_end_to_end() {
+    let mut block = failed_block(1, "aliyun configure");
+    let output = "Access Key Id []:";
+    block.output.terminal_output_ref = Some(write_output(output.as_bytes()));
+
+    assert_eq!(
+        classify_failure(&block, &[], Some(output)).class,
+        FailureClass::InteractiveCancel
+    );
+    assert_eq!(
+        failure_analysis_disposition(&[], &block, AnalysisMode::Smart, Some(output)),
+        FailureAnalysisDisposition::SilentRecord
+    );
+}

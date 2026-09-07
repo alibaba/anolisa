@@ -16,10 +16,11 @@ sqlite = ["dep:rusqlite"]
 [dependencies]
 blake3.workspace = true
 thiserror.workspace = true
+tokenless-protocol = { path = "../tokenless-protocol" }
 
 [dependencies.rusqlite]
 workspace = true
 optional = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

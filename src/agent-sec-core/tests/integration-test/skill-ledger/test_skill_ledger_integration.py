@@ -148,6 +148,17 @@ def write_findings_file(parent: Path, name: str, findings: list | dict) -> Path:
     return path
 
 
+def snapshot_file_tree(root: Path) -> dict[str, bytes]:
+    """Return relative paths and contents for every file below *root*."""
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def read_latest_manifest(skill_dir: Path) -> dict:
     """Read ``.skill-meta/latest.json`` for assertions."""
     latest = skill_dir / ".skill-meta" / "latest.json"
@@ -1499,6 +1510,217 @@ def test_scan_all_no_skill_dirs(ws):
     assert (
         "no skill directories" in combined.lower()
     ), f"Expected no-dirs message: {combined}"
+
+
+def test_readonly_system_scan_all_skips_while_read_commands_still_run(
+    ws,
+    monkeypatch,
+):
+    """Batch writes skip read-only system Skills without changing read commands."""
+    case_root = ws.root / "readonly_system_scan"
+    system_root = case_root / "system-skills"
+    system_skill = make_skill(system_root, "weather", {"main.py": "print('ok')\n"})
+    data_root = case_root / "xdg_data"
+    runtime_root = case_root / "runtime"
+    data_root.mkdir(parents=True)
+    runtime_root.mkdir()
+    write_skill_ledger_config(
+        case_root,
+        {
+            "enableDefaultSkillDirs": True,
+            "managedSkillDirs": [],
+        },
+    )
+    env = {
+        "XDG_CONFIG_HOME": str(case_root / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(runtime_root),
+    }
+    config_path = (
+        case_root / "xdg_config" / "agent-sec" / "skill-ledger" / "config.json"
+    )
+    config_before = config_path.read_text()
+    monkeypatch.setattr(
+        config_module,
+        "DEFAULT_SYSTEM_SKILL_ROOTS",
+        (system_root,),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "DEFAULT_SKILL_DIRS",
+        [f"{system_root}/*"],
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.skill_ledger.core.certifier.ledger_update_access",
+        lambda _root: (False, "read-only"),
+    )
+
+    scanned = run_skill_ledger(["scan", "--all"], env_extra=env)
+
+    assert scanned.returncode == 0, scanned.stderr
+    scan_out = parse_json_output(scanned.stdout)
+    assert scan_out["keyCreated"] is True
+    assert scan_out["results"] == [
+        {
+            "canonicalSkillDir": str(system_skill),
+            "skillName": "weather",
+            "status": "skipped",
+            "reasonCode": "readonly_system_skill",
+            "persisted": False,
+        }
+    ]
+    assert config_path.read_text() == config_before
+    assert not (system_skill / ".skill-meta").exists()
+
+    explicit_scan = run_skill_ledger(["scan", str(system_skill)], env_extra=env)
+
+    assert explicit_scan.returncode == 1
+    assert "skill-ledger analyze" in (explicit_scan.stdout + explicit_scan.stderr)
+    assert not (system_skill / ".skill-meta").exists()
+
+    analyzed = run_skill_ledger(
+        ["analyze", str(system_skill), "--format", "json"],
+        env_extra=env,
+    )
+    checked = run_skill_ledger(["check", "--all"], env_extra=env)
+    status = run_skill_ledger(["status"], env_extra=env)
+
+    assert analyzed.returncode == 0, analyzed.stderr
+    assert parse_json_output(analyzed.stdout)["status"] in {
+        "pass",
+        "warn",
+        "deny",
+    }
+    assert checked.returncode == 0, checked.stderr
+    assert parse_json_output(checked.stdout)["results"][0]["status"] == "none"
+    assert status.returncode == 0, status.stderr
+    status_out = parse_json_output(status.stdout)
+    assert status_out["skills"]["breakdown"]["none"] == 1
+    assert status_out["skills"]["health"] == "unscanned"
+    assert not (system_skill / ".skill-meta").exists()
+
+
+def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
+    ws,
+    monkeypatch,
+):
+    """Skipped system Skills do not mask writable success or real user errors."""
+    case_root = ws.root / "mixed_system_scan"
+    system_root = case_root / "system-skills"
+    system_skill = make_skill(system_root, "system", {"main.py": "print('ok')\n"})
+    user_skill = make_skill(
+        case_root / "user-skills",
+        "user",
+        {"main.py": "print('ok')\n"},
+    )
+    data_root = case_root / "xdg_data"
+    runtime_root = case_root / "runtime"
+    data_root.mkdir(parents=True)
+    runtime_root.mkdir()
+    write_skill_ledger_config(
+        case_root,
+        {
+            "enableDefaultSkillDirs": False,
+            "managedSkillDirs": [str(system_skill), str(user_skill)],
+        },
+    )
+    env = {
+        "XDG_CONFIG_HOME": str(case_root / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(runtime_root),
+    }
+    monkeypatch.setattr(
+        config_module,
+        "DEFAULT_SYSTEM_SKILL_ROOTS",
+        (system_root,),
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.skill_ledger.core.certifier.ledger_update_access",
+        lambda _root: (False, "read-only"),
+    )
+
+    successful = run_skill_ledger(["scan", "--all"], env_extra=env)
+
+    assert successful.returncode == 0, successful.stderr
+    successful_out = parse_json_output(successful.stdout)
+    assert [result["status"] for result in successful_out["results"]] == [
+        "skipped",
+        "scanned",
+    ]
+    assert not (system_skill / ".skill-meta").exists()
+    assert (user_skill / ".skill-meta" / "latest.json").is_file()
+
+    shutil.rmtree(user_skill / ".skill-meta")
+    original_compute_file_hashes = compute_file_hashes
+
+    def fail_user_hashing(skill_dir: str | Path) -> dict[str, str]:
+        if Path(skill_dir) == user_skill:
+            raise PermissionError("user ledger input is unreadable")
+        return original_compute_file_hashes(skill_dir)
+
+    monkeypatch.setattr(
+        "agent_sec_cli.skill_ledger.core.certifier.compute_file_hashes",
+        fail_user_hashing,
+    )
+
+    failed = run_skill_ledger(["scan", "--all"], env_extra=env)
+
+    assert failed.returncode == 1
+    failed_out = parse_json_output(failed.stdout)
+    assert [result["status"] for result in failed_out["results"]] == [
+        "skipped",
+        "error",
+    ]
+    assert "user ledger input is unreadable" in failed_out["results"][1]["error"]
+
+
+def test_init_baseline_creates_keys_but_skips_readonly_system_skill(
+    ws,
+    monkeypatch,
+):
+    """init retains key initialization while avoiding system Skill metadata writes."""
+    case_root = ws.root / "readonly_system_init"
+    system_root = case_root / "system-skills"
+    system_skill = make_skill(system_root, "weather", {"main.py": "print('ok')\n"})
+    data_root = case_root / "xdg_data"
+    runtime_root = case_root / "runtime"
+    data_root.mkdir(parents=True)
+    runtime_root.mkdir()
+    write_skill_ledger_config(
+        case_root,
+        {
+            "enableDefaultSkillDirs": True,
+            "managedSkillDirs": [],
+        },
+    )
+    env = {
+        "XDG_CONFIG_HOME": str(case_root / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(runtime_root),
+    }
+    monkeypatch.setattr(
+        config_module,
+        "DEFAULT_SYSTEM_SKILL_ROOTS",
+        (system_root,),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "DEFAULT_SKILL_DIRS",
+        [f"{system_root}/*"],
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.skill_ledger.core.certifier.ledger_update_access",
+        lambda _root: (False, "read-only"),
+    )
+
+    initialized = run_skill_ledger(["init"], env_extra=env)
+
+    assert initialized.returncode == 0, initialized.stderr
+    out = parse_json_output(initialized.stdout)
+    assert out["keyCreated"] is True
+    assert out["results"][0]["status"] == "skipped"
+    assert (data_root / "agent-sec" / "skill-ledger" / "key.pub").is_file()
+    assert not (system_skill / ".skill-meta").exists()
 
 
 # ── Group 6: audit command ────────────────────────────────────────────────
@@ -3734,25 +3956,46 @@ def test_status_drifted_shows_details(ws):
     ), f"Expected health 'attention' after drift: {out['skills']}"
 
 
-# ── Group 8: stubs & edge cases ───────────────────────────────────────────
+# ── Group 8: reserved commands & edge cases ───────────────────────────────
 
 
-def test_set_policy_stub(ws):
-    """set-policy → exit 0, 'coming soon' in output."""
-    skill = make_skill(ws.skills_dir, "stub-policy", {"x.txt": "x"})
+def test_set_policy_removed(ws: Workspace) -> None:
+    """The removed set-policy placeholder fails without creating ledger state."""
+    skill = make_skill(ws.skills_dir, "removed-policy", {"x.txt": "x"})
+    metadata_dir = skill / ".skill-meta"
+    assert not metadata_dir.exists()
+
     r = run_skill_ledger(
         ["set-policy", str(skill), "--policy", "allow"],
         env_extra=ws.env(),
     )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 2, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    error = strip_ansi(r.stderr).lower()
+    assert "no such command" in error
+    assert "set-policy" in error
+    assert not metadata_dir.exists()
 
 
-def test_rotate_keys_stub(ws):
-    """rotate-keys → exit 0, 'coming soon' in output."""
+def test_rotate_keys_not_implemented(ws: Workspace) -> None:
+    """rotate-keys fails explicitly without changing the isolated key store."""
+    key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
+    before = snapshot_file_tree(key_dir)
+    keyring_existed = (key_dir / "keyring").is_dir()
+    assert {"key.enc", "key.pub"}.issubset(before)
+
     r = run_skill_ledger(["rotate-keys"], env_extra=ws.env())
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 1, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    assert r.stderr == (
+        "Error: rotate-keys is not implemented; no keys were changed.\n"
+    )
+    assert snapshot_file_tree(key_dir) == before
+    assert (key_dir / "keyring").is_dir() is keyring_existed
+
+    help_result = run_skill_ledger(["rotate-keys", "--help"], env_extra=ws.env())
+    assert help_result.returncode == 0, help_result.stderr
+    assert "not implemented" in strip_ansi(help_result.stdout).lower()
 
 
 def test_list_scanners(ws):

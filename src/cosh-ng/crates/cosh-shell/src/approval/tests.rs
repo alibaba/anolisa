@@ -793,11 +793,11 @@ fn shell_handoff_validation_message_uses_active_language() {
     let zh = I18n::new(Language::ZhCn);
     let text = approval_shell_handoff_validation_message(
         &zh,
-        "shell handoff command contains newline; multiline handoff is not enabled",
+        "shell handoff command contains an unsupported line break",
     );
 
     assert!(text.contains("换行"), "{text}");
-    assert!(!text.contains("multiline handoff is not enabled"), "{text}");
+    assert!(!text.contains("unsupported line break"), "{text}");
 
     let unknown = approval_shell_handoff_validation_message(&zh, "custom validation");
     assert_eq!(unknown, "custom validation");

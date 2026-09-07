@@ -161,6 +161,10 @@ ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cl
 ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
 ```
 
+全局配置文件的读取方是 daemon，因此 `config -g` 不止于写文件：写入 `/etc/ws-ckpt/config.toml` 后，它会请求 daemon 重载，并把 daemon 实际加载到的配置与刚写入的逐项比对。只要有任何不一致，命令会列出每个差异字段并以非零退出，而不是报成功。
+
+这一点在 Kubernetes sidecar 部署中尤其重要：CLI（app 容器）与 daemon 运行在不同容器、各自独立的文件系统里。需把 `/etc/ws-ckpt` 挂到两容器共享的卷上（`emptyDir` 即可）；否则每一条 `config -g` 设置都会静默停留在 daemon 的内置默认值。随附的 `k8s-sidecar-example.yaml` 已经接好了这个共享卷。
+
 ---
 
 ## 重要注意事项

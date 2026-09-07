@@ -56,6 +56,7 @@ mod tests {
         "debug",
         "health",
         "help",
+        "hook_action",
         "hook_details",
         "hooks",
         "insight",
@@ -184,28 +185,107 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 26
+            MessageId::ALL.len() - 58
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
-            MessageId::ALL.len() - 17
+            MessageId::ALL.len() - 49
         );
-        // The #2068 startup auth-hint segment precedes the session-picker
-        // footer and the appended #1961 plan-mode segment; tail ownership
-        // assertions move with each appended segment.
+        // The #2068 startup auth-hint segment remains ahead of the appended
+        // session-picker footer, Agent Composer, Trust-catalog, hook-action,
+        // Enhanced-routing, and #1961 plan-mode segments.
         assert_eq!(
             MessageId::StartupAuthHintLine as usize,
-            MessageId::ALL.len() - 16
+            MessageId::ALL.len() - 48
         );
         // The session-picker footer segment remains pinned ahead of the
-        // appended #1961 plan-mode segment.
+        // appended Agent Composer, Trust-catalog, hook-action,
+        // Enhanced-routing, and #1961 plan-mode segments.
         assert_eq!(
             MessageId::SessionPickerMarkedFooter as usize,
+            MessageId::ALL.len() - 47
+        );
+        assert_eq!(
+            MessageId::AgentComposerTitle as usize,
+            MessageId::SessionPickerMarkedFooter as usize + 1
+        );
+        assert_eq!(
+            MessageId::AgentComposerFooterEditing as usize,
+            MessageId::ALL.len() - 44
+        );
+        assert_eq!(
+            MessageId::AgentComposerRejectedTitle as usize,
+            MessageId::AgentComposerFooterEditing as usize + 1
+        );
+        assert_eq!(
+            MessageId::AgentComposerRejectedFooter as usize,
+            MessageId::ApprovalTrustUnknownToolReason as usize - 1
+        );
+        assert_eq!(
+            MessageId::ApprovalTrustUnknownToolReason as usize,
+            MessageId::ALL.len() - 36
+        );
+        // The hook-action segment follows the Trust-catalog segment and remains
+        // ahead of the appended Enhanced-routing and #1961 plan-mode segments.
+        assert_eq!(
+            MessageId::SlashHooksActionCancelledTitle as usize,
+            MessageId::ALL.len() - 35
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionCancelledBody as usize,
+            MessageId::ALL.len() - 34
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionVerbEnable as usize,
+            MessageId::ALL.len() - 33
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionVerbDisable as usize,
+            MessageId::ALL.len() - 32
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionQuestion as usize,
+            MessageId::ALL.len() - 31
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionOptionShell as usize,
+            MessageId::ALL.len() - 30
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionOptionAgent as usize,
+            MessageId::ALL.len() - 29
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionOptionBoth as usize,
+            MessageId::ALL.len() - 28
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionAgentEnabledBody as usize,
+            MessageId::ALL.len() - 27
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionAgentDisabledBody as usize,
+            MessageId::ALL.len() - 26
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionAgentErrorBody as usize,
+            MessageId::ALL.len() - 25
+        );
+        assert_eq!(
+            MessageId::HelpSummaryModeRouting as usize,
+            MessageId::SlashHooksActionAgentErrorBody as usize + 1
+        );
+        assert_eq!(
+            MessageId::RoutingModeShellOnlyFooter as usize,
             MessageId::ALL.len() - 15
         );
         // The #1961 plan-mode workflow segment is appended after every
         // earlier segment so pre-existing discriminants never shift; tail
         // ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::HelpSummaryModePlan as usize,
+            MessageId::RoutingModeShellOnlyFooter as usize + 1
+        );
         assert_eq!(
             MessageId::HelpSummaryModePlan as usize,
             MessageId::ALL.len() - 14

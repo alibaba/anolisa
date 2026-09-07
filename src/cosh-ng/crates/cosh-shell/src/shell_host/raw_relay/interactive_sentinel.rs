@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::i18n::{I18n, MessageId};
+use crate::shell_host::HintCardRenderer;
 use crate::types::CommandOrigin;
 
 use super::super::osc::OscParser;
@@ -145,7 +146,9 @@ pub(crate) fn sample_interactive_state(master_fd: i32, shell_pgid: i32) -> Inter
 }
 
 /// One-shot inline hint card (spec Q6, user-decided 2026-08-04): a
-/// yellow-bordered notice card appended to the terminal stream once per
+/// NoticePanel-family card (#2179: same framing, width contract, and
+/// plain fallback as every other panel, produced by the injected
+/// [`HintCardRenderer`]) appended to the terminal stream once per
 /// episode/kind, followed by a redraw of the program's own prompt tail so
 /// the user's typing target visually returns to the bottom (continuity).
 /// Fullscreen (alt-screen) episodes render nothing: any in-screen insert
@@ -155,7 +158,7 @@ pub(crate) fn hint_card(
     prompt_tail: &str,
     i18n: &I18n,
     input_wait_timeout_secs: u64,
-    cols: u16,
+    renderer: &HintCardRenderer,
 ) -> Option<String> {
     if matches!(kind, InteractiveHintKind::Fullscreen { .. }) {
         return None;
@@ -175,44 +178,27 @@ pub(crate) fn hint_card(
     let (safe_tail, _) = crate::evidence::redact_sensitive_text(prompt_tail.trim_end());
     let safe_tail = safe_tail.trim().to_string();
 
-    let width = usize::from(cols).clamp(40, 100);
-    let inner = width - 2;
-    let mut lines: Vec<String> = Vec::new();
-    let title = i18n.t(MessageId::ShellInputWaitHintTitle);
-    let title_width = approx_display_width(title);
-    let dashes = inner.saturating_sub(title_width + 3);
-    lines.push(format!(
-        "\x1b[33m╭─ {title} {}\x1b[0m",
-        "─".repeat(dashes.max(1))
-    ));
-    let body_line = |text: &str, dim: bool| {
-        let clipped = clip_to_width(text, inner.saturating_sub(2));
-        if dim {
-            format!("\x1b[33m│\x1b[0m \x1b[2m{clipped}\x1b[0m")
-        } else {
-            format!("\x1b[33m│\x1b[0m {clipped}")
-        }
-    };
+    let mut body: Vec<String> = Vec::new();
     if safe_tail.is_empty() {
-        lines.push(body_line(kind_body, false));
+        body.push(kind_body.to_string());
     } else {
-        lines.push(body_line(&safe_tail, false));
-        lines.push(body_line(kind_body, true));
+        body.push(safe_tail.clone());
+        body.push(kind_body.to_string());
     }
-    lines.push(body_line(
-        i18n.t(MessageId::ShellInputWaitHintGuidanceBody),
-        true,
-    ));
+    body.push(
+        i18n.t(MessageId::ShellInputWaitHintGuidanceBody)
+            .to_string(),
+    );
     if input_wait_timeout_secs > 0 && timeout_eligible(kind) {
-        lines.push(body_line(
-            &i18n.format(
-                MessageId::ShellInputWaitHintTimeoutForecastBody,
-                &[("seconds", &input_wait_timeout_secs.to_string())],
-            ),
-            true,
+        body.push(i18n.format(
+            MessageId::ShellInputWaitHintTimeoutForecastBody,
+            &[("seconds", &input_wait_timeout_secs.to_string())],
         ));
     }
-    lines.push(format!("\x1b[33m╰{}\x1b[0m", "─".repeat(inner)));
+    let lines = renderer.render(i18n.t(MessageId::ShellInputWaitHintTitle), body);
+    if lines.is_empty() {
+        return None;
+    }
 
     let mut rendered = format!("\r\n{}\r\n", lines.join("\r\n"));
     if !safe_tail.is_empty() {
@@ -222,95 +208,6 @@ pub(crate) fn hint_card(
         rendered.push(' ');
     }
     Some(rendered)
-}
-
-/// Extracts the current unfinished display line (after the last newline),
-/// stripped of CSI/OSC escape sequences and control bytes — the "prompt
-/// tail" the foreground program is waiting on.
-pub(crate) fn prompt_tail_from_display(display: &[u8]) -> String {
-    let start = display
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let tail = String::from_utf8_lossy(&display[start..]);
-    strip_escape_sequences(&tail)
-}
-
-fn strip_escape_sequences(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    for follow in chars.by_ref() {
-                        if follow.is_ascii_alphabetic() || follow == '~' {
-                            break;
-                        }
-                    }
-                }
-                // String-family introducers (OSC / DCS / SOS / PM / APC):
-                // consume until BEL or the ST pair `ESC \` (#2168 review:
-                // treating only OSC here left DCS/APC payloads visible).
-                Some(']' | 'P' | 'X' | '^' | '_') => {
-                    chars.next();
-                    while let Some(follow) = chars.next() {
-                        if follow == '\u{7}' {
-                            break;
-                        }
-                        if follow == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                // nF sequences such as charset selection `ESC ( B`: consume
-                // intermediates (0x20..=0x2F) plus the final byte, instead
-                // of dropping a single char and leaking the final.
-                Some('\u{20}'..='\u{2f}') => {
-                    while let Some(&follow) = chars.peek() {
-                        chars.next();
-                        if !('\u{20}'..='\u{2f}').contains(&follow) {
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    chars.next();
-                }
-            }
-            continue;
-        }
-        if c == '\r' || c.is_control() {
-            continue;
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// Coarse display width (ASCII = 1 column, everything else = 2): enough
-/// to keep the card border aligned for the zh/en copy and typical prompt
-/// tails without pulling a unicode-width dependency into the relay.
-fn approx_display_width(text: &str) -> usize {
-    text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
-}
-
-fn clip_to_width(text: &str, max_width: usize) -> String {
-    let mut width = 0;
-    let mut out = String::new();
-    for c in text.chars() {
-        let w = if c.is_ascii() { 1 } else { 2 };
-        if width + w > max_width.saturating_sub(1) {
-            out.push('…');
-            break;
-        }
-        width += w;
-        out.push(c);
-    }
-    out
 }
 
 /// Timeout eligibility for the #2161 input-wait interrupt: only kinds
@@ -330,24 +227,56 @@ pub(crate) fn timeout_eligible(kind: &InteractiveHintKind) -> bool {
 
 /// Shared input-wait episode clock between the relay loop (producer: the
 /// sentinel sampler) and the runtime controller (consumer: the #2161
-/// input-wait timeout). Stores the epoch-millis when the current
-/// timeout-eligible episode began; 0 means "not waiting". The producer
-/// clears it on output activity, ineligible/None classifications, and
-/// handoff exit, so the consumer's duration read is always the length of
-/// the *current uninterrupted* wait (re-entry restarts the clock).
+/// input-wait timeout). Stores the monotonic-millis (see [`Self::now_ms`])
+/// when the current timeout-eligible episode began; 0 means "not
+/// waiting". The producer clears it on output activity, ineligible/None
+/// classifications, and handoff exit, so the consumer's duration read is
+/// always the length of the *current uninterrupted* wait (re-entry
+/// restarts the clock).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InputWaitStatus {
     waiting_since_ms: Arc<AtomicU64>,
+    /// Test-only pinned clock (0 = use the real monotonic clock).
+    /// Shared across clones like the episode stamp so producer/consumer
+    /// handles observe the same simulated time; absent from release
+    /// builds so the production layout stays a single atomic.
+    #[cfg(test)]
+    test_clock_ms: Arc<AtomicU64>,
 }
 
 impl InputWaitStatus {
+    /// Milliseconds on a process-local monotonic clock (#2168 review
+    /// P1-1): an `Instant` anchor makes the interrupt timer immune to
+    /// NTP/VM/container wall-clock jumps, which with `SystemTime` could
+    /// fire a false SIGINT (forward jump) or never fire (backward jump).
+    /// Only differences of this clock are ever used; the constant offset
+    /// keeps values strictly positive (0 stays "not waiting") and leaves
+    /// backdating headroom early in the process lifetime.
+    ///
+    /// Bounds: the `1 << 32` offset is a ~49.7-day base, and elapsed
+    /// milliseconds only reach the remaining u64 range after ~584 million
+    /// years of process uptime — consumers may treat this value as
+    /// overflow-free for any conceivable timeout configuration.
     fn now_ms() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-            .max(1)
+        use std::sync::OnceLock;
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        let epoch = *EPOCH.get_or_init(Instant::now);
+        Instant::now().duration_since(epoch).as_millis() as u64 + (1 << 32)
+    }
+
+    /// Clock reading feeding the production chain. Tests may pin it via
+    /// [`Self::set_test_clock_ms`] to drive deterministic forward/backward
+    /// jump scenarios through `mark_waiting`/`waiting_for`; the real path
+    /// stays the lock-free `Instant` read above (#2176 review P2).
+    fn clock_ms(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let pinned = self.test_clock_ms.load(Ordering::Acquire);
+            if pinned != 0 {
+                return pinned;
+            }
+        }
+        Self::now_ms()
     }
 
     /// Marks the start of an eligible wait episode; keeps the original
@@ -355,7 +284,7 @@ impl InputWaitStatus {
     pub(crate) fn mark_waiting(&self) {
         let _ = self.waiting_since_ms.compare_exchange(
             0,
-            Self::now_ms(),
+            self.clock_ms(),
             Ordering::AcqRel,
             Ordering::Acquire,
         );
@@ -371,15 +300,32 @@ impl InputWaitStatus {
         if since == 0 {
             return None;
         }
-        Some(Duration::from_millis(Self::now_ms().saturating_sub(since)))
+        Some(Duration::from_millis(Self::elapsed_ms(
+            self.clock_ms(),
+            since,
+        )))
+    }
+
+    /// Jump-defensive elapsed arithmetic: a start stamp ahead of `now`
+    /// (impossible on the monotonic clock; the backward-jump failure
+    /// mode of the former wall-clock implementation) clamps to zero
+    /// rather than underflowing into an instant timeout.
+    fn elapsed_ms(now_ms: u64, since_ms: u64) -> u64 {
+        now_ms.saturating_sub(since_ms)
     }
 
     #[cfg(test)]
     pub(crate) fn backdate_for_test(&self, age: Duration) {
         self.waiting_since_ms.store(
-            Self::now_ms().saturating_sub(age.as_millis() as u64),
+            self.clock_ms().saturating_sub(age.as_millis() as u64),
             Ordering::Release,
         );
+    }
+
+    /// Pins the episode clock for tests (0 restores the real clock).
+    #[cfg(test)]
+    pub(crate) fn set_test_clock_ms(&self, ms: u64) {
+        self.test_clock_ms.store(ms, Ordering::Release);
     }
 }
 
@@ -400,7 +346,7 @@ pub(super) fn emit_interactive_hint_if_waiting<W: std::io::Write>(
     input_wait_status: &InputWaitStatus,
     hint_i18n: &I18n,
     input_wait_timeout_secs: u64,
-    cols: u16,
+    hint_card_renderer: Option<&HintCardRenderer>,
 ) -> std::io::Result<()> {
     let is_agent_handoff = matches!(
         parser.active_command_origin(),
@@ -435,16 +381,26 @@ pub(super) fn emit_interactive_hint_if_waiting<W: std::io::Write>(
         .map(std::mem::discriminant)
         .is_none_or(|seen| seen != std::mem::discriminant(&kind));
     if changed {
-        let prompt_tail = prompt_tail_from_display(&parser.display);
-        if let Some(card) = hint_card(
-            &kind,
-            &prompt_tail,
-            hint_i18n,
-            input_wait_timeout_secs,
-            cols,
-        ) {
-            output.write_all(card.as_bytes())?;
-            output.flush()?;
+        // #2179 fail-quiet: no injected panel renderer means no card, but
+        // the episode kind is still recorded so re-entry stays deduped.
+        if let Some(renderer) = hint_card_renderer {
+            // Prompt tail: the parser's incrementally maintained, bounded
+            // visible tail (#2196 reviews R1/R4/R5/R7 — window anchored at
+            // preexec, one escape-stripping authority with state carried
+            // across chunks, retained lines capped, O(1) per sample; the
+            // last non-blank visible line keeps the #2179 echo+read
+            // semantics).
+            let prompt_tail = parser.active_command_visible_tail();
+            if let Some(card) = hint_card(
+                &kind,
+                &prompt_tail,
+                hint_i18n,
+                input_wait_timeout_secs,
+                renderer,
+            ) {
+                output.write_all(card.as_bytes())?;
+                output.flush()?;
+            }
         }
         *shown = Some(kind);
     }
@@ -465,47 +421,90 @@ mod linux {
     /// Cost bound per sample (#2168 review): stop probing group members
     /// after this many, keeping the worst case fail-quiet, not slow.
     const MAX_PGRP_PROBES: usize = 32;
+    #[cfg(test)]
+    pub(super) const MAX_PGRP_PROBES_FOR_TEST: usize = MAX_PGRP_PROBES;
 
     pub(super) fn fill_foreground_block_state(fg_pgid: i32, snapshot: &mut InteractiveSnapshot) {
+        // #2168 review P1-2: probe the group leader first — the common
+        // single-process foreground group (read -p, sudo, pagers) then
+        // resolves without scanning the whole process table.
+        //
+        // Assumption scope: when the leader is not the blocked reader
+        // (a descendant is), this shortcut simply misses and the walk
+        // below degrades to the pre-shortcut full-table scan — the
+        // shortcut is budgeted separately (#2176 review P2), so all
+        // MAX_PGRP_PROBES fallback slots stay available to non-leader
+        // members and every member base could reach is still reached.
+        // Enumeration order stays /proc-dependent exactly as before;
+        // evidence is per-group (one blocked member suffices), so order
+        // can only affect which member supplies the wording-only
+        // `fg_comm`, never the verdict.
+        let leader_in_group = process_pgid(fg_pgid) == Some(fg_pgid);
+        if leader_in_group && probe_member(fg_pgid, snapshot) {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return;
         };
-        let mut probed = 0usize;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
-                continue;
-            };
-            if process_pgid(pid) != Some(fg_pgid) {
-                continue;
+        let members = entries.flatten().filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+            if pid == fg_pgid && leader_in_group {
+                return None;
             }
-            probed += 1;
-            if probed > MAX_PGRP_PROBES {
-                return;
-            }
-            let wchan = read_proc(pid, "wchan").unwrap_or_default();
-            let syscall = read_proc(pid, "syscall").unwrap_or_default();
-            // #2168 review: a blocked read(2) only counts when the fd it
-            // waits on resolves to the tty — `sleep 130 | cat` blocks in a
-            // pipe read on fd 0 and must never accrue input-wait timeout.
-            let blocked_read = blocked_read_fd(&syscall)
-                .map(|fd| fd_is_tty(pid, fd))
-                .unwrap_or(false);
-            if TTY_READ_WCHANS.contains(&wchan.trim()) || blocked_read {
-                snapshot.blocked_tty_read = true;
-                snapshot.fg_comm = read_proc(pid, "comm")
-                    .map(|comm| comm.trim().to_string())
-                    .filter(|comm| !comm.is_empty())
-                    .or_else(|| snapshot.fg_comm.take());
-                // Evidence is per-group: one blocked member is enough.
-                return;
-            }
-            if snapshot.fg_comm.is_none() {
-                snapshot.fg_comm = read_proc(pid, "comm")
-                    .map(|comm| comm.trim().to_string())
-                    .filter(|comm| !comm.is_empty());
+            (process_pgid(pid) == Some(fg_pgid)).then_some(pid)
+        });
+        scan_members(members, |pid| probe_member(pid, snapshot));
+    }
+
+    /// Walks fallback group members with the full probe budget: up to
+    /// MAX_PGRP_PROBES members are probed, stopping early on the first
+    /// evidence hit. Extracted so the budget contract (a blocked member
+    /// in the last slot is still probed; the bound stays fail-quiet)
+    /// is testable without a live /proc (#2176 review P2).
+    pub(super) fn scan_members(
+        members: impl Iterator<Item = i32>,
+        mut probe: impl FnMut(i32) -> bool,
+    ) -> bool {
+        for pid in members.take(MAX_PGRP_PROBES) {
+            if probe(pid) {
+                return true;
             }
         }
+        false
+    }
+
+    /// Probes one foreground-group member; returns true once
+    /// blocked-tty-read evidence is found (evidence is per-group: one
+    /// blocked member is enough, the caller stops scanning).
+    ///
+    /// `fg_comm` is a wording prior only (see the field docs on
+    /// [`InteractiveSnapshot`]): it merely sharpens hint copy and never
+    /// carries identity semantics — which member it names may depend on
+    /// probe order, and that is acceptable by design.
+    fn probe_member(pid: i32, snapshot: &mut InteractiveSnapshot) -> bool {
+        let wchan = read_proc(pid, "wchan").unwrap_or_default();
+        let syscall = read_proc(pid, "syscall").unwrap_or_default();
+        // #2168 review: a blocked read(2) only counts when the fd it
+        // waits on resolves to the tty — `sleep 130 | cat` blocks in a
+        // pipe read on fd 0 and must never accrue input-wait timeout.
+        let blocked_read = blocked_read_fd(&syscall)
+            .map(|fd| fd_is_tty(pid, fd))
+            .unwrap_or(false);
+        if TTY_READ_WCHANS.contains(&wchan.trim()) || blocked_read {
+            snapshot.blocked_tty_read = true;
+            snapshot.fg_comm = member_comm(pid).or_else(|| snapshot.fg_comm.take());
+            return true;
+        }
+        if snapshot.fg_comm.is_none() {
+            snapshot.fg_comm = member_comm(pid);
+        }
+        false
+    }
+
+    fn member_comm(pid: i32) -> Option<String> {
+        read_proc(pid, "comm")
+            .map(|comm| comm.trim().to_string())
+            .filter(|comm| !comm.is_empty())
     }
 
     /// Parses `/proc/<pid>/syscall`: the fd argument of a blocked read(2),

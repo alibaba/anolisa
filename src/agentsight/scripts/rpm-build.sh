@@ -157,19 +157,7 @@ TARBALL_NAME="agentsight-${VERSION}"
 TARBALL_DIR="${OUTPUT_DIR}/${TARBALL_NAME}"
 
 log_info "Preparing tarball contents..."
-mkdir -p "$TARBALL_DIR"
-
-# Copy required files
-cp "target/release/agentsight" "$TARBALL_DIR/"
-cp "target/release/agentsight-enforcer" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/scripts/agentsight-start.sh" "$TARBALL_DIR/agentsight-start"
-cp "$PROJECT_ROOT/scripts/agentsight.service" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/scripts/agentsight-enforcer.service" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/component.toml" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/agentsight.json" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/README.md" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/README_zh.md" "$TARBALL_DIR/"
-cp "$PROJECT_ROOT/LICENSE" "$TARBALL_DIR/"
+./scripts/stage-rpm-payload.sh "$TARBALL_DIR"
 
 log_info "Files prepared in: $TARBALL_DIR"
 

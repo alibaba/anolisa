@@ -279,3 +279,41 @@ def test_invalid_mode_warns_and_allows(mock_cli) -> None:
     assert output["decision"] == "allow"
     assert "systemMessage" in output
     assert "Invalid PROMPT_SCANNER_MODE" in output["systemMessage"]
+
+
+def _run_with_scan_mode(
+    mock_cli, scan_mode: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Run the hook with one PROMPT_SCANNER_SCAN_MODE value and keep stderr.
+
+    The empty prompt short-circuits before the CLI call, so stderr carries the
+    configuration diagnostic alone.
+    """
+    extra = {} if scan_mode is None else {"PROMPT_SCANNER_SCAN_MODE": scan_mode}
+    env, _capture = mock_cli(extra=extra)
+
+    proc = _run_hook(
+        {"hook_event_name": "UserPromptSubmit", "prompt": ""},
+        env,
+    )
+
+    assert proc.returncode == 0
+    return proc
+
+
+def test_invalid_scan_mode_reports_fallback(mock_cli) -> None:
+    proc = _run_with_scan_mode(mock_cli, "banana")
+
+    assert (
+        "[prompt-scanner] invalid PROMPT_SCANNER_SCAN_MODE 'banana'; "
+        "using 'standard'" in proc.stderr
+    )
+
+
+@pytest.mark.parametrize("scan_mode", ["fast", "standard", "strict", "  STRICT "])
+def test_valid_scan_mode_stays_silent(mock_cli, scan_mode: str) -> None:
+    assert _run_with_scan_mode(mock_cli, scan_mode).stderr == ""
+
+
+def test_unset_scan_mode_stays_silent(mock_cli) -> None:
+    assert _run_with_scan_mode(mock_cli, None).stderr == ""

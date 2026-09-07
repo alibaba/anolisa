@@ -51,6 +51,7 @@ impl GenAISqliteStore {
                 start_timestamp_ns INTEGER NOT NULL,
                 end_timestamp_ns INTEGER,
                 duration_ns INTEGER,
+                first_output_timestamp_ns INTEGER,
                 pid INTEGER,
                 process_name TEXT,
                 agent_name TEXT,
@@ -114,6 +115,21 @@ impl GenAISqliteStore {
             // NOTE: idx_genai_status and idx_genai_interruption_type are NOT created here
             // because they depend on columns added via migration. They are created in the
             // migration blocks below, which guarantees the columns exist first.
+        )?;
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_resource_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                agent_name TEXT,
+                cpu_percent REAL NOT NULL,
+                memory_bytes INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_pid_timestamp
+                ON agent_resource_samples(pid, timestamp_ns);
+            CREATE INDEX IF NOT EXISTS idx_resource_timestamp
+                ON agent_resource_samples(timestamp_ns);",
         )?;
 
         // ── Forward-compatible migrations ──────────────────────────────────────
@@ -198,6 +214,9 @@ impl GenAISqliteStore {
         // v8: stable key used to reconcile idle stream snapshots on completion
         ensure_col!("pending_match_key", "TEXT", "idx_genai_pending_match_key");
 
+        // v9: first provider event that carries model output
+        ensure_col!("first_output_timestamp_ns", "INTEGER");
+
         Ok(())
     }
 
@@ -227,104 +246,214 @@ impl GenAISqliteStore {
         total
     }
 
-    /// Check database size and prune if approaching limit
+    /// Logical data size: physical size minus freelist pages.
     ///
-    /// Keeps pruning until size drops below threshold to avoid repeated triggers.
+    /// Purge convergence is measured on this: deleting rows does not shrink
+    /// the file without VACUUM — freed pages go to the freelist and are
+    /// reused by future inserts, so the physical file stabilizes at its
+    /// historical peak while the logical size reflects live data.
+    pub(super) fn effective_db_size(&self) -> u64 {
+        let physical = self.get_total_db_size();
+        let free_bytes = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let freelist: i64 = match conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Fall back to the physical size (conservative: the prune
+                    // loop may over-delete by the freelist amount) — but make
+                    // the degraded measurement visible.
+                    log::warn!(
+                        "freelist_count query failed; logical size falls back \
+                         to physical size: {e}"
+                    );
+                    0
+                }
+            };
+            let page_size: i64 = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .unwrap_or(4096);
+            (freelist.max(0) * page_size.max(0)) as u64
+        };
+        physical.saturating_sub(free_bytes)
+    }
+
+    /// Check database size and prune if approaching limit.
+    ///
+    /// Uses adaptive pruning: the fraction of records deleted per iteration
+    /// scales with how far the database exceeds the configured maximum, so a
+    /// severely oversized database is brought back under control quickly
+    /// instead of inching down 5% at a time.
+    ///
+    /// The loop never runs VACUUM: rebuilding the whole file would push its
+    /// pages through the page cache, which counts against the service's
+    /// cgroup memory limit and can OOM-kill the process on large databases
+    /// (#2888). Deleting rows + a truncating WAL checkpoint is enough — the
+    /// freelist is reused by future inserts, so the physical file stops
+    /// growing once the logical size fits.
     pub(super) fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut current_size = self.get_total_db_size();
+        let physical_size = self.get_total_db_size();
         let threshold = get_prune_threshold();
 
-        if current_size < threshold {
+        // Trigger on physical size (disk safety is physical), converge on
+        // logical size (deletes only shrink the logical size via freelist).
+        if physical_size < threshold {
             return Ok(());
         }
 
+        let mut current_size = self.effective_db_size();
+        if current_size < threshold {
+            // Physically large but mostly freelist: future writes reuse free
+            // pages, no rows need to be deleted.
+            return Ok(());
+        }
+
+        let max_size = get_max_db_size();
+        let overshoot = current_size as f64 / max_size as f64;
+
+        // Delete a larger fraction when the database is far over the limit.
+        //   1–2× over → 10% per iteration
+        //   2–5× over → 25% per iteration
+        //   5×+  over → 50% per iteration
+        let prune_pct = if overshoot > 5.0 {
+            0.50
+        } else if overshoot > 2.0 {
+            0.25
+        } else {
+            0.10
+        };
+
         log::info!(
-            "Database size {}MB exceeding threshold {}MB, pruning old records",
+            "Database size {}MB exceeding threshold {}MB (overshoot {:.1}×), \
+             pruning {:.0}% per iteration",
             current_size / 1024 / 1024,
-            threshold / 1024 / 1024
+            threshold / 1024 / 1024,
+            overshoot,
+            prune_pct * 100.0
         );
 
-        // Keep pruning until below threshold (max 5 iterations to prevent infinite loop)
-        let mut iterations = 0;
-        while current_size >= threshold && iterations < 5 {
+        const MAX_ITERATIONS: u32 = 20;
+        let mut iterations = 0u32;
+
+        while current_size >= threshold && iterations < MAX_ITERATIONS {
             iterations += 1;
-            self.prune_old_records()?;
-            self.checkpoint()?;
-            current_size = self.get_total_db_size();
+
+            if let Err(e) = self.prune_old_records_with_percent(prune_pct) {
+                log::warn!("Prune failed on iteration {iterations}: {e}");
+                break;
+            }
+
+            // Flush and truncate the WAL so freed pages are visible and the
+            // WAL does not grow unbounded. Never VACUUM here (#2888). A busy
+            // checkpoint (another connection holds a read snapshot) leaves the
+            // WAL intact — stop pruning: further deletes would keep appending
+            // WAL frames and never converge.
+            match self.wal_checkpoint() {
+                Ok(true) => {
+                    log::warn!(
+                        "WAL checkpoint busy on iteration {iterations}; \
+                         stopping prune (the WAL could not be truncated)"
+                    );
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    log::warn!("WAL checkpoint failed on iteration {iterations}: {e}");
+                }
+            }
+
+            let new_size = self.effective_db_size();
+            current_size = new_size;
 
             if current_size >= threshold {
                 log::info!(
-                    "Database still {}MB (threshold {}MB), continue pruning (iteration {})",
+                    "Database still {}MB (threshold {}MB), continue pruning \
+                     (iteration {iterations}/{MAX_ITERATIONS})",
                     current_size / 1024 / 1024,
                     threshold / 1024 / 1024,
-                    iterations
                 );
             }
         }
 
-        log::info!(
-            "Pruning complete, database size now {}MB",
-            current_size / 1024 / 1024
-        );
+        if current_size >= threshold {
+            log::warn!(
+                "Database size {}MB still above threshold {}MB after pruning; \
+                 will retry on next write",
+                current_size / 1024 / 1024,
+                threshold / 1024 / 1024,
+            );
+        } else {
+            log::info!(
+                "Pruning complete, database size now {}MB",
+                current_size / 1024 / 1024
+            );
+        }
 
         Ok(())
     }
 
-    /// Prune old records to free up space
+    /// Prune old records using the default 5% ratio.
     ///
-    /// Deletes a percentage of oldest records based on id.
+    /// Thin wrapper around [`prune_old_records_with_percent`] for callers that
+    /// only need the conservative default (e.g. SQLITE_FULL retry).
     pub(super) fn prune_old_records(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.prune_old_records_with_percent(PRUNE_PERCENT)
+    }
+
+    /// Delete the oldest `percent` fraction of records, ordered by id.
+    ///
+    /// `percent` is clamped to \[0.0, 1.0\]. At least one record is deleted
+    /// when the table is non-empty and `percent` > 0.
+    fn prune_old_records_with_percent(
+        &self,
+        percent: f64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pct = percent.clamp(0.0, 1.0);
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Get total count
-        let count: i64 =
+        let event_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))?;
+        let resource_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM agent_resource_samples", [], |row| {
+                row.get(0)
+            })?;
 
-        if count == 0 {
+        if event_count == 0 && resource_count == 0 {
             return Ok(());
         }
 
-        // Calculate how many to delete (5% of total)
-        let delete_count = ((count as f64) * PRUNE_PERCENT).max(1.0) as i64;
+        let event_delete_count = if event_count > 0 {
+            ((event_count as f64) * pct).max(1.0) as i64
+        } else {
+            0
+        };
+        let resource_delete_count = if resource_count > 0 {
+            ((resource_count as f64) * pct).max(1.0) as i64
+        } else {
+            0
+        };
 
         log::info!(
-            "Pruning {} of {} records ({:.1}%)",
-            delete_count,
-            count,
-            PRUNE_PERCENT * 100.0
+            "Pruning {event_delete_count}/{event_count} GenAI events and \
+             {resource_delete_count}/{resource_count} resource samples ({:.1}%)",
+            pct * 100.0
         );
 
-        // Delete oldest records by id
-        let deleted = conn.execute(
+        let deleted_events = conn.execute(
             "DELETE FROM genai_events WHERE id IN (
                 SELECT id FROM genai_events ORDER BY id ASC LIMIT ?1
             )",
-            params![delete_count],
+            params![event_delete_count],
+        )?;
+        let deleted_resources = conn.execute(
+            "DELETE FROM agent_resource_samples WHERE id IN (
+                SELECT id FROM agent_resource_samples ORDER BY id ASC LIMIT ?1
+            )",
+            params![resource_delete_count],
         )?;
 
-        log::info!("Deleted {deleted} records");
-
-        Ok(())
-    }
-
-    /// Execute WAL checkpoint and VACUUM to reclaim disk space
-    ///
-    /// 1. VACUUM: rebuild database to compact data
-    /// 2. Checkpoint: flush and truncate WAL file
-    ///
-    /// Note: VACUUM in WAL mode creates a new db file, so we need to
-    /// re-enable WAL and checkpoint after VACUUM.
-    pub(super) fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-
-        // VACUUM rebuilds the database (works better before checkpoint in WAL mode)
-        conn.execute_batch("VACUUM;")?;
-
-        // Re-enable WAL mode (VACUUM may reset it)
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-
-        // Checkpoint with TRUNCATE to shrink WAL file
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        log::info!(
+            "Deleted {deleted_events} GenAI events and {deleted_resources} resource samples"
+        );
 
         Ok(())
     }
@@ -334,9 +463,15 @@ impl GenAISqliteStore {
     /// Call during graceful shutdown to clean up `-wal` / `-shm` files —
     /// mirrors the sibling stores (token, http, audit) which do this via
     /// `connection::wal_checkpoint` in their own `checkpoint()` methods.
-    pub fn wal_checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
+    ///
+    /// Returns `Ok(true)` when the checkpoint was blocked by another
+    /// connection's read snapshot (busy): the statement succeeds but the WAL
+    /// is NOT truncated. Purge loops must stop deleting in that case — the
+    /// WAL stays in the size measurement while deletes keep appending frames,
+    /// so the loop never converges (#2888).
+    pub fn wal_checkpoint(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        Ok(())
+        let busy: i32 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok(busy != 0)
     }
 }

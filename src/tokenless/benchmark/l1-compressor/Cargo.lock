@@ -679,22 +679,44 @@ dependencies = [
  "libc",
  "serde_json",
  "tokenless-ccr",
+ "tokenless-compressors",
  "tokenless-schema",
  "toon-format",
 ]
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "rusqlite",
+ "thiserror",
+ "tokenless-protocol",
+]
+
+[[package]]
+name = "tokenless-compressors"
+version = "0.8.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tokenless-ccr",
+ "tokenless-protocol",
+ "toon-format",
+]
+
+[[package]]
+name = "tokenless-protocol"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
 [[package]]
 name = "tokenless-schema"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "regex",
  "serde_json",

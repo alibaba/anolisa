@@ -6,7 +6,7 @@ pub(super) fn render_notice_panel<W: Write>(
     body: Vec<String>,
     footer: Option<&str>,
 ) -> std::io::Result<()> {
-    RatatuiInlineRenderer::for_terminal().write_notice_panel(
+    RatatuiInlineRenderer::for_terminal().write_slash_notice_panel(
         output,
         NoticePanelModel {
             title,

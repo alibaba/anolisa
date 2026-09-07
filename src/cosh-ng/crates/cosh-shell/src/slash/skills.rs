@@ -176,3 +176,23 @@ pub(super) fn format_skill_detail(data: &Value) -> Vec<String> {
     }
     lines
 }
+
+pub(super) fn completion_skill_names(data: &Value) -> Vec<String> {
+    let Some(skills) = data.as_array() else {
+        return Vec::new();
+    };
+    let mut names = skills
+        .iter()
+        .filter(|skill| {
+            !skill
+                .get("disabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|skill| skill.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}

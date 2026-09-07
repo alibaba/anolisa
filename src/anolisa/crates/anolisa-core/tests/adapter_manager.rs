@@ -24,10 +24,14 @@ use anolisa_core::adapter::claim::{
 };
 use anolisa_core::adapter::driver::{AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOptions, EnableOutcome};
+use anolisa_core::domain::ProviderBinding;
 use anolisa_core::manifest::{NoticeLevel, NoticeWhen};
-use anolisa_core::state::InstallMode as StateInstallMode;
+use anolisa_core::state::{
+    FileOwner, InstallMode as StateInstallMode, ObjectKind, OwnedFile, OwnedFileKind,
+};
 use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
+use sha2::{Digest, Sha256};
 
 /// Serializes the process-global env mutation across tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -48,6 +52,7 @@ struct World {
 
 impl World {
     fn manager(&self) -> AdapterManager {
+        record_owned_adapter_files(&self.layout, &self.resource_root);
         AdapterManager::new(
             self.layout.clone(),
             Some(self.user_home.clone()),
@@ -86,6 +91,59 @@ impl World {
             .find_adapter_claim(COMPONENT, FRAMEWORK)
             .is_some()
     }
+}
+
+fn record_owned_adapter_files(layout: &FsLayout, root: &Path) {
+    fn collect(root: &Path, files: &mut Vec<OwnedFile>) {
+        for entry in std::fs::read_dir(root).expect("read adapter fixture") {
+            let entry = entry.expect("adapter fixture entry");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("adapter fixture file type");
+            if file_type.is_dir() {
+                collect(&path, files);
+            } else if file_type.is_symlink() {
+                files.push(OwnedFile {
+                    path: path.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: None,
+                    kind: OwnedFileKind::Symlink,
+                    referent: Some(std::fs::read_link(path).expect("adapter fixture symlink")),
+                    mode: None,
+                    capabilities: Vec::new(),
+                });
+            } else if file_type.is_file() {
+                files.push(OwnedFile {
+                    path: path.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: Some(format!(
+                        "{:x}",
+                        Sha256::digest(std::fs::read(path).expect("adapter fixture bytes"))
+                    )),
+                    kind: OwnedFileKind::File,
+                    referent: None,
+                    mode: None,
+                    capabilities: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if !root.is_dir() {
+        return;
+    }
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut state = load_state_at(&state_path);
+    let installation = state
+        .find_mut(ObjectKind::Component, COMPONENT)
+        .expect("fixture component");
+    let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+        panic!("fixture component must be raw-owned");
+    };
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    artifact.files = files;
+    state.save(&state_path).expect("save fixture state");
 }
 
 fn recorded_openclaw_state_dir(claim: &AdapterClaim) -> &Path {
@@ -200,6 +258,8 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OC_VERSION_PREAMBLE",
     "FAKE_OC_CONFIG_FAIL_KEY",
     "FAKE_OC_CONFIG_FAIL_AFTER_KEY",
+    "HERMES_BIN",
+    "HERMES_HOME",
 ];
 
 struct OpenClawEnvGuard {
@@ -485,6 +545,14 @@ installed_at = "2026-06-15T00:00:00Z"
     );
     std::fs::write(&state_path, toml).expect("seed state");
     write_installed_manifest(layout, FRAMEWORK);
+    record_owned_adapter_files(
+        layout,
+        &layout
+            .datadir
+            .join("adapters")
+            .join(COMPONENT)
+            .join(FRAMEWORK),
+    );
 }
 
 fn write_installed_manifest(layout: &FsLayout, framework: &str) {
@@ -529,6 +597,10 @@ fn enable_status_disable_happy_path() {
         EnableOutcome::Enabled(c) => *c,
         EnableOutcome::Planned { .. } => panic!("expected enabled, got plan"),
     };
+    assert!(
+        world.layout.lock_file.is_file(),
+        "apply must retain the existing install-lock boundary"
+    );
     assert_eq!(claim.component, COMPONENT);
     assert_eq!(claim.framework, FRAMEWORK);
     assert_eq!(claim.plugin_id.as_deref(), Some(COMPONENT));
@@ -574,6 +646,29 @@ fn enable_status_disable_happy_path() {
             .is_none(),
         "receipt must be gone after successful disable"
     );
+}
+
+#[test]
+fn enable_rejects_modified_package_owned_source() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    std::fs::write(
+        world.resource_root.join("openclaw.plugin.json"),
+        br#"{"id":"modified","name":"Modified"}"#,
+    )
+    .expect("modify package-owned manifest after recording its digest");
+
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("modified package-owned bytes must block enable");
+    assert!(matches!(
+        err,
+        AdapterError::InvalidAdapterInput { reason, .. } if reason.contains("content changed")
+    ));
+    assert!(!world.registry_marker_exists());
+    assert!(!world.has_claim());
 }
 
 #[test]
@@ -669,6 +764,196 @@ skills = ["sec-audit"]
         &resource.kind,
         ClaimResourceKind::ExternalPath { path } if path == &expected
     )));
+
+    std::fs::write(expected.join("skills/sec-audit/runtime.log"), b"runtime")
+        .expect("runtime file");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status with runtime file");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    std::fs::write(expected.join("skills/sec-audit/marker.txt"), b"changed")
+        .expect("mutate materialized skill");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status with changed skill");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    assert!(status.entries[0].report.conditions.iter().any(|condition| {
+        condition.kind
+            == anolisa_core::adapter::driver::AdapterConditionKind::MaterializedBundleMatches
+            && condition.status == ConditionStatus::False
+    }));
+}
+
+#[test]
+fn reenable_prunes_removed_managed_skill_files_but_keeps_runtime_extras() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial skill revision");
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    let removed = destination.join("marker.txt");
+    let runtime_extra = destination.join("runtime.log");
+    assert!(removed.is_file());
+    std::fs::write(&runtime_extra, b"runtime").expect("runtime-created extra");
+
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::remove_file(source.join("marker.txt")).expect("remove old managed source");
+    std::fs::write(source.join("renamed.txt"), b"skill-v2").expect("write renamed source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("re-enable updated skill revision");
+
+    assert!(destination.join("renamed.txt").is_file());
+    assert!(
+        !removed.exists(),
+        "a file owned only by the prior receipt must be removed"
+    );
+    assert_eq!(
+        std::fs::read(&runtime_extra).expect("runtime extra must survive"),
+        b"runtime"
+    );
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status after re-enable");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
+#[test]
+fn reenable_prunes_empty_ancestors_before_directory_to_file_change() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::create_dir_all(source.join("hook.py/sub")).expect("old nested source directory");
+    std::fs::write(source.join("hook.py/sub/managed.txt"), b"v1").expect("old nested managed file");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial directory-shaped output");
+
+    std::fs::remove_dir_all(source.join("hook.py")).expect("remove old source directory");
+    std::fs::write(source.join("hook.py"), b"v2").expect("new file-shaped source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("empty ancestors are pruned before replacing the directory");
+
+    let destination = world.openclaw_home.join("skills/sec-audit/hook.py");
+    assert_eq!(
+        std::fs::read(destination).expect("new file-shaped output"),
+        b"v2"
+    );
+}
+
+#[test]
+fn hermes_reenable_prunes_removed_managed_skill_files() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    let hermes_root = world
+        .layout
+        .datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join("hermes");
+    let source = hermes_root.join("skills/sec-audit");
+    std::fs::create_dir_all(&source).expect("Hermes skill source");
+    std::fs::write(source.join("marker.txt"), b"skill-v1").expect("Hermes skill marker");
+    write_openclaw_manifest(
+        &world.layout,
+        &format!(
+            r#"[[adapters]]
+framework = "hermes"
+adapter_type = "skill_bundle"
+source = "adapters/{COMPONENT}/hermes"
+dest = "{{datadir}}/adapters/{{component}}/hermes/"
+
+[adapters.hermes]
+skills = ["sec-audit"]
+"#
+        ),
+    );
+    record_owned_adapter_files(&world.layout, &hermes_root);
+    let hermes_home = world._root.path().join("hermes-home");
+    guard.set("HERMES_BIN", &world.fake_bin);
+    guard.set("HERMES_HOME", &hermes_home);
+    let manager = AdapterManager::new(
+        world.layout.clone(),
+        Some(world.user_home.clone()),
+        "tester".to_string(),
+    );
+
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable initial Hermes skill revision");
+    let destination = hermes_home.join("skills/sec-audit");
+    assert!(destination.join("marker.txt").is_file());
+
+    std::fs::remove_file(source.join("marker.txt")).expect("remove old Hermes source");
+    std::fs::write(source.join("renamed.txt"), b"skill-v2").expect("rename Hermes source");
+    record_owned_adapter_files(&world.layout, &hermes_root);
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("re-enable updated Hermes skill revision");
+
+    assert!(destination.join("renamed.txt").is_file());
+    assert!(!destination.join("marker.txt").exists());
+    let status = manager.status(Some(COMPONENT)).expect("Hermes status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
+#[test]
+fn reenable_refuses_directory_to_file_change_when_runtime_content_would_be_lost() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::create_dir_all(source.join("hook.py")).expect("old source directory");
+    std::fs::write(source.join("hook.py/managed.txt"), b"v1").expect("old managed file");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial directory-shaped output");
+
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    std::fs::write(destination.join("hook.py/runtime.log"), b"runtime")
+        .expect("runtime content under old directory");
+    std::fs::remove_dir_all(source.join("hook.py")).expect("remove old source directory");
+    std::fs::write(source.join("hook.py"), b"v2").expect("new file-shaped source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("runtime content must not be recursively removed");
+    assert!(matches!(
+        err,
+        AdapterError::ReenableCleanupIncomplete { .. }
+    ));
+    assert_eq!(
+        std::fs::read(destination.join("hook.py/runtime.log")).expect("runtime content survives"),
+        b"runtime"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, FRAMEWORK)
+        .cloned()
+        .expect("prior receipt remains durable");
+    assert!(
+        claim
+            .materialized_files
+            .iter()
+            .any(|file| file.relative_path == Path::new("hook.py/managed.txt"))
+    );
 }
 
 #[test]
@@ -868,6 +1153,44 @@ fn migration_dry_run_previews_cleanup_without_mutation() {
         argv_lines(&world.argv_log())
             .iter()
             .all(|line| !line.starts_with("plugins uninstall "))
+    );
+}
+
+#[test]
+fn reenable_dry_run_previews_stale_materialized_file_cleanup() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial skill revision");
+
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::remove_file(source.join("marker.txt")).expect("remove old managed source");
+    std::fs::write(source.join("renamed.txt"), b"skill-v2").expect("write renamed source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    let stale = destination.join("marker.txt");
+    let outcome = manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("plan stale materialized-file cleanup");
+    let plan = match outcome {
+        EnableOutcome::Planned { plan, .. } => plan,
+        EnableOutcome::Enabled(_) => panic!("dry-run must return a plan"),
+    };
+    let cleanup = format!("remove stale materialized file {}", stale.display());
+    assert!(
+        plan.actions.iter().any(|action| action == &cleanup),
+        "missing '{cleanup}' in plan: {:?}",
+        plan.actions
+    );
+    assert!(stale.is_file(), "dry-run must not remove the stale output");
+    assert!(
+        !destination.join("renamed.txt").exists(),
+        "dry-run must not deliver the replacement output"
     );
 }
 
@@ -1112,6 +1435,8 @@ fn dry_run_enable_does_not_register_or_persist() {
     let world = stage();
     world.apply_env(&guard, None);
     let manager = world.manager();
+    assert!(!world.layout.lock_file.exists());
+    assert!(!world.layout.central_log.exists());
 
     let outcome = manager
         .enable(COMPONENT, Some(FRAMEWORK), true)
@@ -1138,6 +1463,14 @@ fn dry_run_enable_does_not_register_or_persist() {
             .join("registry")
             .join(COMPONENT)
             .exists()
+    );
+    assert!(
+        !world.layout.lock_file.exists(),
+        "dry-run must not create the install lock file"
+    );
+    assert!(
+        !world.layout.central_log.exists(),
+        "dry-run probes must not create operation records"
     );
 }
 
@@ -1343,6 +1676,8 @@ fn dry_run_disable_leaves_state_unchanged() {
         .expect("enable");
     let state_path = world.layout.state_dir.join("installed.toml");
     let state_bytes_before = std::fs::read(&state_path).expect("read state file");
+    let log_bytes_before = std::fs::read(&world.layout.central_log).expect("read central log");
+    std::fs::remove_file(&world.layout.lock_file).expect("remove released seed lock file");
     assert!(
         world
             .load_state()
@@ -1382,6 +1717,15 @@ fn dry_run_disable_leaves_state_unchanged() {
         state_bytes_before, state_bytes_after,
         "installed.toml must be byte-identical after dry-run disable"
     );
+    assert!(
+        !world.layout.lock_file.exists(),
+        "dry-run disable must not recreate the install lock file"
+    );
+    assert_eq!(
+        std::fs::read(&world.layout.central_log).expect("read central log after dry-run"),
+        log_bytes_before,
+        "dry-run disable must not append operation records"
+    );
     // Double-check: receipt still present and status unchanged.
     let state_after = world.load_state();
     let claim_after = state_after
@@ -1405,6 +1749,7 @@ fn dry_run_disable_leaves_state_unchanged() {
         .expect("real disable");
     assert!(!real.dry_run);
     assert!(real.claim_removed, "real disable must remove receipt");
+    assert!(world.layout.lock_file.is_file());
     assert!(
         world
             .load_state()
@@ -1830,6 +2175,7 @@ fn authorized_unsafe_supported_includes_flag_once() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect("authorized unsafe enable");
@@ -1869,6 +2215,7 @@ fn authorized_unsafe_unsupported_blocks() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("authorized-but-unsupported unsafe must block");
@@ -1900,6 +2247,7 @@ fn authorized_unsafe_deprecated_noop_blocks() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("a deprecated no-op cannot satisfy unsafe authorization");
@@ -2560,6 +2908,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("unsafe authorization must be rejected for skill_bundle");
@@ -3158,6 +3507,7 @@ fn authorized_unsafe_dry_run_shows_flag_without_mutation() {
             true,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect("dry-run enable");
@@ -3199,6 +3549,7 @@ fn central_log_records_authorized_unsafe_install_argv() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect("authorized unsafe enable");
@@ -3234,6 +3585,7 @@ dest = "{{datadir}}/adapters/{{component}}/hermes/"
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("unsafe authorization must be rejected for a non-OpenClaw framework");

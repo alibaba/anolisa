@@ -136,13 +136,16 @@ fn install_dry_run_does_not_download_the_artifact() {
 }
 
 #[test]
-fn install_reports_missing_local_repository_index() {
+fn install_reports_missing_local_repository_index_from_override() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
     let repo_root = tmp.path().join("repo");
     let repo_url = write_local_repo(&repo_root);
     let index_path = repo_root.join("v1/index.toml");
-    std::fs::remove_dir_all(&repo_root).expect("remove repository directory");
+    // Remove only the distribution index: the published component index
+    // stays so identity validation passes and the missing-index diagnostic
+    // below is what surfaces.
+    std::fs::remove_file(&index_path).expect("remove repository index");
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
@@ -158,12 +161,12 @@ fn install_reports_missing_local_repository_index() {
         "missing-index diagnostic must identify {index_path:?}; got: {reason}"
     );
     assert!(
-        reason.contains("repo.toml"),
-        "missing-index diagnostic must name repo.toml; got: {reason}"
+        reason.contains("one-off --repo <URL> override"),
+        "missing-index diagnostic must identify the one-off override; got: {reason}"
     );
     assert!(
-        reason.contains("--repo <URL>"),
-        "missing-index diagnostic must name the one-off override; got: {reason}"
+        !reason.contains("repo.toml"),
+        "override diagnostic must not blame repo.toml; got: {reason}"
     );
     assert!(
         !reason.contains("failed to fetch distribution index"),
@@ -207,6 +210,55 @@ fn install_reports_missing_local_repository_index() {
 }
 
 #[test]
+fn install_reports_config_path_for_missing_local_repository_index() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    let index_path = repo_root.join("v1/index.toml");
+    // Remove only the distribution index: the published component index
+    // stays so identity validation passes and the config-attributed
+    // missing-index diagnostic below is what surfaces.
+    std::fs::remove_file(&index_path).expect("remove repository index");
+
+    std::fs::create_dir_all(&layout.etc_dir).expect("create repo config directory");
+    let config_path = layout.etc_dir.join("repo.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{repo_url}\"\n"
+        ),
+    )
+    .expect("write repo config");
+
+    let err = handle_with_fake_rpm(args("agentsight"), &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("missing repository index must fail");
+    let reason = err.reason();
+
+    assert!(
+        reason.contains(&index_path.display().to_string()),
+        "missing-index diagnostic must identify {index_path:?}; got: {reason}"
+    );
+    assert!(
+        reason.contains(&config_path.display().to_string()),
+        "missing-index diagnostic must identify active config {config_path:?}; got: {reason}"
+    );
+    assert!(
+        reason.contains("move it aside and retry"),
+        "config diagnostic must recommend a non-destructive recovery; got: {reason}"
+    );
+    assert!(
+        reason.contains("--repo <URL>"),
+        "config diagnostic must mention the one-off override escape hatch; got: {reason}"
+    );
+    assert!(
+        !reason.contains("one-off --repo <URL> override selected this repository"),
+        "config diagnostic must not claim a CLI override was used; got: {reason}"
+    );
+}
+
+#[test]
 fn install_preserves_non_not_found_index_fetch_error() {
     let tmp = tempdir().expect("tmpdir");
     let index_path = tmp.path().join("repo/v1/index.toml");
@@ -216,7 +268,7 @@ fn install_preserves_non_not_found_index_fetch_error() {
         source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "index access denied"),
     };
     let rendered_download_error = download_error.to_string();
-    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+    let err = super::super::raw::index_fetch_error(&index_url, download_error, None);
 
     assert_eq!(
         err.reason(),
@@ -240,7 +292,7 @@ fn install_preserves_not_found_away_from_index_path() {
         source: std::io::Error::new(std::io::ErrorKind::NotFound, "cache path missing"),
     };
     let rendered_download_error = download_error.to_string();
-    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+    let err = super::super::raw::index_fetch_error(&index_url, download_error, None);
 
     assert_eq!(
         err.reason(),
@@ -707,6 +759,7 @@ fn prepare_raw_execution_resolves_declared_capabilities() {
             package: "agentsight".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },
@@ -785,6 +838,7 @@ fn prepare_raw_execution_resolves_declared_services() {
             package: "agentsight".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },
@@ -1281,6 +1335,7 @@ fn write_local_repo_with_conflicts(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let manifest = component_manifest_toml_with_conflicts(component, version, modes, conflicts);
     let manifest_sha = format!("{:x}", Sha256::digest(manifest.as_bytes()));
@@ -1378,11 +1433,13 @@ manifest_digest = "sha256:{manifest_sha}"
     }
     std::fs::write(v1.join("index.toml"), index).expect("write distribution index");
     std::fs::write(
-        v1.join("components.toml"),
-        r#"schema_version = 1
+        v1.join("components-v2.toml"),
+        format!(
+            r#"schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
 
 [[components.backends]]
 kind = "raw"
@@ -1390,11 +1447,15 @@ package = "cosh"
 
 [[components]]
 name = "cosh-ng"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
 
 [[components.backends]]
 kind = "raw"
 package = "cosh-ng"
 "#,
+            os = env.os,
+            arch = env.arch,
+        ),
     )
     .expect("write component index");
     format!("file://{}", v1.display())
@@ -1588,6 +1649,76 @@ fn install_all_dry_run_rejects_conflicts_between_planned_components() {
     );
 }
 
+/// `install --all --repo <URL>` enumerates the override repository's
+/// component index — the same authority identity and package resolution
+/// consult — instead of the repo.toml chain, so an override-only component
+/// installs while the default index plays no part (issue #2630 review
+/// follow-up). Runs in user mode like the batch conflict test above, so the
+/// pipeline never consults the host's real rpm tooling.
+#[test]
+fn install_all_with_repo_override_enumerates_the_override_index() {
+    let sandbox = TestSandbox::new();
+    // repo.toml points at a repository whose index lists nothing.
+    let default_repo = write_empty_repo(&sandbox.root().join("default-repo"));
+    let ctx = sandbox.context_with(InstallMode::User, TestContextOptions::default());
+    let layout = common::resolve_layout(&ctx);
+    std::fs::create_dir_all(&layout.etc_dir).expect("create config dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{default_repo}\"\n"
+        ),
+    )
+    .expect("write repo config");
+    // The override repository publishes agentsight with its meta sidecar. The
+    // batch enumeration only lists entries with a matching backend row, so
+    // the override index declares the raw backend explicitly.
+    let override_root = sandbox.root().join("override");
+    let override_url =
+        write_published_layout_repo_with_meta(&override_root, "agentsight", "0.2.0", &["user"]);
+    let env = anolisa_env::EnvService::detect();
+    std::fs::write(
+        override_root.join("v1/components-v2.toml"),
+        format!(
+            r#"schema_version = 2
+
+[[components]]
+name = "agentsight"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
+
+[[components.backends]]
+kind = "raw"
+package = "agentsight"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ),
+    )
+    .expect("override component index");
+
+    let batch_args = InstallArgs {
+        component: None,
+        all: true,
+        fail_fast: false,
+        version: None,
+        backend: Some("raw".to_string()),
+        repo: Some(override_url),
+        package: None,
+    };
+    handle_all(batch_args, &ctx)
+        .expect("the override-only component must be enumerated and installed");
+
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "the override-only component must be installed"
+    );
+    let store = load_v5_store(&layout);
+    assert!(
+        store.find(ObjectKind::Component, "agentsight").is_some(),
+        "the override-only component must be recorded"
+    );
+}
+
 #[test]
 fn install_dry_run_rejects_mismatched_sidecar_digest() {
     let tmp = tempdir().expect("tmpdir");
@@ -1626,6 +1757,253 @@ fn install_dry_run_rejects_mismatched_sidecar_digest() {
             .all(|name| !name.ends_with("cosh-ng.tar.gz")),
         "digest failure must not fetch the install artifact; cache entries: {cached_names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Target-specific sidecar metadata
+// ---------------------------------------------------------------------------
+
+/// Local `file://` repo publishing one component for two targets, each with
+/// its own install contract — the shape a raw repository takes once a
+/// component's payload and lifecycle differ per platform.
+///
+/// The Linux build is system-only and its `meta.toml` sits at the version
+/// root (`<component>/<version>/meta.toml`); the macOS build also supports
+/// user mode and publishes `meta.toml` beside its own artifact. Each index
+/// entry carries the `manifest_digest` of *its own* contract.
+///
+/// `macos_sidecar = false` drops the macOS sidecar, leaving the legacy shape:
+/// one version-level contract covering every target. `digests = false` drops
+/// `manifest_digest` from every entry, the shape of a repository published
+/// before the field existed.
+fn write_local_repo_target_specific_meta(
+    root: &Path,
+    macos_sidecar: bool,
+    digests: bool,
+) -> String {
+    const COMPONENT: &str = "agentsight";
+    const VERSION: &str = "0.10.1";
+
+    let v1 = root.join("v1");
+    let version_dir = v1.join(COMPONENT).join(VERSION);
+    std::fs::create_dir_all(&version_dir).expect("create version dir");
+
+    let linux_meta = component_manifest_toml(COMPONENT, VERSION, &["system"]);
+    std::fs::write(version_dir.join("meta.toml"), &linux_meta).expect("write version-level meta");
+    let macos_meta = component_manifest_toml(COMPONENT, VERSION, &["user"]);
+
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for (os, arch, modes, meta) in [
+        ("linux", "x86_64", &["system"][..], &linux_meta),
+        ("macos", "aarch64", &["user"][..], &macos_meta),
+    ] {
+        let artifact_dir = version_dir.join(os).join(arch);
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+        if os == "macos" && macos_sidecar {
+            std::fs::write(artifact_dir.join("meta.toml"), meta).expect("write macos sidecar");
+        }
+
+        // `build_component_artifact` embeds the same manifest text, so the
+        // executed contract digests to the value published for this entry.
+        let artifact = build_component_artifact(COMPONENT, VERSION, modes);
+        let artifact_name = format!("{COMPONENT}-{VERSION}-{os}-{arch}.tar.gz");
+        std::fs::write(artifact_dir.join(&artifact_name), &artifact).expect("write artifact");
+
+        let digest_line = if digests {
+            format!(
+                "manifest_digest = \"sha256:{:x}\"\n",
+                Sha256::digest(meta.as_bytes())
+            )
+        } else {
+            String::new()
+        };
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{COMPONENT}"
+version = "{VERSION}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{COMPONENT}/{VERSION}/{os}/{arch}/{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{artifact_sha:x}"
+{digest_line}"#,
+            modes_arr = toml_string_array(modes),
+            artifact_sha = Sha256::digest(&artifact),
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write distribution index");
+    format!("file://{}", v1.display())
+}
+
+fn agentsight_resolve_inputs(repo_url: String) -> ResolveInputs<'static> {
+    ResolveInputs {
+        component: "agentsight".to_string(),
+        package: "agentsight".to_string(),
+        backend: "raw".to_string(),
+        base_url: repo_url,
+        repository_origin: None,
+        version: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// File names cached under `<cache>/downloads`, for asserting what a dry-run
+/// did and did not fetch.
+fn cached_download_names(layout: &FsLayout) -> Vec<String> {
+    std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+/// The regression, in the shape that fails silently: with no
+/// `manifest_digest` to cross-check, deriving the metadata URL from the
+/// version root loads the *Linux* contract for a resolved macOS artifact.
+/// That contract declares system mode only, so a `--install-mode user`
+/// dry-run refuses an install the execution path — which reads the artifact's
+/// own embedded contract — would have accepted.
+#[test]
+fn dry_run_contract_reads_the_target_sidecar_without_a_digest() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), true, false);
+    let ctx = sandbox.context(InstallMode::User);
+    let layout = common::resolve_layout(&ctx);
+
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &macos_arm_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("macos/aarch64 entry must resolve");
+
+    let contract = load_dry_run_install_contract(&ctx, &layout, &resolution)
+        .expect("the macOS sidecar must satisfy the user-mode dry-run")
+        .expect("a published sidecar must yield a contract");
+
+    assert_eq!(
+        contract.manifest.install.modes,
+        vec!["user".to_string()],
+        "dry-run must validate the macOS contract, not the version-level Linux one"
+    );
+}
+
+/// The same resolution with `manifest_digest` published per entry: the
+/// sidecar is both selected by target and verified against the digest the
+/// execution path checks the embedded contract against.
+#[test]
+fn dry_run_contract_reads_the_resolved_target_sidecar() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), true, true);
+    let ctx = sandbox.context(InstallMode::User);
+    let layout = common::resolve_layout(&ctx);
+
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &macos_arm_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("macos/aarch64 entry must resolve");
+    assert!(
+        resolution
+            .artifact_url
+            .ends_with("/macos/aarch64/agentsight-0.10.1-macos-aarch64.tar.gz"),
+        "fixture must resolve the macOS artifact, got: {}",
+        resolution.artifact_url
+    );
+
+    let contract = load_dry_run_install_contract(&ctx, &layout, &resolution)
+        .expect("the macOS sidecar must satisfy the user-mode dry-run")
+        .expect("a published sidecar must yield a contract");
+
+    assert_eq!(
+        contract.manifest.install.modes,
+        vec!["user".to_string()],
+        "dry-run must validate the macOS contract, not the version-level Linux one"
+    );
+    let cached = cached_download_names(&layout);
+    assert!(
+        cached.iter().all(|name| !name.ends_with(".tar.gz")),
+        "dry-run must stay lightweight and skip the artifact; cache entries: {cached:?}"
+    );
+}
+
+/// A repository publishing only version-level metadata — every raw repo
+/// before target-specific contracts existed — must keep resolving its
+/// contract through the version-root fallback.
+#[test]
+fn dry_run_contract_falls_back_to_version_level_meta() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), false, true);
+    let ctx = sandbox.context(InstallMode::System);
+    let layout = common::resolve_layout(&ctx);
+
+    let sibling = sandbox
+        .repo_root()
+        .join("v1/agentsight/0.10.1/linux/x86_64/meta.toml");
+    assert!(
+        !sibling.exists(),
+        "the legacy fixture must publish no sibling metadata"
+    );
+
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &linux_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("linux/x86_64 entry must resolve");
+
+    let contract = load_dry_run_install_contract(&ctx, &layout, &resolution)
+        .expect("an absent sibling must fall back, not fail")
+        .expect("version-level metadata must still yield a contract");
+
+    assert_eq!(contract.manifest.install.modes, vec!["system".to_string()]);
+    assert_eq!(contract.source, InstallContractSource::SidecarMeta);
+}
+
+/// Fallback is reserved for absence. A published sibling that does not match
+/// the index `manifest_digest` must fail the dry-run — falling through to the
+/// version root would validate a contract the resolved artifact never had.
+#[test]
+fn dry_run_contract_rejects_a_tampered_sidecar_without_falling_back() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), true, true);
+    std::fs::write(
+        sandbox
+            .repo_root()
+            .join("v1/agentsight/0.10.1/macos/aarch64/meta.toml"),
+        component_manifest_toml("agentsight", "0.10.1", &["user", "system"]),
+    )
+    .expect("replace the macOS sidecar");
+
+    let ctx = sandbox.context(InstallMode::User);
+    let layout = common::resolve_layout(&ctx);
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &macos_arm_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("macos/aarch64 entry must resolve");
+
+    let Err(err) = load_dry_run_install_contract(&ctx, &layout, &resolution) else {
+        panic!("a sidecar digest mismatch must fail the dry-run, not fall back");
+    };
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("sha256 mismatch"), "got: {err}");
 }
 
 #[test]
@@ -1701,6 +2079,7 @@ install_modes = ["system"]
         package: "sec-core".to_string(),
         backend: "raw".to_string(),
         base_url: repo_url.clone(),
+        repository_origin: None,
         version,
         warnings: Vec::new(),
     };
@@ -1791,6 +2170,7 @@ install_modes = ["system"]
             package: "cosh".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },
@@ -1853,6 +2233,7 @@ install_modes = [1]
             package: "sec-core".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },

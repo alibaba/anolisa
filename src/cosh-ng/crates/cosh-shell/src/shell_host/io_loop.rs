@@ -9,6 +9,7 @@ use wait_timeout::ChildExt;
 use crate::raw_input::{foreground_process_group_for_fds, signal_process_group_id};
 
 use super::osc::OscParser;
+use super::prompt_presentation::PromptPresentation;
 
 pub(super) fn read_until(
     master: &mut File,
@@ -54,9 +55,29 @@ pub(super) fn read_until_streaming<W: Write>(
     timeout: Duration,
     condition: impl Fn(&OscParser) -> bool,
 ) -> io::Result<bool> {
+    read_until_streaming_with_presentation(
+        master,
+        child,
+        parser,
+        output,
+        &mut PromptPresentation::new(false),
+        timeout,
+        condition,
+    )
+}
+
+pub(super) fn read_until_streaming_with_presentation<W: Write>(
+    master: &mut File,
+    child: &mut Child,
+    parser: &mut OscParser,
+    output: &mut W,
+    prompt_presentation: &mut PromptPresentation,
+    timeout: Duration,
+    condition: impl Fn(&OscParser) -> bool,
+) -> io::Result<bool> {
     let deadline = Instant::now() + timeout;
     let mut buffer = [0_u8; 8192];
-    let mut display_start = parser.display.len();
+    let mut display_start = parser.display_position();
 
     while Instant::now() < deadline {
         loop {
@@ -64,10 +85,17 @@ pub(super) fn read_until_streaming<W: Write>(
                 Ok(0) => break,
                 Ok(n) => {
                     parser.feed(&buffer[..n])?;
-                    if parser.display.len() > display_start {
-                        output.write_all(&parser.display[display_start..])?;
+                    prompt_presentation.observe(parser);
+                    if parser.display_position() > display_start {
+                        let display_end = parser.display_position();
+                        prompt_presentation.write_range(
+                            parser,
+                            display_start,
+                            display_end,
+                            output,
+                        )?;
                         output.flush()?;
-                        display_start = parser.display.len();
+                        display_start = display_end;
                     }
                     if condition(parser) {
                         return Ok(true);

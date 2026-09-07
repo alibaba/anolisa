@@ -21,11 +21,16 @@ VERSION_RE = re.compile(
 TOML_CONTRACTS = (
     ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/.anolisa/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.macos.toml"),
     ("src/copilot-shell/package.json", "src/copilot-shell/component.toml"),
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/component.toml"),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.toml"),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.macos.toml"),
     ("src/skillfs/Cargo.toml", "src/skillfs/component.toml"),
     ("src/tokenless/Cargo.toml", "src/anolisa/manifests/components/tokenless/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/component.toml"),
+    ("src/ws-ckpt/src/Cargo.toml", "src/anolisa/manifests/components/ws-ckpt/component.toml"),
 )
 VERSION_TEMPLATES = (
     ("src/agent-memory/Cargo.toml", "src/agent-memory/.anolisa/component.toml.in"),
@@ -38,6 +43,7 @@ VERSION_TEMPLATES = (
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/claude-code/.claude-plugin/plugin.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/codex/.codex-plugin/plugin.json.in"),
     ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qwencode/qwen-extension.json.in"),
+    ("src/tokenless/Cargo.toml", "src/tokenless/adapters/tokenless/qwenpaw/plugin.json.in"),
 )
 AGENT_MEMORY_JSON = (
     "src/agent-memory/adapters/agent-memory/manifest.json",

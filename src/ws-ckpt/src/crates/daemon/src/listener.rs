@@ -62,6 +62,14 @@ pub async fn run_listener(
                 break;
             }
         }
+
+        // Reap finished connections. JoinSet holds each task's handle and output
+        // slot until it is joined, so without this the set grows by one entry per
+        // CLI invocation and is only released at shutdown. try_join_next never
+        // awaits, so reaping cannot delay the next accept; a join_next branch in
+        // the select! above would instead need a second mutable borrow of
+        // join_set while the accept arm still spawns into it.
+        while join_set.try_join_next().is_some() {}
     }
 
     // 7. Wait for in-flight tasks to complete (with timeout)
@@ -112,16 +120,17 @@ async fn handle_connection(
     // Decode request
     let request: Request = decode_payload(&payload).context("Failed to decode request")?;
 
-    let agent_name = stream
-        .peer_cred()
-        .ok()
+    let peer_cred = stream.peer_cred().ok();
+    let agent_name = peer_cred
+        .as_ref()
         .and_then(|cred| cred.pid().map(|p| p as u32))
         .map(crate::ops_log::detect_agent_name)
         .unwrap_or_else(|| "user".to_string());
     let ops_name = crate::ops_log::ops_name_from_request(&request);
 
     // Dispatch
-    let response = crate::dispatcher::dispatch(&state, request).await;
+    let context = crate::dispatcher::DispatchContext::new(peer_cred.map(|cred| cred.uid()));
+    let response = crate::dispatcher::dispatch_with_context(&state, request, context).await;
 
     if let Some(name) = ops_name {
         crate::ops_log::log_operation(name, &agent_name, &response);

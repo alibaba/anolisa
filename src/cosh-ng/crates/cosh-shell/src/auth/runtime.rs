@@ -22,7 +22,7 @@ use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
     ExistingProvider, ProviderAction,
 };
-use crate::auth::retry::restore_after_failed_submission;
+use crate::auth::retry::restore_after_failed_submission_at;
 use crate::auth::validation::{
     record_field_edit, record_field_submission, FieldSubmission, PROVIDER_ID_HINT,
 };
@@ -453,12 +453,7 @@ fn handle_auth_answer<W: std::io::Write>(
                             footer: None,
                         },
                     )?;
-                    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-                        writeln!(output)?;
-                        write!(output, "cosh-osc$ ")?;
-                    } else {
-                        state.trigger_pty_prompt = true;
-                    }
+                    crate::slash::prompt::write_shell_prompt(state, output)?;
                     output.flush()?;
                 }
                 ProviderAction::Edit => {
@@ -745,6 +740,7 @@ fn send_auth_response<W: std::io::Write>(
     let mut auth = state.auth.state.take().expect("auth state present");
     let provider = &auth.providers[auth.selected_provider];
     let provider_label = provider.label.clone();
+    let provider_template_id = provider.id.clone();
     let provider_id = auth
         .editing_provider_name
         .clone()
@@ -757,6 +753,21 @@ fn send_auth_response<W: std::io::Write>(
         values: auth.collected_values.clone(),
         persist: true,
     };
+
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let validation_body = auth_validation_body(
+        &provider.id,
+        response.values.get("auth_source").map(String::as_str),
+    );
+    renderer.write_notice_panel(
+        output,
+        NoticePanelModel {
+            title: "Validating configuration...",
+            body: validation_body,
+            footer: None,
+        },
+    )?;
+    output.flush()?;
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
         let result = active_run.handle.respond_auth(response);
@@ -777,15 +788,20 @@ fn send_auth_response<W: std::io::Write>(
                     std::io::Error::other("missing adapter for cosh-core auth registry")
                 })?;
                 if let Err(error) = core_auth_configure(adapter, &response) {
-                    restore_after_failed_submission(&mut auth);
+                    restore_after_configure_failure(
+                        &mut auth,
+                        error.code.as_deref(),
+                        error.focus_field(&provider_template_id),
+                    );
                     state.auth.state = Some(auth);
-                    let renderer =
-                        RatatuiInlineRenderer::for_terminal().with_language(state.language);
                     renderer.write_notice_panel(
                         output,
                         NoticePanelModel {
                             title: "Credentials were not saved",
-                            body: vec![error, "Review the values and try again.".to_string()],
+                            body: vec![
+                                error.message,
+                                "Review the highlighted value and try again.".to_string(),
+                            ],
                             footer: None,
                         },
                     )?;
@@ -800,6 +816,35 @@ fn send_auth_response<W: std::io::Write>(
 
     state.auth.completed_ids.insert(auth.id);
     finish_auth_configuration(state, output, &provider_label)
+}
+
+fn restore_after_configure_failure(
+    auth: &mut RuntimeAuthState,
+    error_code: Option<&str>,
+    field_name: Option<&str>,
+) {
+    if error_code == Some("credential_source_unavailable")
+        && matches!(auth.phase, AuthPhase::AliyunEcsChallenge { .. })
+    {
+        auth.field_error = None;
+        return;
+    }
+    restore_after_failed_submission_at(auth, field_name);
+}
+
+pub(super) fn auth_validation_body(provider_id: &str, auth_source: Option<&str>) -> Vec<String> {
+    let mut body = vec!["Checking endpoint, credentials, and model.".to_string()];
+    if matches!(
+        provider_id,
+        "dashscope" | "openai_compat" | "coding_plan" | "token_plan"
+    ) || (provider_id == "aliyun" && auth_source != Some("ecs_ram_role"))
+    {
+        body.push(
+            "If read-only model validation is unavailable or cannot verify credentials, validation may make a minimal chat request (max_tokens=1) that consumes a very small amount of quota or incurs a very small charge."
+                .to_string(),
+        );
+    }
+    body
 }
 
 /// Reports whether `event` carries the capture id the auth panel is currently listening on.
@@ -854,12 +899,7 @@ fn cancel_auth_panel<W: std::io::Write>(
         },
     )?;
 
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        writeln!(output)?;
-        write!(output, "cosh-osc$ ")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
+    crate::slash::prompt::write_shell_prompt(state, output)?;
     output.flush()?;
     Ok(())
 }

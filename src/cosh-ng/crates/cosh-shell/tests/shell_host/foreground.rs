@@ -247,7 +247,11 @@ fn raw_relay_zsh_job_control_suspend_fg_and_interrupt() {
         std::process::id(),
         unique_suffix()
     ));
-    let mut config = ShellHostConfig::new("zsh-job-control-test", &work_dir);
+    // zsh selects vi keybindings from these conventional environment values.
+    // The relay must not inject Bash Readline control bindings into that editor.
+    let mut config = ShellHostConfig::new("zsh-job-control-test", &work_dir)
+        .with_env("EDITOR", "vim")
+        .with_env("VISUAL", "vim");
     config.native_mode = false;
     let mut rendered = Vec::new();
     let output = run_raw_relay_zsh_with_actions(

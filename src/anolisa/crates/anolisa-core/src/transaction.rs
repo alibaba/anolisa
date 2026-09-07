@@ -596,13 +596,13 @@ impl Transaction {
                 self.operation_id
             )));
         }
-        if let Some(existing) = &self.delegated_recovery {
-            if existing != &context {
-                return Err(TransactionError::Failed(format!(
-                    "refused to replace delegated recovery context for operation {}",
-                    self.operation_id
-                )));
-            }
+        if let Some(existing) = &self.delegated_recovery
+            && existing != &context
+        {
+            return Err(TransactionError::Failed(format!(
+                "refused to replace delegated recovery context for operation {}",
+                self.operation_id
+            )));
         }
         let previous_context = self.delegated_recovery.clone();
         let previous_step_count = self.steps.len();

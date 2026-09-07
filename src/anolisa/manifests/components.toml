@@ -14,6 +14,7 @@ publisher = "anolisa"
 name = "cosh"
 display_name = "Copilot Shell"
 summary = "Copilot shell launcher and deterministic CLI gateway"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"
@@ -37,6 +38,7 @@ name = "copilot-shell"
 name = "cosh-ng"
 display_name = "cosh-ng"
 summary = "Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"
@@ -52,6 +54,7 @@ legacy_adopt = true
 name = "agentsight"
 display_name = "AgentSight"
 summary = "eBPF-based AI agent observability tool"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"
@@ -67,6 +70,7 @@ legacy_adopt = true
 name = "agent-memory"
 display_name = "Agent Memory"
 summary = "Agent persistent memory and context"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"
@@ -82,6 +86,7 @@ legacy_adopt = true
 name = "os-skills"
 display_name = "OS Skills"
 summary = "Curated OS Skill library for agent runtimes"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"
@@ -97,6 +102,7 @@ legacy_adopt = true
 name = "tokenless"
 display_name = "Tokenless"
 summary = "LLM token optimization toolkit"
+platforms = ["linux", "macos"]
 
 [[components.backends]]
 kind = "raw"
@@ -112,6 +118,7 @@ legacy_adopt = true
 name = "ws-ckpt"
 display_name = "Workspace Checkpoint"
 summary = "Workspace checkpoint and rollback service"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"
@@ -127,6 +134,7 @@ legacy_adopt = true
 name = "sec-core"
 display_name = "Agent Security Core"
 summary = "Agent security core adapters and runtime"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "rpm"
@@ -138,6 +146,7 @@ legacy_adopt = true
 name = "skillfs"
 display_name = "SkillFS"
 summary = "AI agent skill management via virtual filesystem"
+platforms = ["linux"]
 
 [[components.backends]]
 kind = "raw"

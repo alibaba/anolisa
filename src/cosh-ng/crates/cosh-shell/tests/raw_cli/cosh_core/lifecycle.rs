@@ -148,6 +148,7 @@ sleep 60
         .env("COSH_CORE_PATH", &cosh_core_path_str)
         .env("COSH_CORE_PID_FILE", &pid_file_str)
         .env("COSH_SHELL_ISOLATED", "1")
+        .env("COSH_SHELL_INTEGRATION", "enhanced")
         .env("COSH_SHELL_RAW_SHELL", "bash")
         .env("COSH_SHELL_DEFAULT_SHELL", "bash")
         .env("COSH_SHELL_LANG", "en-US")

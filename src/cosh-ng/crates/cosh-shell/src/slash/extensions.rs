@@ -278,7 +278,7 @@ fn commit_or_query_result(
         json!({"operation_id": operation_id, "fingerprint": fingerprint}),
     ) {
         Ok(result) => Ok(result),
-        Err(RegistryQueryError::Response(error)) => Err(error),
+        Err(RegistryQueryError::Response { message, .. }) => Err(message),
         Err(RegistryQueryError::Transport(commit_error)) => adapter
             .registry_query(
                 "extensions",
@@ -302,7 +302,7 @@ fn update_all_or_query_result(adapter: &crate::adapter::CoshCoreAdapter) -> Resu
         json!({"operation_id": operation_id}),
     ) {
         Ok(result) => Ok(result),
-        Err(RegistryQueryError::Response(error)) => Err(error),
+        Err(RegistryQueryError::Response { message, .. }) => Err(message),
         Err(RegistryQueryError::Transport(commit_error)) => adapter
             .registry_query(
                 "extensions",

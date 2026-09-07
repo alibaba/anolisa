@@ -745,6 +745,7 @@ fn health_status(pid: u32, agent_name: &str) -> AgentHealthStatus {
         agent_name: agent_name.into(),
         category: "test".into(),
         exe_path: "/usr/bin/sleep".into(),
+        workspace_path: Some("/workspace".into()),
         ports: Vec::new(),
         status: AgentHealthState::Healthy,
         last_check_time: 1,

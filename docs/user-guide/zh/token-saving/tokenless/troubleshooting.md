@@ -14,7 +14,7 @@ anolisa status tokenless
 anolisa doctor tokenless
 anolisa adapter status tokenless
 tokenless stats status
-tokenless env-check --all --checklist
+tokenless env-check --all --json
 ```
 
 如果某条命令失败，先处理该层问题，再继续后面的检查。查看安装计划但不修改系统：
@@ -114,13 +114,51 @@ anolisa adapter status tokenless
 env | grep '^TOKENLESS_'
 ```
 
-确认没有意外设置 `TOKENLESS_STATS_ENABLED=0`，并检查自定义数据库路径是否仍位于真实用户 home 下。
+确认没有意外设置 `TOKENLESS_STATS_ENABLED=0`，并检查自定义数据库路径是否仍位于真实用户 home 或选定的数据目录下。
+
+## Schema 压缩没有统计记录
+
+Schema 压缩的接入方式因宿主而异：
+
+- **cosh 与 Cosh-NG**：通过 `BeforeModel` Hook 在每次模型调用前运行；本节的告警来自该 Hook。
+- **OpenCode**：通过其 `tool.definition` 插件 Hook 逐个压缩工具定义，不走 `BeforeModel`。MCP 工具不经过该 Hook，因此工具集只有 MCP 工具时不会有记录，下面的 `BeforeModel` 告警也不适用。
+- **Qwen Code**：扩展清单里带有 `BeforeModel` Hook 条目，但当前 Qwen Code 版本未实现该 Hook 事件：其 Hook 注册器会跳过未知事件名，实际只注册其余 Hook 组，Schema Hook 不会运行。Qwen Code 上没有 `compress-schema` 记录属于预期行为，本节无法用于诊断。
+
+在实际运行该 Hook 的宿主上没有 `compress-schema` 记录时，按以下顺序排查：
+
+### 1. 确认确实有可压缩内容
+
+统计只记录实际产生 Token 节省的调用，压缩结果不比原文更小就不会记录。内置工具的描述通常较短（低于 256 字符函数描述 / 160 字符参数描述的截断阈值，也没有可移除的 `title` 或 `examples`），压缩没有收益，零记录属于预期行为。用当前工具声明直接验证——请把下面的示例数组替换为你的真实工具声明（合法 JSON 数组，不要保留占位文本、尖括号或外侧引号）：
+
+```bash
+echo '[{"name":"example_tool","description":"这是一段刻意写得足够长的示例工具描述，用于演示 Schema 压缩效果，它必须超过函数描述二百五十六个字符的截断阈值，才能产生可记录的压缩收益。这是一段刻意写得足够长的示例工具描述，用于演示 Schema 压缩效果，它必须超过函数描述二百五十六个字符的截断阈值，才能产生可记录的压缩收益。这是一段刻意写得足够长的示例工具描述，用于演示 Schema 压缩效果，它必须超过函数描述二百五十六个字符的截断阈值，才能产生可记录的压缩收益。这是一段刻意写得足够长的示例工具描述，用于演示 Schema 压缩效果，它必须超过函数描述二百五十六个字符的截断阈值，才能产生可记录的压缩收益。"}]' | tokenless compress-schema --batch
+```
+
+如果 stderr 输出 `did not reduce size`，说明当前工具集没有可压缩内容；带有长描述的工具集（例如部分 MCP 工具）会正常产生记录。
+
+### 2. 确认 BeforeModel Hook 已触发
+
+在 cosh 与 Cosh-NG 上，BeforeModel 事件没有可供 Schema 压缩处理的内容时，Hook 会给出以下警告之一（每条均为每个会话最多一次）并原样放行：
+
+```text
+[tokenless] WARNING: BeforeModel payload is not a JSON object ...
+[tokenless] WARNING: BeforeModel payload carries no llm_request object ...
+[tokenless] WARNING: BeforeModel event carries no tool declarations ...
+```
+
+第一条警告表示 Hook 收到的负载不是 JSON 对象；第二条表示负载缺少 `llm_request` 对象；第三条表示宿主已发射 BeforeModel，但事件格式不带工具声明（`llm_request.config.tools` 或 `llm_request.tools`），应升级或检查宿主的 Hook 协议版本。既没有警告也没有记录时，说明 BeforeModel 根本没有触发，确认：
+
+- 扩展或插件已安装并启用（`anolisa adapter status tokenless`）。
+- 宿主配置没有禁用 Hooks。
+- 宿主版本支持 BeforeModel 事件。
+
+之后按[启用后没有产生统计记录](#启用后没有产生统计记录)的通用步骤继续排查。
 
 ## Adapter 启用失败
 
 常见原因：
 
-- 目标 Agent 框架未安装或未被扫描到。
+- 目标 Agent 产品未安装或未被扫描到。
 - 框架版本不满足 Adapter 要求。
 - adapter 命令的执行用户与目标框架配置或 receipt 的所属用户不同。
 - 直接安装的 Tokenless RPM 尚未写入 ANOLISA 状态。
@@ -134,7 +172,7 @@ anolisa adapter scan
 anolisa --verbose adapter enable tokenless <framework>
 ```
 
-npm 安装请使用[框架集成 · npm 安装后的手动接入](framework-integration.md#npm-安装后的手动接入)。
+npm 安装请使用[Agent 集成 · npm 安装后的手动接入](framework-integration.md#npm-安装后的手动接入)。
 
 直接安装 RPM 后，请先补充状态记录，再用拥有目标框架配置的用户重试 adapter
 命令。
@@ -165,29 +203,22 @@ rtk rewrite "ls -la"
 
 ```bash
 command -v rtk
-tokenless env-check --tool Shell
 ```
 
 如果 RTK 正常但 Agent 中不生效，检查框架支持矩阵、Adapter 状态和是否已经重启会话。
 
 `TOKENLESS_COMPRESSION_ENABLED=0` 不会关闭命令重写。如果必须保留原始 Shell 输入，应禁用 Adapter；使用 OpenClaw Plugin 时也可以设置 `rtk_enabled=false`。
 
-## Tool Ready 报 `NOT_READY`
+## Tool Ready 仍然报告 `NOT_READY`
 
-查看完整清单：
-
-```bash
-tokenless env-check --tool <name>
-tokenless env-check --all --checklist
-```
-
-`NOT_READY` 表示缺少必需依赖；先处理报告的具体二进制、配置、权限或网络问题。自动修复前先确认变更：
+当前构建已硬关闭 Tool Ready，不会输出 `NOT_READY` 或阻断工具。先确认实际生效的二进制：
 
 ```bash
-tokenless env-check --tool <name> --fix
+tokenless --version
+tokenless env-check --tool <name> --json
 ```
 
-`--fix` 可能调用包管理器或创建链接，不应在不了解输出时直接加 `sudo`。
+JSON 应包含 `"status":"UNKNOWN"` 和 `"enabled":false`。如果仍得到 `NOT_READY`，说明线上混用了新旧版本。请同时更新 Tokenless 二进制和共享 Adapter 资源，然后重启 Agent。旧的 `TOKENLESS_TOOL_READY_ENABLED` 环境变量不会生效。
 
 ## 数据库错误
 
@@ -199,7 +230,7 @@ ls -l ~/.tokenless/stats.db*
 env | grep -E 'TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-确认当前用户对选定的数据目录和数据库可写。`tokenless` CLI 只接受真实用户 home 下的 `TOKENLESS_DATA_DIR`、`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB`，覆盖值被拒绝时会回退。随包提供的 RTK 统计写入器会直接使用 `TOKENLESS_STATS_DB`，因此也要移除或修正 Agent 环境中的异常覆盖值。
+确认当前用户对选定的数据目录和数据库可写。`TOKENLESS_DATA_DIR` 可以位于真实用户 home 之外，但必须是不包含父目录遍历的绝对非根目录；显式数据目录无效时不会回退到 home。`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB` 必须位于真实用户 home 或选定的数据目录下，随包 RTK 写入器也执行相同规则。
 
 不要让多个用户共享同一个 `stats.db`。AgentSight 和 Tokenless 应以能访问同一用户数据库的方式运行。
 
@@ -238,9 +269,15 @@ tokenless retrieve <hash> --stash-db ~/.tokenless/stash.db
 
 ## 有统计记录但 Prompt 没有变小
 
-先查看[支持矩阵](framework-integration.md#支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段，Codex 则有意保留原始结果，只追加分析或压缩备选。这些路径可以记录变小的候选内容，但不一定减少最终 Prompt。
+先查看[支持矩阵](framework-integration.md#agent-adapter-支持矩阵)中的响应交付路径。Qoder 通过
+`updatedToolOutput` 替换输出。Qwen Code 与旧版 Copilot Shell 的当前契约没有替换字段，
+因此会透传工具后输出，也不会通过 `additionalContext` 注入压缩副本。Codex 同样不执行响应
+压缩，其 PostToolUse Context 只包含识别出的环境失败；实际节省应在经过 RTK 改写的 Shell
+调用上测量。
 
-Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。OpenClaw 会替换持久化结果，但只有设置 `toon_compression_enabled=true` 才会启用 TOON。
+Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。
+OpenClaw 在 `post_tool_enabled` 开启时优化受支持的持久化结果。Tokenless 会在 JSON 清理或
+TOON 能产生更小合法结果时自动选择对应方式。
 
 ## Qoder Plugin 缓存问题
 

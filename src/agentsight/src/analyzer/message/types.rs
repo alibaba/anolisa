@@ -697,10 +697,25 @@ pub struct AnthropicSseMessageDelta {
 }
 
 /// Anthropic SSE usage delta
+///
+/// Official Anthropic sends only `output_tokens` here and reports
+/// `input_tokens` plus the cache counters in `message_start`. Some
+/// Anthropic-compatible proxies invert this and put the full terminal usage in
+/// the delta instead, so every counter is optional and callers must merge the
+/// delta with `message_start` rather than trusting either alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicSseUsageDelta {
     /// Output tokens
     pub output_tokens: u64,
+    /// Input tokens, when the provider reports them in the delta
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Input tokens used to create cache entries
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    /// Input tokens read from cache
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
 }
 
 // ============================================================================

@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::tools::is_shell_tool_name;
+use crate::tools::{is_shell_tool_name, known_provider_tool, KnownProviderTool};
 use crate::types::{AgentEvent, QuestionSelectionMode};
 
 mod auth;
@@ -13,9 +13,9 @@ use auth::parse_auth_provider;
 pub(crate) use serialization::serialize_approval_receipt;
 pub use serialization::{
     serialize_answer, serialize_auth_response, serialize_claude_allow, serialize_co_allow,
-    serialize_deny, serialize_host_executed_shell_result, serialize_initialize,
-    serialize_shell_evidence_result, serialize_user_message, HostExecutedInputWait,
-    HostExecutedShellMetadata, HostExecutedShellResult,
+    serialize_cosh_core_initialize, serialize_deny, serialize_host_executed_shell_result,
+    serialize_initialize, serialize_shell_evidence_result, serialize_user_message,
+    HostExecutedInputWait, HostExecutedShellMetadata, HostExecutedShellResult,
 };
 pub(crate) use serialization::{
     serialize_cosh_core_user_message, serialize_initialize_without_session_start,
@@ -27,6 +27,8 @@ const SHELL_HANDOFF_CONTINUATION_HINT: &str =
 pub const PENDING_CONTROL_TOOL_CALL_GRACE: Duration = Duration::from_millis(200);
 const CONSUMED_CONTROL_TOOL_ID_TTL: Duration = Duration::from_secs(30);
 pub const ANALYSIS_ONLY_SHELL_DENY_MESSAGE: &str = "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.";
+/// Exact control protocol version emitted and accepted by this shell.
+pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 1;
 
 pub enum ControlRequest {
     Initialize {
@@ -141,6 +143,8 @@ pub struct AuthResponse {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ControlProtocolCapabilities {
     pub provider_initialize_seen: bool,
+    /// Negotiated exact version, or `None` for a legacy unversioned peer.
+    pub protocol_version: Option<u32>,
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
     pub can_handle_shell_evidence_tool: bool,
@@ -374,8 +378,8 @@ fn provider_tool_result_id(event: &AgentEvent) -> Option<&str> {
     }
 }
 
-fn is_control_backed_tool_name(name: &str) -> bool {
-    is_shell_tool_name(name) || name == "cosh_shell_evidence"
+pub(crate) fn is_control_backed_tool_name(name: &str) -> bool {
+    known_provider_tool(name).is_some_and(KnownProviderTool::is_control_backed)
 }
 
 fn is_terminal_agent_event(event: &AgentEvent) -> bool {
@@ -575,22 +579,68 @@ pub fn should_deny_shell_request_for_analysis_continuation(prompt: &str, tool_na
         && is_shell_tool_name(tool_name)
 }
 
-pub fn parse_initialize_capabilities(line: &str) -> Option<ControlProtocolCapabilities> {
+pub(crate) fn parse_initialize_response(
+    line: &str,
+    expected_request_id: &str,
+) -> Option<Result<ControlProtocolCapabilities, String>> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
+    parse_initialize_response_value(&v, expected_request_id)
+}
+
+pub(crate) fn parse_initialize_response_value(
+    v: &Value,
+    expected_request_id: &str,
+) -> Option<Result<ControlProtocolCapabilities, String>> {
     if v.get("type")?.as_str()? != "control_response" {
         return None;
     }
     let envelope = v.get("response")?;
-    if envelope.get("subtype")?.as_str()? != "success" {
-        return None;
-    }
     let response = envelope.get("response")?;
     if response.get("subtype")?.as_str()? != "initialize" {
         return None;
     }
+    let Some(request_id) = envelope.get("request_id").and_then(Value::as_str) else {
+        return Some(Err(
+            "initialize response is missing a valid request id".to_string()
+        ));
+    };
+    if request_id != expected_request_id {
+        return Some(Err(format!(
+            "initialize response request id {request_id:?} does not match {expected_request_id:?}"
+        )));
+    }
+    let protocol_version = match response.get("protocol_version") {
+        None => None,
+        Some(value) => match value
+            .as_u64()
+            .and_then(|version| u32::try_from(version).ok())
+        {
+            Some(version) => Some(version),
+            None => {
+                return Some(Err(
+                    "initialize response has an invalid control protocol version".to_string(),
+                ));
+            }
+        },
+    };
+    if let Some(version) = protocol_version {
+        if version != CONTROL_PROTOCOL_VERSION {
+            return Some(Err(format!(
+                "unsupported control protocol version {version}; expected exact version {CONTROL_PROTOCOL_VERSION}"
+            )));
+        }
+    }
+    if envelope.get("subtype").and_then(Value::as_str) != Some("success") {
+        let message = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("provider rejected control protocol initialization");
+        return Some(Err(message.to_string()));
+    }
     let capabilities = response.get("capabilities");
-    Some(ControlProtocolCapabilities {
+    Some(Ok(ControlProtocolCapabilities {
         provider_initialize_seen: true,
+        protocol_version,
         can_handle_can_use_tool: bool_capability(capabilities, "can_handle_can_use_tool"),
         can_handle_host_executed_shell_tool_result: bool_capability(
             capabilities,
@@ -601,7 +651,7 @@ pub fn parse_initialize_capabilities(line: &str) -> Option<ControlProtocolCapabi
             "can_handle_shell_evidence_tool",
         ),
         can_handle_approval_receipt: bool_capability(capabilities, "can_handle_approval_receipt"),
-    })
+    }))
 }
 
 fn bool_capability(capabilities: Option<&Value>, key: &str) -> bool {

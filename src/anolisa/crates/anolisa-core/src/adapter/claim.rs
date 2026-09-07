@@ -34,11 +34,9 @@ use serde_json::Value;
 use crate::path_safety::{PathBoundaryError, canonicalize_nearest_existing, validate_owned_path};
 use anolisa_platform::fs_layout::FsLayout;
 
-use super::util::digest_tree;
-
 /// Schema version for the generic claim shape and [`ClaimResource`].
 /// Persisted in every receipt so a future on-disk migration can branch.
-pub const CLAIM_SCHEMA_VERSION: u32 = 1;
+pub const CLAIM_SCHEMA_VERSION: u32 = 2;
 
 /// Schema version for [`DriverPayload`]. Bumped independently of
 /// [`CLAIM_SCHEMA_VERSION`] when a driver's typed payload changes shape.
@@ -82,10 +80,20 @@ pub struct AdapterClaim {
     /// Resource directory read at enable time. Kept for status display and
     /// upgrade detection; `disable` must NOT depend on it still existing.
     pub resource_root: PathBuf,
-    /// Digest of the resource tree at enable time, for drift/upgrade
-    /// detection. Optional: a driver may decline to compute one.
+    /// Legacy whole-tree digest read only to migrate pre-v2 receipts. New
+    /// receipts never write it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_digest: Option<String>,
+    /// Package-manager-owned adapter inputs captured at enable time. The root
+    /// is the resolved source root and every file path is relative to it, so
+    /// a source-root migration changes the revision even when bytes do not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<AdapterSourceRevision>,
+    /// Files ANOLISA explicitly materialized into framework-owned resources.
+    /// Runtime additions under those resources are intentionally absent and
+    /// therefore ignored by status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materialized_files: Vec<MaterializedFile>,
     /// [`DriverPayload`] schema version ([`DRIVER_SCHEMA_VERSION`] at write
     /// time).
     pub driver_schema: u32,
@@ -111,21 +119,6 @@ impl AdapterClaim {
     /// Whether this receipt represents a skill-only adapter bundle.
     pub fn is_skill_bundle(&self) -> bool {
         self.adapter_type.as_deref() == Some("skill_bundle")
-    }
-
-    /// Compare the enable-time [`Self::bundle_digest`] against a fresh digest
-    /// of [`Self::resource_root`].
-    ///
-    /// This is the drift/upgrade detection the `bundle_digest` field exists
-    /// for; the drivers' `ResourceBundleMatches` condition and post-update
-    /// adapter actions branch on the same verdict, so the comparison lives
-    /// with the receipt schema instead of being re-derived per caller.
-    pub fn bundle_match(&self) -> BundleMatch {
-        match (&self.bundle_digest, digest_tree(&self.resource_root)) {
-            (Some(recorded), Some(current)) if recorded == &current => BundleMatch::Matched,
-            (Some(_), Some(_)) => BundleMatch::Changed,
-            _ => BundleMatch::Unknown,
-        }
     }
 
     /// Find a resource by its stable `id`.
@@ -215,7 +208,11 @@ impl AdapterClaim {
         exact_symlink_targets: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
         if let Some(pid) = &self.plugin_id {
-            validate_plugin_id(pid)?;
+            if self.framework == "dsh" {
+                validate_dsh_package_name(pid)?;
+            } else {
+                validate_plugin_id(pid)?;
+            }
         }
         for resource in &self.resources {
             resource.validate_with_owned_roots(
@@ -239,6 +236,7 @@ impl AdapterClaim {
                 _ => {}
             }
         }
+        validate_integrity_entries(self)?;
         Ok(())
     }
 
@@ -269,47 +267,74 @@ impl AdapterClaim {
     }
 }
 
-/// Reason text for reports about a receipt whose resource bundle changed
-/// after enable. The drivers' `ResourceBundleMatches` status condition and
-/// the post-update adapter actions share this wording so `adapter status`
-/// and `update` name the same problem identically.
-pub const BUNDLE_CHANGED_REASON: &str = "resource bundle changed since enable";
+/// Follow-up reason shared by adapter status and component update actions.
+pub const SOURCE_REVISION_CHANGED_REASON: &str = "adapter source revision changed since enable";
 
-/// How a receipt's enable-time bundle digest compares to the resource tree
-/// currently on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BundleMatch {
-    /// The recorded digest matches a fresh digest of the resource root.
-    Matched,
-    /// Both digests exist and differ: the resource bundle changed after
-    /// enable, so the framework-side state no longer corresponds to the
-    /// component's current adapter resources.
-    Changed,
-    /// No digest was recorded at enable time or the resource root cannot be
-    /// digested now; drift cannot be decided either way.
-    Unknown,
+/// Package-managed file type persisted in source and materialized revisions.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedFileKind {
+    /// Regular file verified by SHA-256.
+    File,
+    /// Symbolic link verified by its literal target.
+    Symlink,
 }
 
-/// Enabled receipts for `component` whose resource bundle changed since
-/// enable — the receipts a component update leaves stale until the adapter
-/// is re-enabled.
-///
-/// Receipts without a recorded digest (or with an unreadable resource root)
-/// are excluded: their drift is unknown, not detected. Receipts kept for a
-/// failed disable (`CleanupFailed`) are not enabled adapters and are
-/// excluded too.
-pub fn stale_enabled_claims<'a>(
-    claims: &'a [AdapterClaim],
-    component: &str,
-) -> Vec<&'a AdapterClaim> {
-    claims
-        .iter()
-        .filter(|claim| {
-            claim.component == component
-                && claim.status == ClaimStatus::Enabled
-                && claim.bundle_match() == BundleMatch::Changed
-        })
-        .collect()
+/// One package-managed input relative to an adapter source root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManagedSourceFile {
+    /// Relative path below [`AdapterSourceRevision::source_root`].
+    pub relative_path: PathBuf,
+    /// File or symbolic link.
+    pub kind: ManagedFileKind,
+    /// Lowercase SHA-256 for regular files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Literal link target for symbolic links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<PathBuf>,
+}
+
+/// Canonical adapter input revision captured from package-manager ownership.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterSourceRevision {
+    /// Canonical source root selected from the installed component contract.
+    pub source_root: PathBuf,
+    /// Sorted package-managed inputs below the source root.
+    pub files: Vec<ManagedSourceFile>,
+    /// Additional package-managed source roots ANOLISA explicitly copies.
+    /// Resource ids keep multiple declared copies distinct without assigning
+    /// semantic file roles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materialized_sources: Vec<MaterializedSourceRevision>,
+}
+
+/// One explicit-copy source included in an adapter input revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MaterializedSourceRevision {
+    /// Destination [`ClaimResource::id`] used to identify the copy mapping.
+    pub resource_id: String,
+    /// Canonical package-managed source root copied into that resource.
+    pub source_root: PathBuf,
+    /// Sorted package-managed inputs below the source root.
+    pub files: Vec<ManagedSourceFile>,
+}
+
+/// One expected file below a receipt-declared materialized resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MaterializedFile {
+    /// [`ClaimResource::id`] of the copied destination root.
+    pub resource_id: String,
+    /// Relative path below that resource.
+    pub relative_path: PathBuf,
+    /// File or symbolic link.
+    pub kind: ManagedFileKind,
+    /// Lowercase SHA-256 for regular files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Literal link target for symbolic links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<PathBuf>,
 }
 
 /// Lifecycle status of a receipt.
@@ -420,6 +445,10 @@ impl ClaimResource {
                     }
                 })
             }
+            ClaimResourceKind::FrameworkPlugin {
+                framework,
+                plugin_id,
+            } if framework == "dsh" => validate_dsh_package_name(plugin_id),
             ClaimResourceKind::FrameworkPlugin { plugin_id, .. } => validate_plugin_id(plugin_id),
             ClaimResourceKind::FrameworkMarketplace { marketplace, .. } => {
                 validate_marketplace_name(marketplace).map_err(|_| {
@@ -560,6 +589,12 @@ pub enum DriverPayload {
     /// Qwen Code driver payload.
     #[serde(rename = "qwencode")]
     QwenCode(QwenCodeClaim),
+    /// QwenPaw driver payload.
+    #[serde(rename = "qwenpaw")]
+    QwenPaw(QwenPawClaim),
+    /// DeepSeek Harness (`dsh`) native plugin payload.
+    #[serde(rename = "dsh")]
+    Dsh(DshClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -703,6 +738,45 @@ pub struct QwenCodeClaim {
     pub plugin_resource: String,
 }
 
+/// QwenPaw driver payload. QwenPaw copies, validates and hot-loads the
+/// plugin through its own CLI; the receipt references the working directory
+/// and the installed plugin directory the CLI populated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenPawClaim {
+    /// Resource id of the QwenPaw working directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub home_resource: String,
+    /// Resource id of the installed plugin directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub plugin_resource: String,
+}
+
+/// DeepSeek Harness native-plugin receipt. A single ANOLISA receipt owns the
+/// same package across every explicitly selected dsh profile; each profile
+/// keeps its own validated framework-plugin resource reference so disable can
+/// release exactly the registrations that enable created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DshClaim {
+    /// Package name read from the bundle's `package.json`.
+    pub package_name: String,
+    /// Resource id of the enable-time dsh home
+    /// ([`ClaimResourceKind::ExternalPath`]). Persisting the resolved root
+    /// keeps later lifecycle operations independent of process environment
+    /// and working-directory drift.
+    pub home_resource: String,
+    /// Profiles in which ANOLISA registered the package.
+    pub profiles: Vec<DshProfileClaim>,
+}
+
+/// One profile entry in a [`DshClaim`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DshProfileClaim {
+    /// dsh profile identifier passed to the native plugin CLI.
+    pub name: String,
+    /// Resource id of the profile's registered package.
+    pub plugin_resource: String,
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -769,6 +843,188 @@ pub enum ClaimValidationError {
         /// Framework in the claim.
         claim_framework: String,
     },
+    /// A persisted source/materialized file entry is malformed or references
+    /// a non-path claim resource.
+    #[error("invalid adapter integrity record: {reason}")]
+    IntegrityRecord {
+        /// Validation failure detail.
+        reason: String,
+    },
+}
+
+fn validate_integrity_entries(claim: &AdapterClaim) -> Result<(), ClaimValidationError> {
+    let fail = |reason: String| Err(ClaimValidationError::IntegrityRecord { reason });
+    if let Some(revision) = &claim.source_revision {
+        if !revision.source_root.is_absolute() {
+            return fail("source root is not absolute".into());
+        }
+        if revision.files.is_empty() {
+            return fail("source revision has no managed files".into());
+        }
+        if revision
+            .files
+            .windows(2)
+            .any(|pair| pair[0].relative_path >= pair[1].relative_path)
+        {
+            return fail("source revision files are not strictly sorted".into());
+        }
+        for file in &revision.files {
+            validate_integrity_file(
+                &file.relative_path,
+                file.kind,
+                file.sha256.as_deref(),
+                file.symlink_target.as_deref(),
+            )?;
+        }
+        if revision.materialized_sources.windows(2).any(|pair| {
+            (&pair[0].resource_id, &pair[0].source_root)
+                >= (&pair[1].resource_id, &pair[1].source_root)
+        }) {
+            return fail("materialized source revisions are not strictly sorted".into());
+        }
+        for source in &revision.materialized_sources {
+            if source.resource_id.is_empty() {
+                return fail("materialized source revision has an empty resource id".into());
+            }
+            let Some(resource) = claim.resource(&source.resource_id) else {
+                return fail(format!(
+                    "materialized source references unknown resource '{}'",
+                    source.resource_id
+                ));
+            };
+            if !matches!(
+                resource.kind,
+                ClaimResourceKind::OwnedPath { .. } | ClaimResourceKind::ExternalPath { .. }
+            ) {
+                return fail(format!(
+                    "materialized source resource '{}' is not a filesystem root",
+                    source.resource_id
+                ));
+            }
+            if !source.source_root.is_absolute() {
+                return fail(format!(
+                    "materialized source '{}' root is not absolute",
+                    source.resource_id
+                ));
+            }
+            if source.files.is_empty() {
+                return fail(format!(
+                    "materialized source '{}' has no managed files",
+                    source.resource_id
+                ));
+            }
+            if source
+                .files
+                .windows(2)
+                .any(|pair| pair[0].relative_path >= pair[1].relative_path)
+            {
+                return fail(format!(
+                    "materialized source '{}' files are not strictly sorted",
+                    source.resource_id
+                ));
+            }
+            for file in &source.files {
+                validate_integrity_file(
+                    &file.relative_path,
+                    file.kind,
+                    file.sha256.as_deref(),
+                    file.symlink_target.as_deref(),
+                )?;
+            }
+        }
+    }
+    if claim.materialized_files.windows(2).any(|pair| {
+        (
+            pair[0].resource_id.as_str(),
+            pair[0].relative_path.as_path(),
+        ) >= (
+            pair[1].resource_id.as_str(),
+            pair[1].relative_path.as_path(),
+        )
+    }) {
+        return fail("materialized files are not strictly sorted".into());
+    }
+    for file in &claim.materialized_files {
+        let Some(resource) = claim.resource(&file.resource_id) else {
+            return fail(format!(
+                "materialized file references unknown resource '{}'",
+                file.resource_id
+            ));
+        };
+        if !matches!(
+            resource.kind,
+            ClaimResourceKind::OwnedPath { .. } | ClaimResourceKind::ExternalPath { .. }
+        ) {
+            return fail(format!(
+                "materialized resource '{}' is not a filesystem root",
+                file.resource_id
+            ));
+        }
+        validate_integrity_file(
+            &file.relative_path,
+            file.kind,
+            file.sha256.as_deref(),
+            file.symlink_target.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_integrity_file(
+    path: &Path,
+    kind: ManagedFileKind,
+    sha256: Option<&str>,
+    symlink_target: Option<&Path>,
+) -> Result<(), ClaimValidationError> {
+    use std::path::Component;
+    let fail = |reason: String| Err(ClaimValidationError::IntegrityRecord { reason });
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir
+                    | Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
+            )
+        })
+    {
+        return fail(format!(
+            "invalid relative managed path '{}'",
+            path.display()
+        ));
+    }
+    match kind {
+        ManagedFileKind::File => {
+            let Some(digest) = sha256 else {
+                return fail(format!("managed file '{}' has no SHA-256", path.display()));
+            };
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || symlink_target.is_some()
+            {
+                return fail(format!(
+                    "managed file '{}' has invalid digest/type metadata",
+                    path.display()
+                ));
+            }
+        }
+        ManagedFileKind::Symlink => {
+            if sha256.is_some()
+                || symlink_target.is_none()
+                || symlink_target.is_some_and(|target| target.as_os_str().is_empty())
+            {
+                return fail(format!(
+                    "managed symlink '{}' has invalid target/type metadata",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reasons an external path is rejected.
@@ -953,6 +1209,55 @@ pub fn validate_plugin_id(plugin_id: &str) -> Result<(), ClaimValidationError> {
     Ok(())
 }
 
+/// Validate an npm-compatible dsh package name before it enters a CLI argv.
+/// Scoped names (`@scope/name`) are accepted because native dsh bundles use
+/// package-manager names, while traversal, flags, empty segments, and shell
+/// metacharacters remain rejected.
+pub fn validate_dsh_package_name(package_name: &str) -> Result<(), ClaimValidationError> {
+    let reject = |reason: &str| {
+        Err(ClaimValidationError::PluginId {
+            plugin_id: package_name.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    if package_name.is_empty() {
+        return reject("must not be empty");
+    }
+    if package_name.starts_with('-') || package_name == "." || package_name == ".." {
+        return reject("must not be '.'/'..' or start with '-'");
+    }
+    let mut segments = package_name.split('/');
+    let first = segments.next().unwrap_or_default();
+    let scoped = first.starts_with('@');
+    if scoped {
+        if first.len() <= 1 || segments.clone().count() != 1 {
+            return reject("scoped names must have exactly one non-empty package segment");
+        }
+        if first[1..].starts_with('.') || first[1..].starts_with('-') {
+            return reject("scope must not start with '.' or '-'");
+        }
+        if !first[1..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return reject("scope contains disallowed characters");
+        }
+    } else if segments.clone().next().is_some() {
+        return reject("unscoped names must not contain '/'");
+    }
+    let name = segments.next().unwrap_or(first);
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('-') {
+        return reject("package segment is empty, traversal, or starts with '-'");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return reject("contains disallowed character");
+    }
+    Ok(())
+}
+
 /// Reject a marketplace name unless it is a non-empty string of argv-safe
 /// characters (`[A-Za-z0-9._-]`) that is neither `.`/`..` nor leading with
 /// `-`. Codex/Claude Code marketplace names are passed to the framework
@@ -1035,7 +1340,9 @@ mod tests {
             adapter_type: None,
             enabled_at: "2026-06-12T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/openclaw"),
-            bundle_digest: Some("sha256:abc".to_string()),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1093,74 +1400,94 @@ mod tests {
         assert_eq!(claim, parsed);
     }
 
-    fn bundle_claim(root: &Path, digest: Option<String>) -> AdapterClaim {
+    #[test]
+    fn managed_integrity_schema_round_trips_through_toml() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+
+        let file = ManagedSourceFile {
+            relative_path: PathBuf::from("SKILL.md"),
+            kind: ManagedFileKind::File,
+            sha256: Some("a".repeat(64)),
+            symlink_target: None,
+        };
         let mut claim = sample_claim();
-        claim.resource_root = root.to_path_buf();
-        claim.bundle_digest = digest;
-        claim
+        claim.source_revision = Some(AdapterSourceRevision {
+            source_root: claim.resource_root.clone(),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin.json"),
+                ..file.clone()
+            }],
+            materialized_sources: vec![MaterializedSourceRevision {
+                resource_id: "openclaw_state_dir".into(),
+                source_root: PathBuf::from("/usr/local/share/anolisa/skills/sec-audit"),
+                files: vec![file.clone()],
+            }],
+        });
+        claim.materialized_files = vec![MaterializedFile {
+            resource_id: "openclaw_state_dir".into(),
+            relative_path: file.relative_path,
+            kind: file.kind,
+            sha256: file.sha256,
+            symlink_target: file.symlink_target,
+        }];
+        let wrapper = Wrapper {
+            adapter_claims: vec![claim],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize integrity receipt");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse integrity receipt");
+        assert_eq!(wrapper, parsed, "round-trip mismatch; TOML was:\n{text}");
     }
 
     #[test]
-    fn bundle_match_classifies_matched_changed_and_unknown() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        std::fs::write(dir.path().join("bundle.json"), b"v1").expect("write bundle");
-        let mut claim = bundle_claim(dir.path(), None);
+    fn legacy_bundle_digest_round_trips_but_new_claim_omits_it() {
+        let new_claim = serde_json::to_value(sample_claim()).expect("new claim JSON");
+        assert!(new_claim.get("bundle_digest").is_none());
 
-        // No digest recorded at enable time: drift cannot be decided.
-        assert_eq!(claim.bundle_match(), BundleMatch::Unknown);
-
-        claim.bundle_digest = digest_tree(dir.path());
-        assert_eq!(claim.bundle_match(), BundleMatch::Matched);
-
-        std::fs::write(dir.path().join("bundle.json"), b"v2").expect("rewrite bundle");
-        assert_eq!(claim.bundle_match(), BundleMatch::Changed);
-
-        // A vanished resource root is Unknown again, not Changed: the
-        // verdict must never rest on a digest that could not be computed.
-        std::fs::remove_dir_all(dir.path()).expect("remove bundle root");
-        assert_eq!(claim.bundle_match(), BundleMatch::Unknown);
-    }
-
-    #[test]
-    fn stale_enabled_claims_selects_only_enabled_changed_receipts() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        std::fs::write(dir.path().join("bundle.json"), b"v1").expect("write bundle");
-        let current = digest_tree(dir.path()).expect("digest");
-
-        let fresh = bundle_claim(dir.path(), Some(current));
-        let mut stale = bundle_claim(dir.path(), Some("sha256:enable-time".to_string()));
-        stale.framework = "cosh".to_string();
-        let mut retry_cleanup = stale.clone();
-        retry_cleanup.status = ClaimStatus::CleanupFailed;
-        let no_digest = bundle_claim(dir.path(), None);
-        let mut other_component = stale.clone();
-        other_component.component = "agent-memory".to_string();
-
-        let claims = vec![
-            fresh,
-            stale.clone(),
-            retry_cleanup,
-            no_digest,
-            other_component.clone(),
-        ];
-        assert_eq!(
-            stale_enabled_claims(&claims, "tokenless"),
-            vec![&stale],
-            "only the enabled receipt with a changed bundle qualifies"
+        let mut value = serde_json::to_value(sample_claim()).expect("claim JSON value");
+        value.as_object_mut().expect("claim object").insert(
+            "bundle_digest".to_string(),
+            serde_json::Value::String("sha256:legacy".to_string()),
         );
+        let parsed: AdapterClaim = serde_json::from_value(value).expect("legacy claim");
+        assert_eq!(parsed.bundle_digest.as_deref(), Some("sha256:legacy"));
+        let written = serde_json::to_value(parsed).expect("legacy claim JSON");
         assert_eq!(
-            stale_enabled_claims(&claims, "agent-memory"),
-            vec![&other_component],
-            "a receipt is only ever reported under its own component"
+            written
+                .get("bundle_digest")
+                .and_then(serde_json::Value::as_str),
+            Some("sha256:legacy")
         );
     }
 
     #[test]
-    fn bundle_changed_reason_matches_the_status_condition_wording() {
-        assert_eq!(
-            BUNDLE_CHANGED_REASON,
-            "resource bundle changed since enable"
-        );
+    fn integrity_records_require_normalized_digest_and_nonempty_symlink_target() {
+        let mut claim = sample_claim();
+        claim.source_revision = Some(AdapterSourceRevision {
+            source_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/openclaw"),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin.json"),
+                kind: ManagedFileKind::File,
+                sha256: Some("A".repeat(64)),
+                symlink_target: None,
+            }],
+            materialized_sources: Vec::new(),
+        });
+        assert!(validate_integrity_entries(&claim).is_err());
+
+        claim.source_revision = Some(AdapterSourceRevision {
+            source_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/openclaw"),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin-link"),
+                kind: ManagedFileKind::Symlink,
+                sha256: None,
+                symlink_target: Some(PathBuf::new()),
+            }],
+            materialized_sources: Vec::new(),
+        });
+        assert!(validate_integrity_entries(&claim).is_err());
     }
 
     #[test]
@@ -1168,6 +1495,26 @@ mod tests {
         validate_plugin_id("tokenless").expect("plain");
         validate_plugin_id("ws-ckpt").expect("dash");
         validate_plugin_id("a.b_c-1").expect("mixed");
+    }
+
+    #[test]
+    fn validate_dsh_package_name_accepts_scoped_name() {
+        validate_dsh_package_name("@anolisa/dsh-tokenless").expect("scoped package");
+        validate_dsh_package_name("dsh-tokenless").expect("unscoped package");
+    }
+
+    #[test]
+    fn validate_dsh_package_name_rejects_traversal_and_shell_text() {
+        for value in [
+            "",
+            "@anolisa",
+            "@anolisa/",
+            "@anolisa/a/b",
+            "../escape",
+            "a b",
+        ] {
+            assert!(validate_dsh_package_name(value).is_err(), "{value}");
+        }
     }
 
     #[test]
@@ -1231,7 +1578,9 @@ mod tests {
             adapter_type: None,
             enabled_at: "2026-06-22T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/agent-sec/hermes"),
-            bundle_digest: Some("sha256:def".to_string()),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1279,6 +1628,69 @@ mod tests {
         let json = serde_json::to_string(&claim).expect("serialize Hermes JSON");
         let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse Hermes JSON");
         assert_eq!(claim, parsed);
+    }
+
+    fn sample_qwenpaw_claim() -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "qwenpaw".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-09-04T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwenpaw"),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: vec![
+                ClaimResource {
+                    id: "qwenpaw_home".to_string(),
+                    purpose: "qwenpaw_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qwenpaw"),
+                    },
+                },
+                ClaimResource {
+                    id: "qwenpaw_plugin".to_string(),
+                    purpose: "qwenpaw_plugin_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qwenpaw/plugins/tokenless"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::QwenPaw(QwenPawClaim {
+                home_resource: "qwenpaw_home".to_string(),
+                plugin_resource: "qwenpaw_plugin".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn qwenpaw_claim_round_trips_and_validates() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let claim = sample_qwenpaw_claim();
+        let wrapper = Wrapper {
+            adapter_claims: vec![claim.clone()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize QwenPaw to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse QwenPaw from TOML");
+        assert_eq!(
+            wrapper, parsed,
+            "QwenPaw round-trip mismatch; TOML:\n{text}"
+        );
+        let json = serde_json::to_string(&claim).expect("serialize QwenPaw JSON");
+        let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse QwenPaw JSON");
+        assert_eq!(claim, parsed);
+        let layout = FsLayout::system(None);
+        claim
+            .validate(&layout, &[PathBuf::from("/home/alice/.qwenpaw")])
+            .expect("QwenPaw claim validates under its working directory");
     }
 
     #[test]
@@ -1346,6 +1758,8 @@ mod tests {
             enabled_at: "2026-06-22T12:00:00Z".to_string(),
             resource_root: PathBuf::from("/data/adapters/sec-core/openclaw"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1438,7 +1852,9 @@ mod tests {
             adapter_type: Some("plugin".to_string()),
             enabled_at: "2026-07-04T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
-            bundle_digest: Some("sha256:c0de".to_string()),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1527,7 +1943,9 @@ mod tests {
             adapter_type: Some("extension".to_string()),
             enabled_at: "2026-07-04T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/common"),
-            bundle_digest: Some("sha256:c05h".to_string()),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1564,6 +1982,8 @@ mod tests {
             enabled_at: "2026-07-04T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/claude-code"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1604,7 +2024,9 @@ mod tests {
             adapter_type: Some("plugin".to_string()),
             enabled_at: "2026-07-08T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qoder"),
-            bundle_digest: Some("sha256:90de".to_string()),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1758,7 +2180,9 @@ mod tests {
             adapter_type: Some("extension".to_string()),
             enabled_at: "2026-07-16T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwencode"),
-            bundle_digest: Some("sha256:0wen".to_string()),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),

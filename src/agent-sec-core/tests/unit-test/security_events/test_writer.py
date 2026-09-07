@@ -4,6 +4,7 @@ import json
 import multiprocessing
 import os
 import re
+import stat
 import threading
 import time
 from datetime import datetime, timedelta
@@ -148,6 +149,96 @@ class TestJsonlEventWriter:
         assert observability_lock.exists()
         assert security_lock.resolve() != observability_lock.resolve()
 
+    def test_data_and_lock_files_are_created_owner_only(self, tmp_path: Path) -> None:
+        path = tmp_path / "security-events.jsonl"
+
+        JsonlEventWriter(path=path).write({"stream": "security"})
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(f"{path}.lock").stat().st_mode) == 0o600
+
+    @pytest.mark.parametrize("process_umask", [0o000, 0o777])
+    def test_owner_only_mode_does_not_depend_on_process_umask(
+        self, tmp_path: Path, process_umask: int
+    ) -> None:
+        path = tmp_path / "security-events.jsonl"
+        previous_umask = os.umask(process_umask)
+        try:
+            JsonlEventWriter(path=path).write_or_raise({"stream": "security"})
+        finally:
+            os.umask(previous_umask)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(f"{path}.lock").stat().st_mode) == 0o600
+
+    def test_existing_owned_data_and_lock_files_are_tightened(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "security-events.jsonl"
+        lock_path = Path(f"{path}.lock")
+        path.write_text("", encoding="utf-8")
+        lock_path.write_text("", encoding="utf-8")
+        path.chmod(0o644)
+        lock_path.chmod(0o666)
+
+        JsonlEventWriter(path=path).write({"stream": "security"})
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+    def test_existing_retained_backups_are_tightened_without_rotation(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "security-events.jsonl"
+        backups = [
+            tmp_path / "security-events.jsonl.20260101-120000.100",
+            tmp_path / "security-events.jsonl.20260101-120000.100.1",
+        ]
+        for backup in backups:
+            backup.write_text("legacy\n", encoding="utf-8")
+            backup.chmod(0o644)
+
+        JsonlEventWriter(path=path, max_bytes=10_000).write_or_raise(
+            {"stream": "security"}
+        )
+
+        assert all(stat.S_IMODE(backup.stat().st_mode) == 0o600 for backup in backups)
+        assert len(_backup_files(path)) == 2
+
+    def test_retained_backup_migration_does_not_follow_symlinks(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "security-events.jsonl"
+        target = tmp_path / "unrelated.txt"
+        target.write_text("unrelated\n", encoding="utf-8")
+        target.chmod(0o644)
+        backup_link = tmp_path / "security-events.jsonl.20260101-120000.100"
+        backup_link.symlink_to(target)
+
+        JsonlEventWriter(path=path).write_or_raise({"stream": "security"})
+
+        assert backup_link.is_symlink()
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    def test_retained_backup_migration_ignores_non_backup_files(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "security-events.jsonl"
+        unrelated = [
+            tmp_path / "security-events.jsonl.old",
+            tmp_path / "security-events.jsonl.bak",
+            tmp_path / "security-events.jsonl.notes",
+        ]
+        for candidate in unrelated:
+            candidate.write_text("unrelated\n", encoding="utf-8")
+            candidate.chmod(0o644)
+
+        JsonlEventWriter(path=path).write_or_raise({"stream": "security"})
+
+        assert all(
+            stat.S_IMODE(candidate.stat().st_mode) == 0o644 for candidate in unrelated
+        )
+
     def test_generic_writer_uses_stream_specific_rotation_state(
         self, tmp_path: Path
     ) -> None:
@@ -200,6 +291,21 @@ class TestWriterAutoRotation:
         assert _backup_files(path), "At least one rotated backup file should exist"
         assert path.exists()
         assert path.stat().st_size < 600
+
+    def test_rotation_tightens_legacy_file_before_moving_it(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "security-events.jsonl"
+        path.write_text("legacy\n", encoding="utf-8")
+        path.chmod(0o644)
+        writer = JsonlEventWriter(path=path, max_bytes=1, backup_count=3)
+
+        writer.write({"stream": "security"})
+
+        backups = _backup_files(path)
+        assert len(backups) == 1
+        assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     def test_backup_count_limit(self, tmp_path: Path) -> None:
         """Test that old backups are deleted when backup_count is exceeded."""

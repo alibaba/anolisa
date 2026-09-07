@@ -18,8 +18,8 @@ Provides:       anolisa-component(blaze)
 %description
 Blaze is the ANOLISA per-host sandbox orchestrator daemon. It manages sandbox
 instance lifecycles via HTTP API with policy-driven backend selection, supporting
-Firecracker microVM, Bubblewrap, and Mock backends. Features include warm-pool
-pre-allocation, multi-backend fallback, and Prometheus metrics export.
+Firecracker microVM, Bubblewrap, and Mock backends. Features include
+multi-backend fallback and Prometheus metrics export.
 
 %prep
 %setup -q

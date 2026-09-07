@@ -403,7 +403,30 @@ fn schema_migration_adds_missing_columns() {
         )
         .unwrap();
     }
+    // A row written by the legacy schema must survive the migration
+    // untouched and read back with every migrated column as None.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO stats (
+                timestamp, operation, agent_id, before_chars, before_tokens,
+                after_chars, after_tokens
+            ) VALUES ('2024-01-01T00:00:00+00:00', 'compress-response', 'old', 10, 4, 5, 2)",
+            [],
+        )
+        .unwrap();
+    }
     let rec = StatsRecorder::new(&db_path).unwrap();
+    let legacy = rec.record_by_id(1).unwrap().unwrap();
+    assert_eq!(legacy.agent_id, "old");
+    assert_eq!(legacy.before_tokens, 4);
+    assert_eq!(legacy.stash_writes, None);
+    assert_eq!(legacy.content_type, None);
+    assert_eq!(legacy.applied_operations, None);
+    assert_eq!(legacy.recoverability, None);
+    assert_eq!(legacy.tokenizer_id, None);
+    assert_eq!(legacy.unrecoverable_truncations, None);
+
     let record =
         StatsRecord::new(OperationType::CompressSchema, "cli".into(), 100, 25, 50, 12)
             .with_mode(CompressionMode::Active)
@@ -412,6 +435,21 @@ fn schema_migration_adds_missing_columns() {
     let got = rec.record_by_id(id).unwrap().unwrap();
     assert_eq!(got.mode, CompressionMode::Active);
     assert_eq!(got.stash_writes, Some(1));
+
+    // The §4.6 tables arrive with the migration too.
+    {
+        let conn = rec.lock_conn();
+        for table in ["compression_artifacts", "retrieve_events"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing table {table}");
+        }
+    }
 
     let conn = rec.lock_conn();
     let mut stmt = conn
@@ -463,4 +501,150 @@ fn record_with_before_after_output() {
     assert_eq!(got.after_text.as_deref(), Some("after-text"));
     assert_eq!(got.before_output.as_deref(), Some("before-output"));
     assert_eq!(got.after_output.as_deref(), Some("after-output"));
+}
+
+#[test]
+fn entry_metadata_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = StatsRecorder::new(dir.path().join("stats.db")).unwrap();
+    let record = StatsRecord::new(OperationType::CompressResponse, "cli".into(), 100, 40, 50, 20)
+        .with_entry_metadata(
+            Some("api-records".into()),
+            Some("command_output".into()),
+            Some(vec!["json_cleanup".into(), "toon".into()]),
+            Some("lossless".into()),
+            "heuristic-v1",
+            Some(2),
+        );
+    let id = rec.record(&record).unwrap();
+    let got = rec.record_by_id(id).unwrap().unwrap();
+    assert_eq!(got.content_type.as_deref(), Some("api-records"));
+    assert_eq!(got.content_origin.as_deref(), Some("command_output"));
+    assert_eq!(
+        got.applied_operations.as_deref(),
+        Some(["json_cleanup".to_string(), "toon".to_string()].as_slice())
+    );
+    assert_eq!(got.recoverability.as_deref(), Some("lossless"));
+    assert_eq!(got.tokenizer_id.as_deref(), Some("heuristic-v1"));
+    assert_eq!(got.unrecoverable_truncations, Some(2));
+}
+
+#[test]
+fn artifacts_attach_to_their_stats_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = StatsRecorder::new(dir.path().join("stats.db")).unwrap();
+    let id = rec
+        .record(&StatsRecord::new(
+            OperationType::CompressResponse,
+            "cli".into(),
+            100,
+            40,
+            50,
+            20,
+        ))
+        .unwrap();
+    let hashes = vec!["a".repeat(24), "b".repeat(24)];
+    rec.record_artifacts(id, "response-cleanup", &hashes).unwrap();
+
+    let conn = rec.lock_conn();
+    let rows: Vec<(i64, String, String, i64)> = conn
+        .prepare("SELECT stats_id, hash, compressor_id, emitted FROM compression_artifacts ORDER BY hash")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (id, "a".repeat(24), "response-cleanup".into(), 1),
+            (id, "b".repeat(24), "response-cleanup".into(), 1),
+        ]
+    );
+}
+
+#[test]
+fn retrieve_events_aggregate_into_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = StatsRecorder::new(dir.path().join("stats.db")).unwrap();
+    let hash = "c".repeat(24);
+    rec.record_retrieve_event(
+        &hash,
+        "hit",
+        "cli",
+        Some(120),
+        Some("heuristic-v1"),
+        Some("agent"),
+        Some("session"),
+        Some("tool"),
+    )
+    .unwrap();
+    rec.record_retrieve_event(
+        &hash,
+        "hit",
+        "cli",
+        Some(80),
+        Some("heuristic-v1"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    rec.record_retrieve_event(&hash, "miss", "embedded", None, None, None, None, None)
+        .unwrap();
+    rec.record_retrieve_event(&hash, "error", "cli", None, None, None, None, None)
+        .unwrap();
+
+    let totals = rec.retrieve_totals().unwrap();
+    assert_eq!(
+        totals,
+        RetrieveTotals {
+            hits: 2,
+            misses: 1,
+            errors: 1,
+            retrieved_tokens: 200,
+        }
+    );
+}
+
+#[test]
+fn clear_empties_the_attribution_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = StatsRecorder::new(dir.path().join("stats.db")).unwrap();
+    let id = rec
+        .record(&StatsRecord::new(
+            OperationType::CompressResponse,
+            "cli".into(),
+            100,
+            40,
+            50,
+            20,
+        ))
+        .unwrap();
+    rec.record_artifacts(id, "response-cleanup", &["d".repeat(24)])
+        .unwrap();
+    rec.record_retrieve_event(
+        &"d".repeat(24),
+        "hit",
+        "cli",
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    rec.clear().unwrap();
+    assert_eq!(rec.count().unwrap(), 0);
+    assert_eq!(rec.retrieve_totals().unwrap(), RetrieveTotals::default());
+    let conn = rec.lock_conn();
+    let artifacts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM compression_artifacts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(artifacts, 0);
 }

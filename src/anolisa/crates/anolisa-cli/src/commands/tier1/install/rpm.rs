@@ -1,18 +1,19 @@
 //! RPM candidate resolution shared by `install` and `adopt`: mapping a
-//! component name (or `--package` override) to the RPM package(s) that could
-//! back it, via the repo-side component index, repo.toml `package_map`, and
-//! rpmdb `Provides: anolisa-component(...)` metadata.
+//! settled component identity (or `--package` override) to the RPM package(s)
+//! that could back it, via the repo-side component index, repo.toml
+//! `package_map`, and rpmdb `Provides: anolisa-component(...)` metadata.
+//! Identity resolution happens before this layer — the candidate chain
+//! selects packages, it never establishes a new component name.
 //!
 //! Presence probing and adoption both moved to the planner-driven pipelines
-//! (`dispatch.rs`, `adopt.rs`); only the identity resolution lives here.
+//! (`dispatch.rs`, `adopt.rs`); only the package resolution lives here.
 
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::rpm_select::{PinnedSelection, nevra, select_pinned_candidate};
 
 use crate::repo_config::BackendConfig;
 use crate::resolution::{
-    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
-    ResolvedTarget,
+    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolveOptions, ResolvedTarget,
 };
 
 /// Resolved RPM component/package pair.
@@ -39,20 +40,19 @@ impl RpmTarget {
     }
 }
 
-/// Resolve candidate RPM component/package pairs for `input`.
+/// Resolve candidate RPM packages for the settled component identity `input`.
 ///
 /// Precedence, in order: CLI `--package`, repo-side component index,
-/// repo.toml `package_map`, installed/available
-/// `anolisa-component(<name>)` providers, then the input package's own
-/// `Provides: anolisa-component(<component>)` metadata.
+/// repo.toml `package_map`, then installed/available
+/// `anolisa-component(<name>)` providers.
 ///
-/// Ordinary RPM packages without ANOLISA metadata return an empty vector:
+/// A component with no package mapping or provider returns an empty vector:
 /// `install --backend rpm <arg>` installs ANOLISA components, not arbitrary
 /// `dnf install <arg>` targets.
 ///
 /// # Errors
 /// Propagates a hard [`PackageQueryError`] from the package query; empty
-/// query results are the normal "no explicit component identity" branch.
+/// query results are the normal "no backend package resolved" branch.
 #[cfg(test)]
 pub(crate) fn rpm_package_candidates(
     cli_override: Option<&str>,
@@ -60,14 +60,7 @@ pub(crate) fn rpm_package_candidates(
     query: &dyn PackageQuery,
     input: &str,
 ) -> Result<Vec<RpmTarget>, PackageQueryError> {
-    rpm_package_candidates_with_index(
-        cli_override,
-        rpm_backend,
-        None,
-        query,
-        input,
-        ResolutionUse::Install,
-    )
+    rpm_package_candidates_with_index(cli_override, rpm_backend, None, query, input)
 }
 
 /// A repository candidate a `--version` pin resolved to.
@@ -143,13 +136,11 @@ pub(crate) fn rpm_package_candidates_with_index(
     component_index: Option<&ComponentIndex>,
     query: &dyn PackageQuery,
     input: &str,
-    use_case: ResolutionUse,
 ) -> Result<Vec<RpmTarget>, PackageQueryError> {
     let resolver = ComponentResolver::new(component_index, rpm_backend, Some(query));
     let resolved = resolver.resolve(
         input,
         BackendKind::Rpm,
-        use_case,
         ResolveOptions {
             package_override: cli_override,
         },

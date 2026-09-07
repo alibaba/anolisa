@@ -14,7 +14,7 @@ Test groups:
    G6  scan --all
    G7  audit
    G8  status (human-readable)
-   G9  stubs & edge cases
+   G9  Reserved commands & edge cases
    G10 SKILL.md contract assertions
    G11 Passphrase-protected key lifecycle
    G12 cosh hook integration
@@ -27,6 +27,7 @@ Usage::
     python3 e2e_test.py --verbose  # show CLI stdout/stderr
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -69,6 +70,7 @@ def run_skill_ledger(
     result = subprocess.run(
         cmd,
         capture_output=True,
+        check=False,
         text=True,
         env=env,
         cwd=cwd,
@@ -120,6 +122,17 @@ def write_findings_file(parent: Path, name: str, findings: list | dict) -> Path:
     path = parent / name
     path.write_text(json.dumps(findings, ensure_ascii=False))
     return path
+
+
+def snapshot_file_tree(root: Path) -> dict[str, bytes]:
+    """Return relative paths and contents for every file below *root*."""
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 # ── Workspace ──────────────────────────────────────────────────────────────
@@ -192,6 +205,8 @@ def case_help_available(ws: Workspace):
     assert (
         "skill-ledger" in r.stdout.lower()
     ), f"Expected 'skill-ledger' in help output: {r.stdout[:200]}"
+    assert "rotate-keys" not in r.stdout
+    assert "set-policy" not in r.stdout
 
 
 # ── G2: init-keys ─────────────────────────────────────────────────────────
@@ -812,24 +827,44 @@ def case_status_drifted_shows_details(ws: Workspace):
     ), f"Expected health 'attention' after drift: {out['skills']}"
 
 
-# ── G9: stubs & edge cases ───────────────────────────────────────────────
+# ── G9: reserved commands & edge cases ───────────────────────────────────
 
 
-def case_set_policy_stub(ws: Workspace):
-    """set-policy → exit 0, 'coming soon' in output."""
-    skill = make_skill(ws.skills_dir, "stub-policy", {"x.txt": "x"})
+def case_set_policy_removed(ws: Workspace) -> None:
+    """The removed set-policy placeholder fails without creating ledger state."""
+    skill = make_skill(ws.skills_dir, "removed-policy", {"x.txt": "x"})
+    metadata_dir = skill / ".skill-meta"
+    assert not metadata_dir.exists()
+
     r = run_skill_ledger(
         ["set-policy", str(skill), "--policy", "allow"], env_extra=ws.env()
     )
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 2, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    assert "no such command" in r.stderr.lower()
+    assert "set-policy" in r.stderr
+    assert not metadata_dir.exists()
 
 
-def case_rotate_keys_stub(ws: Workspace):
-    """rotate-keys → exit 0, 'coming soon' in output."""
+def case_rotate_keys_not_implemented(ws: Workspace) -> None:
+    """rotate-keys fails explicitly without changing the isolated key store."""
+    key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
+    before = snapshot_file_tree(key_dir)
+    keyring_existed = (key_dir / "keyring").is_dir()
+    assert {"key.enc", "key.pub"}.issubset(before)
+
     r = run_skill_ledger(["rotate-keys"], env_extra=ws.env())
-    assert r.returncode == 0, f"exit {r.returncode}: {r.stderr}"
-    assert "coming soon" in r.stdout.lower()
+    assert r.returncode == 1, f"exit {r.returncode}: {r.stderr}"
+    assert r.stdout == ""
+    assert r.stderr == (
+        "Error: rotate-keys is not implemented; no keys were changed.\n"
+    )
+    assert snapshot_file_tree(key_dir) == before
+    assert (key_dir / "keyring").is_dir() is keyring_existed
+
+    help_result = run_skill_ledger(["rotate-keys", "--help"], env_extra=ws.env())
+    assert help_result.returncode == 0, help_result.stderr
+    assert "not implemented" in help_result.stdout.lower()
 
 
 def case_list_scanners(ws: Workspace):
@@ -1113,6 +1148,7 @@ def case_passphrase_missing_env_fails(ws: Workspace):
         cmd,
         input="\n",
         capture_output=True,
+        check=False,
         text=True,
         env=env_without,
         start_new_session=True,
@@ -1130,25 +1166,37 @@ def case_passphrase_missing_env_fails(ws: Workspace):
 
 # ── G12: cosh hook integration ───────────────────────────────────────────
 
-# The cosh hook script location varies; try common paths.
-_HOOK_SEARCH_PATHS = [
-    # Relative to RPM install
-    Path("/usr/share/anolisa/extensions/agent-sec-core/hooks/skill_ledger_hook.py"),
-    # Relative to source tree (if running during development)
-    Path(__file__).resolve().parents[3]
-    / "cosh-extension"
-    / "hooks"
-    / "skill_ledger_hook.py",
-]
+# Source gates must exercise the checked-out hook, while direct RPM acceptance
+# must keep validating the installed artifact.
+_SOURCE_ROOT = Path(__file__).resolve().parents[3]
+_SOURCE_HOOK = _SOURCE_ROOT / "cosh-extension" / "hooks" / "skill_ledger_hook.py"
+_INSTALLED_HOOK = Path(
+    "/usr/share/anolisa/extensions/agent-sec-core/hooks/skill_ledger_hook.py"
+)
+_CLI_PATH = Path(CLI_BIN).resolve() if CLI_BIN else None
+_SOURCE_RUN = _CLI_PATH is not None and _CLI_PATH.is_relative_to(_SOURCE_ROOT)
+_HOOK_OVERRIDE_RAW = os.environ.get("SKILL_LEDGER_E2E_HOOK_SCRIPT")
+_HOOK_OVERRIDE = Path(_HOOK_OVERRIDE_RAW).expanduser() if _HOOK_OVERRIDE_RAW else None
+if _HOOK_OVERRIDE is not None:
+    _HOOK_SEARCH_PATHS = [_HOOK_OVERRIDE]
+elif _SOURCE_RUN:
+    _HOOK_SEARCH_PATHS = [_SOURCE_HOOK, _INSTALLED_HOOK]
+else:
+    _HOOK_SEARCH_PATHS = [_INSTALLED_HOOK, _SOURCE_HOOK]
 HOOK_SCRIPT: str | None = None
 for _p in _HOOK_SEARCH_PATHS:
     if _p.is_file():
         HOOK_SCRIPT = str(_p)
         break
+if _HOOK_OVERRIDE is not None and HOOK_SCRIPT is None:
+    raise FileNotFoundError(
+        "SKILL_LEDGER_E2E_HOOK_SCRIPT does not point to a regular file: "
+        f"{_HOOK_OVERRIDE}"
+    )
 
 
-def _run_hook(input_data, env_extra=None):
-    """Pipe cosh event JSON into the hook script, return parsed output."""
+def _run_hook_process(input_data, env_extra=None):
+    """Pipe cosh event JSON into the hook script and return the process result."""
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
@@ -1159,6 +1207,7 @@ def _run_hook(input_data, env_extra=None):
         ),
         capture_output=True,
         text=True,
+        check=False,
         timeout=CLI_TIMEOUT_S,
         env=env,
     )
@@ -1166,6 +1215,12 @@ def _run_hook(input_data, env_extra=None):
         print(f"  hook stdout: {proc.stdout.strip()[:200]}")
         if proc.stderr.strip():
             print(f"  hook stderr: {proc.stderr.strip()[:200]}")
+    return proc
+
+
+def _run_hook(input_data, env_extra=None):
+    """Pipe cosh event JSON into the hook script, return parsed output."""
+    proc = _run_hook_process(input_data, env_extra=env_extra)
     return json.loads(proc.stdout)
 
 
@@ -1176,15 +1231,58 @@ def _hook_env(env_extra: dict | None = None, *, policy: str) -> dict:
     return env
 
 
-def _make_cosh_event(skill_name: str, cwd: str) -> dict:
-    """Build a minimal cosh PreToolUse JSON event."""
-    return {
+def _add_skill_context(event: dict, skill_name: str, skill_dir: Path | None) -> dict:
+    """Attach the Host-resolved SKILL.md path when supplied."""
+    if skill_dir is not None:
+        event["skill_context"] = {
+            "skill_name": skill_name,
+            "file_path": str(skill_dir / "SKILL.md"),
+        }
+    return event
+
+
+def _make_cosh_event(
+    skill_name: str, cwd: str, *, skill_dir: Path | None = None
+) -> dict:
+    """Build a legacy Cosh PreToolUse JSON event."""
+    event = {
         "session_id": "test-session",
         "hook_event_name": "PreToolUse",
         "tool_name": "skill",
         "tool_input": {"skill": skill_name},
         "cwd": cwd,
     }
+    return _add_skill_context(event, skill_name, skill_dir)
+
+
+def _make_cosh_ng_event(
+    skill_name: str, cwd: str, *, skill_dir: Path | None = None
+) -> dict:
+    """Build a Cosh-NG invoke PreToolUse JSON event."""
+    event = {
+        "session_id": "test-session",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "skill",
+        "tool_input": {"action": "invoke", "name": skill_name},
+        "cwd": cwd,
+    }
+    return _add_skill_context(event, skill_name, skill_dir)
+
+
+def _make_host_skill_events(
+    skill_name: str, cwd: str, skill_dir: Path
+) -> list[tuple[str, dict]]:
+    """Return equivalent legacy Cosh and Cosh-NG invoke events."""
+    return [
+        (
+            "legacy-cosh",
+            _make_cosh_event(skill_name, cwd, skill_dir=skill_dir),
+        ),
+        (
+            "cosh-ng",
+            _make_cosh_ng_event(skill_name, cwd, skill_dir=skill_dir),
+        ),
+    ]
 
 
 def case_hook_invalid_json_allows():
@@ -1206,18 +1304,16 @@ def case_hook_wrong_tool_allows():
 
 def case_hook_unknown_skill_policy_modes():
     """Skill not found before summary resolution: fail-open regardless of policy."""
-    output = _run_hook(_make_cosh_event("nonexistent-skill-xyz", "/tmp"))
-    assert output == {"decision": "allow"}
-
-    output = _run_hook(
-        _make_cosh_event("nonexistent-skill-xyz", "/tmp"),
-        env_extra=_hook_env(policy="warn"),
-    )
-    assert output == {"decision": "allow"}
+    for policy in ("observe", "warn", "ask", "block"):
+        output = _run_hook(
+            _make_cosh_event("nonexistent-skill-xyz", "/tmp"),
+            env_extra=_hook_env(policy=policy),
+        )
+        assert output == {"decision": "allow"}, f"{policy}: {output}"
 
 
 def case_hook_pass_status_silent(ws: Workspace):
-    """Hook on a pass-status skill → silent allow (no reason)."""
+    """Both Host payloads allow a pass-status skill without a reason."""
     skill = make_skill(ws.hook_skills_dir, "hook-pass", {"m.txt": "main"})
     env = ws.env()
     findings = write_findings_file(
@@ -1228,16 +1324,16 @@ def case_hook_pass_status_silent(ws: Workspace):
     run_skill_ledger(
         ["certify", str(skill), "--findings", str(findings)], env_extra=env
     )
-    output = _run_hook(
-        _make_cosh_event("hook-pass", str(ws.root)),
-        env_extra=env,
-    )
-    assert output["decision"] == "allow"
-    assert "reason" not in output, f"Expected silent allow, got reason: {output}"
+    for profile, event in _make_host_skill_events("hook-pass", str(ws.root), skill):
+        output = _run_hook(event, env_extra=env)
+        assert output["decision"] == "allow", f"{profile}: {output}"
+        assert (
+            "reason" not in output
+        ), f"{profile}: expected silent allow, got reason: {output}"
 
 
 def case_hook_drifted_policy_modes(ws: Workspace):
-    """Hook on a drifted skill: default asks, debug allows, block rejects."""
+    """Both Host payloads apply ask/debug/warn/block to a drifted skill."""
     skill = make_skill(ws.hook_skills_dir, "hook-drift", {"f.txt": "original"})
     env = ws.env()
     findings = write_findings_file(
@@ -1249,46 +1345,103 @@ def case_hook_drifted_policy_modes(ws: Workspace):
         ["certify", str(skill), "--findings", str(findings)], env_extra=env
     )
     (skill / "f.txt").write_text("MODIFIED")
-    output = _run_hook(
-        _make_cosh_event("hook-drift", str(ws.root)),
-        env_extra=env,
+    for profile, event in _make_host_skill_events("hook-drift", str(ws.root), skill):
+        output = _run_hook(event, env_extra=env)
+        assert output["decision"] == "ask", f"{profile}: {output}"
+        assert (
+            "reason" in output
+        ), f"{profile}: expected confirmation reason for drifted: {output}"
+        assert (
+            "drifted" in output["reason"].lower()
+            or "changed" in output["reason"].lower()
+        ), f"{profile}: {output}"
+
+        output = _run_hook(
+            event,
+            env_extra=_hook_env(env, policy="debug"),
+        )
+        assert output == {"decision": "allow"}, f"{profile}: {output}"
+
+        output = _run_hook(
+            event,
+            env_extra=_hook_env(env, policy="warn"),
+        )
+        assert output["decision"] == "allow", f"{profile}: {output}"
+        assert (
+            "reason" in output
+        ), f"{profile}: expected visible warning for drifted: {output}"
+        assert (
+            "drifted" in output["reason"].lower()
+            or "changed" in output["reason"].lower()
+        ), f"{profile}: {output}"
+
+        output = _run_hook(
+            event,
+            env_extra=_hook_env(env, policy="block"),
+        )
+        assert output["decision"] == "block", f"{profile}: {output}"
+        assert (
+            "reason" in output
+        ), f"{profile}: expected block reason for drifted: {output}"
+        assert (
+            "drifted" in output["reason"].lower()
+            or "changed" in output["reason"].lower()
+        ), f"{profile}: {output}"
+
+
+def case_hook_cosh_ng_list_silent_allow(ws: Workspace):
+    """Cosh-NG list skips identity checks, policy reads, keys, and CLI calls."""
+    skill = make_skill(ws.hook_skills_dir, "hook-list-probe", {"f.txt": "main"})
+    marker = ws.root / "unexpected-cli-call"
+    fake_bin = ws.root / "fake-bin"
+    fake_bin.mkdir()
+    fake_cli = fake_bin / "agent-sec-cli"
+    fake_cli.write_text(
+        '#!/bin/sh\n: > "$SKILL_LEDGER_E2E_CLI_MARKER"\nexit 97\n',
+        encoding="utf-8",
     )
-    assert output["decision"] == "ask"
-    assert "reason" in output, f"Expected confirmation reason for drifted: {output}"
-    assert (
-        "drifted" in output["reason"].lower() or "changed" in output["reason"].lower()
+    fake_cli.chmod(0o755)
+
+    event = _make_cosh_ng_event(
+        "ignored-list-name",
+        str(ws.root),
+        skill_dir=skill,
+    )
+    event["tool_input"] = {
+        "action": "list",
+        "name": "ignored-list-name",
+        "skill": "hook-list-probe",
+    }
+    result = _run_hook_process(
+        event,
+        env_extra=ws.env(
+            {
+                "PATH": str(fake_bin),
+                "SKILL_LEDGER_E2E_CLI_MARKER": str(marker),
+                "SKILL_LEDGER_MODE": "invalid-list-probe-policy",
+            }
+        ),
     )
 
-    output = _run_hook(
-        _make_cosh_event("hook-drift", str(ws.root)),
-        env_extra=_hook_env(env, policy="debug"),
-    )
-    assert output == {"decision": "allow"}
-
-    output = _run_hook(
-        _make_cosh_event("hook-drift", str(ws.root)),
-        env_extra=_hook_env(env, policy="block"),
-    )
-    assert output["decision"] == "block"
-    assert "reason" in output, f"Expected block reason for drifted: {output}"
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"decision": "allow"}
     assert (
-        "drifted" in output["reason"].lower() or "changed" in output["reason"].lower()
-    )
+        result.stderr == ""
+    ), f"list emitted identity/policy diagnostics: {result.stderr}"
+    assert not marker.exists(), "list unexpectedly invoked agent-sec-cli"
+    key_dir = ws.xdg_data / "agent-sec" / "skill-ledger"
+    assert not (key_dir / "key.pub").exists(), "list unexpectedly initialized keys"
+    assert not (key_dir / "key.enc").exists(), "list unexpectedly initialized keys"
 
 
 def case_hook_path_traversal_policy_modes(ws: Workspace):
     """Path traversal before summary resolution fails open without HookOutput reason."""
-    output = _run_hook(
-        _make_cosh_event("../../etc/passwd", "/tmp"),
-        env_extra=ws.env(),
-    )
-    assert output == {"decision": "allow"}
-
-    output = _run_hook(
-        _make_cosh_event("../../etc/passwd", "/tmp"),
-        env_extra=_hook_env(ws.env(), policy="warn"),
-    )
-    assert output == {"decision": "allow"}
+    for policy in ("observe", "warn", "ask", "block"):
+        output = _run_hook(
+            _make_cosh_event("../../etc/passwd", "/tmp"),
+            env_extra=_hook_env(ws.env(), policy=policy),
+        )
+        assert output == {"decision": "allow"}, f"{policy}: {output}"
 
 
 # ── G13: Full pipeline (vetter → ledger → hook) ─────────────────────────
@@ -1444,8 +1597,8 @@ E2E_CASES = [
     E2ECase("G7: --verify-snapshots", case_audit_verify_snapshots),
     E2ECase("G8: human-readable output", case_status_human_readable_output),
     E2ECase("G8: drifted details", case_status_drifted_shows_details),
-    E2ECase("G9: set-policy stub", case_set_policy_stub),
-    E2ECase("G9: rotate-keys stub", case_rotate_keys_stub),
+    E2ECase("G9: set-policy removed", case_set_policy_removed),
+    E2ECase("G9: rotate-keys unavailable", case_rotate_keys_not_implemented),
     E2ECase("G9: list-scanners", case_list_scanners),
     E2ECase("G9: certify empty skill dir", case_certify_empty_skill_dir),
     E2ECase("G10: empty passphrase env", case_contract_init_keys_empty_passphrase_env),
@@ -1484,9 +1637,15 @@ E2E_CASES = [
         requires_hook=True,
     ),
     E2ECase(
-        "G12: hook drifted ask/debug/block",
+        "G12: hook drifted ask/debug/warn/block",
         case_hook_drifted_policy_modes,
         requires_hook=True,
+    ),
+    E2ECase(
+        "G12: Cosh-NG list → silent allow",
+        case_hook_cosh_ng_list_silent_allow,
+        requires_hook=True,
+        init_default_keys=False,
     ),
     E2ECase(
         "G12: hook path traversal fail-open",
@@ -1546,8 +1705,6 @@ def test_skill_ledger_e2e_case(case: E2ECase, ws: Workspace):
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for running this pytest module directly."""
     global VERBOSE
-
-    import argparse
 
     parser = argparse.ArgumentParser(description="skill-ledger CLI E2E tests (RPM)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show CLI output")

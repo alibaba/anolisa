@@ -9,6 +9,7 @@ use super::CoshCoreAdapter;
 
 pub(super) const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const REGISTRY_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const AUTH_CONFIGURE_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Distinguishes registry protocol failures from transport failures.
@@ -16,14 +17,17 @@ pub(crate) enum RegistryQueryError {
     /// The request could not produce a valid, correlated registry response.
     Transport(String),
     /// The core returned a valid registry response that rejected the request.
-    Response(String),
+    Response {
+        message: String,
+        code: Option<String>,
+    },
 }
 
 impl RegistryQueryError {
     /// Preserves the existing string-based adapter API for ordinary callers.
     pub(crate) fn into_message(self) -> String {
         match self {
-            Self::Transport(message) | Self::Response(message) => message,
+            Self::Transport(message) | Self::Response { message, .. } => message,
         }
     }
 }
@@ -94,6 +98,26 @@ impl CoshCoreAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0);
+
+        // Forward the user's shell cwd so the registry-mode cosh-core
+        // resolves the same project root as the headless runtime. Falls
+        // back to the active session's workspace scope when the shell
+        // cwd is unavailable (e.g. programmatic callers without a PTY).
+        let workspace = self
+            .shell_cwd
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| {
+                self.session
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.active_workspace_scope().map(str::to_string))
+            });
+        if let Some(workspace) = workspace {
+            command.arg("--workspace").arg(workspace);
+        }
+
         let mut child = command.spawn().map_err(|error| {
             RegistryQueryError::Transport(format!("failed to spawn cosh-core --registry: {error}"))
         })?;
@@ -176,7 +200,14 @@ impl CoshCoreAdapter {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error")
                 .to_string();
-            Err(RegistryQueryError::Response(error))
+            Err(RegistryQueryError::Response {
+                message: error,
+                code: resp
+                    .get("data")
+                    .and_then(|data| data.get("error_code"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
         }
     }
 }
@@ -199,6 +230,9 @@ pub(super) fn extension_mutation_requires_reload(domain: &str, action: &str) -> 
 }
 
 pub(super) fn registry_timeout(domain: &str, action: &str) -> Duration {
+    if domain == "auth" && action == "configure" {
+        return AUTH_CONFIGURE_TIMEOUT;
+    }
     let long_running_extension_action = extension_mutation_requires_reload(domain, action)
         || (domain == "extensions"
             && matches!(

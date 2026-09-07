@@ -23,6 +23,40 @@ python-lint-ci: ## Run incremental ruff lint check (only changed lines vs main, 
 	@cd "$(shell git rev-parse --show-toplevel)" && diff-quality --violations=flake8 --compare-branch=$(COMPARE_BRANCH) src/agent-sec-core/ruff_report.txt || true
 	@rm -f ruff_report.txt
 
+# -----------------------------------------------------------------------------
+# Rust code quality. agent-sec-cli (prompt-scanner) is cross-platform; linux-sandbox is Linux-only.
+#
+# pyo3 0.20 rejects Python > 3.12, so point it at the uv project env instead of
+# whatever PATH offers.  Never export an empty value -- that is fatal to pyo3.
+# Recipes group `{ $(PYO3_PIN); cargo ...; }` behind `cd ... &&` so a failed cd
+# aborts the whole line instead of running cargo from the wrong directory.
+PYO3_PIN = PY="$$(uv python find 2>/dev/null)"; if [ -n "$$PY" ]; then export PYO3_PYTHON="$$PY"; fi
+
+.PHONY: rust-code-pretty
+rust-code-pretty: ## Format Rust code with cargo fmt (agent-sec-cli + V2 + linux-sandbox)
+	@echo "🎨 Formatting Rust code with cargo fmt..."
+	cd agent-sec-cli && cargo fmt --all
+	cd v2 && cargo fmt --all
+	cd linux-sandbox && cargo fmt
+
+.PHONY: rust-fmt-check
+rust-fmt-check: ## Check Rust formatting without modifying files
+	@echo "🔍 Checking Rust formatting..."
+	cd agent-sec-cli && cargo fmt --all -- --check
+	cd v2 && cargo fmt --all -- --check
+	cd linux-sandbox && cargo fmt -- --check
+
+.PHONY: rust-lint
+rust-lint: ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
+	@echo "🔍 Running cargo clippy..."
+	cd agent-sec-cli && { $(PYO3_PIN); cargo clippy --workspace --all-targets -- -D warnings; }
+	cd v2 && cargo clippy --workspace --all-targets --locked -- -D warnings
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		cd linux-sandbox && cargo clippy --all-targets -- -D warnings; \
+	else \
+		echo "  (linux-sandbox clippy skipped: requires Linux)"; \
+	fi
+
 # =============================================================================
 # TEST
 # =============================================================================
@@ -34,13 +68,17 @@ test-python: ## Run Python unit and integration tests
 	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
 	uv run --project agent-sec-cli pytest tests/e2e/daemon -v
+	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner -v
 	@echo "🧪 Running skill-ledger e2e tests..."
 	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
 
 .PHONY: test-prompt-scanner-e2e
-test-prompt-scanner-e2e: ## Run daemon-backed prompt-scanner e2e tests
-	@echo "🧪 Running daemon-backed prompt-scanner e2e tests..."
-	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner/e2e_test.py
+test-prompt-scanner-e2e: ## Run prompt-scanner e2e tests (L2 cases self-skip unless a model is served)
+	@# L2 (standard/strict) cases skip when no model backend is reachable. To run
+	@# them, serve the model (e.g. `ollama serve` + `ollama pull <model>`) and set
+	@# PROMPT_SCANNER_E2E_REQUIRE_L2=1 to turn the skip into a hard failure.
+	@echo "🧪 Running prompt-scanner e2e tests..."
+	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner
 
 .PHONY: test-e2e-rpm
 test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
@@ -50,7 +88,6 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
-		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# linux-sandbox e2e skipped: requires privileged container
@@ -65,7 +102,6 @@ test-e2e-source-build: ## Run E2E tests against source-build-installed agent-sec
 	$(VENV_PYTHON) -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
-		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# linux-sandbox e2e skipped: requires privileged container
@@ -76,20 +112,41 @@ test-python-coverage: ## Run Python tests with coverage report
 	cd agent-sec-cli && uv sync
 	uv run --project agent-sec-cli pytest tests/ \
 		--ignore=tests/e2e/linux-sandbox \
-		--ignore=tests/e2e/prompt-scanner \
 		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/skill-signing \
 		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
 
 .PHONY: test-rust
-test-rust: ## Run Rust sandbox tests
-	@echo "🧪 Running Rust tests..."
-	cd linux-sandbox && cargo test -- --skip bwrap_seccomp
+test-rust: ## Run Rust tests (agent-sec-cli + V2; linux-sandbox on Linux only)
+	@echo "🧪 Running agent-sec-cli workspace Rust tests..."
+	cd agent-sec-cli && { $(PYO3_PIN); cargo test --workspace; }
+	@echo "🧪 Running AgentSecCore V2 workspace Rust tests..."
+	cd v2 && cargo test --workspace --locked
+	@echo "🧪 Running linux-sandbox Rust tests (Linux only)..."
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		cd linux-sandbox && cargo test -- --skip bwrap_seccomp; \
+	else \
+		echo "  (linux-sandbox tests skipped: requires Linux)"; \
+	fi
 
+# One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
+# CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
+#
+# Exclude `src/bin/`: build-time tools (sync_atr) that ship in no artifact, so
+# their main()/git/IO glue would skew the gate. Their logic is unit-tested.
 .PHONY: test-rust-coverage
-test-rust-coverage: ## Run Rust sandbox tests with coverage report
-	@echo "🧪 Running Rust tests with coverage..."
-	cd linux-sandbox && cargo llvm-cov --cobertura --output-path ../rust-coverage.xml -- --skip bwrap_seccomp
+test-rust-coverage: ## Run Rust tests with coverage (agent-sec-cli crates; linux-sandbox on Linux only)
+	@echo "🧪 Running agent-sec-cli Rust tests with coverage..."
+	cd agent-sec-cli && cargo llvm-cov --cobertura \
+		--ignore-filename-regex '/src/bin/' \
+		--output-path ../rust-cli-coverage.xml \
+		-p prompt-scanner -p model-service
+	@echo "🧪 Running linux-sandbox Rust tests with coverage (Linux only)..."
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		cd linux-sandbox && cargo llvm-cov --cobertura --output-path ../rust-coverage.xml -- --skip bwrap_seccomp; \
+	else \
+		echo "  (linux-sandbox coverage skipped: requires Linux)"; \
+	fi
 
 .PHONY: test-openclaw-plugin
 test-openclaw-plugin: ## Run openclaw-plugin tests
@@ -213,7 +270,6 @@ download-deps: ## Download ALL Python deps for agent-sec-cli (requires network)
 		--timeout 60 \
 		--require-hashes \
 		--index-url https://pypi.org/simple/ \
-		--extra-index-url https://download.pytorch.org/whl/cpu \
 		-r agent-sec-cli/requirements.txt
 
 .PHONY: stage-cli

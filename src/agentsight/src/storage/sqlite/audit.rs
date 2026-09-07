@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use super::connection::{create_connection, default_base_path, wal_checkpoint};
+use super::connection::{
+    create_connection, default_base_path, wal_checkpoint, wal_checkpoint_busy,
+};
 use crate::analyzer::{AuditEventType, AuditExtra, AuditRecord, AuditSummary};
 
 /// SQLite-based audit event store
@@ -187,9 +189,71 @@ impl AuditStore {
         Ok(deleted as u64)
     }
 
-    /// Execute WAL checkpoint to flush WAL data back to the main database file
+    /// Number of records in the table.
+    ///
+    /// Used by size-based purging to size deletion batches proportionally.
+    /// The table name is interpolated, not parameterized (SQL placeholders do
+    /// not support identifiers); it is built internally from config, never
+    /// from user input.
+    pub fn count(&self) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM {}", self.table_name),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Delete the oldest N records by timestamp.
+    ///
+    /// Used for size-based pruning when the database file exceeds its
+    /// configured maximum, regardless of record age.
+    pub fn delete_oldest_batch(&self, limit: usize) -> Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (
+                SELECT id FROM {} ORDER BY timestamp_ns ASC LIMIT ?1
+            )",
+            self.table_name, self.table_name
+        );
+        let deleted = self.conn.execute(&sql, params![limit as i64])?;
+        Ok(deleted)
+    }
+
+    /// Run VACUUM to reclaim free pages after bulk deletes.
+    ///
+    /// Since all stores in `Storage` share one database file, calling
+    /// this on any store vacuums the entire file. Re-enables WAL mode
+    /// afterwards as a defensive measure (VACUUM may reset it).
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn
+            .execute_batch("VACUUM; PRAGMA journal_mode=WAL;")?;
+        Ok(())
+    }
+
+    /// Execute WAL checkpoint to flush WAL data back to the main database file.
     pub fn checkpoint(&self) -> Result<()> {
         wal_checkpoint(&self.conn)
+    }
+
+    /// Truncating WAL checkpoint that reports whether it was blocked (busy).
+    ///
+    /// See [`wal_checkpoint_busy`]; size-based purge uses this to stop
+    /// deleting when the WAL cannot be truncated (#2888).
+    pub fn checkpoint_busy(&self) -> Result<bool> {
+        wal_checkpoint_busy(&self.conn)
+    }
+
+    /// Free-page bytes on the shared database file (freelist count x page size).
+    ///
+    /// Used by size-based purge convergence: deleted rows grow the freelist
+    /// instead of shrinking the file, so the logical data size is
+    /// `physical - freelist_bytes`.
+    pub fn freelist_bytes(&self) -> Result<u64> {
+        let freelist: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok((freelist.max(0) * page_size.max(0)) as u64)
     }
 
     /// Get summary statistics since a given timestamp

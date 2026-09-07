@@ -329,6 +329,34 @@ impl DaemonState {
         self.get_by_wsid(&ws_id)
     }
 
+    /// Returns the workspace ID registered for this exact path spelling.
+    ///
+    /// The map guard is dropped before returning so callers can acquire the
+    /// lifecycle lock without retaining a DashMap shard lock across `.await`.
+    pub(crate) fn wsid_for_exact_registration_path(&self, path: &Path) -> Option<String> {
+        self.path_to_wsid
+            .get(path)
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Confirms that both registration indexes still name the same workspace.
+    pub(crate) fn exact_registration_is_current(
+        &self,
+        path: &Path,
+        ws_id: &str,
+        workspace: &Arc<RwLock<WorkspaceState>>,
+    ) -> bool {
+        let path_matches = self
+            .path_to_wsid
+            .get(path)
+            .is_some_and(|entry| entry.value() == ws_id);
+        let workspace_matches = self
+            .workspaces
+            .get(ws_id)
+            .is_some_and(|entry| Arc::ptr_eq(entry.value(), workspace));
+        path_matches && workspace_matches
+    }
+
     /// Resolve a workspace by identifier: tries workspace ID first, then filesystem path.
     /// Supports absolute paths, relative paths, and workspace IDs (e.g., "ws-6d5aaa").
     pub async fn resolve_workspace(&self, workspace: &str) -> Option<Arc<RwLock<WorkspaceState>>> {
@@ -639,7 +667,10 @@ impl DaemonState {
         // If loaded index has no snapshots, try rebuilding from filesystem
         let index = if index.snapshots.is_empty() {
             match index_store::rebuild_from_fs(path, workspace_path.clone()).await {
-                Ok(rebuilt) if !rebuilt.snapshots.is_empty() => {
+                Ok(mut rebuilt) if !rebuilt.snapshots.is_empty() => {
+                    // Filesystem recovery reconstructs snapshot metadata only;
+                    // retained guarded receipts must survive the rebuild.
+                    rebuilt.governed_evidence = index.governed_evidence.clone();
                     info!(
                         "Rebuilt {} snapshot(s) from filesystem for {}",
                         rebuilt.snapshots.len(),
@@ -730,7 +761,8 @@ impl DaemonState {
 mod tests {
     use super::*;
     use ws_ckpt_common::{
-        save_workspace_policy, CleanupRetention, DaemonConfig, SnapshotIndex, SnapshotMeta,
+        save_workspace_policy, CleanupRetention, DaemonConfig, GuardedCheckpointEvidenceV2,
+        GuardedCheckpointOutcomeV2, SnapshotIndex, SnapshotMeta, WorkspaceGenerationTokenV2,
     };
 
     fn test_backend() -> Arc<dyn StorageBackend> {
@@ -765,6 +797,42 @@ mod tests {
     fn new_state_has_empty_workspaces() {
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         assert!(state.all_workspaces().is_empty());
+    }
+
+    #[tokio::test]
+    async fn filesystem_rebuild_preserves_guarded_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_path = temp.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let index_dir = temp.path().join("indexes").join("ws-abcdef");
+
+        let mut index = SnapshotIndex::new(workspace_path.clone());
+        index.governed_evidence.insert(
+            "skipped-1".to_string(),
+            GuardedCheckpointEvidenceV2 {
+                ws_id: "ws-abcdef".to_string(),
+                registered_path: workspace_path.to_string_lossy().into_owned(),
+                generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                checkpoint_id: "skipped-1".to_string(),
+                operation_digest: [2; 32],
+                caller_uid: 1000,
+                outcome: GuardedCheckpointOutcomeV2::Skipped {
+                    reason: "empty".to_string(),
+                },
+            },
+        );
+        crate::index_store::save(&index_dir, &index).await.unwrap();
+        std::fs::create_dir(index_dir.join("orphan-snapshot")).unwrap();
+
+        let state = DaemonState::new(test_config(), test_backend(), temp.path().join("state"));
+        DaemonState::rebuild_single_workspace(&state, &index_dir)
+            .await
+            .unwrap();
+
+        let restored = state.get_by_wsid("ws-abcdef").expect("rebuilt workspace");
+        let restored = restored.read().await;
+        assert!(restored.index.snapshots.contains_key("orphan-snapshot"));
+        assert!(restored.index.governed_evidence.contains_key("skipped-1"));
     }
 
     #[test]

@@ -262,8 +262,8 @@ pub fn agent_request_from_intercepted_input(
         return None;
     }
 
-    let input = event.input.as_ref()?.trim();
-    if input.is_empty() {
+    let input = event.input.as_ref()?;
+    if input.trim().is_empty() {
         return None;
     }
 
@@ -281,7 +281,7 @@ pub fn agent_request_from_intercepted_input(
         command_block: CommandBlock {
             id: block_id,
             session_id: event.session_id.clone(),
-            command: input.to_string(),
+            command: input.clone(),
             origin: Default::default(),
             cwd: cwd.clone(),
             end_cwd: cwd,
@@ -299,7 +299,7 @@ pub fn agent_request_from_intercepted_input(
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
-        user_input: Some(input.to_string()),
+        user_input: Some(input.clone()),
         findings: Vec::new(),
         mode: AgentMode::RecommendOnly,
         user_confirmed: true,
@@ -461,7 +461,7 @@ fn matches_failure_analysis_slash(input: Option<&str>) -> bool {
         .split_whitespace()
         .next()
         .unwrap_or_default();
-    matches!(first_token, "/explain" | "/agent")
+    first_token == "/explain"
 }
 
 fn matches_cancel_slash(input: Option<&str>) -> bool {
@@ -633,6 +633,26 @@ mod tests {
         let plain_request = super::agent_request_from_intercepted_input(&plain_event, 2, true)
             .expect("plain request");
         assert!(!crate::types::request_has_sensitive_input(&plain_request));
+    }
+
+    #[test]
+    fn intercepted_input_request_preserves_exact_nonempty_payload() {
+        for (sequence, input) in [" 你好", "   你好", "\t你好", "你好 ", "你好\t", "  你好\t "]
+            .into_iter()
+            .enumerate()
+        {
+            let event = ShellEvent::user_input_intercepted("session-1", input);
+            let request = super::agent_request_from_intercepted_input(&event, sequence, true)
+                .expect("nonempty input request");
+
+            assert_eq!(request.command_block.command, input);
+            assert_eq!(request.user_input.as_deref(), Some(input));
+        }
+
+        for input in ["", " ", "   ", "\t", " \t "] {
+            let event = ShellEvent::user_input_intercepted("session-1", input);
+            assert!(super::agent_request_from_intercepted_input(&event, 7, true).is_none());
+        }
     }
 
     #[test]

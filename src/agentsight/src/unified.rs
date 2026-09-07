@@ -19,10 +19,12 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::aggregator::Aggregator;
@@ -37,7 +39,7 @@ use crate::interruption::{
     DetectorConfig, InterruptionDetector, ProcessExitStatus, recover_oom_events,
 };
 use crate::parser::Parser;
-use crate::probes::{FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
+use crate::probes::{ChannelWatermarks, FileWatchEvent, FileWriteEvent, Probes, ProbesPoller};
 use crate::response_map::ResponseSessionMapper;
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore, sibling_db_path};
 use crate::storage::{SqliteConfig, Storage, TimePeriod, TokenQuery, TokenQueryResult};
@@ -102,8 +104,14 @@ pub struct AgentSight {
     last_drain_check: std::time::Instant,
     /// Rate-limiter for interruption DB purge (at most once per 60 s)
     last_interruption_purge: std::time::Instant,
+    /// Rate-limiter for the buffer watermark log (at most once per 60 s)
+    last_watermark_log: std::time::Instant,
     /// Cache of pid → agent_name, persists after process exit for deferred resolution
     pid_agent_name_cache: lru::LruCache<u32, String>,
+    /// Live Agent processes sampled for Session resource timelines.
+    resource_targets: Arc<RwLock<HashMap<u32, String>>>,
+    /// Resource sampler joined before the GenAI database is checkpointed.
+    resource_sampler_handle: Option<std::thread::JoinHandle<()>>,
     /// HTTP domain patterns from config, used for runtime DNS-based tcpsniff target addition
     http_domains: Vec<String>,
     /// Mailbox for watcher thread to deposit a dynamically-created LogtailExporter
@@ -192,6 +200,11 @@ impl AgentSight {
         // Init logging after config file load so JSON `log_path` / `verbose` apply.
         config.apply_verbose();
 
+        // Establish the procfs root before anything resolves a pid through it,
+        // and before a probe bakes the pid-namespace flag derived from it into
+        // its skeleton.
+        crate::utils::procfs::configure(&config.procfs_root);
+
         if config_load_ok {
             if let Some(path) = config.config_path.as_ref() {
                 log::info!(
@@ -205,6 +218,10 @@ impl AgentSight {
         } else if let Some((path, e)) = config_load_err {
             log::warn!("Failed to load config from {path:?}: {e}, using embedded defaults");
         }
+
+        // Persistence check runs after the config file load so the warning
+        // targets the storage directory actually in effect.
+        crate::container::warn_if_data_dir_not_persistent(&config.storage_base_path);
 
         let all_cmdline_rules = config.cmdline_rules.clone();
 
@@ -517,6 +534,23 @@ impl AgentSight {
 
         // Create `running` flag early so background threads can observe shutdown.
         let running = Arc::new(AtomicBool::new(true));
+        let resource_targets = Arc::new(RwLock::new(
+            existing_agents
+                .iter()
+                .map(|agent| (agent.pid, agent.agent_info.name.clone()))
+                .chain(conn_results.iter().filter_map(|result| {
+                    Self::conn_scan_agent_name(&scanner, result.pid).map(|name| (result.pid, name))
+                }))
+                .collect(),
+        ));
+        for agent in &existing_agents {
+            Self::register_resource_targets(&resource_targets, agent.pid, &agent.agent_info.name);
+        }
+        for result in &conn_results {
+            if let Some(agent_name) = Self::conn_scan_agent_name(&scanner, result.pid) {
+                Self::register_resource_targets(&resource_targets, result.pid, &agent_name);
+            }
+        }
 
         // Spawn background threads (config watcher, stale scanner).
         if let Some(ref cfg_path) = config.config_path {
@@ -532,6 +566,12 @@ impl AgentSight {
         if let Some(ref sqlite_store) = genai_sqlite_store {
             crate::background::start_stale_scanner(Arc::clone(sqlite_store), Arc::clone(&running));
         }
+        let resource_sampler_handle = Self::start_resource_sampler_if_enabled(
+            config.features.resource_sampling_enabled,
+            genai_sqlite_store.as_ref(),
+            Arc::clone(&resource_targets),
+            Arc::clone(&running),
+        );
 
         // Trajectory collector (Qoder/QoderWork JSONL → ATIF → trajectories.db).
         // Feature-gated (default off); the thread shares `running` as stop flag.
@@ -590,7 +630,10 @@ impl AgentSight {
             ffi_sender: None,
             last_drain_check: std::time::Instant::now(),
             last_interruption_purge: std::time::Instant::now(),
+            last_watermark_log: std::time::Instant::now(),
             pid_agent_name_cache,
+            resource_targets,
+            resource_sampler_handle,
             http_domains,
             pending_logtail,
             deadloop_kill_enabled: config.deadloop_kill_enabled,
@@ -611,6 +654,7 @@ impl AgentSight {
             token_consumption_table: "token_consumption".to_string(),
             retention_days: config.retention_days,
             purge_interval: config.purge_interval,
+            max_db_size_mb: config.max_db_size_mb,
         };
         Storage::with_sqlite_config(&sqlite_config)
     }
@@ -632,7 +676,48 @@ impl AgentSight {
 
     /// Attach SSL probes to a specific agent process
     pub fn attach_process(&mut self, pid: u32, agent_name: &str) {
+        Self::register_resource_targets(&self.resource_targets, pid, agent_name);
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
+    }
+
+    fn register_resource_targets(
+        targets: &Arc<RwLock<HashMap<u32, String>>>,
+        pid: u32,
+        agent_name: &str,
+    ) {
+        let Ok(mut targets) = targets.write() else {
+            log::warn!("Failed to register resource target pid={pid}: target lock poisoned");
+            return;
+        };
+        targets.insert(pid, agent_name.to_string());
+        if Self::should_register_descendants(agent_name) {
+            for child in Self::collect_descendant_pids(pid) {
+                targets.insert(child, agent_name.to_string());
+            }
+        }
+    }
+
+    fn start_resource_sampler_if_enabled(
+        enabled: bool,
+        store: Option<&Arc<GenAISqliteStore>>,
+        targets: Arc<RwLock<HashMap<u32, String>>>,
+        running: Arc<AtomicBool>,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        if !enabled {
+            log::debug!("Agent resource sampling disabled");
+            return None;
+        }
+        let Some(store) = store else {
+            log::debug!("Resource sampling enabled but SQLite storage is unavailable");
+            return None;
+        };
+        match crate::health::resource::start_resource_sampler(Arc::clone(store), targets, running) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                log::warn!("Failed to start Agent resource sampler: {error}");
+                None
+            }
+        }
     }
 
     /// Resolve the agent name to cache for a connection-scan hit.
@@ -653,10 +738,99 @@ impl AgentSight {
         if let Err(e) = probes.add_traced_pid(pid) {
             log::warn!("Failed to add pid {pid} to traced_processes map: {e}");
         }
+        // Register descendant PIDs so child processes spawned by wrapper-style
+        // agents are admitted by the BPF `traced_processes` filter even when
+        // procmon misses their execve tracepoint. The SSL uprobe is inode-global
+        // (pid=-1), so registering is sufficient — no per-child attach needed.
+        //
+        // Currently gated to QwenCode: its `/usr/local/bin/qwen` shebang
+        // wrapper immediately spawnSync's a `node-22 --expose-gc …cli.js`
+        // child, which then spawn's another node-22 worker that does all the
+        // actual LLM HTTPS I/O. The wrapper itself makes zero SSL calls, so
+        // without the descendants in the BPF map, qwencode's traffic is
+        // captured by the uprobe and silently dropped by `is_pid_traced()`.
+        // Other agents (CoshNG, Claude, Codex, …) still have their main
+        // process participate in TLS, so the matched PID alone is enough.
+        if Self::should_register_descendants(agent_name) {
+            for child in Self::collect_descendant_pids(pid) {
+                if child == pid {
+                    continue;
+                }
+                if let Err(e) = probes.add_traced_pid(child) {
+                    log::debug!("Failed to register descendant pid {child} of {pid}: {e}");
+                } else {
+                    log::debug!("Registered descendant pid {child} of {pid} ({agent_name})");
+                }
+            }
+        }
         // attach_process logs WARN internally if SSL attach degrades to
         // global-uprobe-only coverage; always succeeds for BPF map registration.
         let _ = probes.attach_process(pid as i32);
         log::info!("Attached to agent: {agent_name} (pid={pid})");
+    }
+
+    /// Whether descendant PIDs should also be registered into the BPF
+    /// `traced_processes` map when an agent is attached.
+    ///
+    /// Currently true only for `QwenCode` — the only agent whose matched
+    /// wrapper process does not itself perform any TLS I/O and whose actual
+    /// LLM traffic happens in deeply-nested child `node-22` processes that
+    /// procmon tends to miss.
+    fn should_register_descendants(agent_name: &str) -> bool {
+        matches!(agent_name, "QwenCode")
+    }
+
+    /// Collect all descendant PIDs of `root` by walking `/proc`.
+    ///
+    /// Reads each numeric `/proc/<pid>/status` once to obtain its `PPid`, then
+    /// BFS-traverses the parent->children edges. Returns the full set including
+    /// `root` itself. Silently skips processes that exit before we read them —
+    /// they won't produce SSL events anyway.
+    fn collect_descendant_pids(root: u32) -> HashSet<u32> {
+        Self::collect_descendant_pids_impl(root, crate::utils::procfs::proc_root())
+    }
+
+    fn collect_descendant_pids_impl(root: u32, proc_root: &Path) -> HashSet<u32> {
+        let mut result = HashSet::new();
+        result.insert(root);
+
+        let proc_dir = match fs::read_dir(proc_root) {
+            Ok(d) => d,
+            Err(_) => return result,
+        };
+
+        let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+        for entry in proc_dir.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let pid: u32 = match name.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let status = match fs::read_to_string(proc_root.join(format!("{pid}/status"))) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let ppid = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:\t"))
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            if let Some(ppid) = ppid {
+                children_of.entry(ppid).or_default().push(pid);
+            }
+        }
+
+        let mut queue = vec![root];
+        while let Some(p) = queue.pop() {
+            if let Some(kids) = children_of.get(&p) {
+                for &k in kids {
+                    if result.insert(k) {
+                        queue.push(k);
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Detach SSL probes from a specific agent process
@@ -714,6 +888,7 @@ impl AgentSight {
                     &mut self.retro_session_fixup,
                     &self.response_mapper,
                     store,
+                    self.interruption_store.as_deref(),
                     fw_event.pid,
                     self.pid_agent_name_cache
                         .peek(&fw_event.pid)
@@ -743,6 +918,14 @@ impl AgentSight {
                 );
                 if let Err(e) = self.probes.attach_process(dns_event.pid as i32) {
                     log::warn!("[UDP-DNS] Failed to attach to pid={}: {}", dns_event.pid, e);
+                } else if let Some(agent_name) =
+                    Self::conn_scan_agent_name(&self.scanner, dns_event.pid)
+                {
+                    self.pid_agent_name_cache
+                        .put(dns_event.pid, agent_name.clone());
+                    if let Ok(mut targets) = self.resource_targets.write() {
+                        targets.insert(dns_event.pid, agent_name);
+                    }
                 }
             }
 
@@ -799,8 +982,8 @@ impl AgentSight {
             );
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
-            // to the *process* comm (/proc/<pid>/comm) and only then the event's
-            // per-event thread comm (which may be e.g. "HTTP client").
+            // to the *process* comm (`<procfs root>/<pid>/comm`) and only then
+            // the event's per-event thread comm (which may be e.g. "HTTP client").
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
@@ -950,8 +1133,7 @@ impl AgentSight {
         match event {
             ProcMonEvent::Exec { pid, comm, .. } => {
                 // Read cmdline for deny-check and custom matching
-                let cmdline_args =
-                    crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline"));
+                let cmdline_args = crate::discovery::scanner::read_cmdline(pid);
 
                 // Phase 1: check deny rules first (blacklist overrides everything)
                 if self.scanner.is_denied(&cmdline_args) {
@@ -967,6 +1149,9 @@ impl AgentSight {
                 }
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
+                if let Ok(mut targets) = self.resource_targets.write() {
+                    targets.remove(pid);
+                }
                 // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
@@ -1010,6 +1195,10 @@ impl AgentSight {
 
         // Main event loop
         while self.running.load(Ordering::SeqCst) {
+            // Rate-limited internally, and deliberately outside the idle branch:
+            // a saturated byte budget keeps the queue non-empty, which is exactly
+            // when the watermarks matter most.
+            self.maybe_log_buffer_watermarks();
             if let Some(result) = self.try_process() {
                 log::trace!("[Event {result}] Processed");
             } else {
@@ -1036,6 +1225,11 @@ impl AgentSight {
     /// Shutdown gracefully
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.resource_sampler_handle.take()
+            && handle.join().is_err()
+        {
+            log::warn!("Agent resource sampler panicked during shutdown");
+        }
         // Flush all pending GenAI events before exit
         self.flush_all_pending_genai();
         // Checkpoint genai_events.db WAL so -wal/-shm are cleaned up on exit
@@ -2106,6 +2300,26 @@ impl AgentSight {
             }
         }
     }
+
+    /// Periodically report event-buffer watermarks.
+    ///
+    /// The tracer runs under `MemoryMax=350M`; when it is killed the journal is
+    /// the only evidence left, and a cgroup total says nothing about *which*
+    /// buffer grew (#2888).
+    fn maybe_log_buffer_watermarks(&mut self) {
+        if self.last_watermark_log.elapsed() < std::time::Duration::from_secs(60) {
+            return;
+        }
+        self.last_watermark_log = std::time::Instant::now();
+
+        let (needs_attention, report) =
+            watermark_report(self.probes.channel_watermarks(), self.pending_genai.len());
+        if needs_attention {
+            log::info!("{report}");
+        } else {
+            log::debug!("{report}");
+        }
+    }
 }
 
 impl Drop for AgentSight {
@@ -2249,6 +2463,7 @@ fn apply_retro_session_fixup(
     fixups: &mut lru::LruCache<u32, Vec<RetroFixupEntry>>,
     mapper: &ResponseSessionMapper,
     store: &GenAISqliteStore,
+    istore: Option<&InterruptionStore>,
     pid: u32,
     current_agent: Option<&str>,
 ) {
@@ -2278,15 +2493,47 @@ fn apply_retro_session_fixup(
                 continue;
             }
         }
-        match store.update_fallback_session_id(&call_id, &session_id) {
-            Ok(n) if n > 0 => {
-                log::debug!("retro session fix-up: call_id={call_id} session_id={session_id}");
+        // Repair the interruptions of this call too: they were persisted with
+        // a NULL session_id while the call was deferred, and the per-session
+        // dashboard breakdown would otherwise never attribute them.
+        //
+        // Both updates are idempotent (one targets NULL session_id, the other
+        // the 32-hex fallback shape), so re-registering on partial failure is
+        // safe and is required: dropping the entry after only one store
+        // succeeded would leave the other permanently unrepaired.
+        let interruption_repaired = match istore {
+            Some(istore) => match istore.backfill_null_session_id(&call_id, &session_id) {
+                Ok(n) => {
+                    if n > 0 {
+                        log::debug!(
+                            "retro session fix-up: {n} interruption(s) of call_id={call_id} -> session_id={session_id}"
+                        );
+                    }
+                    true
+                }
+                Err(e) => {
+                    log::warn!(
+                        "retro session fix-up of interruptions failed for call_id={call_id}: {e}"
+                    );
+                    false
+                }
+            },
+            None => true,
+        };
+        let genai_repaired = match store.update_fallback_session_id(&call_id, &session_id) {
+            Ok(n) => {
+                if n > 0 {
+                    log::debug!("retro session fix-up: call_id={call_id} session_id={session_id}");
+                }
+                true
             }
-            Ok(_) => {}
             Err(e) => {
                 log::warn!("retro session fix-up failed for call_id={call_id}: {e}");
-                failed.push((call_id, registered_at, entry_agent));
+                false
             }
+        };
+        if !interruption_repaired || !genai_repaired {
+            failed.push((call_id, registered_at, entry_agent));
         }
     }
     if !failed.is_empty() {
@@ -2297,11 +2544,13 @@ fn apply_retro_session_fixup(
 /// Record `agent_crash` interruption events for the pending calls of an
 /// exited agent process, and mark those calls as interrupted.
 ///
-/// Skips entirely when the process terminated voluntarily with exit code 0:
-/// a single-shot agent finishing its run with still-unresolved pending calls
-/// is not a crash (issue #1989). Abnormal exits (non-zero code or fatal
-/// signal, which covers the SIGKILL sent by the OOM killer) keep the previous
-/// behavior, with the decoded exit status embedded in the detail JSON.
+/// Skips entirely when the process terminated without a crash: a voluntary
+/// exit with code 0, or a graceful parent-initiated reap via
+/// SIGTERM/SIGINT/SIGHUP with no core dump (a single-shot agent finishing its
+/// run with still-unresolved pending calls is not a crash; issue #1989).
+/// Abnormal exits (non-zero code, fatal signal, core dump, or the SIGKILL
+/// sent by the OOM killer) keep the previous behavior, with the decoded exit
+/// status embedded in the detail JSON.
 ///
 /// Extracted as a free function so the crash decision is unit-testable
 /// without constructing a full `AgentSight` instance.
@@ -2313,7 +2562,9 @@ fn record_agent_crash_interruptions(
     istore: &InterruptionStore,
     genai_store: Option<&GenAISqliteStore>,
 ) {
-    use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+    use crate::interruption::{
+        InterruptionEvent, InterruptionType, is_reap_worker_agent, was_pid_oom_killed,
+    };
 
     // Nothing to record without pending calls; guard here so future callers
     // cannot emit call-less crash events by accident.
@@ -2321,7 +2572,9 @@ fn record_agent_crash_interruptions(
         return;
     }
 
-    if exit_status.is_clean() {
+    let clean_exit = exit_status.is_clean()
+        || (exit_status.is_graceful_reap() && is_reap_worker_agent(agent_name));
+    if clean_exit {
         log::info!(
             "[CrashDetect] Agent {agent_name} (pid={pid}) exited cleanly with {} pending call(s) — not a crash",
             pending_calls.len(),
@@ -2397,10 +2650,123 @@ fn record_agent_crash_interruptions(
     }
 }
 
+/// Render the buffer watermark report, and whether it needs operator attention.
+///
+/// Split out from the logging call site so the wording is covered by tests: this
+/// line is the only evidence left after an OOM kill, and it has to say which
+/// buffer holds the memory. Attention means the byte budget already rejected
+/// events, which is reported at INFO so diagnosing an OOM does not require
+/// turning on debug logging; a quiet pipeline stays at DEBUG.
+fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, String) {
+    let mut report = format!(
+        "Buffer watermarks: event channel {} / {} bytes in flight",
+        marks.in_flight_bytes, marks.budget_bytes
+    );
+    let needs_attention = marks.dropped_over_budget > 0;
+    if needs_attention {
+        report.push_str(&format!(
+            ", {} events dropped over budget",
+            marks.dropped_over_budget
+        ));
+    }
+    report.push_str(&format!(", pending_genai {pending_genai} entries"));
+    (needs_attention, report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn watermark_report_stays_quiet_without_drops() {
+        let (needs_attention, report) = watermark_report(
+            ChannelWatermarks {
+                in_flight_bytes: 1024,
+                budget_bytes: 64 * 1024 * 1024,
+                dropped_over_budget: 0,
+            },
+            3,
+        );
+        assert!(!needs_attention);
+        assert_eq!(
+            report,
+            "Buffer watermarks: event channel 1024 / 67108864 bytes in flight, \
+             pending_genai 3 entries"
+        );
+    }
+
+    #[test]
+    fn watermark_report_surfaces_drops() {
+        // The drop count is the signal that separates channel pressure from
+        // downstream growth, so it must appear and must raise the level.
+        let (needs_attention, report) = watermark_report(
+            ChannelWatermarks {
+                in_flight_bytes: 67108864,
+                budget_bytes: 67108864,
+                dropped_over_budget: 42,
+            },
+            17,
+        );
+        assert!(needs_attention);
+        assert!(report.contains("42 events dropped over budget"));
+        assert!(report.contains("67108864 / 67108864 bytes in flight"));
+        assert!(report.contains("pending_genai 17 entries"));
+    }
+
+    #[test]
+    fn watermark_report_shows_unlimited_budget_as_zero() {
+        // With the gate disabled the reading must still be usable, otherwise an
+        // operator who set 0 loses the only in-flight measurement.
+        let (needs_attention, report) = watermark_report(
+            ChannelWatermarks {
+                in_flight_bytes: 8 * 1024 * 1024,
+                budget_bytes: 0,
+                dropped_over_budget: 0,
+            },
+            0,
+        );
+        assert!(!needs_attention);
+        assert!(report.contains("8388608 / 0 bytes in flight"));
+    }
+
+    #[test]
+    fn resource_sampler_is_not_started_when_disabled() {
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        assert!(
+            AgentSight::start_resource_sampler_if_enabled(false, None, targets, running).is_none()
+        );
+    }
+
+    #[test]
+    fn resource_sampler_is_not_started_without_sqlite() {
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        assert!(
+            AgentSight::start_resource_sampler_if_enabled(true, None, targets, running).is_none()
+        );
+    }
+
+    #[test]
+    fn resource_sampler_starts_when_enabled_with_sqlite() {
+        let dir = unique_tmp_dir("resource-sampler");
+        let store = Arc::new(
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store"),
+        );
+        let targets = Arc::new(RwLock::new(HashMap::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let handle = AgentSight::start_resource_sampler_if_enabled(
+            true,
+            Some(&store),
+            targets,
+            Arc::clone(&running),
+        )
+        .expect("resource sampler handle");
+        running.store(false, Ordering::SeqCst);
+        handle.join().expect("resource sampler join");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Generate a unique temp directory for each test invocation.
     fn unique_tmp_dir(tag: &str) -> PathBuf {
@@ -2477,6 +2843,72 @@ mod tests {
                 .len(),
             1,
             "pending call must stay pending on clean exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sigterm_reap_with_pending_call_records_no_agent_crash() {
+        // A known per-request worker family (CoshNG) reaped with SIGTERM (raw
+        // 0x0f) is a deliberate graceful shutdown: no agent_crash may be
+        // recorded even when the process left pending calls behind.
+        let pid = 3_999_994;
+        let (dir, genai_store, istore) = setup_crash_stores("sigterm-exit", pid);
+        let pending = genai_store
+            .list_pending_for_pids(&[pid])
+            .expect("list pending");
+
+        record_agent_crash_interruptions(
+            pid as u32,
+            "CoshNG",
+            ProcessExitStatus::decode(0x0f),
+            &pending,
+            &istore,
+            Some(genai_store.as_ref()),
+        );
+
+        assert!(
+            list_crash_events(&istore).is_empty(),
+            "SIGTERM reap must not produce an agent_crash interruption"
+        );
+        // The pending call must NOT be stamped as interrupted either.
+        assert_eq!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .len(),
+            1,
+            "pending call must stay pending on graceful reap"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sigterm_non_worker_agent_still_records_agent_crash() {
+        // The graceful-reap exemption is limited to known worker families. A
+        // non-worker agent (Codex) interrupted by SIGTERM with a pending call
+        // is still a mid-session disappearance and must record a crash.
+        let pid = 3_999_995;
+        let (dir, genai_store, istore) = setup_crash_stores("sigterm-codex", pid);
+        let pending = genai_store
+            .list_pending_for_pids(&[pid])
+            .expect("list pending");
+
+        record_agent_crash_interruptions(
+            pid as u32,
+            "Codex",
+            ProcessExitStatus::decode(0x0f),
+            &pending,
+            &istore,
+            Some(genai_store.as_ref()),
+        );
+
+        assert_eq!(
+            list_crash_events(&istore).len(),
+            1,
+            "SIGTERM on a non-worker agent must still record agent_crash"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3041,7 +3473,7 @@ mod tests {
         );
 
         let mapper = make_mapper_with_pid(4242);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, None, 4242, None);
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(rows.len(), 1);
@@ -3053,6 +3485,91 @@ mod tests {
         assert!(
             fixups.peek(&4242).is_none(),
             "pid entry must be consumed after the fix-up"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cross-module coverage for the dual-store fix-up: one late FileWrite must
+    /// repair the GenAI row **and** the interruptions of the same call. Passing
+    /// `None` for the interruption store (as the narrow test above does) cannot
+    /// catch a regression in the interruption branch.
+    #[test]
+    fn test_retro_session_fixup_repairs_both_stores() {
+        use crate::interruption::{InterruptionEvent, InterruptionType};
+
+        let dir = unique_tmp_dir("retro-fixup-dual");
+        let store =
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let istore = InterruptionStore::new_with_path(&dir.join("interruption_events.db"))
+            .expect("interruption store");
+
+        let mut info = make_test_pending_info("retro-call-dual");
+        info.pid = 4242;
+        info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
+        store.insert_pending(&info).expect("insert_pending");
+
+        // An interruption detected while the call was still deferred: no
+        // session_id could be attached at detection time.
+        let mut event = InterruptionEvent::new(
+            InterruptionType::EmptyResponse,
+            None,
+            None,
+            Some("conv-dual".to_string()),
+            Some("retro-call-dual".to_string()),
+            Some(4242),
+            Some("cosh-core".to_string()),
+            1_000,
+            None,
+        );
+        event.interruption_id = "int-retro-dual".to_string();
+        istore.insert(&event).expect("insert interruption");
+
+        let mut fixups = make_fixup_cache();
+        fixups.put(
+            4242,
+            vec![(
+                "retro-call-dual".to_string(),
+                std::time::Instant::now(),
+                None,
+            )],
+        );
+
+        let mapper = make_mapper_with_pid(4242);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, Some(&istore), 4242, None);
+
+        const RESOLVED: &str = "550e8400-e29b-41d4-a716-446655440000";
+        let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
+        assert_eq!(rows[0].1.as_deref(), Some(RESOLVED), "genai row repaired");
+
+        let repaired = istore
+            .get_by_id("int-retro-dual")
+            .expect("get interruption")
+            .expect("interruption present");
+        assert_eq!(
+            repaired.session_id.as_deref(),
+            Some(RESOLVED),
+            "interruption session_id must be backfilled by the same fix-up"
+        );
+
+        // Repaired rows must now appear in the per-session breakdown under the
+        // real session rather than the unassigned bucket.
+        let breakdown = istore
+            .count_unresolved_by_session_detailed(0, i64::MAX, None)
+            .expect("breakdown");
+        assert!(
+            breakdown.iter().any(|(sid, _, _, _)| sid == RESOLVED),
+            "backfilled interruption must group under the resolved session"
+        );
+        assert!(
+            !breakdown
+                .iter()
+                .any(|(sid, _, _, _)| sid == crate::storage::sqlite::UNASSIGNED_SESSION_ID),
+            "unassigned bucket must be empty once the session is known"
+        );
+        assert!(
+            fixups.peek(&4242).is_none(),
+            "pid entry must be consumed after a fully successful fix-up"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3078,7 +3595,7 @@ mod tests {
 
         // Mapper knows a different pid only.
         let mapper = make_mapper_with_pid(9999);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, None, 4242, None);
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(
@@ -3119,7 +3636,7 @@ mod tests {
         fixups.put(4242, vec![("retro-call-3".to_string(), expired_at, None)]);
 
         let mapper = make_mapper_with_pid(4242);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, None, 4242, None);
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(
@@ -3161,7 +3678,14 @@ mod tests {
         );
 
         let mapper = make_mapper_with_pid(4242);
-        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, Some("other-agent"));
+        apply_retro_session_fixup(
+            &mut fixups,
+            &mapper,
+            &store,
+            None,
+            4242,
+            Some("other-agent"),
+        );
 
         let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
         assert_eq!(
@@ -3175,5 +3699,127 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a fake `/proc/<pid>/status` file with a single `PPid:\t<ppid>` line.
+    fn write_fake_status(proc_root: &Path, pid: u32, ppid: u32) {
+        let dir = proc_root.join(pid.to_string());
+        std::fs::create_dir_all(&dir).expect("create fake proc dir");
+        std::fs::write(dir.join("status"), format!("Name:\tfake\nPPid:\t{ppid}\n"))
+            .expect("write fake status");
+    }
+
+    #[test]
+    fn collect_descendants_qwencode_wrapper_chain() {
+        // cosh-shell(1) -> bash(2) -> node wrapper(3) -> node-22(4) -> node-22(5)
+        // Asking for descendants of 3 must return {3, 4, 5} and ignore the
+        // ancestor (1, 2) and unrelated branches (9, parented by 1).
+        let dir = unique_tmp_dir("qwencode-chain");
+        write_fake_status(&dir, 1, 0);
+        write_fake_status(&dir, 2, 1);
+        write_fake_status(&dir, 3, 2);
+        write_fake_status(&dir, 4, 3);
+        write_fake_status(&dir, 5, 4);
+        write_fake_status(&dir, 9, 1);
+
+        let got = AgentSight::collect_descendant_pids_impl(3, &dir);
+
+        let mut want = HashSet::new();
+        want.extend([3, 4, 5]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_root_only_when_no_children() {
+        let dir = unique_tmp_dir("lone-root");
+        write_fake_status(&dir, 7, 0);
+        write_fake_status(&dir, 8, 0); // sibling, not a descendant
+
+        let got = AgentSight::collect_descendant_pids_impl(7, &dir);
+        let mut want = HashSet::new();
+        want.insert(7);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_returns_root_when_proc_missing() {
+        let dir = unique_tmp_dir("missing-proc").join("does-not-exist");
+        // Don't create `dir` — read_dir must fail and the helper must fall
+        // back to returning {root}.
+        let got = AgentSight::collect_descendant_pids_impl(42, &dir);
+        let mut want = HashSet::new();
+        want.insert(42);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn collect_descendants_skips_orphan_status_files() {
+        // pid=10 has a status file; pid=11 has its directory but no status
+        // file (process exited mid-walk). The walker should include 10 as a
+        // descendant of 1 but silently skip 11.
+        let dir = unique_tmp_dir("orphan-status");
+        write_fake_status(&dir, 1, 0);
+        write_fake_status(&dir, 10, 1);
+        let orphan_dir = dir.join("11");
+        std::fs::create_dir_all(&orphan_dir).expect("create orphan proc dir");
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 10]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_descendants_ignores_non_numeric_entries() {
+        // `/proc` always contains `self`, `thread-self`, `sys`, etc. The
+        // walker must skip non-numeric entries without panicking.
+        let dir = unique_tmp_dir("non-numeric");
+        write_fake_status(&dir, 1, 0);
+        write_fake_status(&dir, 2, 1);
+        std::fs::create_dir_all(dir.join("self")).expect("create self dir");
+        std::fs::create_dir_all(dir.join("thread-self")).expect("create thread-self dir");
+        std::fs::write(dir.join("meminfo"), "ignored").expect("write stray file");
+
+        let got = AgentSight::collect_descendant_pids_impl(1, &dir);
+        let mut want = HashSet::new();
+        want.extend([1, 2]);
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn should_register_descendants_only_qwencode() {
+        // Positive case: the only agent currently opted in.
+        assert!(AgentSight::should_register_descendants("QwenCode"));
+
+        // Negative cases: every other known agent name must stay out so the
+        // traced_processes BPF map stays lean.
+        for name in [
+            "CoshNG",
+            "Claude",
+            "Codex",
+            "OpenClaw",
+            "os-copilot",
+            "cosh",
+            "node-22",
+            "Hermes",
+            "Runloop",
+            "CoshNG-shell",
+            "",
+            "qwencode", // lowercase must not match
+            "qwenCode", // case-sensitive
+        ] {
+            assert!(
+                !AgentSight::should_register_descendants(name),
+                "descendant registration must be opt-in; {name:?} is not opted in"
+            );
+        }
     }
 }

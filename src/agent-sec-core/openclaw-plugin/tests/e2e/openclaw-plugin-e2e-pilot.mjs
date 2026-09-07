@@ -243,7 +243,6 @@ async function runPilot() {
     AGENT_SEC_OPENCLAW_PILOT_OPENCLAW_LOG: openclawCallsLog,
     AGENT_SEC_OPENCLAW_PILOT_CLI_LOG: agentSecCliCallsLog,
     AGENT_SEC_OPENCLAW_PILOT_CLI_OVERRIDE_FILE: agentSecCliOverrideFile,
-    AGENT_SEC_DAEMON_PROMPT_PRELOAD: process.env.AGENT_SEC_DAEMON_PROMPT_PRELOAD ?? "0",
     // Bonjour/mDNS discovery is unrelated to this plugin e2e and OpenClaw
     // 2026.4.24 has a reproducible ciao cancellation crash in CI-like hosts.
     OPENCLAW_DISABLE_BONJOUR: "1",
@@ -269,18 +268,25 @@ async function runPilot() {
   );
   result.versions.agentSecCli = agentSecVersion.stdout.trim();
 
-  await runRequiredStep("agent-sec-plugin-build", "npm", ["run", "build"], {
-    cwd: PLUGIN_ROOT,
-    env: baseEnv,
-    timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
-  });
-  const packResult = await runRequiredStep(
-    "agent-sec-plugin-pack",
-    "npm",
-    ["pack", "--pack-destination", artifactsDir, "--json"],
-    { cwd: PLUGIN_ROOT, env: baseEnv, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
-  );
-  result.install.packageArtifact = await parseNpmPackArtifact(packResult.stdout, artifactsDir);
+  if (args.pluginPackage) {
+    result.install.packageArtifact = path.resolve(args.pluginPackage);
+    await fs.access(result.install.packageArtifact);
+    result.install.prebuiltPackage = true;
+  } else {
+    await runRequiredStep("agent-sec-plugin-build", "npm", ["run", "build"], {
+      cwd: PLUGIN_ROOT,
+      env: baseEnv,
+      timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
+    });
+    const packResult = await runRequiredStep(
+      "agent-sec-plugin-pack",
+      "npm",
+      ["pack", "--pack-destination", artifactsDir, "--json"],
+      { cwd: PLUGIN_ROOT, env: baseEnv, timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS },
+    );
+    result.install.packageArtifact = await parseNpmPackArtifact(packResult.stdout, artifactsDir);
+    result.install.prebuiltPackage = false;
+  }
   result.install.packageRoot = await extractPackedPluginPackage({
     artifactsDir,
     env: baseEnv,

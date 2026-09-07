@@ -34,6 +34,29 @@
 - 修改 `agentsight.json` 结构（新增/删除/重命名字段、改变语义）时，必须同步 bump `schema_version` 并更新 `config.rs` 中的 `CURRENT_SCHEMA_VERSION` 常量
 - 纯新增可选字段且旧配置完全兼容时，不需要 bump `schema_version`
 
+### 用户文档
+用户指南位于 `docs/user-guide/{en,zh}/agent-observability/agentsight/`，中英双语必须同步改，只改一侧视为未完成。
+
+改动落在下面这些面上时，必须在同一个 PR 里更新对应页面：
+
+| 改动内容 | 必须同步的页面 |
+|----------|----------------|
+| 新增/删除子命令，或改动参数、默认值、`possible_values` | `cli-reference.md` |
+| `agentsight.json` 字段、默认值、`features` 开关、`runtime_limits` | `configuration.md` |
+| `InterruptionType` 枚举、severity 默认值、检测阈值、DeadLoop 处置 | `interruption-detection.md` |
+| API 路由增删（`/api/docs` 清单变化）、数据库文件、保留与容量策略 | `data-and-storage.md` |
+| Dashboard 页面增删、导航能力探测（`capabilities`）、认证行为 | `dashboard.md` |
+| systemd unit、安装路径、容器/Sidecar 要求、macOS 能力边界 | `deployment.md` |
+| 伴生组件集成（tokenless / agent-sec-core / enforcer）表现变化 | `integrations.md` |
+
+硬性要求：
+
+- 文档中的命令与输出必须在真实环境验证过，禁止凭源码推测排版；示例中的会话/对话/中断 ID、Token 数、主机名与 IP 必须是一眼可辨的占位值（如 `00000000-0000-0000-0000-000000000001`、`203.0.113.10`），禁止粘贴真实采集数据
+- 不要在正文中钉未发布的补丁版本号，用 `0.11`、`0.11.x` 这类版本序列表述
+- 已知缺陷（CLI 与界面提示不一致、参数覆盖不全等）以显式 caveat 写清楚，不要静默省略
+- 截图放在 `docs/images/agentsight/{en,zh}/`，用相对路径引用；网站构建由 `website/scripts/prepare-docs.mjs` 自动改写路径并拷贝到静态目录，新增图片必须被某个页面引用，否则不会进入站点
+- 文档变更后本地至少跑通：`bash scripts/docs-lint.sh`、`python3 scripts/docs-link-check.py`、`npm run build --prefix website`
+
 ## 1. Quick Start
 
 ```bash
@@ -143,7 +166,7 @@ OpenAI Responses API 的 `response.completed` 事件可能跨多个 TLS record�
 
 | 命令 | 入口 | 功能 |
 |------|------|------|
-| `agentsight trace` | `src/bin/cli/trace.rs` | eBPF 追踪（需 root） |
+| `agentsight trace` | `src/bin/cli/trace.rs` | eBPF 追踪（需 root）；`--no-ebpf` 仅跑轨迹采集，无需特权 |
 | `agentsight serve` | `src/bin/cli/serve.rs` | API + Dashboard 服务器 |
 | `agentsight token` | `src/bin/cli/token.rs` | 查询 Token 消耗 |
 | `agentsight audit` | `src/bin/cli/audit.rs` | 查询审计事件 |
@@ -205,12 +228,15 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus token 指标 |
 | `/api/sessions` | GET | 会话列表 |
+| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM） |
 | `/api/sessions/{id}/traces` | GET | 会话下的 trace |
 | `/api/traces/{id}` | GET | trace 详情 |
 | `/api/conversations/{id}` | GET | conversation 事件详情 |
 | `/api/agent-names` | GET | Agent 名称列表 |
 | `/api/timeseries` | GET | 时序 Token 统计 |
-| `/api/agent-health` | GET | Agent 健康状态 |
+| `/api/metrics/latency` | GET | LLM latency and throughput percentile metrics |
+| `/api/agent-health` | GET | 历史 Agent 活动（SQLite 聚合） |
+| `/api/agent-process-health` | GET | 当前 Agent 进程健康状态 |
 | `/api/agent-health/{pid}` | DELETE | 删除健康条目 |
 | `/api/agent-health/{pid}/restart` | POST | 重启 Agent |
 | `/api/export/atif/trace/{id}` | GET | ATIF trace 导出 |
@@ -218,16 +244,16 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/export/atif/conversation/{id}` | GET | ATIF conversation 导出 |
 | `/api/token-savings` | GET | Token 节省统计（`start_ns`, `end_ns`, `agent_name`） |
 | `/api/interruptions` | GET | 中断事件列表（`start_ns`, `end_ns`, `agent_name`, `type`, `severity`, `resolved`, `limit`） |
-| `/api/interruptions/count` | GET | 中断计数按严重级别（`start_ns`, `end_ns`） |
-| `/api/interruptions/stats` | GET | 中断按类型统计（`start_ns`, `end_ns`） |
-| `/api/interruptions/session-counts` | GET | 按 session 分组的中断计数（`start_ns`, `end_ns`） |
-| `/api/interruptions/conversation-counts` | GET | 按 conversation 分组的中断计数（`start_ns`, `end_ns`） |
+| `/api/interruptions/count` | GET | 中断计数按严重级别（`start_ns`, `end_ns`, `agent_name`）— 固定只统计 `resolved=false`，不接受 `resolved` 参数 |
+| `/api/interruptions/stats` | GET | 中断按（类型, 严重级别）统计（`start_ns`, `end_ns`）— 同样固定只统计 `resolved=false` |
+| `/api/interruptions/session-counts` | GET | 按 session 分组的未解决中断计数（`start_ns`, `end_ns`, `agent_name`），NULL session_id 归入 `__unassigned__` |
+| `/api/interruptions/conversation-counts` | GET | 按 session + conversation 分组的未解决中断计数（`start_ns`, `end_ns`, `agent_name`），NULL session_id / conversation_id 归入 `__unassigned__`；session 维度不可省略，否则会话未识别的中断会被计入拥有该 conversation 的 session |
 | `/api/interruptions/{id}` | GET | 单个中断事件详情 |
 | `/api/interruptions/{id}/resolve` | POST | 标记中断为已解决 |
 | `/api/sessions/{id}/interruptions` | GET | 指定 session 的所有中断 |
 | `/api/conversations/{id}/interruptions` | GET | 指定 conversation 的所有中断 |
 | `/api/auth/login` | POST | Dashboard 登录（Body: `{"token":"..."}` ），成功设置 httpOnly cookie |
-| `/api/auth/status` | GET | 返回 `{"auth_enabled": bool}`（免认证，供前端判断是否需登录）|
+| `/api/auth/status` | GET | 返回 `{"auth_enabled": bool, "capabilities": [...]}`（免认证）；`capabilities` 为动态探测结果，取决于宿主机上安装的伴随组件（agent-sec / enforcer / tokenless），供前端 NavBar 过滤不可用页面 |
 | `/api/auth/verify` | GET | 校验当前 session cookie/token 是否有效，返回 `{"authenticated": bool}` |
 | `/api/optimize/sessions/{id}/{dim}` | POST | 运行单维度优化分析，`dim` ∈ `perf` / `perf-issues` / `cost` / `cost-waste` / `accuracy` / `summary`（后四者需 LLM 配置，10–60s；`summary` 为单次调用叙事摘要） |
 | `/api/optimize/sessions/{id}/results` | GET | 读取已持久化的优化分析结果 |
@@ -243,7 +269,7 @@ React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm
 
 ## 10. Configuration
 
-`AgentsightConfig`（`src/config.rs`），关键环境变量：SLS_*（阿里云日志服务导出）、`AGENTSIGHT_TOKENIZER_PATH`、`AGENTSIGHT_CHROME_TRACE`、`RUST_LOG`。
+`AgentsightConfig`（`src/config.rs`），关键环境变量：SLS_*（阿里云日志服务导出）、`AGENTSIGHT_TOKENIZER_PATH`、`AGENTSIGHT_CHROME_TRACE`、`RUST_LOG`、`AGENTSIGHT_SSL_REATTACH_TTL_SECS`（SSL uprobe 陈旧重挂载 TTL，默认 300 秒；用于内核静默注销 uprobe consumer 的 serverless/overlayfs 场景，如 ACS；设为 `0` 表示每次匹配进程都强制重挂载，仅供测试）。
 
 ### 配置文件加载语义
 
@@ -255,8 +281,8 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 `agentsight.json` 顶层包含 `schema_version` 字段，标记当前配置格式的版本。程序启动时通过 `ensure_default_agents_config` 检查磁盘上配置文件的 `schema_version`：
 
-- **版本缺失或过旧**（如从 0.6 升级到 0.7）：自动备份旧文件为 `.json.bak`，用内嵌默认配置覆盖
-- **版本一致**：保留用户自定义配置不动
+- **版本缺失或过旧**（如从 0.6 升级到 0.7）：先把旧文件复制为 `config.json.bak.<unix秒>`，再写入浅合并结果——以内嵌默认配置为底，逐个顶层键叠加用户已设置的内容（`schema_version` 除外），最后提升版本号（`config.rs` 的 `ensure_default_agents_config`，见 #1496）
+- **版本一致或更新**：保留用户自定义配置不动
 - **RPM 安装**：使用 `%config(noreplace)`，RPM 升级不覆盖磁盘文件，由程序自身的 schema_version 检查处理升级
 
 **修改 `agentsight.json` 时的检查清单**：
@@ -288,6 +314,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 |--------|--------|------|
 | `event_channel_capacity` | 10,000 | Probe 事件有界通道容量 |
 | `event_channel_policy` | `backpressure` | 满载策略：backpressure / drop_newest / sample |
+| `event_channel_max_bytes_mb` | 64 | 排队事件的字节预算（单条 SSL 记录可达 4 MiB，槽位数无法限定内存）|
 | `pending_genai_max_count` | 1,000 | 等待 session_id 的最大事件数 |
 | `pending_genai_max_bytes_mb` | 64 | 等待 session_id 的最大字节数 |
 | `pid_cache_size` | 1,024 | PID → agent_name LRU 缓存 |
@@ -327,7 +354,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 - Lead with "zero-instrumentation eBPF observability" — the user installs AgentSight and gets full tracing without touching their Agent code. This is the single most important differentiator.
 
 ### Gotchas to Warn About
-- root/CAP_BPF is required for `agentsight trace` — users who forget get silent "no events" behavior. Every usage section must note this.
+- root/CAP_BPF is required for `agentsight trace` — users who forget get silent "no events" behavior. Every usage section must note this. `--no-ebpf` is the unprivileged fallback and runs the trajectory collector alone; never present it as a substitute for eBPF-derived data (token metering, audit, interruption detection).
 - Config file semantics: user-provided `config.json` **replaces** the built-in defaults entirely (no merge). Users who partially customize lose Agent discovery rules for unmentioned Agents.
 
 ### Content Decisions

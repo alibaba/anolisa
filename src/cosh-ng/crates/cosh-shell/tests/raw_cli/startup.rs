@@ -124,8 +124,8 @@ fn raw_cli_startup_banner_renders_when_enabled() {
         "no hooks line when hooks are disabled: {output}"
     );
     assert!(!output.contains("no command ran"), "{output}");
-    assert!(!output.contains("cosh-osc$ ╭ cosh-shell"), "{output}");
-    assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
+    assert!(!output.contains("cosh-osc$ ╭ · cosh-shell"), "{output}");
+    assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
     assert!(!output.contains("Thinking..."), "{output}");
 }
 
@@ -165,6 +165,24 @@ fn raw_cli_startup_banner_reports_effective_modes() {
 
     assert!(output.contains("Approval: trust"), "{output}");
     assert!(output.contains("Analysis: manual"), "{output}");
+}
+
+#[test]
+fn raw_cli_startup_approval_alias_and_invalid_value_fail_closed() {
+    for value in ["balanced", "invalid"] {
+        let output = run_raw_cli_with_env(
+            "fake",
+            "exit\n",
+            &[
+                ("COSH_SHELL_STARTUP_BANNER", "1"),
+                ("COSH_SHELL_APPROVAL_MODE", value),
+                ("TERM", "xterm-256color"),
+            ],
+        );
+
+        assert!(output.contains("Approval: recommend"), "{value}: {output}");
+        assert!(!output.contains("Approval: auto"), "{value}: {output}");
+    }
 }
 
 #[test]
@@ -392,7 +410,7 @@ fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
     assert!(output.contains("Disk"), "{output}");
     assert!(!output.contains("Health check"), "{output}");
     assert!(!output.contains("Suggested prompts"), "{output}");
-    assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
+    assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
 }
 
 #[test]

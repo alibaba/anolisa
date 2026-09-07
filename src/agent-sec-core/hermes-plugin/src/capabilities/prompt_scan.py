@@ -3,8 +3,6 @@
 import json
 import logging
 import os
-import time
-from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..cli_runner import call_agent_sec_cli, trace_context
@@ -13,23 +11,15 @@ from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
 
-_DEFAULT_WARNING_TTL_SECONDS = 300.0
-_RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
-_SCAN_MODE = _RAW_SCAN_MODE
-if _SCAN_MODE not in {"fast", "standard", "strict"}:
-    _SCAN_MODE = "standard"
-logger.info(
-    "Prompt scanner scan mode: raw=%r, effective=%r", _RAW_SCAN_MODE, _SCAN_MODE
-)
+_VALID_SCAN_MODES = {"fast", "standard", "strict"}
 _USER_INPUT_SOURCE = "user_input"
 
 
-@dataclass
-class WarningBucket:
-    """Cached warnings for a single Hermes run/session key."""
-
-    warnings: list[str] = field(default_factory=list)
-    last_touched_at: float = field(default_factory=time.monotonic)
+def _normalize_scan_mode(raw_mode: str | None) -> str:
+    scan_mode = (raw_mode or "standard").strip().lower()
+    if scan_mode not in _VALID_SCAN_MODES:
+        return "standard"
+    return scan_mode
 
 
 class PromptScanCapability(AgentSecCoreCapability):
@@ -45,25 +35,25 @@ class PromptScanCapability(AgentSecCoreCapability):
     def __init__(self) -> None:
         super().__init__()
         self._hook_enabled: bool = True
-        self._warning_ttl_seconds: float = _DEFAULT_WARNING_TTL_SECONDS
-        self._warnings_by_key: dict[str, WarningBucket] = {}
+        raw_scan_mode = os.environ.get("PROMPT_SCANNER_SCAN_MODE")
+        self._scan_mode = _normalize_scan_mode(raw_scan_mode)
+        logger.info(
+            "Prompt scanner scan mode: raw=%r, effective=%r",
+            raw_scan_mode,
+            self._scan_mode,
+        )
 
     def _on_register(self, config: dict[str, Any]) -> None:
         """Read prompt-scan specific config."""
         self._hook_enabled = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
-        ttl = config.get("warning_ttl_seconds", _DEFAULT_WARNING_TTL_SECONDS)
-        try:
-            parsed_ttl = float(ttl)
-        except (TypeError, ValueError):
-            parsed_ttl = _DEFAULT_WARNING_TTL_SECONDS
-        self._warning_ttl_seconds = max(0.0, parsed_ttl)
+        if "warning_ttl_seconds" in config:
+            logger.warning(
+                "[agent-sec-core] prompt-scan warning_ttl_seconds is ignored; "
+                "Hermes synthetic warning delivery was removed"
+            )
 
     def get_hooks_define(self) -> dict[str, Callable[..., Any]]:
-        return {
-            "pre_llm_call": self._on_pre_llm_call,
-            "transform_llm_output": self._on_transform_llm_output,
-            "on_session_end": self._on_session_end,
-        }
+        return {"pre_llm_call": self._on_pre_llm_call}
 
     # ------------------------------------------------------------------
     # Hook handlers
@@ -73,22 +63,11 @@ class PromptScanCapability(AgentSecCoreCapability):
         """Scan the current user input before the LLM turn starts."""
         if not self._hook_enabled:
             return None
-        self._cleanup_expired()
 
         user_text = self._extract_user_text(messages, kwargs)
         if not user_text.strip():
             return None
 
-        cache_key = self._cache_key(kwargs)
-        if cache_key is None:
-            logger.warning(
-                f"[agent-sec-core] {self.id} missing session/task key, fail-open"
-            )
-            return None
-
-        # Drop any stale warning carried over from a previous turn under the
-        # same correlation key — only the freshest scan should win.
-        self._warnings_by_key.pop(cache_key, None)
         scan = self._scan_text(user_text, trace_context(kwargs))
         if scan is None:
             return None
@@ -111,42 +90,12 @@ class PromptScanCapability(AgentSecCoreCapability):
             )
             return None
 
-        warning = self._format_prompt_warning(verdict, scan)
-
-        # Non-blocking delivery: cache warning for transform_llm_output.
-        self._push_warning(cache_key, warning)
+        threat_type = self._safe_string(scan.get("threat_type")) or "unknown"
+        risk_level = self._safe_string(scan.get("risk_level")) or "unknown"
         logger.warning(
-            f"[agent-sec-core] {self.id} {verdict.upper()} warning cached key={cache_key}"
+            f"[agent-sec-core] {self.id} {verdict.upper()} observed "
+            f"threat_type={threat_type[:32]} risk_level={risk_level[:32]}"
         )
-        return None
-
-    def _on_transform_llm_output(
-        self,
-        response_text: str = "",
-        session_id: str = "",
-        **kwargs: Any,
-    ) -> str | None:
-        """Prepend cached prompt-scan warnings to the final user-visible response."""
-        self._cleanup_expired()
-        if not isinstance(response_text, str) or not response_text:
-            return None
-
-        cache_key = self._cache_key({"session_id": session_id, **kwargs})
-        if cache_key is None:
-            return None
-
-        warnings = self._pop_warnings(cache_key)
-        if not warnings:
-            return None
-
-        return "\n".join(warnings) + "\n\n" + response_text
-
-    def _on_session_end(self, session_id: str = "", **kwargs: Any) -> None:
-        """Clean cached warnings when Hermes ends a session."""
-        cache_key = self._cache_key({"session_id": session_id, **kwargs})
-        if cache_key is not None:
-            self._warnings_by_key.pop(cache_key, None)
-        self._cleanup_expired()
         return None
 
     # ------------------------------------------------------------------
@@ -170,7 +119,7 @@ class PromptScanCapability(AgentSecCoreCapability):
         args = [
             "scan-prompt",
             "--mode",
-            _SCAN_MODE,
+            self._scan_mode,
             "--format",
             "json",
             "--source",
@@ -242,72 +191,8 @@ class PromptScanCapability(AgentSecCoreCapability):
         return ""
 
     # ------------------------------------------------------------------
-    # Warning cache helpers
+    # Misc helpers
     # ------------------------------------------------------------------
-
-    def _cache_key(self, values: dict[str, Any]) -> str | None:
-        """Return the best available Hermes turn/session correlation key."""
-        for key in ("session_id", "task_id", "run_id"):
-            value = values.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return None
-
-    def _push_warning(self, cache_key: str, warning: str) -> None:
-        """Cache a warning for later transform_llm_output delivery."""
-        self._cleanup_expired()
-        now = time.monotonic()
-        bucket = self._warnings_by_key.get(cache_key)
-        if bucket is None:
-            bucket = WarningBucket(last_touched_at=now)
-        if warning not in bucket.warnings:
-            bucket.warnings.append(warning)
-        bucket.last_touched_at = now
-        self._warnings_by_key[cache_key] = bucket
-
-    def _pop_warnings(self, cache_key: str) -> list[str]:
-        """Return and remove cached warnings for a key."""
-        bucket = self._warnings_by_key.pop(cache_key, None)
-        if bucket is None:
-            return []
-        return list(bucket.warnings)
-
-    def _cleanup_expired(self) -> None:
-        """Remove stale warning buckets."""
-        ttl = self._warning_ttl_seconds
-        now = time.monotonic()
-        expired = [
-            cache_key
-            for cache_key, bucket in self._warnings_by_key.items()
-            if now - bucket.last_touched_at >= ttl
-        ]
-        for cache_key in expired:
-            self._warnings_by_key.pop(cache_key, None)
-
-    # ------------------------------------------------------------------
-    # Formatting & misc helpers
-    # ------------------------------------------------------------------
-
-    def _format_prompt_warning(self, verdict: str, scan: dict[str, Any]) -> str:
-        """Build a warning string from a scan-prompt result."""
-        threat_type = self._safe_string(scan.get("threat_type"))
-        risk_level = self._safe_string(scan.get("risk_level")) or "unknown"
-        confidence = scan.get("confidence")
-
-        lines = [
-            "\U0001f6e1\ufe0f [prompt-scan] 检测到安全风险",
-            f"  攻击类型 : {threat_type or 'unknown'}",
-            f"  风险等级 : {risk_level}",
-            "  拦截环节 : 用户输入扫描 (pre_llm_call)",
-        ]
-        if confidence is not None:
-            try:
-                lines.append(f"  模型置信度: {float(confidence) * 100:.1f}%")
-            except (TypeError, ValueError):
-                pass
-        lines.append("")
-        lines.append("本轮请求将继续处理。")
-        return "\n".join(lines)
 
     def _message_value(self, message: Any, key: str) -> Any:
         """Read a key from dict-like or object-like messages."""

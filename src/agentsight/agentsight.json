@@ -29,6 +29,7 @@
         "flush_ms": 100
       }
     },
+    "resource_sampling": false,
     "interruption_detection": {
       "enabled": true,
       "retention_days": 30,
@@ -45,6 +46,7 @@
   "runtime_limits": {
     "event_channel_capacity": 10000,
     "event_channel_policy": "backpressure",
+    "event_channel_max_bytes_mb": 64,
     "pending_genai_max_count": 1000,
     "pending_genai_max_bytes_mb": 64,
     "pid_cache_size": 1024,
@@ -53,7 +55,7 @@
     "ring_buffer_mb": 32
   },
   "https": [
-    {"rule": ["dashscope.aliyuncs.com"]},
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]},
     {"rule": ["api.openai.com"]}
   ],
   "http": [],
@@ -68,13 +70,11 @@
       {"rule": ["*codex*"], "agent_name": "Codex"},
       {"rule": ["*node*", "*codex*"], "agent_name": "Codex"},
       {"rule": ["*/node*", "*", "*", "*", "*", "*server/index.ts*"], "agent_name": "Runloop"},
-      {"rule": ["node*", "*/bin/co*"], "agent_name": "Cosh"},
       {"rule": ["node*", "*/bin/cosh*"], "agent_name": "Cosh"},
-      {"rule": ["node*", "*/bin/copliot*"], "agent_name": "Cosh"},
+      {"rule": ["node*", "*/bin/copilot*"], "agent_name": "Cosh"},
       {"rule": ["node*", "*copilot-shell*"], "agent_name": "Cosh"},
       {"rule": ["*node*", "*copilot-shell*"], "agent_name": "Cosh"},
       {"rule": ["*node*", "*cosh*"], "agent_name": "Cosh"},
-      {"rule": ["*node*", "*/bin/co*"], "agent_name": "Cosh"},
       {"rule": ["*node*", "*os-copilot*"], "agent_name": "Cosh"},
       {"rule": ["*cosh-shell*"], "agent_name": "CoshNG"},
       {"rule": ["*cosh-core*"], "agent_name": "CoshNG"},
@@ -89,7 +89,15 @@
       {"rule": ["qwen*"], "agent_name": "QwenCode"},
       {"rule": ["*/qwen*"], "agent_name": "QwenCode"},
       {"rule": ["*node*", "*qwen*"], "agent_name": "QwenCode"},
-      {"rule": ["*node*", "*", "*qwen*"], "agent_name": "QwenCode"}
+      {"rule": ["*node*", "*", "*qwen*"], "agent_name": "QwenCode"},
+      {"rule": ["agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "-m", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*", "*agentscope*"], "agent_name": "AgentScope"},
+      {"rule": ["*python*", "*agent_scope*"], "agent_name": "AgentScope"}
+    ],
+    "deny": [
+      {"rule": ["*", "*", "-c", "*sftp-server*"]}
     ]
   },
   "codex_offsets": {

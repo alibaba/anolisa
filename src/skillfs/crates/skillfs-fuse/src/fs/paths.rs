@@ -18,6 +18,16 @@ use crate::security::{
 };
 use crate::sys::{errno, open_dir_path};
 
+/// Selects whether installer-authorized live I/O targets a loaded skill or a
+/// source-root candidate that has not entered the store yet.
+#[derive(Clone, Copy)]
+pub(super) enum FlatLiveDirKind {
+    /// Resolve an existing skill through its stored manifest path.
+    ExistingSkill,
+    /// Resolve staging and pending-install candidates directly under source.
+    SourceRootCandidate,
+}
+
 impl SkillFs {
     /// Return the base path for physical file access.
     ///
@@ -65,6 +75,14 @@ impl SkillFs {
             self.skill_source_path(skill_name)
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .unwrap_or_else(|| self.source.join(skill_name))
+        }
+    }
+
+    /// Resolve the live directory used by flat installer-authorized I/O.
+    pub(super) fn flat_live_dir(&self, skill_name: &str, kind: FlatLiveDirKind) -> PathBuf {
+        match kind {
+            FlatLiveDirKind::ExistingSkill => self.skill_physical_dir(skill_name),
+            FlatLiveDirKind::SourceRootCandidate => self.source_base().join(skill_name),
         }
     }
 
@@ -158,14 +176,14 @@ impl SkillFs {
     /// in-place mode) so that all I/O bypasses the FUSE layer.
     pub(super) fn resolve_physical_path(&self, fuse_path: &str) -> Option<PathBuf> {
         match self.parse_fuse_path(Path::new(fuse_path)) {
-            PathType::SkillDir { skill_name } => Some(self.source_base().join(&skill_name)),
+            PathType::SkillDir { skill_name } => Some(self.skill_physical_dir(&skill_name)),
             PathType::SkillMd { skill_name } => {
-                Some(self.source_base().join(&skill_name).join("SKILL.md"))
+                Some(self.skill_physical_dir(&skill_name).join("SKILL.md"))
             }
             PathType::Passthrough {
                 skill_name,
                 relative_path,
-            } => Some(self.source_base().join(&skill_name).join(&relative_path)),
+            } => Some(self.skill_physical_dir(&skill_name).join(&relative_path)),
             // L1 inbox virtual mapping: `<inbox>/<skill>/<rel>` shares
             // the physical layout with the live source candidate
             // directory. The inbox root itself has no physical backing
@@ -232,29 +250,20 @@ impl SkillFs {
             .map(|n| n.to_os_string())
             .ok_or(libc::EINVAL)?;
         let parent_fuse = path.parent().ok_or(libc::EINVAL)?;
-        let parent_fuse_str = match parent_fuse.to_str() {
-            Some(s) => s.to_string(),
-            None => return Err(libc::EINVAL),
-        };
-        let parent_physical = match crate::path::parse_path_with_layout(
-            parent_fuse,
-            self.in_place,
-            self.skill_layout,
-        ) {
-            PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
-                self.source_base().join(&skill_name)
-            }
+        let parent_physical = match self.parse_fuse_path(parent_fuse) {
+            PathType::SkillDir { skill_name } => self.skill_physical_dir(&skill_name),
+            PathType::InboxSkillDir { skill_name } => self.inbox_skill_dir(&skill_name),
             PathType::SkillMd { skill_name } => {
-                self.source_base().join(&skill_name).join("SKILL.md")
+                self.skill_physical_dir(&skill_name).join("SKILL.md")
             }
             PathType::Passthrough {
                 skill_name,
                 relative_path,
-            }
-            | PathType::InboxPassthrough {
+            } => self.skill_physical_dir(&skill_name).join(&relative_path),
+            PathType::InboxPassthrough {
                 skill_name,
                 relative_path,
-            } => self.source_base().join(&skill_name).join(&relative_path),
+            } => self.inbox_skill_dir(&skill_name).join(&relative_path),
             PathType::HermesMeta { name } => self.source_base().join(&name),
             PathType::HermesMetaChild {
                 name,
@@ -289,7 +298,6 @@ impl SkillFs {
             PathType::SkillsDir | PathType::Root | PathType::InboxDir => self.source_base(),
             PathType::Invalid => return Err(libc::ENOTDIR),
         };
-        let _ = parent_fuse_str; // suppress unused-binding warning when tracing is off
         open_dir_path(&parent_physical)
             .map(|f| (f, leaf))
             .map_err(|e| errno(&e))
@@ -449,5 +457,75 @@ impl SkillFs {
     /// Skill that has no activation key and would fail closed to hidden.
     pub(super) fn hermes_is_top_level_skill(&self, name: &str) -> bool {
         skillfs_core::store::has_regular_skill_md(&self.source_base().join(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsRawFd;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, store::SkillStore};
+
+    use super::*;
+
+    #[test]
+    fn flat_paths_and_grace_use_the_stored_categorized_source_dir() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let skill_dir = source.path().join("catalog/demo");
+        std::fs::create_dir_all(&skill_dir).expect("categorized skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: categorized\n---\nbody\n",
+        )
+        .expect("categorized SKILL.md");
+        std::fs::write(skill_dir.join("notes.txt"), "notes").expect("passthrough file");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            Arc::new(RwLock::new(store)),
+            false,
+        );
+
+        assert_eq!(
+            fs.resolve_physical_path("/skills/demo"),
+            Some(skill_dir.clone())
+        );
+        assert_eq!(
+            fs.resolve_physical_path("/skills/demo/SKILL.md"),
+            Some(skill_dir.join("SKILL.md"))
+        );
+        assert_eq!(
+            fs.resolve_physical_path("/skills/demo/notes.txt"),
+            Some(skill_dir.join("notes.txt"))
+        );
+        assert_eq!(
+            fs.resolve_physical_path("/skills/new-skill"),
+            Some(source.path().join("new-skill"))
+        );
+        assert_eq!(
+            fs.flat_live_dir("demo", FlatLiveDirKind::ExistingSkill),
+            skill_dir
+        );
+        // Grace targets loaded skills, while staging/pending candidates retain
+        // their direct source-root mapping.
+        assert_eq!(
+            fs.flat_live_dir("demo", FlatLiveDirKind::SourceRootCandidate),
+            source.path().join("demo")
+        );
+
+        let (parent, leaf) = fs
+            .open_parent_dir_for("/skills/demo/notes.txt")
+            .expect("open categorized parent");
+        assert_eq!(leaf, "notes.txt");
+        let fd_path = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
+        assert_eq!(
+            std::fs::canonicalize(fd_path).expect("canonical parent fd"),
+            std::fs::canonicalize(&skill_dir).expect("canonical skill dir")
+        );
     }
 }

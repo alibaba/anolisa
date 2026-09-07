@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{block::Padding, Block, BorderType, Paragraph, Widget, Wrap},
 };
 
-use crate::types::{AgentEvent, GovernedEvent};
+use crate::types::{AgentEvent, CardKind, GovernedEvent};
 
 mod actions;
 mod activity;
@@ -142,10 +142,17 @@ impl RatatuiInlineRenderer {
         output: &mut W,
         governed_events: &[GovernedEvent],
     ) -> io::Result<()> {
+        let lines = self.governed_event_lines(governed_events);
+        // An event batch without visible content (e.g. an orphan hook
+        // notification whose display text was never populated) must not
+        // render an empty titled card (#2067).
+        if lines.iter().all(|line| line.trim().is_empty()) {
+            return Ok(());
+        }
         self.write_block(
             output,
-            self.i18n().t(crate::MessageId::AgentGovernanceTitle),
-            self.governed_event_lines(governed_events),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentGovernanceTitle)),
+            lines,
             None,
         )
     }
@@ -157,7 +164,7 @@ impl RatatuiInlineRenderer {
     pub fn write_loading_text<W: Write>(&self, output: &mut W, text: &str) -> io::Result<()> {
         self.write_block(
             output,
-            self.i18n().t(crate::MessageId::AgentResponseTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
             vec![text.to_string()],
             None,
         )
@@ -171,7 +178,7 @@ impl RatatuiInlineRenderer {
         StreamingAgentBlock::new(
             self.content_width(),
             self.plain,
-            self.i18n().t(crate::MessageId::AgentResponseTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
         )
     }
 
@@ -205,7 +212,7 @@ impl RatatuiInlineRenderer {
             }
             return self.write_styled_block(
                 output,
-                self.i18n().t(crate::MessageId::AgentResponseTitle),
+                &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
                 body,
             );
         }
@@ -217,7 +224,7 @@ impl RatatuiInlineRenderer {
         };
         self.write_block(
             output,
-            self.i18n().t(crate::MessageId::AgentResponseTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
             body,
             footer,
         )
@@ -230,7 +237,7 @@ impl RatatuiInlineRenderer {
         body: Vec<String>,
         footer: Option<&str>,
     ) -> io::Result<()> {
-        self.write_block(output, title, body, footer)
+        self.write_block(output, &CardKind::System.title(title), body, footer)
     }
 
     pub fn write_notice_panel<W: Write>(
@@ -238,10 +245,37 @@ impl RatatuiInlineRenderer {
         output: &mut W,
         model: NoticePanelModel<'_>,
     ) -> io::Result<()> {
+        for line in self.typed_notice_panel_lines(CardKind::System, model) {
+            writeln!(output, "{line}")?;
+        }
+        Ok(())
+    }
+
+    /// Renders a notice owned by an explicit slash-command invocation.
+    pub(crate) fn write_slash_notice_panel<W: Write>(
+        &self,
+        output: &mut W,
+        model: NoticePanelModel<'_>,
+    ) -> io::Result<()> {
+        for line in self.typed_notice_panel_lines(CardKind::SlashCommand, model) {
+            writeln!(output, "{line}")?;
+        }
+        Ok(())
+    }
+
+    /// Offscreen form of [`Self::write_notice_panel`]: returns the fully
+    /// framed panel lines (no trailing newlines) so callers that own a
+    /// non-`Write` sink — such as the raw relay splicing a hint card into
+    /// a live PTY stream with `\r\n` endings — reuse the exact panel
+    /// family framing, width contract, and plain fallback.
+    pub fn notice_panel_lines(&self, model: NoticePanelModel<'_>) -> Vec<String> {
+        self.typed_notice_panel_lines(CardKind::System, model)
+    }
+
+    fn typed_notice_panel_lines(&self, kind: CardKind, model: NoticePanelModel<'_>) -> Vec<String> {
         let lines = model.body.into_iter().map(Line::from).collect();
-        self.write_block(
-            output,
-            model.title,
+        self.block_lines(
+            &kind.title(model.title),
             self.render_lines(lines, self.content_width()),
             model.footer,
         )
@@ -280,23 +314,30 @@ impl RatatuiInlineRenderer {
         body: Vec<String>,
         footer: Option<&str>,
     ) -> io::Result<()> {
+        for line in self.block_lines(title, body, footer) {
+            writeln!(output, "{line}")?;
+        }
+        Ok(())
+    }
+
+    fn block_lines(&self, title: &str, body: Vec<String>, footer: Option<&str>) -> Vec<String> {
         if self.plain {
-            writeln!(output, "{title}:")?;
+            let mut out = vec![format!("{title}:")];
             for line in body {
                 if line.trim().is_empty() {
-                    writeln!(output)?;
+                    out.push(String::new());
                 } else {
-                    writeln!(output, "  {line}")?;
+                    out.push(format!("  {line}"));
                 }
             }
             if let Some(footer) = footer {
                 for line in
                     self.render_lines(vec![Line::from(footer.to_string())], self.content_width())
                 {
-                    writeln!(output, "  {line}")?;
+                    out.push(format!("  {line}"));
                 }
             }
-            return Ok(());
+            return out;
         }
 
         let mut lines = body;
@@ -305,11 +346,7 @@ impl RatatuiInlineRenderer {
                 self.render_lines(vec![Line::from(footer.to_string())], self.content_width()),
             );
         }
-        let rendered_lines = self.rich_block_lines(title, lines);
-        for line in rendered_lines {
-            writeln!(output, "{line}")?;
-        }
-        Ok(())
+        self.rich_block_lines(title, lines)
     }
 
     fn write_styled_block<W: Write>(

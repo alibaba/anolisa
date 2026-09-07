@@ -50,11 +50,30 @@ pub(crate) struct FailedCommandAgentStartOptions {
     pub(crate) trigger: FailedCommandAnalysisTrigger,
 }
 
+#[cfg(test)]
 pub(crate) fn collect_failed_command_insights<W: Write>(
     events: &[ShellEvent],
     blocks: &[CommandBlock],
     state: &mut InlineState,
+    output: &mut W,
+    event_index_base: usize,
+) -> std::io::Result<()> {
+    collect_failed_command_insights_with_history_base(
+        events,
+        blocks,
+        state,
+        output,
+        0,
+        event_index_base,
+    )
+}
+
+pub(crate) fn collect_failed_command_insights_with_history_base<W: Write>(
+    events: &[ShellEvent],
+    blocks: &[CommandBlock],
+    state: &mut InlineState,
     _output: &mut W,
+    history_index_base: usize,
     event_index_base: usize,
 ) -> std::io::Result<()> {
     for block in blocks {
@@ -64,7 +83,8 @@ pub(crate) fn collect_failed_command_insights<W: Write>(
         if state.evaluated_failed_command_insights.contains(&block.id) {
             continue;
         }
-        let end_event_index = block_end_event_index(events, block);
+        let end_event_index = block_end_event_index(events, block)
+            .map(|index| history_index_base.saturating_add(index));
         if end_event_index.is_none_or(|idx| idx < event_index_base) {
             continue;
         }

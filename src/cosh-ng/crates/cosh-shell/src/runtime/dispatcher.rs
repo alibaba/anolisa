@@ -3,11 +3,12 @@ use std::io::Write;
 use crate::activity::runtime::{
     close_untracked_shell_handoffs, record_approved_shell_handoff_blocks, render_activity_rows,
 };
+use crate::adapter::AgentAdapter;
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
-    block_end_event_index, collect_failed_command_insights, failed_command_candidate,
-    failed_command_intervention, render_post_failure_actions, start_agent_for_block,
-    FailedCommandAgentStartOptions, FailedCommandAnalysisTrigger,
+    block_end_event_index, collect_failed_command_insights_with_history_base,
+    failed_command_candidate, failed_command_intervention, render_post_failure_actions,
+    start_agent_for_block, FailedCommandAgentStartOptions, FailedCommandAnalysisTrigger,
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
@@ -29,8 +30,9 @@ use crate::runtime::details::render_runtime_details_card_actions;
 use crate::runtime::evidence_delivery::shell_handoff_continuation_requests;
 use crate::runtime::evidence_requests::render_evidence_request_actions;
 use crate::runtime::hooks::{
-    handle_consultation_events, record_blocks_followed_by_user_input, record_command_hook_findings,
-    render_queued_hook_consultation, render_recorded_hook_findings,
+    handle_consultation_events, record_blocks_followed_by_user_input,
+    record_command_hook_findings_with_history_base, render_queued_hook_consultation,
+    render_recorded_hook_findings,
 };
 use crate::runtime::insight::render_pending_command_insight;
 use crate::runtime::prelude::{
@@ -41,7 +43,7 @@ use crate::runtime::state::InlineState;
 use crate::slash::runtime::render_slash_actions;
 use crate::slash::session::poll_background_compaction;
 
-use super::controller::{pending_card_capture, shell_has_active_foreground_command};
+use super::controller::pending_card_capture;
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
 use super::startup::{
     render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
@@ -107,23 +109,29 @@ fn render_inline_guidance_from_batch<W: Write>(
 ) -> std::io::Result<()> {
     state.personalization.poll_ready();
     let events = snapshot.events();
-    let action_events = batch.events.as_slice();
+    let history_index_base = snapshot.base();
+    let action_events = batch.events;
     let event_index_base = batch.global_index(0);
-    state.shell_exited = events
+    if action_events.is_empty() {
+        return poll_inline_runtime_without_shell_events(adapter, state, output);
+    }
+
+    state.control.observe_shell_command_activity(action_events);
+    state.shell_exited |= action_events
         .iter()
         .any(|event| event.kind == ShellEventKind::ShellExited);
+    #[cfg(test)]
+    state.control.record_ledger_rebuild();
     let ledger = build_command_blocks(events);
     record_completed_command_blocks(state, &ledger.blocks);
     state.session_blocks = ledger.blocks.clone();
     // Positive evidence of command activity (R9): incomplete or
     // unmatched markers produce ledger errors instead of blocks, so an
     // empty `session_blocks` alone never proves the shell has not run
-    // (and cd'd inside) a command. `events` is the session's cumulative
-    // stream (the raw relay always passes the parser's full event vec,
-    // which is append-only), so once a command marker is present it is
-    // present in every later dispatch and this assignment never
-    // regresses to `false`.
-    state.shell_command_activity_observed = events.iter().any(|event| {
+    // (and cd'd inside) a command. Absolute cursors make each marker part of
+    // an incremental batch at most once even after the retained event window
+    // compacts, so this flag stays monotonic without full-history rescans.
+    state.shell_command_activity_observed |= action_events.iter().any(|event| {
         matches!(
             event.kind,
             ShellEventKind::CommandStarted
@@ -143,7 +151,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     // follows it. Scanned newest first: the most recent decisive
     // event wins, and an event-free dispatch never erases the last
     // known state.
-    for event in events.iter().rev() {
+    for event in action_events.iter().rev() {
         if event.kind == ShellEventKind::UserInputIntercepted
             && event.component.as_deref() == Some("shell_pty_input")
             && event.message.as_deref() == Some("write")
@@ -179,6 +187,15 @@ fn render_inline_guidance_from_batch<W: Write>(
         output,
         event_index_base,
     )?;
+    // Hook-action disambiguation panel (#1629): route focus/answer/cancel
+    // events for the pending hook-action question panel.
+    crate::slash::hooks::render_hook_action_card_actions(
+        action_events,
+        adapter,
+        state,
+        output,
+        event_index_base,
+    )?;
     let evidence_actions = EvidenceRequestConsumer::consume(
         action_events,
         &ledger.blocks,
@@ -197,7 +214,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         event_index_base,
     )?;
     RuntimeDispatcher::apply_actions(approval_actions, state);
-    let shell_busy = shell_has_active_foreground_command(events);
+    let shell_busy = state.control.shell_busy();
     if shell_busy {
         if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
             cancellation.set_foreground_idle(false);
@@ -231,7 +248,12 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
     update_soft_newline_tip_state(action_events, state);
-    crate::runtime::prompt_draft::handle_prompt_draft_events(action_events, state, output)?;
+    crate::runtime::prompt_draft::handle_prompt_draft_events(
+        action_events,
+        state,
+        output,
+        adapter.name(),
+    )?;
     let personal_idle = state.agent_run.active.is_none()
         && !state.personalization.shell_input_active
         && !action_events
@@ -260,7 +282,13 @@ fn render_inline_guidance_from_batch<W: Write>(
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
     handle_consultation_events(action_events, &ledger.blocks, adapter, state, output)?;
     render_queued_hook_consultation(state, output)?;
-    record_command_hook_findings(events, &ledger.blocks, state, event_index_base);
+    record_command_hook_findings_with_history_base(
+        events,
+        &ledger.blocks,
+        state,
+        history_index_base,
+        event_index_base,
+    );
     render_recorded_hook_findings(&ledger.blocks, state, output)?;
     render_intercept_agent_guidance(
         action_events,
@@ -289,7 +317,9 @@ fn render_inline_guidance_from_batch<W: Write>(
             auto_runtime_available
                 && block.origin == crate::types::CommandOrigin::UserInteractive
                 && !state.hooks.block_followed_by_user_input(&block.id)
-                && block_end_event_index(events, block).is_some_and(|idx| idx >= event_index_base)
+                && block_end_event_index(events, block)
+                    .map(|idx| history_index_base.saturating_add(idx))
+                    .is_some_and(|idx| idx >= event_index_base)
         })
         .collect::<Vec<_>>();
     for block in auto_blocks {
@@ -302,6 +332,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         let user_has_not_continued = !state.hooks.block_followed_by_user_input(&block.id);
         let gates = InterventionGates {
             same_dispatch_batch: block_end_event_index(events, block)
+                .map(|idx| history_index_base.saturating_add(idx))
                 .is_some_and(|idx| idx >= event_index_base),
             input_empty: user_has_not_continued,
             foreground_idle: !shell_busy,
@@ -338,14 +369,22 @@ fn render_inline_guidance_from_batch<W: Write>(
             state,
             output,
             FailedCommandAgentStartOptions {
-                selectable_after_event_index: block_end_event_index(events, block),
+                selectable_after_event_index: block_end_event_index(events, block)
+                    .map(|idx| history_index_base.saturating_add(idx)),
                 trigger: FailedCommandAnalysisTrigger::Auto,
             },
         )?;
         output.flush()?;
     }
 
-    collect_failed_command_insights(events, &ledger.blocks, state, output, event_index_base)?;
+    collect_failed_command_insights_with_history_base(
+        events,
+        &ledger.blocks,
+        state,
+        output,
+        history_index_base,
+        event_index_base,
+    )?;
     if pending_card_capture(state).is_none() {
         render_pending_command_insight(state, output)?;
     } else {
@@ -379,6 +418,47 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_owned_shell_prompt(state, output)?;
 
     Ok(())
+}
+
+fn poll_inline_runtime_without_shell_events<W: Write>(
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if state.shell_exited {
+        stop_active_agent_run_without_rendering(state, output)?;
+        return Ok(());
+    }
+
+    if state.control.shell_busy() {
+        if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
+            cancellation.set_foreground_idle(false);
+        }
+        state.personalization.idle_since = None;
+        poll_active_agent_run_deferred(state, output, adapter)?;
+        poll_background_compaction(state, output, adapter, true)?;
+        return Ok(());
+    }
+
+    render_startup_health_banner(state, output)?;
+    render_pending_recommendation_notice(state, output)?;
+    let personal_idle =
+        state.agent_run.active.is_none() && !state.personalization.shell_input_active;
+    crate::recommendation::personal_session::poll_personal_session(state, adapter, personal_idle);
+    render_queued_hook_consultation(state, output)?;
+    if pending_card_capture(state).is_none() {
+        render_pending_command_insight(state, output)?;
+    } else {
+        state.pending_command_insight = None;
+    }
+    flush_held_agent_events(state, output)?;
+    if !state.control.shell_handoff().has_active_handoff() {
+        poll_active_agent_run(state, output, adapter)?;
+    }
+    flush_held_agent_events(state, output)?;
+    start_pending_shell_handoff_continuations(adapter, state, output)?;
+    poll_background_compaction(state, output, adapter, false)?;
+    render_owned_shell_prompt(state, output)
 }
 
 /// Starts the shell-evidence continuation whose delivery to the owning provider
@@ -498,7 +578,7 @@ fn render_soft_newline_tip<W: Write>(
 
 fn render_owned_shell_prompt<W: Write>(
     state: &mut InlineState,
-    output: &mut W,
+    _output: &mut W,
 ) -> std::io::Result<()> {
     if state.agent_run.active.is_some()
         || state.shell_exited
@@ -518,13 +598,11 @@ fn render_owned_shell_prompt<W: Write>(
         return Ok(());
     }
 
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        let prompt = std::env::var("COSH_POC_PS1").unwrap_or_else(|_| "cosh-osc$ ".to_string());
-        write!(output, "{prompt}")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
-    output.flush()?;
+    // PromptPresentation owns the out-of-band input marker. Even an isolated
+    // shell must restore through the PTY relay instead of writing PS1 here,
+    // otherwise this synthetic repaint bypasses that single presentation
+    // owner and leaves one editable prompt undecorated.
+    state.trigger_pty_prompt = true;
     state.agent_run.needs_prompt_after_run = false;
     Ok(())
 }

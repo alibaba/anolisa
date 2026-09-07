@@ -373,9 +373,9 @@ impl GenAIBuilder {
         let provider = self.extract_provider_from_path(&request.path);
 
         // Resolve agent_name: cache → cmdline rule → *process* comm
-        // (/proc/<pid>/comm). Only if /proc is unreadable do we fall back to the
-        // SSL event's per-event thread comm, which may be a library worker-thread
-        // name such as "HTTP client".
+        // (`<procfs root>/<pid>/comm`). Only if the entry is unreadable do we
+        // fall back to the SSL event's per-event thread comm, which may be a
+        // library worker-thread name such as "HTTP client".
         let agent_name = Self::resolve_agent_name_from_comm(
             &request.source_event.comm,
             conn_id.pid,

@@ -7,6 +7,7 @@
 
 pub mod checker;
 pub mod port_detector;
+pub(crate) mod resource;
 pub mod store;
 
 pub use checker::HealthChecker;

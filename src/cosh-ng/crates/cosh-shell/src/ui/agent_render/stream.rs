@@ -11,10 +11,11 @@ use super::buffer_to_styled_lines;
 use super::card::StreamingCardFrame;
 use super::markdown::{is_table_row, is_table_separator_row, MarkdownRenderModel};
 use super::wrap::{
-    display_width, is_line_closing_punctuation, line_to_string, should_buffer_word_char,
-    strip_ansi_escape, wrap_plain_line,
+    char_width, display_width, is_cjk_breakable, is_line_closing_punctuation, line_to_string,
+    should_buffer_word_char, strip_ansi_escape, wrap_plain_line,
 };
 use super::RatatuiInlineRenderer;
+use crate::types::CardKind;
 
 pub struct StreamingAgentBlock {
     width: usize,
@@ -26,6 +27,7 @@ pub struct StreamingAgentBlock {
     seen_text: bool,
     line_has_visible: bool,
     pending_word: String,
+    pending_cjk_group: String,
     pending_star: bool,
     pending_backticks: usize,
     skip_until_newline: bool,
@@ -49,6 +51,7 @@ impl StreamingAgentBlock {
             seen_text: false,
             line_has_visible: false,
             pending_word: String::new(),
+            pending_cjk_group: String::new(),
             pending_star: false,
             pending_backticks: 0,
             skip_until_newline: false,
@@ -103,6 +106,7 @@ impl StreamingAgentBlock {
             self.pending_star = false;
         }
         self.flush_pending_word(output)?;
+        self.flush_pending_cjk_group(output)?;
         self.pending_backticks = 0;
 
         if !self.started {
@@ -132,6 +136,7 @@ impl StreamingAgentBlock {
         self.line_has_visible = false;
         self.current_width = 0;
         self.current_line.clear();
+        self.pending_cjk_group.clear();
         Ok(true)
     }
 
@@ -146,6 +151,12 @@ impl StreamingAgentBlock {
         }
 
         if should_buffer_word_char(ch) {
+            if !self.pending_cjk_group.is_empty() {
+                if is_line_closing_punctuation(ch) {
+                    return self.write_visible_char(output, ch);
+                }
+                self.flush_pending_cjk_group(output)?;
+            }
             self.pending_word.push(ch);
             return Ok(());
         }
@@ -215,6 +226,19 @@ impl StreamingAgentBlock {
     }
 
     fn write_visible_char<W: Write>(&mut self, output: &mut W, ch: char) -> io::Result<()> {
+        if !self.pending_cjk_group.is_empty() {
+            if self.pending_unit_continues_with(ch) {
+                self.pending_cjk_group.push(ch);
+                return Ok(());
+            }
+
+            if is_line_closing_punctuation(ch) {
+                self.pending_cjk_group.push(ch);
+                return Ok(());
+            }
+            self.flush_pending_cjk_group(output)?;
+        }
+
         if !self.started && ch.is_whitespace() {
             return Ok(());
         }
@@ -239,12 +263,15 @@ impl StreamingAgentBlock {
             return self.write_line_break(output);
         }
 
+        if is_cjk_breakable(ch) && !is_line_closing_punctuation(ch) {
+            self.pending_cjk_group.push(ch);
+            self.seen_text = true;
+            self.line_has_visible = true;
+            return Ok(());
+        }
+
         let next_width = self.current_line_width_with(ch);
-        if next_width > 0
-            && self.current_width > 0
-            && next_width > self.width
-            && !is_line_closing_punctuation(ch)
-        {
+        if next_width > 0 && self.current_width > 0 && next_width > self.width {
             self.write_line_break(output)?;
         }
 
@@ -252,6 +279,59 @@ impl StreamingAgentBlock {
         self.current_line.push(ch);
         self.current_width = display_width(&self.current_line);
         if !ch.is_whitespace() {
+            self.seen_text = true;
+            self.line_has_visible = true;
+        }
+        Ok(())
+    }
+
+    fn pending_unit_continues_with(&self, ch: char) -> bool {
+        if ch.is_whitespace() || ch.is_control() {
+            return false;
+        }
+        if char_width(ch) == 0 {
+            return true;
+        }
+
+        let pending_width = display_width(&self.pending_cjk_group);
+        let mut combined = self.pending_cjk_group.clone();
+        combined.push(ch);
+        display_width(&combined) <= pending_width
+    }
+
+    fn flush_pending_cjk_group<W: Write>(&mut self, output: &mut W) -> io::Result<()> {
+        if self.pending_cjk_group.is_empty() {
+            return Ok(());
+        }
+
+        let pending = std::mem::take(&mut self.pending_cjk_group);
+        let pending_width = display_width(&pending);
+        if pending_width <= self.width {
+            if self.current_width > 0 && self.current_width + pending_width > self.width {
+                self.write_line_break(output)?;
+            }
+            return self.write_buffered_text(output, &pending);
+        }
+
+        if self.current_width > 0 {
+            self.write_line_break(output)?;
+        }
+
+        for ch in pending.chars() {
+            if self.current_width > 0 && self.current_line_width_with(ch) > self.width {
+                self.write_line_break(output)?;
+            }
+            let mut encoded = [0; 4];
+            self.write_buffered_text(output, ch.encode_utf8(&mut encoded))?;
+        }
+        Ok(())
+    }
+
+    fn write_buffered_text<W: Write>(&mut self, output: &mut W, text: &str) -> io::Result<()> {
+        write!(output, "{text}")?;
+        self.current_line.push_str(text);
+        self.current_width = display_width(&self.current_line);
+        if text.chars().any(|ch| !ch.is_whitespace()) {
             self.seen_text = true;
             self.line_has_visible = true;
         }
@@ -335,14 +415,17 @@ impl MarkdownStreamBlock {
                 writeln!(
                     output,
                     "{}:",
-                    self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)
+                    CardKind::AgentResponse
+                        .title(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
                 )?;
             } else {
                 writeln!(
                     output,
                     "{}",
-                    self.frame()
-                        .top(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
+                    self.frame().top(
+                        &CardKind::AgentResponse
+                            .title(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)),
+                    )
                 )?;
             }
             self.started = true;
@@ -382,8 +465,10 @@ impl MarkdownStreamBlock {
             writeln!(
                 output,
                 "{}",
-                self.frame()
-                    .top(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
+                self.frame().top(
+                    &CardKind::AgentResponse
+                        .title(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)),
+                )
             )?;
             self.started = true;
         }

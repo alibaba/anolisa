@@ -6,7 +6,7 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File};
 #[cfg(test)]
 use std::fs::{DirBuilder, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -22,10 +22,14 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use blaze_core::BlazeError;
+use blaze_core::backend::{BackendKind, SnapshotKind};
 use blaze_core::config::{PolicyLoadErrorMode, TemplateSection};
 use blaze_core::error::ConfigErrorSource;
+use blaze_core::storage::{TemplateArtifact, TemplateStorage};
 use hyper::body::Bytes;
+use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -40,7 +44,9 @@ const CATALOG_FILE_MODE: u32 = 0o600;
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 const LIST_RESPONSE_CONCURRENCY: usize = 1;
 const ITEM_RESPONSE_CONCURRENCY: usize = 1;
-const HOST_PATH_HELPERS: [&str; 5] = ["ip", "iptables", "kill", "sysctl", "unshare"];
+// `sh` and `mount` join the set because the Firecracker launch now binds the
+// sandbox's rootfs onto the portable snapshot-view path before exec.
+const HOST_PATH_HELPERS: [&str; 7] = ["ip", "iptables", "kill", "mount", "sh", "sysctl", "unshare"];
 
 #[derive(Clone, Copy)]
 struct ImportLimits {
@@ -82,6 +88,54 @@ struct CatalogUsage {
 #[derive(Clone)]
 pub(crate) struct TemplateCatalog {
     inner: Arc<CatalogInner>,
+}
+
+/// Boot metadata a published `template.json` must carry for create to consume.
+#[derive(Debug, Deserialize)]
+struct TemplateManifest {
+    format_version: u32,
+    name: String,
+    image_digest: String,
+    backend: BackendKind,
+    backend_version: Option<String>,
+    resource_layout: Option<String>,
+    boot_args: Option<String>,
+    snapshot_kind: SnapshotKind,
+    expose_guest_socket: bool,
+    network: bool,
+    vcpus: Option<u32>,
+    memory_mib: Option<u64>,
+    rootfs_size: u64,
+    memory_size: u64,
+    artifacts: Vec<TemplateArtifactManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateArtifactManifest {
+    name: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+/// Validated launch semantics and stable artifact objects for one create.
+///
+/// Each artifact is an already-open file object, so the create path copies the
+/// bytes the catalog validated even if a catalog path is replaced afterward.
+#[derive(Debug)]
+pub(super) struct ResolvedTemplate {
+    pub(super) name: String,
+    pub(super) image_digest: String,
+    pub(super) backend: BackendKind,
+    pub(super) backend_version: Option<String>,
+    pub(super) boot_args: Option<String>,
+    pub(super) snapshot_kind: SnapshotKind,
+    pub(super) expose_guest_socket: bool,
+    pub(super) network: bool,
+    pub(super) vcpus: Option<u32>,
+    pub(super) memory_mib: Option<u64>,
+    pub(super) rootfs_size: u64,
+    pub(super) memory_size: u64,
+    pub(super) storage: TemplateStorage,
 }
 
 struct CatalogInner {
@@ -487,6 +541,23 @@ impl TemplateCatalog {
         Ok(Bytes::from_owner(owner))
     }
 
+    /// Resolve one published template into validated launch semantics and open
+    /// artifact objects for a single create request.
+    async fn resolve_for_create(&self, name: String) -> Result<ResolvedTemplate> {
+        validate_name(&name, "runtime template")?;
+        let catalog = self.clone();
+        tokio::task::spawn_blocking(move || {
+            resolve_published(
+                &catalog.inner.root,
+                &name,
+                catalog.inner.limits,
+                catalog.inner.boundary,
+            )
+        })
+        .await
+        .map_err(join_error("runtime template resolve"))?
+    }
+
     async fn import(
         &self,
         name: String,
@@ -790,6 +861,14 @@ impl SandboxManager {
     /// Read one published runtime artifact set by name.
     pub async fn get_template(&self, name: String) -> Result<Bytes> {
         self.template_catalog.get(name).await
+    }
+
+    /// Resolve one published template into validated launch inputs for create.
+    pub(super) async fn resolve_template_for_create(
+        &self,
+        name: String,
+    ) -> Result<ResolvedTemplate> {
+        self.template_catalog.resolve_for_create(name).await
     }
 
     /// Copy and atomically publish one operator-prepared artifact directory.
@@ -2448,6 +2527,16 @@ fn validate_template_root_paths_with_mounts_and_policy_mode(
     for path in host_named_network_namespace_paths {
         push_configured_and_resolved_root(&mut roots, "host named network namespace", path)?;
     }
+    // Every Firecracker owner creates this fixed mount target before launching,
+    // and it does so through whatever the path resolves to. Reserve both the
+    // literal and its resolved target, so neither a catalog root configured at
+    // this path nor a symlinked parent pointing into one can end up owning the
+    // file, which startup accounting would read as a malformed published entry.
+    push_configured_and_resolved_root(
+        &mut roots,
+        "snapshot view rootfs",
+        Path::new(crate::spawner::firecracker::PORTABLE_ROOTFS_PATH),
+    )?;
     roots.extend(helper_executable_roots.iter().cloned());
     let mut configured_backends = backend_binaries.iter().collect::<Vec<_>>();
     configured_backends.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
@@ -3203,6 +3292,254 @@ fn get_published(
     read_published_directory(&directory, name, limits, boundary)
 }
 
+/// Resolve one published template into validated launch inputs.
+///
+/// Structure and boundary checks match ordinary lookup, then the metadata is
+/// parsed as boot metadata, cross-checked for backend consistency, and each
+/// artifact is opened and re-hashed so create receives stable file objects.
+fn resolve_published(
+    root: &File,
+    name: &str,
+    limits: ImportLimits,
+    boundary: CatalogBoundary,
+) -> Result<ResolvedTemplate> {
+    let directory =
+        match try_open_catalog_directory(root, OsStr::new(name), boundary, Path::new(name))? {
+            Some(directory) => directory,
+            None => {
+                return Err(BlazeDaemonError::NotFound(format!(
+                    "runtime template {name}"
+                )));
+            }
+        };
+    let metadata = read_published_directory(&directory, name, limits, boundary)?;
+    let manifest = serde_json::from_value::<TemplateManifest>(metadata).map_err(|error| {
+        BlazeDaemonError::Conflict(format!(
+            "runtime template {name} does not contain boot metadata: {error}"
+        ))
+    })?;
+    validate_template_manifest(name, &manifest)?;
+
+    let mut artifacts = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| (artifact.name.as_str(), artifact))
+        .collect::<HashMap<_, _>>();
+    let vmstate = open_verified_template_artifact(
+        &directory,
+        name,
+        artifacts
+            .remove("vmstate.snap")
+            .expect("validated VM-state manifest"),
+        boundary,
+    )?;
+    let memory = open_verified_template_artifact(
+        &directory,
+        name,
+        artifacts
+            .remove("mem.bin")
+            .expect("validated memory manifest"),
+        boundary,
+    )?;
+    let rootfs = open_verified_template_artifact(
+        &directory,
+        name,
+        artifacts
+            .remove("rootfs.ext4")
+            .expect("validated rootfs manifest"),
+        boundary,
+    )?;
+
+    Ok(ResolvedTemplate {
+        name: manifest.name,
+        image_digest: manifest.image_digest,
+        backend: manifest.backend,
+        backend_version: manifest.backend_version,
+        boot_args: manifest.boot_args,
+        snapshot_kind: manifest.snapshot_kind,
+        expose_guest_socket: manifest.expose_guest_socket,
+        network: manifest.network,
+        vcpus: manifest.vcpus,
+        memory_mib: manifest.memory_mib,
+        rootfs_size: manifest.rootfs_size,
+        memory_size: manifest.memory_size,
+        storage: TemplateStorage {
+            vmstate,
+            memory,
+            rootfs,
+        },
+    })
+}
+
+/// Check that manifest metadata describes a self-consistent bootable template.
+///
+/// Firecracker entries carry the stricter contract: a pinned backend version,
+/// the `portable-v1` resource layout, the captured kernel command line,
+/// non-zero VM shape, and a `memory_size` that equals `memory_mib` expressed in
+/// bytes. All backends must describe the three known artifacts exactly once
+/// with lowercase-hex digests and sizes that agree with the recorded rootfs and
+/// memory sizes.
+fn validate_template_manifest(expected_name: &str, manifest: &TemplateManifest) -> Result<()> {
+    let invalid = |reason: &str| {
+        BlazeDaemonError::Conflict(format!(
+            "runtime template {expected_name} is not bootable: {reason}"
+        ))
+    };
+    if manifest.format_version != 1 {
+        return Err(invalid("format_version must be 1"));
+    }
+    if manifest.name != expected_name {
+        return Err(invalid("metadata name does not match the catalog name"));
+    }
+    if manifest.image_digest.trim().is_empty() {
+        return Err(invalid("image_digest must not be empty"));
+    }
+    if manifest.backend == BackendKind::Firecracker
+        && manifest
+            .backend_version
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return Err(invalid("firecracker templates require backend_version"));
+    }
+    if manifest.backend == BackendKind::Firecracker
+        && manifest.resource_layout.as_deref() != Some("portable-v1")
+    {
+        return Err(invalid(
+            "firecracker templates require resource_layout portable-v1",
+        ));
+    }
+    if manifest.backend == BackendKind::Firecracker && manifest.boot_args.is_none() {
+        return Err(invalid("firecracker templates require boot_args"));
+    }
+    if manifest.backend == BackendKind::Firecracker
+        && (manifest.vcpus.is_none_or(|vcpus| vcpus == 0)
+            || manifest.memory_mib.is_none_or(|memory| memory == 0))
+    {
+        return Err(invalid(
+            "firecracker templates require non-zero vcpus and memory_mib",
+        ));
+    }
+    if manifest.backend == BackendKind::Firecracker {
+        let expected_memory_size = manifest
+            .memory_mib
+            .expect("validated Firecracker memory")
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| invalid("memory_mib exceeds the supported artifact size"))?;
+        if manifest.memory_size != expected_memory_size {
+            return Err(invalid(
+                "memory_size must equal memory_mib expressed in bytes",
+            ));
+        }
+    }
+    if manifest.rootfs_size == 0 || manifest.memory_size == 0 {
+        return Err(invalid(
+            "rootfs_size and memory_size must be greater than zero",
+        ));
+    }
+    if manifest.artifacts.len() != 3 {
+        return Err(invalid(
+            "artifacts must describe vmstate.snap, mem.bin, and rootfs.ext4 exactly once",
+        ));
+    }
+
+    let mut names = HashSet::new();
+    for artifact in &manifest.artifacts {
+        if !matches!(
+            artifact.name.as_str(),
+            "vmstate.snap" | "mem.bin" | "rootfs.ext4"
+        ) || !names.insert(artifact.name.as_str())
+        {
+            return Err(invalid(
+                "artifacts must describe vmstate.snap, mem.bin, and rootfs.ext4 exactly once",
+            ));
+        }
+        if artifact.size_bytes == 0 {
+            return Err(invalid("artifact sizes must be greater than zero"));
+        }
+        if artifact.sha256.len() != 64
+            || !artifact
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("artifact sha256 values must be lowercase hex"));
+        }
+        if artifact.name == "rootfs.ext4" && artifact.size_bytes != manifest.rootfs_size {
+            return Err(invalid("rootfs_size does not match rootfs.ext4"));
+        }
+        if artifact.name == "mem.bin" && artifact.size_bytes != manifest.memory_size {
+            return Err(invalid("memory_size does not match mem.bin"));
+        }
+    }
+    Ok(())
+}
+
+/// Open one published artifact and re-hash it against the manifest values.
+///
+/// The returned open object binds later materialization to the exact bytes the
+/// catalog validated, so a catalog path swapped after this check cannot change
+/// what is copied into the sandbox.
+fn open_verified_template_artifact(
+    directory: &File,
+    template: &str,
+    expected: &TemplateArtifactManifest,
+    boundary: CatalogBoundary,
+) -> Result<TemplateArtifact> {
+    let mut file = open_published_artifact(
+        directory,
+        OsStr::new(template),
+        OsStr::new(&expected.name),
+        boundary,
+    )?;
+    let metadata = file.metadata()?;
+    validate_published_file(&metadata, template, OsStr::new(&expected.name))?;
+    if metadata.len() != expected.size_bytes {
+        return Err(BlazeDaemonError::RecoveryRequired(format!(
+            "runtime template {template} artifact {} has {} bytes; metadata records {}",
+            expected.name,
+            metadata.len(),
+            expected.size_bytes
+        )));
+    }
+
+    let mut digest = Sha256::new();
+    let mut remaining = expected.size_bytes;
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    while remaining > 0 {
+        let limit = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = file.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "runtime template {template} artifact {} ended before its declared size",
+                expected.name
+            )));
+        }
+        digest.update(&buffer[..read]);
+        remaining -= u64::try_from(read).unwrap_or(remaining);
+    }
+    let mut trailing = [0_u8; 1];
+    if file.read(&mut trailing)? != 0 {
+        return Err(BlazeDaemonError::RecoveryRequired(format!(
+            "runtime template {template} artifact {} exceeds its declared size",
+            expected.name
+        )));
+    }
+    let actual = format!("{:x}", digest.finalize());
+    if actual != expected.sha256 {
+        return Err(BlazeDaemonError::RecoveryRequired(format!(
+            "runtime template {template} artifact {} digest mismatch",
+            expected.name
+        )));
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(TemplateArtifact {
+        file,
+        size_bytes: expected.size_bytes,
+        sha256: expected.sha256.clone(),
+    })
+}
+
 fn read_published(
     root: &File,
     name: &str,
@@ -3631,6 +3968,51 @@ fn lock_catalog_state(inner: &CatalogInner) -> std::sync::MutexGuard<'_, Catalog
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn firecracker_manifest(boot_args: Option<&str>) -> TemplateManifest {
+        let artifact = |name: &str, size_bytes: u64| TemplateArtifactManifest {
+            name: name.to_string(),
+            size_bytes,
+            sha256: "0".repeat(64),
+        };
+        TemplateManifest {
+            format_version: 1,
+            name: "runtime-base".to_string(),
+            image_digest: "sha256:image".to_string(),
+            backend: BackendKind::Firecracker,
+            backend_version: Some("Firecracker v1.16.0".to_string()),
+            resource_layout: Some("portable-v1".to_string()),
+            boot_args: boot_args.map(str::to_string),
+            snapshot_kind: SnapshotKind::Full,
+            expose_guest_socket: false,
+            network: false,
+            vcpus: Some(1),
+            memory_mib: Some(1),
+            rootfs_size: 1,
+            memory_size: 1024 * 1024,
+            artifacts: vec![
+                artifact("vmstate.snap", 1),
+                artifact("mem.bin", 1024 * 1024),
+                artifact("rootfs.ext4", 1),
+            ],
+        }
+    }
+
+    #[test]
+    fn firecracker_template_manifest_requires_captured_boot_arguments() {
+        validate_template_manifest(
+            "runtime-base",
+            &firecracker_manifest(Some("console=ttyS0 panic=1")),
+        )
+        .expect("captured command line");
+
+        let error = validate_template_manifest("runtime-base", &firecracker_manifest(None))
+            .expect_err("missing command line must be rejected");
+        assert!(matches!(
+            error,
+            BlazeDaemonError::Conflict(message) if message.contains("require boot_args")
+        ));
+    }
 
     fn test_config(root: &Path, import_root: &Path) -> TemplateSection {
         TemplateSection {

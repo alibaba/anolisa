@@ -427,8 +427,11 @@ sidecar as privileged.
 
 ```bash
 cd src/skillfs
-IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
-docker build -f container/Dockerfile -t "$IMAGE" .
+IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)
+DOCKERFILE=container/Dockerfile
+# Use container/Dockerfile.alinux4 for Alibaba Cloud Linux 4.
+docker build -f "$DOCKERFILE" -t "$IMAGE" .
+docker run --rm "$IMAGE" skillfs --version
 docker push "$IMAGE"
 kubectl apply -f deploy/kubernetes/00-namespace.yaml
 kubectl apply -f deploy/kubernetes/10-example-configmap.yaml
@@ -512,14 +515,28 @@ Related security surfaces:
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
   external daemon. Notify v2 identifies the Skill with its canonical path and
   complete flat or Hermes `skillId`; live/backing paths are resolved separately.
+  `--notify-auth-key-file <PATH>` enables mutual HMAC authentication for a
+  container peer implementing the proposed contract. The inner notify v2
+  payload is unchanged, while a session-bound tag protects both the request and
+  acknowledgement. Authenticated notify also requires an owner-matched socket
+  with no group/other permissions under an owner-matched directory that also
+  grants no group/other permissions; `0700` is the recommended directory mode.
+  The initial profile requires SkillFS and sec-core to use the same effective
+  UID. Peer-side sec-core support is not implemented by this SkillFS change and
+  remains tracked in #2439.
   In-place notify mounts, and any notify mount with `--ledger-backing-root`,
-  require `--trusted-peer-exe` so the authenticated resolver is available
+  require an authenticated control-peer mode so the resolver is available
   before the daemon accesses the source.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.
-- Startup reconcile sends best-effort notifications for known skills after
-  mount startup.
+- Startup reconcile queues known skills through the notify worker and retries
+  temporary delivery failures until the daemon acknowledges, so SkillFS can
+  start before the daemon and still converge. Non-retryable failures are
+  reported, while inconclusive authentication uses a shared bounded endpoint
+  budget to prevent retry storms. See
+  [Reconcile Delivery Durability](docs/security/runtime-activation-implementation-plan.md#reconcile-delivery-durability)
+  for retry and observability details.
 - `--ledger-backing-root <PATH>` provides a daemon-visible source view for
   in-place activation/notify mounts, because the public source path is a FUSE
   over-mount. Use `/run/user/$UID/skillfs-ledger/...` or
@@ -532,19 +549,20 @@ Related security surfaces:
 - `--trusted-writer <NAME>` is a deprecated compatibility gate based on Linux
   TGID `comm`; process names can be spoofed and this should not be used for
   production trust.
-- `--control-socket <PATH>` with `--trusted-peer-exe <PATH>` starts a trusted
-  Unix socket control plane. Trusted peers can write activation JSON or xattr
-  through methods such as `meta.writeActivation` and
-  `meta.setActivationXattr`. The packaged Skill Ledger worker's executable is
-  `/usr/bin/python3.11` because it starts through `sys.executable`, not a
-  `skill-ledger` launcher.
+- `--control-socket <PATH>` starts a trusted Unix socket control plane when
+  exactly one peer mode is configured. `--trusted-peer-exe <PATH>` preserves
+  host executable authentication; `--trusted-peer-key-file <PATH>` enables an
+  explicit container HMAC profile, protects control requests and responses
+  with session-bound tags, and requires an explicit socket path.
+  Trusted peers can write activation JSON or xattr through methods such as
+  `meta.writeActivation` and `meta.setActivationXattr`.
 - The control plane is opt-in and authenticated. The endpoint is resolved by
   priority: CLI `--control-socket` > `[control_socket].path` in the config >
   the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`. A
-  trusted peer without an explicit path uses the default endpoint; an explicit
-  path without a trusted peer is a configuration error; neither leaves the
-  control plane off. The default never falls back to `/tmp` or `/var/tmp`, and
-  a second instance never unlinks an active endpoint.
+  executable peer without an explicit path uses the default endpoint; HMAC
+  mode always requires an explicit path; an explicit path without a peer mode
+  is a configuration error. The default never falls back to `/tmp` or
+  `/var/tmp`, and a second instance never unlinks an active endpoint.
 - `skill.resolveLiveSource` is a read-only query that maps a caller-supplied
   canonical Skill directory to its physical live/backing source. It returns
   `managed=true` (with the derived `skillId`, `relativeSkillDir`,

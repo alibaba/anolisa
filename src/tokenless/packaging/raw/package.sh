@@ -58,8 +58,7 @@ normalize_modes() {
     find "$stage" -type f -exec chmod 0644 {} +
     chmod 0755 \
         "$stage/bin/tokenless" \
-        "$stage/libexec/anolisa/tokenless/rtk" \
-        "$stage/libexec/anolisa/tokenless/toon"
+        "$stage/libexec/anolisa/tokenless/rtk"
     find "$stage/adapters" "$stage/extensions/tokenless" \
         -type f \( -name '*.py' -o -name '*.sh' -o \
         -path '*/codex/scripts/*' \) -exec chmod 0755 {} +
@@ -91,6 +90,9 @@ stage_payload() {
         openclaw/package.json \
         openclaw/openclaw.plugin.json \
         openclaw/dist/index.js \
+        dsh/package.json \
+        dsh/cordis.patch.yml \
+        dsh/dist/index.js \
         hermes/plugin.yaml \
         qoder/.qoder-plugin/plugin.json \
         claude-code/.claude-plugin/marketplace.json \
@@ -99,6 +101,9 @@ stage_payload() {
         codex/.codex-plugin/plugin.json \
         qwencode/qwen-extension.json \
         qwencode/hooks/run-hook.sh \
+        qwenpaw/plugin.json \
+        qwenpaw/plugin.py \
+        qwenpaw/requirements.txt \
         common/cosh-extension.json \
         common/tool-ready-spec.json \
         common/tokenless-env-fix.sh; do
@@ -114,9 +119,13 @@ stage_payload() {
         "$stage/extensions/tokenless/commands"
     install -p -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
     install -p -m 0755 "$BIN_DIR/tokenless" "$stage/bin/tokenless"
-    install -p -m 0755 "$BIN_DIR/rtk" "$BIN_DIR/toon" \
+    install -p -m 0755 "$BIN_DIR/rtk" \
         "$stage/libexec/anolisa/tokenless/"
     cp -a "$adapters"/. "$stage/adapters"/
+
+    # A checkout upgraded from the former adapter layout can retain formerly
+    # ignored AgentScope build artifacts. They are not part of this payload.
+    rm -rf "$stage/adapters/agentscope"
 
     # ANOLISA intentionally ignores archive symlinks. The source tree shares
     # these dispatchers by symlink, so raw packages must carry regular files.
@@ -169,8 +178,8 @@ TARGET_OS="$(normalize_os "${TARGET_OS:-$(detect_os)}")"
 TARGET_ARCH="$(normalize_arch "${TARGET_ARCH:-$(detect_arch)}")"
 
 validate_target
-[ -n "$BIN_DIR" ] || die "BIN_DIR must contain prebuilt tokenless, rtk, and toon binaries"
-for binary in tokenless rtk toon; do
+[ -n "$BIN_DIR" ] || die "BIN_DIR must contain prebuilt tokenless and rtk binaries"
+for binary in tokenless rtk; do
     [ -x "$BIN_DIR/$binary" ] || die "missing executable: $BIN_DIR/$binary"
 done
 require_file "$CONTRACT"
@@ -179,7 +188,7 @@ VERSION="$(python3 "$SCRIPT_DIR/verify-release.py" "$SOURCE_ROOT" "$CONTRACT")"
 python3 "$SCRIPT_DIR/verify-binaries.py" \
     --os "$TARGET_OS" \
     --arch "$TARGET_ARCH" \
-    "$BIN_DIR/tokenless" "$BIN_DIR/rtk" "$BIN_DIR/toon"
+    "$BIN_DIR/tokenless" "$BIN_DIR/rtk"
 
 if [ "$COMMAND" = "stage" ]; then
     [ -n "${DESTDIR:-}" ] || die "DESTDIR is required by stage"

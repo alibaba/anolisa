@@ -1,6 +1,7 @@
 %define anolis_release 2
 %global debug_package %{nil}
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
+%define cosh_replacement_ready ( [ -x "%{_bindir}/cosh" ] && rpm -q --qf '%%{NAME}\\n' -f "%{_bindir}/cosh" 2>/dev/null | awk '$0 == "copilot-shell" { found=1 } END { exit found ? 0 : 1 }' )
 
 Name:           cosh-ng
 Version:        @VERSION@
@@ -10,14 +11,14 @@ License:        Apache-2.0
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 
-BuildRequires:  rust >= 1.74
+BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
 BuildRequires:  gcc
-BuildRequires:  openssl-devel
+BuildRequires:  systemd-rpm-macros
 Requires(post):   lua
 Requires(postun): lua
-Requires:       openssl-libs
-Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh
+Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
+Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell
 
@@ -37,28 +38,25 @@ rm -rf %{buildroot}
 # Install internal binaries to libexec
 install -d %{buildroot}%{_libexecdir_cosh}
 install -m 0755 target/release/cosh-core %{buildroot}%{_libexecdir_cosh}/cosh-core
+install -m 0755 target/release/cosh-gateway %{buildroot}%{_libexecdir_cosh}/cosh-gateway
 install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
+
+# Install the rendered system-level Gateway template.
+install -d %{buildroot}%{_unitdir}
+sed 's|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g' \
+    packaging/systemd/cosh-gateway@.service.in \
+    > %{buildroot}%{_unitdir}/cosh-gateway@.service
+chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
 
 # Install CLI binary
 install -d %{buildroot}%{_bindir}
 install -m 0755 target/release/cosh-cli %{buildroot}%{_bindir}/cosh-cli
 
-# Install launcher script
-cat > %{buildroot}%{_bindir}/cosh << 'EOF'
-#!/bin/bash
-case "${1:-}" in
-  -c|--|--help|--version)
-    exec %{_libexecdir_cosh}/cosh-shell "$@"
-    ;;
-esac
-
-if [ "$#" -eq 0 ] && [ ! -t 0 ]; then
-  exec %{_libexecdir_cosh}/cosh-shell "$@"
-fi
-
-exec %{_libexecdir_cosh}/cosh-shell raw cosh-core "$@"
-EOF
-chmod 0755 %{buildroot}%{_bindir}/cosh
+# /usr/bin/cosh is the compiled entry: a symlink onto cosh-shell, which
+# dispatches on argv[0]. A script launcher would lose the login argv[0]
+# (binfmt_script) and add an interpreter hop to the execve chain; the
+# TUI-vs-passthrough decision lives in cosh-shell's invocation classifier.
+ln -s %{_libexecdir_cosh}/cosh-shell %{buildroot}%{_bindir}/cosh
 
 # Install cosh-switch script
 cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
@@ -95,16 +93,50 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_bindir}/cosh-switch
 %dir %{_libexecdir_cosh}
 %{_libexecdir_cosh}/cosh-core
+%{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
+%{_unitdir}/cosh-gateway@.service
 %{_datadir}/anolisa/components/cosh-ng/component.toml
 
+%preun
+if [ "$1" -eq 0 ]; then
+  if ! passwd_entries=$(getent passwd); then
+    echo "error: cannot uninstall cosh-ng: failed to enumerate passwd entries with getent." >&2
+    exit 1
+  fi
+  if [ -z "$passwd_entries" ]; then
+    echo "error: cannot uninstall cosh-ng: getent returned no passwd entries." >&2
+    exit 1
+  fi
+  if ! users=$(printf '%s\n' "$passwd_entries" | awk -F: '$7 == "%{_bindir}/cosh" { print $1 }'); then
+    echo "error: cannot uninstall cosh-ng: failed to inspect passwd login shells." >&2
+    exit 1
+  fi
+  if [ -n "$users" ] && ! %{cosh_replacement_ready}; then
+    echo "error: cannot uninstall cosh-ng while users still use %{_bindir}/cosh as their login shell:" >&2
+    printf '%s\n' "$users" >&2
+    exit 1
+  fi
+  if [ -d /run/systemd/system ] && ! systemctl stop 'cosh-gateway@*.service'; then
+    echo "error: cannot uninstall cosh-ng: failed to stop running Gateway instances." >&2
+    exit 1
+  fi
+fi
+%systemd_preun cosh-gateway@.service
+
 %post -p <lua>
-nl        = '\n'
-cosh      = '%{_bindir}/cosh'..nl
-f = io.open('/etc/shells', 'a+')
+local nl = '\n'
+local cosh = '%{_bindir}/cosh'
+local f = io.open('/etc/shells', 'a+')
 if f then
-  local shells = nl..f:read('*all')..nl
-  if not shells:find(nl..cosh) then f:write(cosh) end
+  f:seek('set')
+  local shells = f:read('*all') or ''
+  local normalized = nl..shells
+  if shells ~= '' and shells:sub(-1) ~= nl then normalized = normalized..nl end
+  if not normalized:find(nl..cosh..nl, 1, true) then
+    local separator = (shells ~= '' and shells:sub(-1) ~= nl) and nl or ''
+    f:write(separator, cosh, nl)
+  end
   f:close()
 end
 

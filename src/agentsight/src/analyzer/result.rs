@@ -53,6 +53,8 @@ pub struct HttpRecord {
     pub response_body: Option<String>,
     /// Duration in nanoseconds (response end - request start)
     pub duration_ns: u64,
+    /// First observable model-output timestamp for streaming responses.
+    pub first_output_timestamp_ns: Option<u64>,
     /// Whether this is an SSE streaming response
     pub is_sse: bool,
     /// Number of SSE events (0 for non-SSE)

@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::io::AsyncBufReadExt;
@@ -12,19 +12,26 @@ use cosh_types::audit::{AuditOutcomeStatus, AuditProviderData, AuditToolData, Ou
 
 use crate::audit::{CoreAuditRecorder, CoreAuditScope};
 use crate::auth::is_auth_error;
+use crate::cli::ExecutionProfile;
 use crate::compaction::{CompactionRuntime, ModelCapability};
-use crate::config::{self, CoreConfig};
+#[cfg(test)]
+use crate::config;
+use crate::config::{ApprovalMode, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
-use crate::hook::{HookDecision, HookNotification, HookSystem};
+use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
-use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
+use crate::protocol::{
+    ClientControlCapabilities, InputMessage, OutputMessage, ShellContext, ShellControlRequest,
+};
 use crate::provider::{
     ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
 };
 use crate::tool::ask_user_question;
-use crate::tool::{SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult};
+use crate::tool::{
+    SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult, ToolRuntimeContext,
+};
 use crate::truncator::OutputTruncator;
 
 use self::tool_execution::{
@@ -36,6 +43,14 @@ use self::tool_execution::{
 mod auth;
 mod extensions;
 mod tool_execution;
+
+fn is_sensitive_write(tool_name: &str, params: &serde_json::Value) -> bool {
+    tool_name == "write_file"
+        && params
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::redaction::contains_sensitive_text)
+}
 
 /// Typed terminal state for one user-request loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +72,7 @@ pub struct CoshCore {
     /// sees the projected effective context.
     pub compaction: CompactionRuntime,
     pub model: String,
+    session_resumed: bool,
     pub shell_context: Option<ShellContext>,
     project_root: PathBuf,
     workspace: SessionWorkspace,
@@ -71,17 +87,67 @@ pub struct CoshCore {
     request_counter: AtomicU32,
     truncator: OutputTruncator,
     loop_detector: LoopDetector,
+    /// Control capabilities the attached client declared at `initialize`.
+    ///
+    /// Defaults to "no capabilities" (headless or legacy clients), which
+    /// keeps trust-mode shell execution provider-native. A client declaring
+    /// both flags opts trust-mode shell commands into the core-issued
+    /// approval channel instead (#2067).
+    pub client_capabilities: ClientControlCapabilities,
+    // One-shot mode shortens only this fallback; explicit overrides and
+    // receipt-based handoff keep their existing semantics.
+    approval_response_timeout_default: Duration,
+    approval_timed_out: AtomicBool,
     /// First control-transport failure of this process, if any.
     ///
     /// Set from `&self` paths (`handle_ask_user`, `handle_shell_evidence`), so
     /// it is a `OnceLock` rather than a plain field: the first failure is the
     /// diagnostic one and the session is over either way.
     control_transport_failure: OnceLock<String>,
+    execution_profile: ExecutionProfile,
 }
 
 impl CoshCore {
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names()
+    }
+
+    pub(crate) fn set_session_resumed(&mut self, resumed: bool) {
+        self.session_resumed = resumed;
+    }
+
+    pub(crate) fn use_one_shot_approval_timeout(&mut self) {
+        self.approval_response_timeout_default =
+            Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_ONE_SHOT_DEFAULT_SECS);
+    }
+
+    pub(crate) fn approval_timed_out(&self) -> bool {
+        self.approval_timed_out.load(Ordering::SeqCst)
+    }
+
+    fn apply_execution_profile_constraints(&mut self) {
+        if self.execution_profile.is_brokered() {
+            self.config.hooks = Default::default();
+            self.config.mcp = Default::default();
+            self.config.skills = Default::default();
+            self.config.agent.allowed_tools.clear();
+            self.config.agent.approval_mode = ApprovalMode::Recommend;
+            self.hook_system = HookSystem::from_config(&self.config.hooks);
+            self.extension_context = None;
+        }
+    }
+
+    fn tool_runtime_context(&self) -> ToolRuntimeContext {
+        let snapshot = self.extension_generation.current();
+        ToolRuntimeContext {
+            model: self.model.clone(),
+            approval_mode: self.config.agent.approval_mode.to_string(),
+            session_resumed: self.session_resumed,
+            compaction_revision: self.compaction.revision(),
+            compacted_through: self.compaction.state().map(|state| state.compacted_through),
+            tools: self.tool_names(),
+            active_extensions: snapshot.active_extensions.iter().cloned().collect(),
+        }
     }
 
     pub fn emit<W: Write>(&self, writer: &mut W, msg: &OutputMessage) {
@@ -207,7 +273,7 @@ impl CoshCore {
             &self.cwd(),
             &self.tool_names(),
             &[],
-            &self.config.agent.approval_mode,
+            self.config.agent.approval_mode.label(),
             self.config.ai.output_language.as_deref(),
             self.extension_context.as_deref(),
         );
@@ -221,58 +287,50 @@ impl CoshCore {
             .effective_history_tokens(&self.messages, prefix_tokens)
     }
 
-    fn classify_tool(&self, tool_name: &str, _params: &serde_json::Value) -> Outcome {
-        let mode = self.config.agent.approval_mode.as_str();
-
-        if mode == "trust" {
-            return Outcome::Allow;
-        }
-
+    fn classify_tool(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
         let tool = match self.tools.get(tool_name) {
             Some(t) => t,
             None => return Outcome::Deny,
         };
 
+        if self.execution_profile.is_brokered() {
+            return Outcome::Deny;
+        }
+
+        let mode = self.config.agent.approval_mode;
+
+        if mode == ApprovalMode::Trust {
+            // A control client that can answer `can_use_tool` and execute the
+            // foreground handoff takes over trust-mode shell execution: the
+            // approval channel is the only path where a hook Block reaches a
+            // deterministic verdict instead of racing the shell-side staging
+            // grace window (#2067). Legacy clients keep local execution.
+            if self.client_capabilities.can_handle_can_use_tool
+                && self.client_capabilities.can_handle_host_executed_shell
+                && tool.kind() == ToolKind::ShellExec
+            {
+                return Outcome::RequireApproval;
+            }
+            return Outcome::Allow;
+        }
+
         if self.config.agent.allowed_tools.contains(tool_name) {
             return Outcome::Allow;
         }
 
-        let kind = tool.kind();
-
-        if kind == ToolKind::ReadOnly {
-            return Outcome::Allow;
-        }
-
-        if kind == ToolKind::Network {
+        if is_sensitive_write(tool_name, params) && mode == ApprovalMode::Auto {
             return Outcome::RequireApproval;
         }
 
-        // MCP servers are external programs. Do not infer their side effects
-        // from a server-provided description or schema.
-        if kind == ToolKind::Mcp {
-            return Outcome::RequireApproval;
-        }
-
-        if kind == ToolKind::External {
-            return Outcome::RequireApproval;
-        }
-
-        if mode == "suggest" {
-            return Outcome::RequireApproval;
-        }
-
-        if kind == ToolKind::ShellExec {
-            return Outcome::RequireApproval;
-        }
-
-        if kind == ToolKind::FileEdit && mode == "auto" {
-            return Outcome::Allow;
-        }
-
-        if mode == "auto" {
-            Outcome::Allow
-        } else {
-            Outcome::RequireApproval
+        match (mode, tool.kind()) {
+            (_, ToolKind::ReadOnly) => Outcome::Allow,
+            (
+                ApprovalMode::Auto,
+                ToolKind::FileEdit | ToolKind::ShellEvidence | ToolKind::Other,
+            ) => Outcome::Allow,
+            // MCP, network, and extension tools are external boundaries. Do
+            // not infer their side effects from descriptions or schemas.
+            _ => Outcome::RequireApproval,
         }
     }
 
@@ -306,6 +364,7 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        self.approval_timed_out.store(false, Ordering::SeqCst);
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -403,7 +462,7 @@ impl CoshCore {
                 ));
             }
 
-            let approval = self.wait_for_approval(&request_id, false, reader).await;
+            let approval = self.wait_for_approval(&request_id, None, reader).await;
             let (approval_status, approval_decision) = approval_audit_outcome(&approval);
             self.audit.record_approval_resolved(
                 approval_scope,
@@ -486,7 +545,7 @@ impl CoshCore {
             &self.cwd(),
             &self.tool_names(),
             &skill_summaries,
-            &self.config.agent.approval_mode,
+            self.config.agent.approval_mode.label(),
             self.config.ai.output_language.as_deref(),
             self.extension_context.as_deref(),
         );
@@ -636,7 +695,8 @@ impl CoshCore {
             // Only the in-band question route may hide assistant text. With the
             // question tool disabled the marker can never become a question, so
             // suppressing the text would drop the reply with nothing to replace it.
-            let in_band_questions_enabled = self.tools.supports_ask_user_question();
+            let in_band_questions_enabled =
+                self.tools.supports_ask_user_question() && !self.execution_profile.is_brokered();
 
             self.emit(writer, &OutputMessage::stream_message_start());
 
@@ -878,10 +938,11 @@ impl CoshCore {
             }
 
             if tool_calls.is_empty() {
-                if self.tools.supports_ask_user_question() {
+                if in_band_questions_enabled {
                     match parse_in_band_question(&text_buf) {
                         InBandQuestion::Valid(synthetic) => {
-                            let result = self.handle_ask_user(&synthetic, reader, writer).await;
+                            let result =
+                                self.handle_ask_user(&synthetic, None, reader, writer).await;
                             if result.is_error {
                                 self.messages.push(Message::assistant(&text_buf));
                                 self.audit.record_turn_terminal(
@@ -990,11 +1051,12 @@ impl CoshCore {
             self.messages
                 .push(Message::assistant_with_tool_calls(&text_buf, tc_infos));
 
-            let ctx = ToolContext::with_workspace(
+            let ctx = ToolContext::with_runtime(
                 self.cwd(),
                 self.session_id.clone(),
                 self.project_root.clone(),
                 self.workspace.clone(),
+                self.tool_runtime_context(),
             );
 
             let mut interrupted = false;
@@ -1069,6 +1131,11 @@ impl CoshCore {
                         Ok(params) => hash_json(params),
                         Err(_) => hash_bytes(tc.arguments.as_bytes()),
                     }),
+                    execution_path: parsed_params
+                        .as_ref()
+                        .ok()
+                        .filter(|params| is_sensitive_write(&tc.name, params))
+                        .map(|_| "sensitive_write".to_string()),
                     ..AuditToolData::default()
                 };
                 self.audit
@@ -1198,15 +1265,16 @@ impl CoshCore {
                     )
                     .await;
                 self.emit_hook_notifications(writer, &hook_result.notifications, Some(&tc.id));
+                let (hook_status, hook_decision) = pre_tool_hook_audit(&hook_result);
                 self.audit.record_hook_decision(
                     tool_scope,
                     "pre_tool_use",
-                    hook_outcome(&hook_result.decision),
-                    hook_decision_name(&hook_result.decision),
+                    hook_status,
+                    hook_decision,
                 );
 
                 let (outcome, params) = match hook_result.decision {
-                    HookDecision::Block(reason) => {
+                    HookDecision::Block(reason) | HookDecision::HookFailure(reason) => {
                         // ─── SLS: hook-blocked tool call counts as total + fail ───
                         self.metrics.tool_calls_total += 1;
                         self.metrics.tool_calls_fail += 1;
@@ -1216,6 +1284,13 @@ impl CoshCore {
                             &result.output,
                             result.is_error,
                         ));
+                        // Release the staged provider-native call on the
+                        // client: without this result event the shell can
+                        // only drop the staged call after its grace timeout,
+                        // which opened the block-bypass handoff race (#2067).
+                        // The machine-readable verdict marker lets the client
+                        // journal the rejection without trusting result text.
+                        self.emit_provider_native_hook_block_result(writer, &tc.id, &result);
                         self.audit.record_tool_terminal(
                             tool_scope,
                             &tc.name,
@@ -1274,6 +1349,10 @@ impl CoshCore {
                             &tc.name,
                             if hook_requires_approval {
                                 "hook_ask"
+                            } else if self.config.agent.approval_mode == ApprovalMode::Trust {
+                                // In trust mode a non-hook RequireApproval is
+                                // the capable-client shell handoff reroute.
+                                "trust_shell_handoff"
                             } else {
                                 "policy_approval"
                             },
@@ -1322,15 +1401,12 @@ impl CoshCore {
                             }
                             ToolResult::error(approval_emit_failed_tool_error(&error))
                         } else {
-                            let accepts_host_executed_shell = self
-                                .tools
-                                .get(&tc.name)
-                                .map(|tool| tool.kind() == ToolKind::ShellExec)
-                                .unwrap_or(false);
+                            let accepted_tool_kind =
+                                self.tools.get(&tc.name).map(|tool| tool.kind());
                             // ─── SLS: approval wait timing ───
                             let approval_start = Instant::now();
                             let approval_result = self
-                                .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
+                                .wait_for_approval(&request_id, accepted_tool_kind, reader)
                                 .await;
                             let approval_wait_ms = approval_start.elapsed().as_millis() as u64;
                             let (approval_status, approval_decision) =
@@ -1351,13 +1427,24 @@ impl CoshCore {
                             match approval_result {
                                 ApprovalResult::Allowed => {
                                     self.metrics.approval_allow += 1;
-                                    self.audit.record_tool_execution_started(
-                                        tool_scope, &tc.name, &tool_data,
-                                    )?;
-                                    let result = self.execute_tool(&tc.name, params, &ctx).await;
-                                    self.emit_provider_native_tool_result(writer, &tc.id, &result);
-                                    tool_result_already_emitted = true;
-                                    result
+                                    if self.execution_profile.is_brokered()
+                                        && accepted_tool_kind == Some(ToolKind::HostedSideEffect)
+                                    {
+                                        ToolResult::error(
+                                            "brokered side effect rejected generic allow; a typed Gateway result is required",
+                                        )
+                                    } else {
+                                        self.audit.record_tool_execution_started(
+                                            tool_scope, &tc.name, &tool_data,
+                                        )?;
+                                        let result =
+                                            self.execute_tool(&tc.name, params, &ctx).await;
+                                        self.emit_provider_native_tool_result(
+                                            writer, &tc.id, &result,
+                                        );
+                                        tool_result_already_emitted = true;
+                                        result
+                                    }
                                 }
                                 ApprovalResult::HostExecutedShell {
                                     llm_content,
@@ -1567,8 +1654,9 @@ impl CoshCore {
                             }
                         } else {
                             let approval_start = Instant::now();
-                            let approval_result =
-                                self.wait_for_approval(&request_id, true, reader).await;
+                            let approval_result = self
+                                .wait_for_approval(&request_id, Some(ToolKind::ShellExec), reader)
+                                .await;
                             let (approval_status, approval_decision) =
                                 approval_audit_outcome(&approval_result);
                             if !matches!(&approval_result, ApprovalResult::HostExecutedShell { .. })
@@ -1688,12 +1776,33 @@ impl CoshCore {
         );
     }
 
+    /// The M2 hook-block release: emits the provider-native error result
+    /// with the machine-readable verdict marker so the client can tell a
+    /// hook rejection apart from an executed-but-failed command without
+    /// reading user-controlled text (#2156).
+    fn emit_provider_native_hook_block_result<W: Write>(
+        &self,
+        writer: &mut W,
+        tool_use_id: &str,
+        result: &ToolResult,
+    ) {
+        self.emit(
+            writer,
+            &OutputMessage::tool_result_hook_blocked(&self.session_id, tool_use_id, &result.output),
+        );
+    }
+
     async fn execute_tool(
         &self,
         name: &str,
         params: serde_json::Value,
         ctx: &ToolContext,
     ) -> ToolResult {
+        if self.execution_profile.is_brokered() {
+            return ToolResult::error(format!(
+                "tool {name} cannot execute inside cosh-core under the gateway brokered profile"
+            ));
+        }
         let result = match self.tools.get(name) {
             Some(tool) => match tool.invoke(params, ctx).await {
                 Ok(r) => r,
@@ -1964,7 +2073,7 @@ impl CoshCore {
     async fn wait_for_approval<R: AsyncBufReadExt + Unpin>(
         &self,
         expected_request_id: &str,
-        accepts_host_executed_shell: bool,
+        accepted_tool_kind: Option<ToolKind>,
         reader: &mut tokio::io::Lines<R>,
     ) -> ApprovalResult {
         // #1940 residual guard: this whole-wait deadline only ends the form
@@ -1975,14 +2084,20 @@ impl CoshCore {
         // guard is disarmed: a legitimate wait (a card pending on the user,
         // a host-executed command running) can then take as long as it
         // needs, and a dead shell still surfaces via EOF below.
-        let mut deadline = Some(tokio::time::Instant::now() + approval_response_timeout());
+        let mut deadline = Some(
+            tokio::time::Instant::now()
+                + approval_response_timeout(self.approval_response_timeout_default),
+        );
         loop {
             let line = match deadline {
                 Some(deadline) => {
                     match tokio::time::timeout_at(deadline, reader.next_line()).await {
                         Ok(Ok(Some(line))) => line,
                         Ok(Ok(None)) | Ok(Err(_)) => return ApprovalResult::Interrupted,
-                        Err(_) => return ApprovalResult::TimedOut,
+                        Err(_) => {
+                            self.approval_timed_out.store(true, Ordering::SeqCst);
+                            return ApprovalResult::TimedOut;
+                        }
                     }
                 }
                 None => match reader.next_line().await {
@@ -2015,10 +2130,22 @@ impl CoshCore {
                         continue;
                     }
                     match response.response.behavior.as_deref() {
-                        Some("allow") => return ApprovalResult::Allowed,
+                        Some("allow") => {
+                            if self.execution_profile.is_brokered()
+                                && accepted_tool_kind == Some(ToolKind::HostedSideEffect)
+                            {
+                                return ApprovalResult::Denied(Some(
+                                    "brokered side effect rejected generic allow; a typed Gateway result is required"
+                                        .to_string(),
+                                ));
+                            }
+                            return ApprovalResult::Allowed;
+                        }
                         Some("deny") => return ApprovalResult::Denied(response.response.message),
                         Some("host_executed_shell") => {
-                            if !accepts_host_executed_shell {
+                            if accepted_tool_kind != Some(ToolKind::ShellExec)
+                                || self.execution_profile.is_brokered()
+                            {
                                 return ApprovalResult::Denied(Some(
                                     "host_executed_shell is only valid for shell tools".to_string(),
                                 ));
@@ -2175,14 +2302,16 @@ enum ApprovalResult {
 /// degrades through the shell's OwnerUnavailable recovery path.
 /// env override exists for tests and incident response.
 const APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS: u64 = 6 * 60 * 60;
+/// A one-shot caller has no built-in approval surface, so an unanswered
+/// request should fail closed instead of inheriting the terminal wait horizon.
+const APPROVAL_RESPONSE_TIMEOUT_ONE_SHOT_DEFAULT_SECS: u64 = 30;
 /// Upper bound for the env override: an absurd value would overflow
 /// `Instant + Duration` and panic at the next approval wait.
 const APPROVAL_RESPONSE_TIMEOUT_MAX_SECS: u64 = 30 * 24 * 60 * 60;
 
-fn approval_response_timeout() -> std::time::Duration {
-    let fallback = || std::time::Duration::from_secs(APPROVAL_RESPONSE_TIMEOUT_DEFAULT_SECS);
+fn approval_response_timeout(fallback: Duration) -> Duration {
     let Ok(raw) = std::env::var("COSH_CORE_APPROVAL_TIMEOUT_SECS") else {
-        return fallback();
+        return fallback;
     };
     match raw.parse::<u64>() {
         Ok(secs) if secs > 0 && secs <= APPROVAL_RESPONSE_TIMEOUT_MAX_SECS => {
@@ -2197,7 +2326,7 @@ fn approval_response_timeout() -> std::time::Duration {
                  falling back to the default approval timeout",
                 APPROVAL_RESPONSE_TIMEOUT_MAX_SECS
             );
-            fallback()
+            fallback
         }
     }
 }
@@ -2206,8 +2335,26 @@ fn hook_decision_name(decision: &HookDecision) -> &'static str {
     match decision {
         HookDecision::Allow => "allow",
         HookDecision::Block(_) => "block",
+        HookDecision::HookFailure(_) => "hook_failure",
         HookDecision::Ask => "ask",
         HookDecision::Passthrough => "passthrough",
+    }
+}
+
+fn pre_tool_hook_audit(result: &PreToolUseResult) -> (AuditOutcomeStatus, &'static str) {
+    if !result.hook_failures.is_empty()
+        && matches!(
+            result.decision,
+            HookDecision::Allow | HookDecision::Passthrough
+        )
+    {
+        // A fail-open hook failed and no stronger decision stopped the tool.
+        (AuditOutcomeStatus::Failed, "hook_failure")
+    } else {
+        (
+            hook_outcome(&result.decision),
+            hook_decision_name(&result.decision),
+        )
     }
 }
 
@@ -2215,6 +2362,7 @@ fn hook_outcome(decision: &HookDecision) -> AuditOutcomeStatus {
     match decision {
         HookDecision::Allow | HookDecision::Passthrough => AuditOutcomeStatus::Allowed,
         HookDecision::Block(_) => AuditOutcomeStatus::Denied,
+        HookDecision::HookFailure(_) => AuditOutcomeStatus::Failed,
         HookDecision::Ask => AuditOutcomeStatus::Started,
     }
 }

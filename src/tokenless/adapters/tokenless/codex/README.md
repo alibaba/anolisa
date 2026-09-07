@@ -1,43 +1,40 @@
 # Tokenless Plugin for Codex
 
-Intelligent tool response compression and environment error detection plugin for
-[Codex](https://github.com/openai/codex). Reduces token consumption by stripping
-noise, truncating verbose output, and classifying environment errors with
-actionable fix hints.
+Command-output reduction and environment error detection plugin for
+[Codex](https://github.com/openai/codex). It rewrites supported shell commands
+through RTK before execution and classifies environment errors with actionable
+fix hints.
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| **Response Compression** | Strips debug fields, nulls, empty values; truncates long strings (512 chars) and arrays (16 items); limits depth to 8 levels |
-| **TOON Encoding** | Further compresses valid JSON responses (15-40% additional savings vs. compressed JSON) |
+| **Command Rewriting** | Rewrites supported shell commands through RTK so verbose output is reduced at its source |
 | **Environment Error Detection** | Classifies tool failures as dependency/permission/file/network/package issues; injects fix hints to prevent retry loops |
-| **Statistics Tracking** | Records every compression operation to SQLite for auditing and optimization |
+| **Statistics Tracking** | Attributes RTK rewrites to the Codex session for auditing and optimization |
 
 ## How It Works
 
 The plugin registers four hooks with Codex:
 
 1. **`SessionStart`** — verifies the `tokenless` CLI is installed and functional (non-blocking)
-2. **`PreToolUse` (tool-ready)** — runs before every tool execution:
-   - Checks if required dependencies are available via `tokenless env-check`
-   - Auto-installs missing dependencies via `tokenless env-check --fix`
-   - Blocks the tool if critical dependencies are still missing after auto-fix
+2. **`PreToolUse` (tool-ready, hard-disabled)** — remains registered but is a
+   silent pass-through. `tokenless env-check` returns `UNKNOWN` with
+   `enabled:false`, so the hook emits no context, performs no repair, and never
+   blocks a tool. Re-enabling the retained legacy pipeline requires a source
+   change and a new release.
 3. **`PreToolUse` (rewrite)** — runs before shell command execution:
    - Rewrites commands via `rtk rewrite` for token optimization
    - Only applies to Bash/Shell/terminal/programmatic tools
 4. **`PostToolUse`** — runs after every tool execution:
-   - Skips content-reading tools (Read, Glob) and small responses (< 500 chars)
+   - Skips content-reading and task-management tools
    - Classifies environment errors and injects fix hints
-   - Compresses large JSON responses via `tokenless compress-response`
-   - Applies TOON encoding for additional savings
-   - Injects a compressed summary as `additionalContext`
 
-> **Codex Protocol Constraint**: PostToolUse hooks cannot suppress the original
-> tool output (`suppressOutput` is rejected). The plugin therefore injects a
-> compressed *summary* as `additionalContext` — the model sees both the original
-> output and the compressed summary, and can use the summary for efficient
-> processing of large outputs.
+> **Codex protocol constraint**: `PostToolUse` rejects output suppression and
+> replacement. Injecting compressed content through `additionalContext` would
+> leave the original in place and increase the prompt. The plugin therefore
+> reserves `additionalContext` for actionable environment diagnostics. Actual
+> first-pass savings come from RTK rewriting supported commands before they run.
 
 ## Installation
 
@@ -76,15 +73,12 @@ Or install from the marketplace (once published).
 
 ## Hook Output Format
 
-The plugin injects `additionalContext` in the following format:
+For a classified environment failure, the plugin injects `additionalContext`
+in the following format:
 
 ```
-[tokenless:compressed] Bash: 45,230 → 2,100 chars (95% reduction)
 [tokenless:env:ENV_DEPENDENCY_MISSING] Missing dependency detected. ...
 Do NOT retry the same command — fix the environment first.
---- compressed content ---
-{... compressed JSON or TOON content ...}
---- end compressed content ---
 ```
 
 ## Configuration
@@ -101,8 +95,9 @@ Configuration is managed through the `tokenless` CLI's environment and config fi
 | `TOKENLESS_STASH_DB` | `~/.tokenless/stash.db` | Reversible stash database path |
 
 `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` take precedence over
-`TOKENLESS_DATA_DIR`. Custom database paths must remain under the real user
-home.
+`TOKENLESS_DATA_DIR`, which may be any accessible absolute non-root directory.
+Custom database files must remain under the real user home or selected data
+directory.
 
 ### View Statistics
 
@@ -112,21 +107,18 @@ tokenless stats list --limit 20
 tokenless stats show <id>
 ```
 
-## Compression Pipeline
+## Savings Path
 
 ```
-Raw tool_response (JSON)
+Shell command
     │
-    ├─ Step 1: ResponseCompressor
-    │   ├─ Drop: debug, trace, stack, stacktrace, logs, logging fields
-    │   ├─ Truncate: strings > 512 chars, arrays > 16 items
-    │   ├─ Drop: null values, empty strings, empty arrays, empty objects
-    │   └─ Limit: max depth 8 levels
+    ├─ PreToolUse: rtk rewrite
+    │   └─ Replaces the command with an output-reducing equivalent
     │
-    ├─ Step 2: TOON Encoding (if result is still valid JSON)
-    │   └─ Binary-to-TOON format encoding (~15-40% additional savings)
+    ├─ Tool execution
+    │   └─ Codex receives the already-reduced output
     │
-    └─ Guard: output only if smaller than input (safety check)
+    └─ PostToolUse: environment diagnostics only
 ```
 
 ## Architecture
@@ -137,9 +129,9 @@ codex-plugin-tokenless/
 ├── hooks/
 │   └── hooks.json           # Hook definitions (SessionStart, PreToolUse, PostToolUse)
 ├── scripts/
-│   ├── compress-response    # PostToolUse: response compression + env error detection
+│   ├── response-diagnostics # PostToolUse: environment error detection
 │   ├── rewrite-hook         # PreToolUse: RTK command rewriting
-│   ├── tool-ready           # PreToolUse: environment check + auto-fix
+│   ├── tool-ready           # PreToolUse: registered hard-disabled pass-through
 │   ├── check-tokenless      # SessionStart: version/availability check
 │   ├── install.sh           # Build and install tokenless CLI + register plugin
 │   ├── detect.sh            # Detect tokenless availability

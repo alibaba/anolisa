@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn raw_cli_invalid_shell_integration_fails_visibly() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = raw_cli_command(binary)
+        .args(["raw", "fake"])
+        .env("COSH_SHELL_INTEGRATION", "enhacned")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run invalid Shell integration");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("invalid shell integration") && stderr.contains("native or enhanced"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
 fn raw_cli_config_language_save_applies_to_current_session_help() {
     let home = temp_shell_home("config-language-current-session");
     let home_str = home.to_string_lossy().to_string();

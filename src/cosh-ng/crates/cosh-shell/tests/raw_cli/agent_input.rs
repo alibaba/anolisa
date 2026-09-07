@@ -1,6 +1,734 @@
 use super::*;
 
 #[test]
+fn raw_cli_routes_slash_bearing_han_prompt_before_shell_execution() {
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-2913/SKILL.md";
+    for (shell, args) in [("bash", vec![]), ("zsh", vec!["--shell", "zsh"])] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let output = run_raw_cli_with_args_env_and_delayed_input(
+            "fake",
+            &args,
+            &[
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("LANG", "C.UTF-8"),
+                ("LC_ALL", "C.UTF-8"),
+            ],
+            vec![
+                (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
+                (b"\n".to_vec(), Duration::from_millis(50)),
+                (
+                    b"echo after-path-prompt\n".to_vec(),
+                    Duration::from_millis(500),
+                ),
+                (b"exit\n".to_vec(), Duration::from_millis(100)),
+            ],
+        );
+
+        assert!(
+            output.contains(&format!("Received shell prompt request: {prompt}")),
+            "{shell}: {output}"
+        );
+        assert!(
+            output.contains(&format!("Agent input: {prompt}")),
+            "{shell}: {output}"
+        );
+        assert!(output.contains("after-path-prompt"), "{shell}: {output}");
+        assert!(
+            !output.contains("No such file or directory")
+                && !output.contains("no such file or directory"),
+            "{shell}: {output}"
+        );
+        assert!(!output.contains("command not found"), "{shell}: {output}");
+    }
+}
+
+#[test]
+fn raw_cli_redacts_cjk_adjacent_secret_in_path_prompt_notice() {
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+    let prompt = format!("打开./nonexistent-cosh-2913，token是{secret}的内容");
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains("Received shell prompt request:"),
+        "{output}"
+    );
+    assert!(output.contains("Agent input: <redacted>"), "{output}");
+    assert!(
+        !output.contains(&format!("Agent input: {prompt}")),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_routes_slash_leading_path_prompt_in_one_input_batch() {
+    let prompt = "/nonexistent-cosh-2913/SKILL.md 帮我读一下";
+    let mut submission = prompt.as_bytes().to_vec();
+    submission.push(b'\n');
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (submission, Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains(&format!("Received shell prompt request: {prompt}")),
+        "{output}"
+    );
+    assert!(!output.contains("AI request"), "{output}");
+    assert!(!output.contains("No such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_routes_space_prefixed_path_prompt_before_zle() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("space-prefixed-path-prompt");
+    // This routing case requires no line-init hook, including distro defaults.
+    fs::write(
+        home.join(".zshrc"),
+        "zle -D zle-line-init 2>/dev/null || true\n\
+         PROMPT='zsh-space-path> '\n\
+         RPROMPT=''\n\
+         _cosh_test_accept_line() {\n\
+           [[ \"$BUFFER\" == *nonexistent-cosh-space-prefix* ]] && print -r -- space-path-reached-zle\n\
+           zle .accept-line\n\
+         }\n\
+         _cosh_test_tab_after_agent_submit() {\n\
+           print -r -- tab-after-agent-submit-reached-zle\n\
+           zle .redisplay\n\
+         }\n\
+         zle -N accept-line _cosh_test_accept_line\n\
+         zle -N _cosh_test_tab_after_agent_submit\n\
+         bindkey '^I' _cosh_test_tab_after_agent_submit\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let prompt = "  /nonexistent-cosh-space-prefix/SKILL.md 帮我读一下";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b" ".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes()[1..].to_vec(), Duration::from_millis(50)),
+            (b"\n\t".to_vec(), Duration::from_millis(50)),
+            (
+                b"echo after-space-path\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains(&format!("Received shell prompt request: {prompt}")),
+        "{output}"
+    );
+    assert!(output.contains("after-space-path"), "{output}");
+    assert!(!output.contains("space-path-reached-zle"), "{output}");
+    assert!(
+        !output.contains("tab-after-agent-submit-reached-zle"),
+        "{output}"
+    );
+    assert!(!output.contains("no such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_routes_fragmented_slash_leading_path_prompt() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("path-prompt-custom-kill-line");
+    // This routing case requires no line-init hook, including distro defaults.
+    fs::write(
+        home.join(".zshrc"),
+        "zle -D zle-line-init 2>/dev/null || true\n\
+         {\n\
+           request_fd=${_COSH_PATH_PROMPT_REQUEST_FD:-${COSH_ZSH_PATH_PROMPT_REQUEST_FD:-}}\n\
+           acknowledgment_fd=${_COSH_PATH_PROMPT_ACK_FD:-${COSH_ZSH_PATH_PROMPT_ACK_FD:-}}\n\
+           if [[ -n \"$request_fd\" && -n \"$acknowledgment_fd\" ]]; then\n\
+             print -r -- path-prompt-fork-channel-exposed\n\
+             IFS= read -r -u \"$request_fd\" request && print -r -- accepted >&\"$acknowledgment_fd\"\n\
+           fi\n\
+         } &!\n\
+         PROMPT='zsh-path:%?> '\nRPROMPT=''\nbindkey -e\nbindkey '^U' self-insert\n\
+         _cosh_test_private_submit() { print -r -- path-prompt-private-binding-ran; zle .redisplay; }\n\
+         zle -N _cosh_test_private_submit\n\
+         bindkey $'\\e[99;99u' _cosh_test_private_submit\n\
+         TRAPINT() { print -r -- path-prompt-user-trap-ran; return 130; }\n\
+         TRAPURG() { print -r -- path-prompt-user-urg-trap-ran; return 0; }\n\
+         typeset -gi COSH_TEST_PRECMD_COUNT=0\n\
+         _cosh_test_slow_third_precmd() {\n\
+           (( ++COSH_TEST_PRECMD_COUNT ))\n\
+           (( COSH_TEST_PRECMD_COUNT == 3 )) && sleep 3\n\
+           return 0\n\
+         }\n\
+         precmd_functions+=(_cosh_test_slow_third_precmd)\n\
+         typeset -g COSH_TEST_PATH_PROMPT='/nonexistent-cosh-1943/SKILL.md 帮我读一下'\n\
+         typeset -g COSH_TEST_HISTORY_LEAK='path-prompt-history-leak'\n\
+         _cosh_test_accept_line() {\n\
+           [[ \"$BUFFER\" == \"$COSH_TEST_PATH_PROMPT\" ]] && print -r -- path-prompt-user-widget-ran\n\
+           zle .accept-line\n\
+         }\n\
+         zle -N accept-line _cosh_test_accept_line\n\
+         _cosh_test_post_intercept_widget() { print -r -- path-prompt-post-intercept-widget-ran; zle .redisplay; }\n\
+         zle -N _cosh_test_post_intercept_widget\n\
+         bindkey '^Xb' _cosh_test_post_intercept_widget\n\
+         _cosh_test_path_history() {\n\
+           [[ \"$1\" == *\"$COSH_TEST_PATH_PROMPT\"* ]] && print -r -- path-prompt-history-hook-ran\n\
+           return 0\n\
+         }\n\
+         autoload -Uz add-zsh-hook\n\
+         add-zsh-hook zshaddhistory _cosh_test_path_history\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let prompt = "/nonexistent-cosh-1943/SKILL.md 帮我读一下";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (
+                b"echo private-sequence-command-ran".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"\x1b[99;99u".to_vec(), Duration::from_millis(100)),
+            (b"\n".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes().to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"\x18b".to_vec(), Duration::from_millis(1_000)),
+            (
+                b"fc -l -20 | grep -Fq -- \"$COSH_TEST_PATH_PROMPT\" && print \"$COSH_TEST_HISTORY_LEAK\"\n"
+                    .to_vec(),
+                Duration::from_millis(100),
+            ),
+            (
+                b"echo after-zsh-path-prompt\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"TRAPURG\n".to_vec(), Duration::from_millis(100)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    let routed = format!("Received shell prompt request: {prompt}");
+    let routed_offset = output.find(&routed).unwrap_or_else(|| panic!("{output}"));
+    let history_probe_offset = output
+        .find("fc -l -20")
+        .unwrap_or_else(|| panic!("{output}"));
+    let preserved_status_offset = output[routed_offset..]
+        .find("zsh-path:0>")
+        .map(|offset| routed_offset + offset)
+        .unwrap_or_else(|| panic!("{output}"));
+    assert!(preserved_status_offset < history_probe_offset, "{output}");
+    assert!(output.contains("after-zsh-path-prompt"), "{output}");
+    assert!(!output.contains("no such file or directory"), "{output}");
+    assert!(!output.contains("path-prompt-user-trap-ran"), "{output}");
+    assert!(output.contains("path-prompt-user-urg-trap-ran"), "{output}");
+    assert!(!output.contains("path-prompt-user-widget-ran"), "{output}");
+    assert!(output.contains("private-sequence-command-ran"), "{output}");
+    assert!(
+        output.contains("path-prompt-post-intercept-widget-ran"),
+        "{output}"
+    );
+    assert_eq!(
+        output.matches("path-prompt-private-binding-ran").count(),
+        1,
+        "{output}"
+    );
+    assert!(
+        !output.contains("path-prompt-fork-channel-exposed"),
+        "{output}"
+    );
+    assert!(!output.contains("path-prompt-history-hook-ran"), "{output}");
+    assert!(!output.contains("path-prompt-history-leak"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_keeps_slash_named_function_and_alias_shell_owned() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("slash-named-shell-commands");
+    // Exercise the complete snapshot rather than the line-init fallback.
+    fs::write(
+        home.join(".zshrc"),
+        "zle -D zle-line-init 2>/dev/null || true\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let function_input = "路径/run 帮我运行一下";
+    let alias_input = "路径/alias 帮我运行一下";
+    let global_alias_input = "路径/global 帮我运行一下";
+    let suffix_alias_input = "/nonexistent-cosh-1943/suffix.txt 帮我运行一下";
+    let long_name = format!("{0}/{0}/{0}/{0}/{0}", "路".repeat(80));
+    let long_name_input = format!("{long_name} 帮我运行一下");
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (
+                b"function \xe8\xb7\xaf\xe5\xbe\x84/run { print -r -- function-path-command:$*; }\n"
+                    .to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"alias '\xe8\xb7\xaf\xe5\xbe\x84/alias'='print -r -- alias-path-command:'\n"
+                    .to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"alias -g '\xe8\xb7\xaf\xe5\xbe\x84/global=print -r -- global-path-command:'\n"
+                    .to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"alias -s txt='print -r -- suffix-path-command:'\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                format!("function {long_name} {{ print -r -- long-path-command:$*; }}\n").into_bytes(),
+                Duration::from_millis(300),
+            ),
+            (
+                format!("{function_input}\n").into_bytes(),
+                Duration::from_millis(300),
+            ),
+            (
+                format!("{alias_input}\n").into_bytes(),
+                Duration::from_millis(300),
+            ),
+            (
+                format!("{global_alias_input}\n").into_bytes(),
+                Duration::from_millis(300),
+            ),
+            (
+                format!("{suffix_alias_input}\n").into_bytes(),
+                Duration::from_millis(300),
+            ),
+            (format!("{long_name_input}\n").into_bytes(), Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("function-path-command:帮我运行一下"),
+        "{output}"
+    );
+    assert!(
+        output.contains("alias-path-command: 帮我运行一下"),
+        "{output}"
+    );
+    assert!(
+        output.contains("global-path-command: 帮我运行一下"),
+        "{output}"
+    );
+    assert!(
+        output.contains("suffix-path-command: /nonexistent-cosh-1943/suffix.txt 帮我运行一下"),
+        "{output}"
+    );
+    assert!(
+        output.contains("long-path-command:帮我运行一下"),
+        "{output}"
+    );
+    assert!(
+        !output.contains(&format!("Received shell prompt request: {function_input}")),
+        "{output}"
+    );
+    assert!(
+        !output.contains(&format!("Received shell prompt request: {alias_input}")),
+        "{output}"
+    );
+    for input in [
+        global_alias_input,
+        suffix_alias_input,
+        long_name_input.as_str(),
+    ] {
+        assert!(
+            !output.contains(&format!("Received shell prompt request: {input}")),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_zsh_keeps_slash_function_after_line_init_mutation_shell_owned() {
+    assert_slash_function_after_line_init_mutation_shell_owned("_cosh_test_line_init");
+}
+
+#[test]
+fn raw_cli_zsh_keeps_slash_function_after_self_bound_line_init_mutation_shell_owned() {
+    assert_slash_function_after_line_init_mutation_shell_owned("zle-line-init");
+}
+
+fn assert_slash_function_after_line_init_mutation_shell_owned(hook: &str) {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("slash-function-line-init");
+    fs::write(
+        home.join(".zshrc"),
+        format!(
+            "PROMPT='zsh-line-init:%?> '\nRPROMPT=''\nbindkey -e\n\
+             {hook}() {{ function 路径/late {{ print -r -- line-init-path-command:$*; }}; }}\n\
+             zle -N zle-line-init {hook}\n"
+        ),
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let input = "路径/late 帮我运行一下";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (
+                format!("{input}\n").into_bytes(),
+                Duration::from_millis(300),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("line-init-path-command:帮我运行一下"),
+        "{output}"
+    );
+    assert!(
+        !output.contains(&format!("Received shell prompt request: {input}")),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_zsh_hands_buffered_tab_to_zle_before_follow_up_input() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let home = temp_zsh_home("path-prompt-tab-handoff");
+    fs::write(
+        home.join(".zshrc"),
+        "PROMPT='zsh-tab:%?> '\nRPROMPT=''\nbindkey -e\n\
+         _cosh_test_tab_rewrite() {\n\
+           print -r -- path-prompt-tab-widget-ran\n\
+           BUFFER=': > \"$HOME/path-prompt-tab-command-executed\"'\n\
+           CURSOR=${#BUFFER}\n\
+           zle .redisplay\n\
+         }\n\
+         zle -N _cosh_test_tab_rewrite\n\
+         bindkey '^I' _cosh_test_tab_rewrite\n",
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (
+                b"/definitely-not-command".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"\t\r echo path-prompt-typeahead-preserved\r exit 0\r".to_vec(),
+                Duration::from_millis(300),
+            ),
+            // Hold stdin open without producing another read; the handoff
+            // deadline must drain the complete retained tail on its own.
+            (Vec::new(), Duration::from_millis(300)),
+        ],
+    );
+    assert!(output.contains("path-prompt-tab-widget-ran"), "{output}");
+    assert!(!home.join("path-prompt-tab-command-executed").exists());
+    assert!(
+        output.contains("path-prompt-typeahead-preserved"),
+        "{output}"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn raw_cli_shell_only_keeps_slash_bearing_han_prompt_shell_owned() {
+    let prompt = "打开./nonexistent-cosh-2913";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b"\x1b[Z".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes().to_vec(), Duration::from_millis(100)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+    assert!(output.contains("No such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_routes_path_prompt_after_shell_cwd_change() {
+    let prompt = "打开./nonexistent-cosh-2913/SKILL.md";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b"cd /tmp\n".to_vec(), Duration::from_millis(300)),
+            (prompt.as_bytes().to_vec(), Duration::from_millis(200)),
+            (b"\n".to_vec(), Duration::from_millis(50)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(
+        output.contains(&format!("Received shell prompt request: {prompt}")),
+        "{output}"
+    );
+    assert!(!output.contains("No such file or directory"), "{output}");
+}
+
+#[test]
+fn raw_cli_uses_physical_cwd_when_pwd_is_reassigned() {
+    let work_dir = tempfile::tempdir().expect("temp work dir");
+    let executable_dir = work_dir.path().join("打开.");
+    fs::create_dir(&executable_dir).expect("create executable dir");
+    let executable = executable_dir.join("existing");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf 'physical-cwd-shell-owned\\n'\n",
+    )
+    .expect("write executable");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod executable");
+
+    for (shell, args) in [("bash", vec![]), ("zsh", vec!["--shell", "zsh"])] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+            "fake",
+            &args,
+            &[
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("LANG", "C.UTF-8"),
+                ("LC_ALL", "C.UTF-8"),
+            ],
+            work_dir.path(),
+            vec![
+                (b"PWD=/tmp\n".to_vec(), Duration::from_millis(300)),
+                (
+                    "打开./existing\n".as_bytes().to_vec(),
+                    Duration::from_millis(300),
+                ),
+                (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+            ],
+        );
+
+        assert!(
+            output.contains("physical-cwd-shell-owned"),
+            "{shell}: {output}"
+        );
+        assert!(
+            !output.contains("Received shell prompt request"),
+            "{shell}: {output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_rejects_physical_cwd_with_trailing_newline() {
+    let work_dir = tempfile::tempdir().expect("temp work dir");
+    let plain_dir = work_dir.path().join("cwd");
+    let newline_dir = work_dir.path().join("cwd\n");
+    fs::create_dir(&plain_dir).expect("create plain cwd");
+    fs::create_dir(&newline_dir).expect("create newline cwd");
+
+    let executable_dir = newline_dir.join("打开.");
+    fs::create_dir(&executable_dir).expect("create executable dir");
+    let executable = executable_dir.join("existing");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf 'newline-cwd-shell-owned\\n'\n",
+    )
+    .expect("write executable");
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("chmod executable");
+
+    for (shell, args) in [("bash", vec![]), ("zsh", vec!["--shell", "zsh"])] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+            "fake",
+            &args,
+            &[
+                ("COSH_SHELL_INTEGRATION", "enhanced"),
+                ("COSH_SHELL_STARTUP_BANNER", "0"),
+                ("LANG", "C.UTF-8"),
+                ("LC_ALL", "C.UTF-8"),
+            ],
+            &newline_dir,
+            vec![
+                (
+                    "打开./existing\n".as_bytes().to_vec(),
+                    Duration::from_millis(300),
+                ),
+                (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+            ],
+        );
+
+        assert!(
+            output.contains("newline-cwd-shell-owned"),
+            "{shell}: {output}"
+        );
+        assert!(
+            !output.contains("Received shell prompt request"),
+            "{shell}: {output}"
+        );
+    }
+}
+
+#[test]
+fn raw_cli_keeps_batched_path_prompt_shell_owned() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (
+                b"echo batch-before-path\n\xe6\x89\x93\xe5\xbc\x80./nonexistent-cosh-2913 API Key: sk-review-fixture\n"
+                    .to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("batch-before-path"), "{output}");
+    assert!(output.contains("No such file or directory"), "{output}");
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_keeps_slash_candidate_batch_shell_owned() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (b"/".to_vec(), Duration::from_millis(100)),
+            (
+                b"bin/true\n\xe6\x89\x93\xe5\xbc\x80./nonexistent-cosh-2913\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("No such file or directory"), "{output}");
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_zsh_shell_arg_intercepts_fragmented_agent_marker() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
@@ -168,9 +896,9 @@ fn raw_cli_zh_natural_language_intercept_skips_redundant_notice() {
     );
 
     assert!(!output.contains("AI 请求"), "{output}");
-    assert!(!output.contains("正在把输入交给 Agent"), "{output}");
+    assert!(!output.contains("Agent 输入"), "{output}");
     assert!(
-        !output.contains("该输入已在进入 Bash 前被拦截。"),
+        !output.contains("该输入已在 Shell 执行前被拦截。"),
         "{output}"
     );
     assert!(output.contains("正在思考..."), "{output}");
@@ -662,13 +1390,14 @@ fn routing_c3_explicit_draft_shows_composition_hint() {
 
 #[test]
 fn raw_cli_passthrough_shortcut_shows_one_time_tip() {
-    // #1721 matrix #18 (T-c): a shortcut pressed while bash owns the input is
-    // relayed unchanged and surfaces a one-time discoverability tip at the
-    // next prompt.
+    // #1721 matrix #18 (T-c): after cursor movement makes the Readline buffer
+    // impossible to mirror safely, the shortcut is stripped and surfaces a
+    // one-time discoverability tip at the next prompt.
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
             (b"echo tip-probe".to_vec(), Duration::ZERO),
+            (b"\x1b[D".to_vec(), Duration::from_millis(50)),
             (b"\x1b[13;2u".to_vec(), Duration::from_millis(50)),
             (b"\n".to_vec(), Duration::from_millis(100)),
             (b"echo tip-once\n".to_vec(), Duration::from_millis(400)),

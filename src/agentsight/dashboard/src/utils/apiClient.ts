@@ -80,6 +80,27 @@ export interface TraceEventDetail {
   conversation_id: string | null;
 }
 
+export interface ResourceSample {
+  timestamp_ns: number;
+  pid: number;
+  agent_name: string | null;
+  cpu_percent: number;
+  memory_bytes: number;
+}
+
+export interface SessionPhase {
+  kind: 'llm' | 'tool_call' | 'idle';
+  start_timestamp_ns: number;
+  end_timestamp_ns: number;
+  tool_call_id?: string;
+}
+
+export interface SessionResourceTimeline {
+  session_id: string;
+  samples: ResourceSample[];
+  phases: SessionPhase[];
+}
+
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 export class ApiRequestError extends Error {
@@ -173,6 +194,8 @@ export interface EnforcementViolation {
   occurred_at_ns: number;
   observed_at_ns: number;
   actplane_revision: string;
+  /** Correlated risk case id (enriched by the backend), when available. */
+  case_id?: string | null;
 }
 
 export interface FileBindingInput {
@@ -215,12 +238,24 @@ export interface CredentialBindingInput {
   agent_id: string;
   session_id?: string;
   root_pid: number;
-  source_path: string;
+  source_path?: string;
+  source_paths?: string[];
   trusted_endpoint?: string;
+  trusted_endpoints?: string[];
   revision: number;
   mode: EnforcementPolicyMode;
   taint_ttl_secs?: number;
   destination_scope: CredentialDestinationScope;
+}
+
+export interface AgentProtectionPreview {
+  agent_id: string;
+  root_pid: number;
+  workspace_path: string;
+  source_paths: string[];
+  trusted_endpoints: string[];
+  mode: EnforcementPolicyMode;
+  max_trusted_endpoints: number;
 }
 
 export class EnforcementApiError extends Error {
@@ -295,6 +330,13 @@ export const createCredentialBinding = (input: CredentialBindingInput) =>
     body: JSON.stringify(input),
   });
 
+export const fetchAgentProtectionPreview = (pid: number, directory?: string) => {
+  const query = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+  return enforcementRequest<AgentProtectionPreview>(
+    `/api/enforcement/agent-protection/${pid}${query}`,
+  );
+};
+
 export const detachEnforcementBinding = (bindingId: string) =>
   enforcementRequest<void>(
     `/api/enforcement/bindings/${encodeURIComponent(bindingId)}`,
@@ -318,6 +360,41 @@ export async function fetchSessions(
   return apiFetch<SessionSummary[]>(`${API_BASE}/api/sessions${qs}`);
 }
 
+/** Candidate session summary sent to the semantic search endpoint. */
+export interface SemanticSearchCandidate {
+  session_id: string;
+  first_message: string | null;
+  last_message: string | null;
+  project: string | null;
+}
+
+/** One LLM-ranked semantic match. */
+export interface SemanticSearchResult {
+  session_id: string;
+  relevance: 'high' | 'medium';
+  reason: string;
+}
+
+export interface SemanticSearchResponse {
+  results: SemanticSearchResult[];
+}
+
+/**
+ * Ask the configured LLM to rank candidate sessions by semantic relevance to
+ * `query`. Returns an empty list when semantic search is unavailable or the
+ * caller sent too few candidates.
+ */
+export async function semanticSearchSessions(body: {
+  query: string;
+  candidates: SemanticSearchCandidate[];
+}): Promise<SemanticSearchResponse> {
+  return apiFetch<SemanticSearchResponse>(`${API_BASE}/api/sessions/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * List all trace IDs within a session, with per-trace token stats.
  * Optional startNs/endNs are forwarded as query parameters for future
@@ -335,6 +412,21 @@ export async function fetchTraces(
   const suffix = qs ? `?${qs}` : '';
   return apiFetch<TraceSummary[]>(
     `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/traces${suffix}`
+  );
+}
+
+/** Fetch process CPU/RSS observations and inferred activity phases for a Session. */
+export async function fetchSessionResources(
+  sessionId: string,
+  startNs?: number | null,
+  endNs?: number | null,
+  maxPoints = 2_000,
+): Promise<SessionResourceTimeline> {
+  const params = new URLSearchParams({ max_points: String(maxPoints) });
+  if (startNs != null) params.set('start_ns', String(startNs));
+  if (endNs != null) params.set('end_ns', String(endNs));
+  return apiFetch<SessionResourceTimeline>(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/resources?${params.toString()}`,
   );
 }
 
@@ -557,6 +649,38 @@ export interface TimeseriesResponse {
   model_series: ModelTimeseriesBucket[];
 }
 
+export interface MetricPercentiles {
+  p50: number;
+  p95: number;
+  p99: number;
+}
+
+export interface LatencyMetricsSummary {
+  agent_name: string | null;
+  call_count: number;
+  streaming_call_count: number;
+  ttft_ms: MetricPercentiles | null;
+  tps_tokens_per_second: MetricPercentiles | null;
+  tpot_ms_per_token: MetricPercentiles | null;
+  e2e_latency_ms: MetricPercentiles | null;
+}
+
+/**
+ * Fetch percentile latency metrics grouped by Agent.
+ */
+export async function fetchLatencyMetrics(
+  startNs: number,
+  endNs: number,
+  agentName?: string
+): Promise<LatencyMetricsSummary[]> {
+  const params = new URLSearchParams({
+    start_ns: String(startNs),
+    end_ns: String(endNs),
+  });
+  if (agentName) params.set('agent_name', agentName);
+  return apiFetch<LatencyMetricsSummary[]>(`${API_BASE}/api/metrics/latency?${params.toString()}`);
+}
+
 /**
  * Fetch time-bucketed token stats and per-model breakdowns.
  */
@@ -577,7 +701,7 @@ export async function fetchTimeseries(
 
 // ─── ATIF export APIs ────────────────────────────────────────────────────────
 
-import type { AtifDocument, AgentHealthResponse } from '../types';
+import type { AtifDocument, AgentHealthResponse, AgentProcessHealthResponse } from '../types';
 
 // ─── Token Savings types ─────────────────────────────────────────────────────
 
@@ -616,7 +740,9 @@ export interface SessionSavings {
   baseline_tokens: number;
   saved_tokens: number;
   compounded_saved: number;
+  /** Fraction of tokens saved, in [0, 1] (not a percentage). */
   savings_rate: number;
+  /** Fraction saved including compounding, in [0, 1] (not a percentage). */
   compounded_savings_rate: number;
   request_count: number;
   tool_saved: number;
@@ -638,7 +764,9 @@ export interface SavingsSummary {
   baseline_tokens: number;
   total_saved_tokens: number;
   total_compounded_saved: number;
+  /** Fraction of tokens saved, in [0, 1] (not a percentage). */
   savings_rate: number;
+  /** Fraction saved including compounding, in [0, 1] (not a percentage). */
   compounded_savings_rate: number;
   total_tool_saved: number;
   total_mcp_saved: number;
@@ -684,6 +812,7 @@ export interface SessionSavingsDetail {
   total_actual_tokens: number;
   total_compounded_saved: number;
   total_original_tokens: number;
+  /** Fraction of tokens saved, in [0, 1] (not a percentage). */
   savings_rate: number;
   items: OptimizationItem[];
 }
@@ -818,6 +947,17 @@ export interface InterruptionTypeDetail {
   count: number;
 }
 
+/**
+ * Bucket key the backend reports for interruptions whose `session_id` /
+ * `conversation_id` could never be resolved.
+ *
+ * Such events are counted by the overview card, so the per-session breakdown
+ * groups them here instead of dropping them — otherwise the total and the
+ * breakdown disagree and look like missing data. Must stay in sync with
+ * `UNASSIGNED_SESSION_ID` in src/storage/sqlite/interruption.rs.
+ */
+export const UNASSIGNED_INTERRUPTION_BUCKET = '__unassigned__';
+
 export interface SessionInterruptionCount {
   session_id: string;
   total: number;
@@ -831,6 +971,7 @@ export interface SessionInterruptionCount {
 }
 
 export interface ConversationInterruptionCount {
+  session_id: string;
   conversation_id: string;
   total: number;
   by_severity: {
@@ -842,27 +983,22 @@ export interface ConversationInterruptionCount {
   types: InterruptionTypeDetail[];
 }
 
-/** Map English interruption_type keys to Chinese labels. */
-export const INTERRUPTION_TYPE_CN: Record<string, string> = {
-  llm_error: 'LLM 错误',
-  sse_truncated: 'SSE 截断',
-  context_overflow: '上下文溢出',
-  agent_crash: 'Agent 崩溃',
-  token_limit: 'Token 超限',
-  rate_limit: '速率限制',
-  auth_error: '鉴权错误',
-  network_timeout: '网络超时',
-  service_unavailable: '服务不可用',
-  safety_filter: '安全过滤',
-  retry_storm: '重试风暴',
-  dead_loop: '死循环',
-  tool_failure: '工具调用失败',
-  empty_response: '空响应',
-  resource_exhaustion: '资源耗尽',
-  slow_response: '响应过慢',
-  state_machine_error: '状态机异常',
-  unauthorized_action: '未授权操作',
-};
+/**
+ * Key for the per-conversation breakdown, which the backend groups by
+ * (session_id, conversation_id).
+ *
+ * Both halves are needed: an interruption detected before its session was
+ * resolved carries the unassigned session bucket, and must not be looked up
+ * under the real session that owns the same conversation.
+ *
+ * Invariant: neither id contains U+0000, so the joined key cannot collide.
+ * Both are either a UUID, a 32-hex fallback hash, or the `__unassigned__`
+ * sentinel — an id carrying a NUL byte would already have failed to round-trip
+ * through the SQLite TEXT columns these values come from.
+ */
+export function conversationInterruptionKey(sessionId: string, conversationId: string): string {
+  return `${sessionId}\u0000${conversationId}`;
+}
 
 /**
  * Fetch all unresolved interruptions for a session.
@@ -914,14 +1050,20 @@ export async function resolveInterruption(interruptionId: string): Promise<void>
 
 /**
  * Fetch unresolved interruption count + max severity per session_id.
+ *
+ * `agentName` must match the agent used to filter the session list, otherwise
+ * the unassigned bucket would aggregate other agents' interruptions into the
+ * filtered table.
  */
 export async function fetchInterruptionSessionCounts(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<SessionInterruptionCount[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
   return apiFetch<SessionInterruptionCount[]>(
     `${API_BASE}/api/interruptions/session-counts?${params.toString()}`
   );
@@ -932,11 +1074,13 @@ export async function fetchInterruptionSessionCounts(
  */
 export async function fetchInterruptionConversationCounts(
   startNs: number,
-  endNs: number
+  endNs: number,
+  agentName?: string
 ): Promise<ConversationInterruptionCount[]> {
   const params = new URLSearchParams();
   params.set('start_ns', String(startNs));
   params.set('end_ns', String(endNs));
+  if (agentName) params.set('agent_name', agentName);
   return apiFetch<ConversationInterruptionCount[]>(
     `${API_BASE}/api/interruptions/conversation-counts?${params.toString()}`
   );
@@ -945,11 +1089,18 @@ export async function fetchInterruptionConversationCounts(
 // ─── Agent health API ─────────────────────────────────────────────────────────
 
 /**
- * Fetch the current health status of all discovered agent processes.
+ * Fetch historical activity for all Agents observed by either SQLite store.
  */
-export async function fetchAgentHealth(opts?: { includeClients?: boolean }): Promise<AgentHealthResponse> {
+export async function fetchAgentHealth(): Promise<AgentHealthResponse> {
+  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health`);
+}
+
+/** Fetch live process health for diagnostics and restart actions. */
+export async function fetchAgentProcessHealth(opts?: {
+  includeClients?: boolean;
+}): Promise<AgentProcessHealthResponse> {
   const qs = opts?.includeClients ? '?include_clients=true' : '';
-  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health${qs}`);
+  return apiFetch<AgentProcessHealthResponse>(`${API_BASE}/api/agent-process-health${qs}`);
 }
 
 /**
@@ -1218,6 +1369,7 @@ export interface SecurityEvidenceEvent {
   occurred_at_ns: number;
   identity: {
     pid: number;
+    ppid?: number | null;
     session_id?: string | null;
     tool_call_id?: string | null;
     [key: string]: unknown;
@@ -1533,7 +1685,7 @@ export async function fetchAuditSessions(
 }
 
 export async function fetchSecurityCases(
-  params?: { limit?: number; offset?: number },
+  params?: { limit?: number; offset?: number; agent_id?: string; status?: string; blocked?: boolean },
 ): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
   return auditFetch<SecurityPaginated<SecurityRiskCase>>(
     `${API_BASE}/api/audit/cases${buildQuery(params)}`,
@@ -1747,6 +1899,7 @@ export type AppCapability =
   | 'optimization'
   | 'skills'
   | 'security'
+  | 'system_audit'
   | 'enforcement'
   | 'atif'
   | 'settings'
@@ -1870,4 +2023,18 @@ export async function saveOptimizeConfig(body: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+/** Run causal attribution on a trajectory and return the causal case. */
+export async function runCausalAttribution(
+  body: import('../types/causal').CausalAttributionRequest,
+): Promise<import('../types/causal').CausalAttributionResponse> {
+  return apiFetch<import('../types/causal').CausalAttributionResponse>(
+    `${API_BASE}/api/causal-attribution`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
 }

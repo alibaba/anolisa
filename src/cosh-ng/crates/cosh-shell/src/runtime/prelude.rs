@@ -42,8 +42,8 @@ pub(crate) use crate::parser::{
 };
 pub(crate) use crate::raw_input::{RawInputCapture, RawObserverAction};
 pub(crate) use crate::shell_host::{
-    run_line_interactive_bash, run_raw_interactive_bash_with_output_control,
-    run_raw_interactive_zsh_with_output_control, run_scripted_bash, ScriptedInput, ShellHostConfig,
+    run_line_interactive_bash, run_raw_interactive_bash_with_event_view,
+    run_raw_interactive_zsh_with_event_view, run_scripted_bash, ScriptedInput, ShellHostConfig,
 };
 pub(crate) use crate::slash::registry::{
     active_slash_commands, visible_slash_commands, SlashCommandSpec,
@@ -103,7 +103,9 @@ pub(crate) use crate::approval::handoff::{
 pub(crate) use crate::approval::panel::render_approval_requests;
 pub(crate) use crate::approval::requests::{
     approval_request_from_governed_event, record_approval_requests, record_auto_approved_request,
-    record_deferred_fallback_request, refresh_shell_request_assessment,
+    record_deferred_fallback_request, record_hook_blocked_staged_request,
+    record_policy_refused_request, record_staged_unresolved_request,
+    refresh_shell_request_assessment,
 };
 pub(crate) use crate::approval::runtime::render_approval_resolution;
 pub(crate) use crate::question::runtime::{

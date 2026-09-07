@@ -1,6 +1,6 @@
 [component]
 name = "ws-ckpt"
-version = "0.4.1"
+version = "0.4.5"
 layer = "runtime"
 domain = "state"
 display_name = "Workspace Checkpoint"
@@ -24,7 +24,7 @@ min_kernel = "5.4"
 [[component.dependencies]]
 name = "btrfs-progs"
 kind = "system-package"
-probe = "btrfs version"
+probe = "mkfs.btrfs --version"
 packages = { rpm = "btrfs-progs", deb = "btrfs-progs" }
 
 [[component.dependencies]]

@@ -417,7 +417,7 @@ struct HttpsProcessMeta {
 
 fn resolve_https_process_meta(pid: u32, agent_name: Option<&str>) -> HttpsProcessMeta {
     HttpsProcessMeta {
-        cmdline: crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline")).join(" "),
+        cmdline: crate::discovery::scanner::read_cmdline(pid).join(" "),
         container_id: crate::container::extract_container_id_cached(pid),
         agent_name: agent_name.map(str::to_lowercase),
     }
@@ -505,9 +505,10 @@ fn build_https_data(record: &HttpRecord, agent_name: Option<&str>) -> HttpsDataH
 
     let c_data = AgentsightHttpsData {
         pid: record.pid as i32,
-        // Process name = the *process* comm (/proc/<pid>/comm), not the SSL
-        // event's per-event thread comm (which may be a worker-thread name such
-        // as "HTTP client"). Falls back to the event comm when /proc is gone.
+        // Process name = the *process* comm (`<procfs root>/<pid>/comm`), not
+        // the SSL event's per-event thread comm (which may be a worker-thread
+        // name such as "HTTP client"). Falls back to the event comm when the
+        // entry is gone.
         process_name: copy_process_name(
             &crate::discovery::scanner::read_comm(record.pid)
                 .unwrap_or_else(|| record.comm.clone()),
@@ -559,11 +560,10 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .agent_name
         .as_ref()
         .map(|s| safe_cstring(&s.to_lowercase()));
-    // Space-joined argv from /proc/<pid>/cmdline; empty when the process has
-    // already exited (read_cmdline returns an empty vec on error).
-    let cmdline = copy_to_fixed_buf::<128>(
-        &crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", call.pid)).join(" "),
-    );
+    // Space-joined argv from <procfs root>/<pid>/cmdline; empty when the process
+    // has already exited (read_cmdline returns an empty vec on error).
+    let cmdline =
+        copy_to_fixed_buf::<128>(&crate::discovery::scanner::read_cmdline(call.pid).join(" "));
     let container_id =
         crate::container::extract_container_id_cached(call.pid as u32).map(|s| safe_cstring(&s));
 
@@ -835,6 +835,30 @@ pub unsafe extern "C" fn agentsight_config_set_enforcer_socket(
     let value = unsafe { CStr::from_ptr(path) }.to_string_lossy();
     if !value.is_empty() {
         unsafe { (*cfg).ffi_enforcer_socket = std::path::PathBuf::from(value.as_ref()) };
+    }
+}
+
+/// Override the procfs mount point that pid lookups resolve through.
+///
+/// Pass a host procfs bind-mounted into the caller's container (e.g.
+/// `"/logtail_host/proc"`) to observe processes in other pid namespaces without
+/// joining them — the caller then needs no `hostPID`. Defaults to `/proc`.
+///
+/// The path is the caller's deployment detail, which is why it is passed in
+/// rather than probed: a standalone install must keep reading its own `/proc`.
+/// Must be set before `agentsight_start`, since probes bake a pid-namespace flag
+/// derived from this root into their BPF objects at load time.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn agentsight_config_set_procfs_root(
+    cfg: *mut AgentsightConfigHandle,
+    path: *const c_char,
+) {
+    if cfg.is_null() || path.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(path) }.to_string_lossy();
+    if !value.is_empty() {
+        unsafe { (*cfg).procfs_root = std::path::PathBuf::from(value.as_ref()) };
     }
 }
 
@@ -1660,6 +1684,7 @@ mod tests {
             response_headers: "{\"content-type\":\"application/octet-stream\"}".to_string(),
             response_body,
             duration_ns: 1,
+            first_output_timestamp_ns: None,
             is_sse: false,
             sse_event_count: 0,
         }
@@ -2080,6 +2105,44 @@ mod tests {
             &std::path::PathBuf::from("/tmp/agentsight-enforcer.sock")
         );
 
+        unsafe { agentsight_config_free(cfg) };
+    }
+
+    #[test]
+    fn test_config_procfs_root_is_configurable() {
+        let cfg = agentsight_config_new();
+        assert!(!cfg.is_null());
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from(crate::utils::procfs::DEFAULT_PROC_ROOT)
+        );
+
+        let root = CString::new("/logtail_host/proc").unwrap();
+        unsafe { agentsight_config_set_procfs_root(cfg, root.as_ptr()) };
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from("/logtail_host/proc")
+        );
+
+        // An empty string keeps the previous value.
+        let empty = CString::new("").unwrap();
+        unsafe { agentsight_config_set_procfs_root(cfg, empty.as_ptr()) };
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from("/logtail_host/proc")
+        );
+
+        unsafe { agentsight_config_free(cfg) };
+
+        // Null operands are no-ops, not crashes.
+        let some_path = CString::new("/proc").unwrap();
+        unsafe { agentsight_config_set_procfs_root(std::ptr::null_mut(), some_path.as_ptr()) };
+        let cfg = agentsight_config_new();
+        unsafe { agentsight_config_set_procfs_root(cfg, std::ptr::null()) };
+        assert_eq!(
+            unsafe { &(*cfg).procfs_root },
+            &std::path::PathBuf::from(crate::utils::procfs::DEFAULT_PROC_ROOT)
+        );
         unsafe { agentsight_config_free(cfg) };
     }
 

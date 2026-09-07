@@ -208,55 +208,59 @@ fn reject_visible_non_writable_component_from_view(
 /// Resolve an install target without treating a read-only system record as
 /// the installation being mutated.
 ///
-/// Exact identities across the visible user-plus-system view still precede
-/// repository aliases. The returned state view keeps planning scoped to its
-/// writable root, so a user install can create a user record that shadows an
-/// existing system installation without inheriting or changing it.
+/// Exact identities across the visible user-plus-system view — including
+/// names claimed by an on-disk operation journal — still precede the
+/// component index, which is the sole authority for every other identity:
+/// an input the index does not recognize is rejected instead of being pinned
+/// literally. A normalized `--repo` override in `index_base_override` makes
+/// that repository's published index the identity authority for this
+/// invocation. The returned state view keeps planning scoped to its writable
+/// root, so a user install can create a user record that shadows an existing
+/// system installation without inheriting or changing it.
 pub(crate) fn resolve_install_target(
     input: &str,
     ctx: &CliContext,
     command: &str,
-) -> Result<(String, StateView, bool), CliError> {
-    resolve_lifecycle_target(input, ctx, command, false)
+    index_base_override: Option<&str>,
+) -> Result<(String, StateView), CliError> {
+    resolve_lifecycle_target(input, ctx, command, false, index_base_override)
+        .map(|(component, view, _)| (component, view))
+}
+
+/// Resolve an adopt target under install's narrow identity precedence.
+///
+/// A fresh adopt writes a brand-new component record, so like install it
+/// lets only exact component records (active or quarantined) and
+/// effectively-pending operation journals precede the component index.
+/// Terminal journals, legacy capability rows, and dropped capability names
+/// stay addressable on the mutation paths, which act on the recorded state
+/// and own the migration guidance; here they must not re-authorize an
+/// identity the index no longer recognizes just because `package_map` or
+/// RPM `Provides` could still resolve a package for it.
+pub(crate) fn resolve_adopt_target(
+    input: &str,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<(String, StateView), CliError> {
+    resolve_lifecycle_target(input, ctx, command, false, None)
+        .map(|(component, view, _)| (component, view))
 }
 
 /// Resolve a lifecycle target and reject a visible installation that the
 /// current invocation cannot mutate.
 ///
-/// Missing targets are returned unchanged for the planner's normal
-/// `not-installed` path. Exact component names and package identities are
-/// resolved from visible state before repository aliases are considered.
+/// Exact component names and package identities are resolved from visible
+/// state first; every other identity must come from the component index.
+/// Index-supported but absent targets flow on to the planner's normal
+/// `not-installed` path, while unrecognized names fail as unsupported (or
+/// as index-unavailable when nothing could validate them).
 pub(crate) fn resolve_mutation_target(
     input: &str,
     ctx: &CliContext,
     command: &str,
 ) -> Result<(String, StateView), CliError> {
-    let writable_state = load_state_store(ctx, command)?;
-    let layout = resolve_layout(ctx);
-    let journal_dir = layout.state_dir.join("journal");
-    let inventory = JournalInventory::load(JournalEvidence::new(
-        &journal_dir,
-        &writable_state.operations,
-    ))
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to inspect pending operation journals: {err}"),
-    })?;
-    let writable_journal_identity = inventory.recoverable_for(input).is_some();
-    let view = StateView::load_with_writable_state(
-        ctx,
-        command,
-        StateVisibility::UserPlusSystem,
-        writable_state,
-    )?;
-
-    if writable_journal_identity {
-        return Ok((input.to_string(), view));
-    }
-    resolve_lifecycle_target_from_view(input, command, true, view, || {
-        component_alias_from_repo_index(input, ctx, command)
-    })
-    .map(|(component, view, _)| (component, view))
+    resolve_lifecycle_target(input, ctx, command, true, None)
+        .map(|(component, view, _)| (component, view))
 }
 
 /// Resolve an adapter target across visible component and local receipt
@@ -274,7 +278,7 @@ pub(crate) fn resolve_adapter_target(
         writable_state,
     )?;
     resolve_adapter_target_from_view(input, command, view, || {
-        component_alias_from_repo_index(input, ctx, command)
+        component_identity_from_repo_index(input, ctx, command, None)
     })
 }
 
@@ -282,7 +286,7 @@ fn resolve_adapter_target_from_view(
     input: &str,
     command: &str,
     view: StateView,
-    alias: impl FnOnce() -> String,
+    identity: impl FnOnce() -> Result<String, CliError>,
 ) -> Result<(String, StateView), CliError> {
     let exact_identity = view.has_exact_component(input)
         || !view
@@ -290,14 +294,11 @@ fn resolve_adapter_target_from_view(
             .state
             .adapter_claims_for_component(input)
             .is_empty();
-    if !exact_identity {
-        view.reject_incomplete_alias_visibility(command, input)?;
+    if exact_identity {
+        return Ok((input.to_string(), view));
     }
-    let component = if exact_identity {
-        input.to_string()
-    } else {
-        alias()
-    };
+    view.reject_incomplete_alias_visibility(command, input)?;
+    let component = identity()?;
     Ok((component, view))
 }
 
@@ -306,16 +307,44 @@ fn resolve_lifecycle_target(
     ctx: &CliContext,
     command: &str,
     reject_read_only: bool,
+    index_base_override: Option<&str>,
 ) -> Result<(String, StateView, bool), CliError> {
     let writable_state = load_state_store(ctx, command)?;
+    let layout = resolve_layout(ctx);
+    let journal_dir = layout.state_dir.join("journal");
+    let inventory = JournalInventory::load(JournalEvidence::new(
+        &journal_dir,
+        &writable_state.operations,
+    ))
+    .map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to inspect pending operation journals: {err}"),
+    })?;
+    // A journal on disk is exact local state: its recorded identity (subject
+    // or legacy step target) stays addressable without index validation so
+    // interrupted or still-uncleared operations remain recoverable offline.
+    // Record-creating commands (install, adopt) share this precedence only
+    // for effectively-pending journals — enough to reach the
+    // pending-operation recovery guidance — because a terminal journal left
+    // behind by a finished operation must not keep authorizing an identity
+    // the component index no longer recognizes.
+    let writable_journal_identity = if reject_read_only {
+        crate::commands::tier1::rpm_install::journal_claims_component(&inventory, input)
+    } else {
+        crate::commands::tier1::rpm_install::pending_journal_claims_component(&inventory, input)
+    };
     let view = StateView::load_with_writable_state(
         ctx,
         command,
         StateVisibility::UserPlusSystem,
         writable_state,
     )?;
+
+    if writable_journal_identity {
+        return Ok((input.to_string(), view, true));
+    }
     resolve_lifecycle_target_from_view(input, command, reject_read_only, view, || {
-        component_alias_from_repo_index(input, ctx, command)
+        component_identity_from_repo_index(input, ctx, command, index_base_override)
     })
 }
 
@@ -324,62 +353,121 @@ fn resolve_lifecycle_target_from_view(
     command: &str,
     reject_read_only: bool,
     view: StateView,
-    alias: impl FnOnce() -> String,
+    identity: impl FnOnce() -> Result<String, CliError>,
 ) -> Result<(String, StateView, bool), CliError> {
-    let exact_identity = view.has_exact_component(input);
+    // Mutations pin any recorded object name so non-component legacy records
+    // (capabilities, dropped capability names) reach their owning command's
+    // migration guidance. Record-creating commands (install, adopt) accept
+    // only exact component records: a historical non-component row must not
+    // authorize a fresh identity the component index no longer recognizes.
+    let exact_identity = if reject_read_only {
+        view.has_exact_object(input)
+    } else {
+        view.has_exact_component(input)
+    };
     if reject_read_only
         && let Some(component) = view.resolve_mutation_component_identity(command, input)?
     {
         return Ok((component, view, true));
     }
-    // Install is allowed to create an independent writable-scope identity,
-    // but incomplete visibility cannot prove that an alias is not an exact
-    // name in the missing root. Pin the literal input instead of remapping it.
-    let literal_identity = exact_identity || !view.unavailable_roots.is_empty();
-    let component = if literal_identity {
-        input.to_string()
-    } else {
-        alias()
-    };
+    if exact_identity {
+        return Ok((input.to_string(), view, true));
+    }
+    // A record-creating command may mint an independent writable-scope
+    // identity, but only one the component index authorizes. Remapping an
+    // alias to its canonical name additionally requires complete visibility:
+    // an unreadable root cannot prove the alias is not an exact name
+    // recorded there.
+    let component = identity()?;
+    if component != input {
+        view.reject_incomplete_alias_visibility(command, input)?;
+    }
     if reject_read_only {
         reject_visible_non_writable_component_from_view(&view, command, &component)?;
     }
-    Ok((component, view, literal_identity))
+    Ok((component, view, false))
 }
 
 /// Resolve a user-supplied component name to the stable state key.
 ///
 /// 1. Exact state match wins — a component installed under its literal name
-///    is never re-mapped.
-/// 2. Otherwise the repo-side component index is consulted for package-name
-///    aliases (e.g., `copilot-shell` → `cosh`) via in-memory lookup only —
-///    no rpmdb/dnf queries are triggered.
-/// 3. Falls back to the literal input when resolution is ambiguous or the
-///    component index is unavailable.
+///    is never re-mapped and stays addressable offline.
+/// 2. Otherwise the repo-side component index is the sole identity authority
+///    (canonical names and declared aliases, e.g. `copilot-shell` → `cosh`)
+///    via in-memory lookup only — no rpmdb/dnf queries are triggered.
+///
+/// # Errors
+///
+/// An input the index does not recognize is an unsupported component; when
+/// no index can be loaded at all, the name cannot be validated and the
+/// explicit index-unavailable error is returned instead (issue #2630).
 pub(crate) fn lookup_component_name_in_store(
     input: &str,
     store: &anolisa_core::state_store::StateStore,
     ctx: &CliContext,
     command: &str,
-) -> String {
+) -> Result<String, CliError> {
     if store.contains_record(ObjectKind::Component, input) {
-        return input.to_string();
+        return Ok(input.to_string());
     }
-    component_alias_from_repo_index(input, ctx, command)
+    component_identity_from_repo_index(input, ctx, command, None)
 }
 
-/// Steps 2–3 of component-name resolution: consult the repo-side component
-/// index for package-name aliases, falling back to the literal input.
-fn component_alias_from_repo_index(input: &str, ctx: &CliContext, command: &str) -> String {
+/// Step 2 of component-name resolution: establish the identity through the
+/// repo-side component index, the sole authority for names absent from
+/// exact local state. A normalized `--repo` base URL in
+/// `index_base_override` replaces the repo.toml chain entirely, so the
+/// overridden repository's index is the authority for the invocation.
+fn component_identity_from_repo_index(
+    input: &str,
+    ctx: &CliContext,
+    command: &str,
+    index_base_override: Option<&str>,
+) -> Result<String, CliError> {
     let layout = resolve_layout(ctx);
-    let repo_config = load_repo_config(ctx, &layout, command, RepoPersistPolicy::BestEffort).ok();
-    let env = anolisa_env::EnvService::detect();
-    let component_index = repo_config
-        .as_ref()
-        .and_then(|cfg| crate::resolution::load_optional_component_index(&layout, &env, cfg));
+    let component_index = match index_base_override {
+        Some(base_url) => crate::resolution::load_component_index_from_base(&layout, base_url).ok(),
+        None => {
+            let repo_config =
+                load_repo_config(ctx, &layout, command, RepoPersistPolicy::BestEffort).ok();
+            let env = anolisa_env::EnvService::detect();
+            repo_config.as_ref().and_then(|cfg| {
+                crate::resolution::load_optional_component_index(&layout, &env, cfg)
+            })
+        }
+    };
 
-    crate::resolution::lookup_component_alias(input, component_index.as_ref())
-        .unwrap_or_else(|| input.to_string())
+    match crate::resolution::resolve_index_identity(input, component_index.as_ref()) {
+        crate::resolution::IndexIdentity::Resolved(component) => Ok(component),
+        crate::resolution::IndexIdentity::Unsupported => {
+            Err(unsupported_component_error(command, input))
+        }
+        crate::resolution::IndexIdentity::Unavailable => {
+            Err(component_index_unavailable_error(command, input))
+        }
+    }
+}
+
+/// Public error for a name the authoritative component index does not know.
+pub(crate) fn unsupported_component_error(command: &str, input: &str) -> CliError {
+    CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!(
+            "unsupported component '{input}'; run `anolisa list` to view supported components"
+        ),
+    }
+}
+
+/// Public error for a name that cannot be validated because no component
+/// index could be loaded. Distinct from [`unsupported_component_error`] so
+/// callers can tell "the index rejected this" from "nothing could check it".
+pub(crate) fn component_index_unavailable_error(command: &str, input: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "component index is unavailable; cannot validate component '{input}'; run `anolisa list` to inspect repository metadata"
+        ),
+    }
 }
 
 /// Path for the component manifest saved as part of an installed component's
@@ -1053,6 +1141,8 @@ mod tests {
             enabled_at: "2026-01-01T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp/adapter-resource"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1118,7 +1208,7 @@ mod tests {
             "install legacy-name",
             false,
             view,
-            || "cosh".to_string(),
+            || Ok("cosh".to_string()),
         )
         .expect("a system record must not block a user-scope install");
 
@@ -1157,7 +1247,7 @@ mod tests {
             view,
             || {
                 alias_consulted.set(true);
-                "cosh".to_string()
+                Ok("cosh".to_string())
             },
         )
         .expect_err("the read-only system identity must win over a user alias target");
@@ -1185,7 +1275,7 @@ mod tests {
             "forget copilot-shell",
             true,
             view,
-            || "cosh".to_string(),
+            || Ok("cosh".to_string()),
         );
 
         let err = result.expect_err("the visible system package identity must win");
@@ -1209,7 +1299,7 @@ mod tests {
             view,
             || {
                 alias_consulted.set(true);
-                "cosh".to_string()
+                Ok("cosh".to_string())
             },
         )
         .expect("the writable package owner must be resolved directly");
@@ -1235,7 +1325,7 @@ mod tests {
             "forget shared-package",
             true,
             view,
-            || "repo-target".to_string(),
+            || Ok("repo-target".to_string()),
         )
         .expect_err("ambiguous state package identity must fail closed");
 
@@ -1257,7 +1347,7 @@ mod tests {
             "repair shared-package",
             true,
             view,
-            || "repo-target".to_string(),
+            || Ok("repo-target".to_string()),
         )
         .expect_err("quarantined package claims must remain authoritative");
 
@@ -1280,7 +1370,7 @@ mod tests {
             view,
             || {
                 alias_consulted.set(true);
-                "cosh".to_string()
+                Ok("cosh".to_string())
             },
         )
         .expect("system component must remain a visible adapter source");
@@ -1297,7 +1387,7 @@ mod tests {
             "legacy-name",
             "adapter disable legacy-name",
             view,
-            || "cosh".to_string(),
+            || Ok("cosh".to_string()),
         )
         .expect_err("incomplete visibility must block adapter alias inference");
 
@@ -1318,7 +1408,7 @@ mod tests {
             view,
             || {
                 alias_consulted.set(true);
-                "cosh".to_string()
+                Ok("cosh".to_string())
             },
         )
         .expect("an exact local receipt remains safely addressable");

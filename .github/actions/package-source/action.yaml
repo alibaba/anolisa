@@ -10,6 +10,10 @@ inputs:
   version:
     description: 'Version string without v prefix (e.g. 2.1.0)'
     required: true
+  tokenless-source-root:
+    description: 'Repository root containing the Tokenless source tree'
+    required: false
+    default: '.'
   artifact-suffix:
     description: 'Suffix appended to both the tar.gz filename and artifact name (e.g. ".preview"). Leave empty for official builds.'
     required: false
@@ -40,6 +44,8 @@ runs:
     # -----------------------------------------------------------------
     - name: Resolve source directory
       shell: bash
+      env:
+        TOKENLESS_SOURCE_ROOT: ${{ inputs.tokenless-source-root }}
       run: |
         COMPONENT="${{ inputs.component }}"
         VERSION="${{ inputs.version }}"
@@ -50,7 +56,7 @@ runs:
           cosh-ng)        SRC_DIR="src/cosh-ng" ;;
           agent-sec-core) SRC_DIR="src/agent-sec-core" ;;
           agentsight)     SRC_DIR="src/agentsight" ;;
-          tokenless)     SRC_DIR="src/tokenless" ;;
+          tokenless)     SRC_DIR="${TOKENLESS_SOURCE_ROOT}/src/tokenless" ;;
           os-skills)      SRC_DIR="src/os-skills" ;;
           ws-ckpt)        SRC_DIR="src/ws-ckpt" ;;
           agent-memory)   SRC_DIR="src/agent-memory" ;;
@@ -156,21 +162,8 @@ runs:
         set -euo pipefail
         cd /tmp/build/${ARCHIVE_NAME}
 
-        RTK_TAG="$(sed -n 's/^rtk_tag[[:space:]]*:=[[:space:]]*"\(.*\)"/\1/p' justfile)"
-        if [ -z "$RTK_TAG" ]; then
-          echo "ERROR: Could not resolve rtk_tag from justfile"
-          exit 1
-        fi
-
         rm -rf third_party/rtk
-        git clone --depth 1 --branch "$RTK_TAG" \
-          https://github.com/rtk-ai/rtk.git third_party/rtk
-
-        patch --forward -p1 --no-backup-if-mismatch \
-          -d third_party/rtk < third_party/patches/rtk-tokenless-stats.patch
-        patch --forward -p1 --no-backup-if-mismatch \
-          -d third_party/rtk < third_party/patches/rtk-pytest-error-report.patch
-
+        bash "$GITHUB_ACTION_PATH/../build-tokenless-prebuilt/setup-rtk.sh" "$PWD"
         rm -rf third_party/rtk/.git
 
     - name: Generate tokenless component contract

@@ -8,14 +8,13 @@ use crate::types::{AgentEvent, AgentRequest, CoshApprovalMode};
 mod driver;
 
 use self::driver::{start_cancellable_qwen_process, start_control_protocol_qwen_process};
-use super::claude::{join_reader_thread, read_lossy, send_agent_event, terminate_process};
+use super::claude::{join_reader_thread, read_lossy};
 use super::prompt::provider_prompt_contract_for_request;
 use super::qwen_stream::QwenStreamParser;
 use super::{
     commit_pending_session, detach_committed_session, prompt_from_request,
     start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
     AgentBackendCapabilities, AgentRunHandle, FreshSessionOutcome, PreparedInvocation,
-    ProviderLineProgress,
 };
 
 #[derive(Debug, Clone)]
@@ -243,14 +242,6 @@ fn qwen_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> S
         prompt_from_request(request),
         provider_prompt_contract_for_request(request, mode, "run_shell_command")
     )
-}
-
-fn line_progress(progressed: bool) -> ProviderLineProgress {
-    if progressed {
-        ProviderLineProgress::Progress
-    } else {
-        ProviderLineProgress::NoProgress
-    }
 }
 
 fn qwen_args_with_prompt(prepared: &PreparedInvocation) -> Vec<String> {

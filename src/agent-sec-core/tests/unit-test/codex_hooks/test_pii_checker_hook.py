@@ -153,18 +153,25 @@ _PII_DENY_RESULT = json.dumps(
 
 def _assert_warning_output(
     output: dict,
-    hook_event: str,
     *,
-    pii_type: str = "phone_cn",
-    redacted_evidence: str = "138****8000",
+    expected_risk: str = "一般风险",
+    expected_action: str = "本次仅提醒，未触发确认或阻断。",
 ) -> str:
     """Assert the common non-blocking warning contract."""
     assert set(output) == {"systemMessage"}
     message = output["systemMessage"]
-    assert pii_type in message
-    assert redacted_evidence in message
-    assert hook_event in message
-    assert "执行将继续" in message
+    assert f"1 项{expected_risk}敏感信息" in message
+    assert expected_action in message
+    for hidden_value in (
+        "phone_cn",
+        "credential",
+        "138****8000",
+        "password=[REDACTED]",
+        "扫描判定",
+        "Hook 策略",
+        "fallback",
+    ):
+        assert hidden_value not in message
     return message
 
 
@@ -378,52 +385,39 @@ def test_environment_disabled_short_circuits_before_input_and_cli(
 
 
 class TestUnifiedHookPolicyWarnings:
-    """Warnings preserve scanner verdict, policy, and actual fallback behavior."""
+    """Warnings show user-facing risk and actual behavior only."""
 
     @pytest.mark.parametrize(
         (
             "policy",
             "scan_output",
-            "expected_verdict",
-            "pii_type",
-            "redacted_evidence",
-            "expected_handling",
+            "expected_risk",
+            "expected_action",
         ),
         (
             (
                 "warn",
                 _PII_DENY_RESULT,
-                "deny",
-                "credential",
-                "password=[REDACTED]",
-                "实际处理：warn，执行将继续。",
+                "高风险",
+                "本次仅提醒，未触发确认或阻断。",
             ),
             (
                 "ask",
                 _PII_DENY_RESULT,
-                "deny",
-                "credential",
-                "password=[REDACTED]",
-                "实际处理：当前 hook 不支持确认，fallback 为 warn，执行将继续。",
+                "高风险",
+                "当前环节不支持确认/阻断，本次仅提醒，不会阻断。",
             ),
             (
                 "block",
                 _PII_FOUND_RESULT,
-                "warn",
-                "phone_cn",
-                "138****8000",
-                (
-                    "实际处理：scanner verdict 未达到 block 条件，"
-                    "fallback 为 warn，执行将继续。"
-                ),
+                "一般风险",
+                "本次仅提醒，未触发确认或阻断。",
             ),
             (
                 "warn",
                 _PII_FOUND_RESULT,
-                "warn",
-                "phone_cn",
-                "138****8000",
-                "实际处理：warn，执行将继续。",
+                "一般风险",
+                "本次仅提醒，未触发确认或阻断。",
             ),
         ),
     )
@@ -432,10 +426,8 @@ class TestUnifiedHookPolicyWarnings:
         mock_cli,
         policy,
         scan_output,
-        expected_verdict,
-        pii_type,
-        redacted_evidence,
-        expected_handling,
+        expected_risk,
+        expected_action,
     ):
         env = mock_cli(
             output=scan_output,
@@ -447,17 +439,11 @@ class TestUnifiedHookPolicyWarnings:
 
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
 
-        message = _assert_warning_output(
+        _assert_warning_output(
             output,
-            "UserPromptSubmit",
-            pii_type=pii_type,
-            redacted_evidence=redacted_evidence,
+            expected_risk=expected_risk,
+            expected_action=expected_action,
         )
-        assert f"扫描判定：{expected_verdict}" in message
-        assert f"Hook 策略：{policy}" in message
-        assert expected_handling in message
-        assert "13800138000" not in message
-        assert "password=swordfish" not in message
 
     def test_block_policy_still_blocks_deny_verdict(self, mock_cli):
         env = mock_cli(
@@ -471,9 +457,16 @@ class TestUnifiedHookPolicyWarnings:
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
 
         assert output["decision"] == "block"
-        assert "credential" in output["reason"]
-        assert "password=[REDACTED]" in output["reason"]
-        assert "password=swordfish" not in output["reason"]
+        assert "1 项高风险敏感信息" in output["reason"]
+        assert "当前策略已阻断本次请求。" in output["reason"]
+        for hidden_value in (
+            "credential",
+            "password=[REDACTED]",
+            "password=swordfish",
+            "deny",
+            "block",
+        ):
+            assert hidden_value not in output["reason"]
 
 
 class TestDenyMode:
@@ -498,23 +491,40 @@ class TestDenyMode:
     def test_warn_verdict_alerts_user_prompt(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
-        _assert_warning_output(output, "UserPromptSubmit")
+        _assert_warning_output(output)
 
     def test_warn_verdict_alerts_post_tool_use(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_POST_TOOL_USE_EVENT, env_override=env)
-        _assert_warning_output(output, "PostToolUse")
+        message = _assert_warning_output(
+            output,
+            expected_action="工具已经执行；本次仅提醒，未触发确认或阻断",
+        )
+        assert "原始工具结果仍会进入模型上下文" in message
+        assert "外部副作用不会撤销" in message
 
     @pytest.mark.parametrize(
-        "event_data",
-        [_USER_PROMPT_EVENT, _PRE_TOOL_USE_EVENT, _POST_TOOL_USE_EVENT],
+        ("event_data", "expected_action"),
+        (
+            (_USER_PROMPT_EVENT, "当前策略已阻断本次请求。"),
+            (_PRE_TOOL_USE_EVENT, "当前策略已阻断本次工具调用。"),
+            (
+                _POST_TOOL_USE_EVENT,
+                (
+                    "工具已经执行；原始工具结果不会进入模型上下文，"
+                    "已发生的外部副作用不会撤销。"
+                ),
+            ),
+        ),
     )
-    def test_deny_verdict_blocks(self, mock_cli, event_data):
+    def test_deny_verdict_blocks(self, mock_cli, event_data, expected_action):
         env = mock_cli(output=_PII_DENY_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(event_data, env_override=env)
         assert output["decision"] == "block"
-        assert "credential" in output["reason"]
-        assert event_data["hook_event_name"] in output["reason"]
+        assert "1 项高风险敏感信息" in output["reason"]
+        assert expected_action in output["reason"]
+        assert "credential" not in output["reason"]
+        assert "password=[REDACTED]" not in output["reason"]
 
     def test_no_raw_pii_in_output(self, mock_cli):
         """Warning output must never contain raw PII content."""
@@ -535,13 +545,13 @@ class TestDenyMode:
             extra={"PII_CHECKER_MODE": "deny"},
         )
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
-        message = _assert_warning_output(output, "UserPromptSubmit")
+        message = _assert_warning_output(output)
         assert "13800138000" not in message
 
     def test_warn_verdict_alerts_pre_tool_use(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
         output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
-        _assert_warning_output(output, "PreToolUse")
+        _assert_warning_output(output)
 
     def test_unknown_verdict_with_findings_fails_open(self, mock_cli: Any) -> None:
         env = mock_cli(
@@ -723,8 +733,8 @@ class TestMainMonkeypatch:
             mode="deny",
         )
         assert output["decision"] == "block"
-        assert "工具输入" in output["reason"]
-        assert "该工具调用已被阻止" in output["reason"]
+        assert "1 项高风险敏感信息" in output["reason"]
+        assert "当前策略已阻断本次工具调用。" in output["reason"]
 
     def test_scan_text_passed_via_stdin(self, monkeypatch, capsys):
         captured = {}
@@ -779,8 +789,9 @@ class TestMainMonkeypatch:
             mode="deny",
         )
         assert set(output) == {"systemMessage"}
-        assert "phone_cn" in output["systemMessage"]
-        assert "执行将继续" in output["systemMessage"]
+        assert "1 项一般风险敏感信息" in output["systemMessage"]
+        assert "本次仅提醒，未触发确认或阻断。" in output["systemMessage"]
+        assert "phone_cn" not in output["systemMessage"]
 
     def test_deny_mode_blocks_post_tool_use(self, monkeypatch, capsys):
         """deny mode + PostToolUse PII → block with tool output message."""
@@ -815,7 +826,10 @@ class TestMainMonkeypatch:
             mode="deny",
         )
         assert output["decision"] == "block"
-        assert "工具输出" in output["reason"]
+        assert "1 项高风险敏感信息" in output["reason"]
+        assert "工具已经执行" in output["reason"]
+        assert "原始工具结果不会进入模型上下文" in output["reason"]
+        assert "已发生的外部副作用不会撤销" in output["reason"]
 
     def test_observe_mode_allows_findings(self, monkeypatch, capsys):
         """observe mode + findings → allow."""
@@ -971,70 +985,77 @@ class TestHelpers:
         assert pii_checker_hook._safe_text(None) == ""
         assert pii_checker_hook._safe_text(123) == ""
 
-    def test_shorten_within_limit(self):
-        assert pii_checker_hook._shorten("short", 80) == "short"
+    @pytest.mark.parametrize(
+        ("severity", "verdict", "expected"),
+        (
+            ("deny", "warn", "high"),
+            ("warn", "deny", "general"),
+            ("unknown", "deny", "high"),
+            ("unknown", "warn", "general"),
+        ),
+    )
+    def test_finding_risk_uses_severity_with_verdict_fallback(
+        self, severity, verdict, expected
+    ):
+        assert (
+            pii_checker_hook._finding_risk({"severity": severity}, verdict) == expected
+        )
 
-    def test_shorten_over_limit(self):
-        long_text = "a" * 100
-        result = pii_checker_hook._shorten(long_text, 10)
-        assert len(result) == 10
-        assert result.endswith("…")
-
-    def test_shorten_collapses_whitespace(self):
-        assert pii_checker_hook._shorten("hello   world") == "hello world"
+    @pytest.mark.parametrize(
+        ("verdict", "findings", "expected"),
+        (
+            ("deny", [{"severity": "deny"}], "检测到 1 项高风险敏感信息"),
+            ("warn", [{"severity": "warn"}], "检测到 1 项一般风险敏感信息"),
+            (
+                "deny",
+                [{"severity": "deny"}, {"severity": "warn"}],
+                "检测到 2 项敏感信息（高风险 1、一般风险 1）",
+            ),
+        ),
+    )
+    def test_risk_summary(self, verdict, findings, expected):
+        assert pii_checker_hook._risk_summary(verdict, findings) == expected
 
 
 class TestFormatBlockReason:
     """Test _format_block_reason output formatting."""
 
-    def test_includes_count_and_types(self):
+    def test_includes_mixed_risk_counts_without_internal_details(self):
         findings = [
-            {"type": "phone_cn", "severity": "warn", "evidence_redacted": "138****"},
+            {"type": "credential", "severity": "deny", "evidence_redacted": "secret"},
             {"type": "email", "severity": "warn", "evidence_redacted": "a***@x.com"},
         ]
         reason = pii_checker_hook._format_block_reason(
-            findings, "UserPromptSubmit", "用户输入"
+            findings, "UserPromptSubmit", "deny"
         )
-        assert "2 项" in reason
-        assert "email" in reason
-        assert "phone_cn" in reason
-        assert "UserPromptSubmit" in reason
-
-    def test_evidence_limited_to_max(self):
-        findings = [{"type": f"t{i}", "evidence_redacted": f"ev{i}"} for i in range(10)]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "PostToolUse", "工具输出"
-        )
-        # Should only include _MAX_EVIDENCE_ITEMS
-        assert reason.count("ev") <= pii_checker_hook._MAX_EVIDENCE_ITEMS + 1
+        assert "检测到 2 项敏感信息（高风险 1、一般风险 1）" in reason
+        for hidden_value in ("credential", "email", "secret", "a***@x.com", "deny"):
+            assert hidden_value not in reason
 
     def test_post_tool_use_message(self):
-        findings = [{"type": "phone_cn", "severity": "warn"}]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "PostToolUse", "工具输出"
-        )
-        assert "工具输出已被拦截" in reason
+        findings = [{"type": "credential", "severity": "deny"}]
+        reason = pii_checker_hook._format_block_reason(findings, "PostToolUse", "deny")
+        assert "工具已经执行" in reason
+        assert "原始工具结果不会进入模型上下文" in reason
+        assert "已发生的外部副作用不会撤销" in reason
 
     def test_pre_tool_use_message(self):
-        findings = [{"type": "phone_cn", "severity": "warn"}]
-        reason = pii_checker_hook._format_block_reason(
-            findings, "PreToolUse", "工具输入"
-        )
-        assert "该工具调用已被阻止" in reason
-        assert "PreToolUse" in reason
+        findings = [{"type": "credential", "severity": "deny"}]
+        reason = pii_checker_hook._format_block_reason(findings, "PreToolUse", "deny")
+        assert "当前策略已阻断本次工具调用。" in reason
 
     def test_user_prompt_submit_message(self):
-        findings = [{"type": "email", "severity": "warn"}]
+        findings = [{"type": "credential", "severity": "deny"}]
         reason = pii_checker_hook._format_block_reason(
-            findings, "UserPromptSubmit", "用户输入"
+            findings, "UserPromptSubmit", "deny"
         )
-        assert "请移除敏感信息" in reason
+        assert "当前策略已阻断本次请求。" in reason
 
 
 class TestFormatWarningMessage:
     """Test non-blocking warning output formatting."""
 
-    def test_includes_redacted_details_and_continuation(self):
+    def test_hides_internal_details_and_reports_warning_behavior(self):
         findings = [
             {
                 "type": "phone_cn",
@@ -1045,17 +1066,51 @@ class TestFormatWarningMessage:
         ]
         message = pii_checker_hook._format_warning_message(
             findings,
-            "PreToolUse",
-            "工具输入",
+            "UserPromptSubmit",
             "warn",
             "warn",
         )
-        assert "隐私告警" in message
-        assert "phone_cn" in message
-        assert "138****8000" in message
-        assert "13800138000" not in message
-        assert "PreToolUse" in message
-        assert "扫描判定：warn" in message
-        assert "Hook 策略：warn" in message
-        assert "实际处理：warn" in message
-        assert "执行将继续" in message
+        assert "检测到 1 项一般风险敏感信息" in message
+        assert "本次仅提醒，未触发确认或阻断。" in message
+        for hidden_value in (
+            "phone_cn",
+            "warn",
+            "138****8000",
+            "13800138000",
+            "扫描判定",
+            "Hook 策略",
+        ):
+            assert hidden_value not in message
+
+    def test_ask_reports_capability_limit(self):
+        message = pii_checker_hook._format_warning_message(
+            [{"severity": "deny"}],
+            "UserPromptSubmit",
+            "deny",
+            "ask",
+        )
+        assert "检测到 1 项高风险敏感信息" in message
+        assert "当前环节不支持确认/阻断，本次仅提醒，不会阻断。" in message
+        assert "ask" not in message
+        assert "fallback" not in message
+
+    def test_warn_finding_does_not_report_capability_degradation(self):
+        message = pii_checker_hook._format_warning_message(
+            [{"severity": "warn"}],
+            "UserPromptSubmit",
+            "warn",
+            "ask",
+        )
+        assert "本次仅提醒，未触发确认或阻断。" in message
+        assert "当前环节不支持" not in message
+
+    def test_post_tool_warning_reports_execution_and_content_boundary(self):
+        message = pii_checker_hook._format_warning_message(
+            [{"severity": "warn"}],
+            "PostToolUse",
+            "warn",
+            "warn",
+        )
+        assert "工具已经执行" in message
+        assert "原始工具结果仍会进入模型上下文" in message
+        assert "外部副作用不会撤销" in message

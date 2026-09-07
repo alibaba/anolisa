@@ -59,7 +59,11 @@ jobs:
               dnf_install nodejs npm
               ;;
             cosh-ng)
-              dnf install -y rust cargo openssl-devel pkgconfig
+              dnf install -y rust cargo pkgconfig systemd-rpm-macros
+              rustc --version | awk '{
+                split($2, v, ".")
+                if (v[1] < 1 || (v[1] == 1 && v[2] < 88)) exit 1
+              }'
               ;;
             agent-sec-core)
               dnf_install clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
@@ -113,7 +117,7 @@ jobs:
         if: inputs.component == 'anolisa'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.88.0'
+          toolchain: '1.93.1'
 
       - name: "Setup Python + uv (agent-sec-core)"
         if: inputs.component == 'agent-sec-core'
@@ -202,17 +206,9 @@ jobs:
             )
 
             PACKAGE_DIR=$(mktemp -d)
-            mkdir -p "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
-            cp -p "$SOURCE_ROOT/target/release/agentsight" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/target/release/agentsight-enforcer" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/scripts/agentsight-start.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/agentsight-start"
-            cp -p "$SOURCE_ROOT/scripts/agentsight.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/scripts/agentsight-enforcer.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/component.toml" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/README.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/README_zh.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/LICENSE" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            "$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
             tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
+            echo "AGENTSIGHT_VERIFY_RPM=$SOURCE_ROOT/scripts/verify-rpm-package.sh" >> "$GITHUB_ENV"
           fi
 
           # The anolisa spec intentionally unpacks Source0 into `anolisa/`
@@ -271,6 +267,12 @@ jobs:
 
           echo "Built RPMs:"
           ls -la /tmp/rpm-output/
+
+          if [ "${{ inputs.component }}" = "agentsight" ]; then
+            while IFS= read -r rpm_path; do
+              "$AGENTSIGHT_VERIFY_RPM" "$rpm_path"
+            done < <(find /tmp/rpm-output/ -maxdepth 1 -type f -name "*.rpm" -print)
+          fi
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4

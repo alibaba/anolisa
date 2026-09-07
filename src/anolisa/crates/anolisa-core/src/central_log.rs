@@ -17,8 +17,9 @@
 //! `OpenOptions::append`, and `query` is a sequential scan with simple
 //! filters. Rotation, indexing, and follow-mode are future work.
 
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -134,7 +135,9 @@ pub struct LogFilter {
     /// Lexicographic lower bound on `started_at` (ISO8601 sorts
     /// correctly for UTC).
     pub since: Option<String>,
-    /// Cap the returned record count (first N AFTER filtering).
+    /// Cap the returned record count to the most recent N matches
+    /// (append-only file order). Results stay chronological: oldest of
+    /// that window first. `None` returns every match; `Some(0)` is empty.
     pub limit: Option<usize>,
 }
 
@@ -142,6 +145,98 @@ pub struct LogFilter {
 #[derive(Debug, Clone)]
 pub struct CentralLog {
     path: PathBuf,
+    // Parks `query` after the shared flock is dropped so overlap tests
+    // can run `append` without a wall-clock race against scheduling.
+    #[cfg(test)]
+    query_scan_hold: Option<QueryScanHold>,
+}
+
+// Rendezvous used by lock-overlap tests: signal that `query` has
+// unlocked, then wait until the test finishes `append` before scan.
+#[cfg(test)]
+#[derive(Clone)]
+struct QueryScanHold {
+    inner: std::sync::Arc<QueryScanHoldInner>,
+}
+
+#[cfg(test)]
+struct QueryScanHoldInner {
+    phase: std::sync::Mutex<QueryScanPhase>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryScanPhase {
+    Running,
+    Unlocked,
+    Resume,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for QueryScanHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("QueryScanHold")
+    }
+}
+
+#[cfg(test)]
+impl QueryScanHold {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(QueryScanHoldInner {
+                phase: std::sync::Mutex::new(QueryScanPhase::Running),
+                changed: std::sync::Condvar::new(),
+            }),
+        }
+    }
+
+    fn park_after_unlock(&self) {
+        let mut phase = self.inner.phase.lock().expect("query scan hold mutex");
+        *phase = QueryScanPhase::Unlocked;
+        self.inner.changed.notify_all();
+        while *phase != QueryScanPhase::Resume {
+            phase = self
+                .inner
+                .changed
+                .wait(phase)
+                .expect("query scan hold condvar");
+        }
+    }
+
+    fn wait_until_unlocked(&self) {
+        use std::time::{Duration, Instant};
+
+        let mut phase = self.inner.phase.lock().expect("query scan hold mutex");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while *phase == QueryScanPhase::Running {
+            let now = Instant::now();
+            assert!(
+                now < deadline,
+                "query never parked after dropping the shared flock"
+            );
+            let (next, timed_out) = self
+                .inner
+                .changed
+                .wait_timeout(phase, deadline.saturating_duration_since(now))
+                .expect("query scan hold condvar");
+            phase = next;
+            if timed_out.timed_out() && *phase == QueryScanPhase::Running {
+                panic!("query never parked after dropping the shared flock");
+            }
+        }
+        assert_eq!(
+            *phase,
+            QueryScanPhase::Unlocked,
+            "query left the post-unlock hold before the overlap append"
+        );
+    }
+
+    fn resume_scan(&self) {
+        let mut phase = self.inner.phase.lock().expect("query scan hold mutex");
+        *phase = QueryScanPhase::Resume;
+        self.inner.changed.notify_all();
+    }
 }
 
 /// Errors raised by [`CentralLog`].
@@ -166,7 +261,11 @@ impl CentralLog {
     /// Open (does not create) a log handle for `path`. The file is
     /// created lazily on the first `append`.
     pub fn open(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            #[cfg(test)]
+            query_scan_hold: None,
+        }
     }
 
     /// Path the log writes to.
@@ -224,14 +323,60 @@ impl CentralLog {
 
     /// Sequentially scan the log, returning matching records. Missing
     /// file yields an empty result. `limit` is applied after filtering
-    /// and keeps the first `N` matches encountered.
+    /// and keeps the most recent `N` matches in append-only file order
+    /// (oldest of that window first). `None` returns every match;
+    /// `Some(0)` is empty.
     ///
-    /// A shared `flock` is held for the duration of the scan so a
-    /// concurrent `append` (which takes an exclusive lock) cannot
-    /// publish a partially-written line into the middle of our read.
-    /// On Linux the kernel still serves the read from the page cache
-    /// without copying, so this is cheap; the lock just keeps writers
-    /// out of the window.
+    /// A shared `flock` is held only long enough to snapshot a stable
+    /// byte length so a concurrent `append` cannot publish a partial
+    /// line into that prefix. The lock is then dropped and the scan
+    /// reads only those bytes, so a tail query does not block writers
+    /// for an O(file-size) deserialize. Later appends extend the file
+    /// past the snapshot and are not included.
+    ///
+    /// # Examples
+    ///
+    /// Three records with `limit = 2` keep the last two, still in file
+    /// order:
+    ///
+    /// ```
+    /// use anolisa_core::central_log::{
+    ///     CentralLog, LogFilter, LogKind, LogRecord, LogStatus, Severity,
+    /// };
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let log = CentralLog::open(dir.path().join("audit.jsonl"));
+    /// for (idx, id) in ["op-a", "op-b", "op-c"].iter().enumerate() {
+    ///     log.append(&LogRecord {
+    ///         kind: LogKind::Operation,
+    ///         operation_id: Some((*id).to_string()),
+    ///         command: "test".into(),
+    ///         source: "anolisa-cli".into(),
+    ///         component: None,
+    ///         severity: Severity::Info,
+    ///         message: "ok".into(),
+    ///         actor: "cli".into(),
+    ///         install_mode: None,
+    ///         started_at: format!("2026-06-01T10:00:0{idx}Z"),
+    ///         finished_at: None,
+    ///         status: Some(LogStatus::Ok),
+    ///         objects: vec![],
+    ///         backup_ids: vec![],
+    ///         warnings: vec![],
+    ///         details: serde_json::Value::Null,
+    ///     })
+    ///     .unwrap();
+    /// }
+    /// let hits = log
+    ///     .query(&LogFilter {
+    ///         limit: Some(2),
+    ///         ..Default::default()
+    ///     })
+    ///     .unwrap();
+    /// assert_eq!(hits.len(), 2);
+    /// assert_eq!(hits[0].operation_id.as_deref(), Some("op-b"));
+    /// assert_eq!(hits[1].operation_id.as_deref(), Some("op-c"));
+    /// ```
     pub fn query(&self, filter: &LogFilter) -> Result<Vec<LogRecord>, CentralLogError> {
         if filter.limit == Some(0) {
             return Ok(Vec::new());
@@ -239,7 +384,7 @@ impl CentralLog {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let file = File::open(&self.path).map_err(|source| CentralLogError::Io {
+        let mut file = File::open(&self.path).map_err(|source| CentralLogError::Io {
             path: self.path.clone(),
             source,
         })?;
@@ -247,24 +392,38 @@ impl CentralLog {
             path: self.path.clone(),
             source,
         })?;
-
-        let result = self.scan_locked(&file, filter);
+        let snapshot = file.metadata().map(|meta| meta.len());
         let unlock_result = FileExt::unlock(&file);
-        let matches = result?;
+        let len = snapshot.map_err(|source| CentralLogError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
         unlock_result.map_err(|source| CentralLogError::Io {
             path: self.path.clone(),
             source,
         })?;
-        Ok(matches)
+        #[cfg(test)]
+        if let Some(hold) = &self.query_scan_hold {
+            hold.park_after_unlock();
+        }
+        file.seek(SeekFrom::Start(0))
+            .map_err(|source| CentralLogError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
+        self.scan_reader(file.take(len), filter)
     }
 
-    fn scan_locked(
+    fn scan_reader<R: Read>(
         &self,
-        file: &File,
+        reader: R,
         filter: &LogFilter,
     ) -> Result<Vec<LogRecord>, CentralLogError> {
-        let reader = BufReader::new(file);
-        let mut matches: Vec<LogRecord> = Vec::new();
+        let reader = BufReader::new(reader);
+        // Keep a sliding window so `--limit` is a tail cap. Stopping at the
+        // first N matches would pin `anolisa logs` to genesis records once
+        // the JSONL file grew past the default 50.
+        let mut matches: VecDeque<LogRecord> = VecDeque::new();
         for line in reader.lines() {
             let line = line.map_err(|source| CentralLogError::Io {
                 path: self.path.clone(),
@@ -275,15 +434,15 @@ impl CentralLog {
             }
             let record: LogRecord = serde_json::from_str(&line)?;
             if record_matches(&record, filter) {
-                matches.push(record);
+                matches.push_back(record);
                 if let Some(limit) = filter.limit
-                    && matches.len() >= limit
+                    && matches.len() > limit
                 {
-                    break;
+                    matches.pop_front();
                 }
             }
         }
-        Ok(matches)
+        Ok(matches.into_iter().collect())
     }
 }
 
@@ -665,9 +824,37 @@ mod tests {
             })
             .expect("query");
         assert_eq!(warn_two.len(), 2);
-        // Limit picks the first 2 matches encountered (Warn, Error).
-        assert_eq!(warn_two[0].severity, Severity::Warn);
-        assert_eq!(warn_two[1].severity, Severity::Error);
+        // Limit keeps the last 2 matches (Error, Warn), still oldest-first.
+        assert_eq!(warn_two[0].severity, Severity::Error);
+        assert_eq!(warn_two[1].severity, Severity::Warn);
+        assert_eq!(warn_two[0].started_at, "2026-06-01T10:00:03Z");
+        assert_eq!(warn_two[1].started_at, "2026-06-01T10:00:04Z");
+    }
+
+    #[test]
+    fn query_limit_tails_matches_inside_since_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = CentralLog::open(dir.path().join("audit.jsonl"));
+        for (idx, op) in ["op-old", "op-a", "op-b", "op-c"].iter().enumerate() {
+            log.append(&operation_record(
+                &format!("2026-06-01T10:00:0{idx}Z"),
+                op,
+                &[],
+                Severity::Info,
+            ))
+            .expect("append");
+        }
+
+        let hits = log
+            .query(&LogFilter {
+                since: Some("2026-06-01T10:00:01Z".to_string()),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .expect("query");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].operation_id.as_deref(), Some("op-b"));
+        assert_eq!(hits[1].operation_id.as_deref(), Some("op-c"));
     }
 
     #[test]
@@ -806,7 +993,7 @@ mod tests {
 
         // Writer: hammers append with large-ish records to push the
         // single write_all comfortably past the POSIX atomic-write
-        // boundary, so the shared-lock guarantee actually matters.
+        // boundary, so the length snapshot under shared lock matters.
         let writer_log = Arc::clone(&log);
         let writer_done = Arc::clone(&done);
         let writer = thread::spawn(move || {
@@ -850,6 +1037,73 @@ mod tests {
 
         let final_records = log.query(&LogFilter::default()).expect("final query");
         assert_eq!(final_records.len(), total_writes);
+    }
+
+    #[test]
+    fn limited_query_releases_lock_before_scanning_history() {
+        use std::sync::{Arc, mpsc};
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let hold = QueryScanHold::new();
+        let mut log = CentralLog::open(path);
+        log.query_scan_hold = Some(hold.clone());
+        let log = Arc::new(log);
+
+        log.append(&operation_record(
+            "2026-06-01T10:00:00Z",
+            "op-before",
+            &["agent-observability"],
+            Severity::Info,
+        ))
+        .expect("seed older");
+        log.append(&operation_record(
+            "2026-06-01T10:00:01Z",
+            "op-snapshot-tail",
+            &["agent-observability"],
+            Severity::Info,
+        ))
+        .expect("seed newer");
+
+        let query_log = Arc::clone(&log);
+        let query = thread::spawn(move || {
+            query_log
+                .query(&LogFilter {
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .expect("tail query")
+        });
+
+        // Query has dropped the shared flock and is parked before scan.
+        hold.wait_until_unlocked();
+        let (done_tx, done_rx) = mpsc::channel();
+        let append_log = Arc::clone(&log);
+        thread::spawn(move || {
+            append_log
+                .append(&operation_record(
+                    "2026-06-01T11:00:00Z",
+                    "op-during-scan",
+                    &["agent-observability"],
+                    Severity::Info,
+                ))
+                .expect("append during tail query");
+            done_tx.send(()).expect("append done");
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("append blocked while query was parked; shared flock was not dropped");
+        assert!(
+            !query.is_finished(),
+            "append completed only after the parked scan resumed"
+        );
+        hold.resume_scan();
+
+        let hits = query.join().expect("query join");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].operation_id.as_deref(), Some("op-snapshot-tail"));
     }
 
     #[test]

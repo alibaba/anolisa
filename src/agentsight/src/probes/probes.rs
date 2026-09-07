@@ -10,7 +10,7 @@ use std::{
     mem,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -30,6 +30,103 @@ use super::udpdns::{RawUdpDnsEvent, UdpDns};
 use crate::config::TcpTarget;
 
 const POLL_TIMEOUT_MS: u64 = 100;
+
+/// Snapshot of the probe event channel's byte accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelWatermarks {
+    /// Approximate bytes of events queued in the channel.
+    pub in_flight_bytes: usize,
+    /// Configured budget; 0 means unlimited.
+    pub budget_bytes: usize,
+    /// Events rejected so far because the budget was exhausted.
+    pub dropped_over_budget: usize,
+}
+
+/// Byte-accounted admission gate for the probe event channel.
+///
+/// The channel's slot count cannot bound memory on its own: one SSL record
+/// carries up to `MAX_BUF_SIZE` (4 MiB), so the 10 000 default slots admit
+/// gigabytes of in-flight payload (#2888).
+///
+/// `max_bytes == 0` disables *rejection* but keeps accounting, matching how
+/// `retention_days` and `max_db_size_mb` already read 0 as "no limit" while
+/// still reporting size — an operator following that convention must not end up
+/// with everything dropped, nor lose the watermark readings.
+#[derive(Clone)]
+struct ChannelBudget {
+    max_bytes: usize,
+    in_flight: Arc<AtomicUsize>,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl ChannelBudget {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Reserve `bytes` for an event about to be published.
+    ///
+    /// Must be called *before* the event becomes visible to the consumer: a
+    /// post-send charge can lose the race against [`Self::release`] on the
+    /// consumer side, and the saturating subtraction would then turn the late
+    /// charge into a permanent phantom reservation that eventually wedges the
+    /// budget shut. Returns false and counts a drop when over budget.
+    fn reserve(&self, bytes: usize) -> bool {
+        let max_bytes = self.max_bytes;
+        let admitted = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                // Saturating so a pathological size cannot wrap into a false pass.
+                let next = cur.saturating_add(bytes);
+                (max_bytes == 0 || next <= max_bytes).then_some(next)
+            })
+            .is_ok();
+        if !admitted {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        admitted
+    }
+
+    /// Give back a reservation whose event never reached the channel.
+    fn refund(&self, bytes: usize) {
+        self.give_back(bytes);
+    }
+
+    /// Give back a reservation once the event has been delivered to the consumer.
+    fn release(&self, bytes: usize) {
+        self.give_back(bytes);
+    }
+
+    /// Saturating so an accounting mismatch cannot wrap the counter and lock out
+    /// admission forever.
+    fn give_back(&self, bytes: usize) {
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(bytes))
+            });
+    }
+
+    fn watermarks(&self) -> ChannelWatermarks {
+        ChannelWatermarks {
+            in_flight_bytes: self.in_flight.load(Ordering::Relaxed),
+            budget_bytes: self.max_bytes,
+            dropped_over_budget: self.dropped.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Whether this cumulative drop count should be logged.
+///
+/// A saturated budget rejects events in bursts, so one line per drop would
+/// itself become the load; powers of two keep the signal without the flood.
+fn should_report_drop(dropped: usize) -> bool {
+    dropped.is_power_of_two()
+}
 
 // Event source constants matching common.h event_source_t
 const EVENT_SOURCE_PROC: u32 = 1;
@@ -68,6 +165,8 @@ pub struct Probes {
     event_rx: crossbeam_channel::Receiver<Event>,
     /// Policy applied when the bounded event channel is full.
     event_channel_policy: ChannelPolicy,
+    /// Byte-accounted admission gate; bounds memory the slot count cannot.
+    budget: ChannelBudget,
 }
 
 impl Probes {
@@ -206,6 +305,7 @@ impl Probes {
             event_tx,
             event_rx,
             event_channel_policy: runtime_limits.event_channel_policy,
+            budget: ChannelBudget::new(runtime_limits.event_channel_max_bytes),
         })
     }
 
@@ -238,10 +338,11 @@ impl Probes {
 
     pub fn attach_process(&mut self, pid: i32) -> Result<()> {
         if let Err(e) = self.attach_ssl_to_process(pid) {
-            // SSL attach may fail when the process exits before /proc/<pid>/maps is
-            // readable, but a previously-attached global uprobe (pid=-1) is still
-            // valid.  Register the pid in the traced map so BPF events from the
-            // global uprobe are not silently dropped.
+            // SSL attach may fail when the process exits before
+            // `<procfs root>/<pid>/maps` is readable, but a previously-attached
+            // global uprobe (pid=-1) is still valid.  Register the pid in the
+            // traced map so BPF events from the global uprobe are not silently
+            // dropped.
             log::warn!(
                 "[attach_process] pid={pid}: SSL attach failed ({e:#}); registering pid anyway for global uprobe coverage"
             );
@@ -270,6 +371,7 @@ impl Probes {
 
         let event_tx = self.event_tx.clone();
         let event_policy = self.event_channel_policy;
+        let budget = self.budget.clone();
         let drop_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
@@ -337,10 +439,33 @@ impl Probes {
                 };
 
                 if let Some(e) = event {
-                    match event_policy {
+                    // Admission is gated on bytes as well as slots: the capacity
+                    // counts events, but a single SSL record carries up to 4 MiB,
+                    // so the slot bound alone cannot keep the tracer inside its
+                    // memory budget (#2888). Reserve before publishing — see
+                    // ChannelBudget::reserve for why the order matters.
+                    let bytes = e.approx_bytes();
+                    if !budget.reserve(bytes) {
+                        let marks = budget.watermarks();
+                        if should_report_drop(marks.dropped_over_budget) {
+                            log::warn!(
+                                "Probes event channel byte budget exhausted ({} / {} bytes in flight); \
+                                 dropped {} events so far",
+                                marks.in_flight_bytes,
+                                marks.budget_bytes,
+                                marks.dropped_over_budget
+                            );
+                        }
+                        return 0;
+                    }
+
+                    let sent = match event_policy {
                         ChannelPolicy::Backpressure => {
                             if event_tx.send(e).is_err() {
                                 log::warn!("Probes event channel closed");
+                                false
+                            } else {
+                                true
                             }
                         }
                         ChannelPolicy::DropNewest => {
@@ -349,6 +474,9 @@ impl Probes {
                                     "Probes event channel full (capacity={}); dropping event",
                                     event_tx.capacity().unwrap_or(0)
                                 );
+                                false
+                            } else {
+                                true
                             }
                         }
                         ChannelPolicy::Sample(n) => {
@@ -359,9 +487,20 @@ impl Probes {
                                         "Probes event channel full (capacity={}); dropping sampled event",
                                         event_tx.capacity().unwrap_or(0)
                                     );
+                                    false
+                                } else {
+                                    true
                                 }
+                            } else {
+                                false
                             }
                         }
+                    };
+
+                    // Refund what never reached the channel, so a dropped or
+                    // sampled-out event cannot leak the reservation.
+                    if !sent {
+                        budget.refund(bytes);
                     }
                 }
                 0
@@ -397,12 +536,21 @@ impl Probes {
 
     /// Receive the next event from any probe (blocking)
     pub fn recv(&self) -> Option<Event> {
-        self.event_rx.recv().ok()
+        let event = self.event_rx.recv().ok()?;
+        self.budget.release(event.approx_bytes());
+        Some(event)
     }
 
     /// Try to receive an event from any probe (non-blocking)
     pub fn try_recv(&self) -> Option<Event> {
-        self.event_rx.try_recv().ok()
+        let event = self.event_rx.try_recv().ok()?;
+        self.budget.release(event.approx_bytes());
+        Some(event)
+    }
+
+    /// Current byte accounting of the probe event channel.
+    pub fn channel_watermarks(&self) -> ChannelWatermarks {
+        self.budget.watermarks()
     }
 
     /// Add a PID to the traced_processes map at runtime
@@ -478,5 +626,125 @@ impl ProbesPoller {
 impl Drop for ProbesPoller {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_admits_until_exhausted() {
+        let budget = ChannelBudget::new(1024);
+        assert!(budget.reserve(1000));
+        assert!(budget.reserve(24));
+        assert!(!budget.reserve(1));
+        let marks = budget.watermarks();
+        assert_eq!(marks.in_flight_bytes, 1024);
+        assert_eq!(marks.dropped_over_budget, 1);
+    }
+
+    #[test]
+    fn budget_rejects_single_oversized_event() {
+        // A 4 MiB SSL record must not be admitted into a smaller budget: this is
+        // the case the slot-count bound alone let through (#2888).
+        let budget = ChannelBudget::new(64 * 1024);
+        assert!(!budget.reserve(4 * 1024 * 1024));
+        assert_eq!(budget.watermarks().in_flight_bytes, 0);
+    }
+
+    #[test]
+    fn rejected_reservation_does_not_consume_budget() {
+        // A rejected event must leave room for the next, smaller one; otherwise a
+        // single oversized record would wedge the channel shut.
+        let budget = ChannelBudget::new(1024);
+        assert!(!budget.reserve(2048));
+        assert!(budget.reserve(1024));
+    }
+
+    #[test]
+    fn refund_returns_unsent_reservation() {
+        let budget = ChannelBudget::new(1024);
+        assert!(budget.reserve(512));
+        budget.refund(512);
+        assert_eq!(budget.watermarks().in_flight_bytes, 0);
+        // Full budget available again after the refund.
+        assert!(budget.reserve(1024));
+    }
+
+    #[test]
+    fn zero_budget_means_unlimited_but_still_accounts() {
+        // Operators read 0 as "no limit" from retention_days / max_db_size_mb;
+        // treating it as a 1-byte budget would silently drop every event. The
+        // watermark must stay readable so the gate can be diagnosed while off.
+        let budget = ChannelBudget::new(0);
+        assert!(budget.reserve(4 * 1024 * 1024));
+        assert!(budget.reserve(4 * 1024 * 1024));
+        let marks = budget.watermarks();
+        assert_eq!(marks.in_flight_bytes, 8 * 1024 * 1024);
+        assert_eq!(marks.dropped_over_budget, 0);
+        assert_eq!(marks.budget_bytes, 0);
+    }
+
+    #[test]
+    fn accounting_saturates_instead_of_wrapping() {
+        let budget = ChannelBudget::new(usize::MAX);
+        assert!(budget.reserve(usize::MAX));
+        // Would wrap to a tiny value and falsely pass without saturation.
+        assert!(budget.reserve(8));
+        budget.release(usize::MAX);
+        budget.release(usize::MAX);
+        assert_eq!(budget.watermarks().in_flight_bytes, 0);
+    }
+
+    #[test]
+    fn drop_reports_are_rate_limited_to_powers_of_two() {
+        assert!(should_report_drop(1));
+        assert!(should_report_drop(2));
+        assert!(should_report_drop(1024));
+        assert!(!should_report_drop(3));
+        assert!(!should_report_drop(1000));
+    }
+
+    /// Reserve-then-publish must survive the consumer draining concurrently.
+    ///
+    /// Charging after the send loses the race when the consumer receives and
+    /// releases first: the saturating subtraction floors at zero and the late
+    /// charge becomes a permanent phantom reservation, which eventually reports
+    /// the budget as exhausted and drops valid events forever.
+    #[test]
+    fn concurrent_drain_leaves_no_phantom_reservation() {
+        const EVENTS: usize = 2_000;
+        const BYTES: usize = 4096;
+
+        let budget = ChannelBudget::new(EVENTS * BYTES);
+        let (tx, rx) = crossbeam_channel::bounded::<usize>(4);
+
+        let consumer_budget = budget.clone();
+        let consumer = thread::spawn(move || {
+            let mut received = 0usize;
+            while let Ok(bytes) = rx.recv() {
+                consumer_budget.release(bytes);
+                received += 1;
+            }
+            received
+        });
+
+        for _ in 0..EVENTS {
+            assert!(budget.reserve(BYTES));
+            tx.send(BYTES).expect("consumer alive");
+        }
+        drop(tx);
+
+        assert_eq!(consumer.join().expect("consumer thread"), EVENTS);
+        let marks = budget.watermarks();
+        assert_eq!(
+            marks.in_flight_bytes, 0,
+            "every reservation must be released once the channel is drained"
+        );
+        assert_eq!(marks.dropped_over_budget, 0);
+
+        // The budget is fully reusable, i.e. no reservation leaked.
+        assert!(budget.reserve(EVENTS * BYTES));
     }
 }

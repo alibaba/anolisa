@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use std::process::Output;
 
 use anolisa_core::{
-    InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
-    Ownership, SubscriptionScope,
+    FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
+    ObjectStatus, OwnedFile, OwnedFileKind, Ownership, SubscriptionScope,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use sha2::{Digest, Sha256};
 
 mod common;
 
@@ -85,11 +86,10 @@ impl NoticeFixture {
             .join(COMPONENT)
             .join("cosh");
         std::fs::create_dir_all(&resource_root).expect("resource root");
-        std::fs::write(
-            resource_root.join("cosh-extension.json"),
-            format!(r#"{{"id":"{COMPONENT}","name":"Notice Demo"}}"#),
-        )
-        .expect("cosh extension manifest");
+        let extension_manifest = format!(r#"{{"id":"{COMPONENT}","name":"Notice Demo"}}"#);
+        let extension_manifest_path = resource_root.join("cosh-extension.json");
+        std::fs::write(&extension_manifest_path, extension_manifest.as_bytes())
+            .expect("cosh extension manifest");
 
         // Component contract snapshot carrying the notices.
         let manifest_path = user_layout.snapshot_path(COMPONENT);
@@ -98,11 +98,20 @@ impl NoticeFixture {
         std::fs::write(&manifest_path, MANIFEST).expect("component manifest");
 
         // Component installed in the user scope; empty system scope.
-        write_state(
-            &user_layout,
-            StateInstallMode::User,
-            vec![component(COMPONENT)],
-        );
+        let mut installed = component(COMPONENT);
+        installed.files.push(OwnedFile {
+            path: extension_manifest_path,
+            owner: FileOwner::Anolisa,
+            sha256: Some(format!(
+                "{:x}",
+                Sha256::digest(extension_manifest.as_bytes())
+            )),
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        });
+        write_state(&user_layout, StateInstallMode::User, vec![installed]);
         write_state(&system_layout, StateInstallMode::System, Vec::new());
 
         Self {

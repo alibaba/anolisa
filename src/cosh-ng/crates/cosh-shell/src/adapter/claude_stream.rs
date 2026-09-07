@@ -313,6 +313,11 @@ impl ClaudeStreamParser {
     }
 
     fn event_from_tool_use(&mut self, tool: ClaudeToolUse) -> Option<AgentEvent> {
+        // Only the provider-native Claude/Qwen spelling is an implicit
+        // question. cosh-core emits the canonical `ask_user_question` tool
+        // event alongside an explicit `ask_user` control request; treating
+        // both as questions consumes the answer before the control owner can
+        // receive it.
         if tool.name == "AskUserQuestion" {
             if is_incomplete_question_tool(&tool) {
                 return None;
@@ -425,6 +430,13 @@ impl ClaudeStreamParser {
                 continue;
             }
             let status = result.status;
+            if let Some(verdict) = result.hook_verdict {
+                events.push(AgentEvent::ToolHookVerdict {
+                    run_id: self.run_id.clone(),
+                    tool_id: tool_id.clone(),
+                    verdict,
+                });
+            }
             for (stream, content) in result.outputs {
                 events.push(AgentEvent::ToolOutputDelta {
                     run_id: self.run_id.clone(),

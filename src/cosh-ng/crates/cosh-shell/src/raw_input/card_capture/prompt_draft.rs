@@ -7,6 +7,16 @@
 use super::{CardInputKind, CardInputState, RawInputCapture, RawInputEvent};
 
 impl CardInputState {
+    /// Refreshes the first visible completion without resetting editor state.
+    pub(super) fn refresh_draft_completion(&mut self, capture: &RawInputCapture) {
+        self.draft_completion = match capture {
+            RawInputCapture::PromptDraft { completion, .. } => {
+                completion.as_deref().map(str::to_string)
+            }
+            _ => None,
+        };
+    }
+
     /// A trailing bare ESC may be the first half of a split legacy
     /// Alt+Enter: hold it briefly; the relay injects a second ESC on
     /// timeout which resolves to an explicit cancel (#1721).

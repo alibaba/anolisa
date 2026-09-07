@@ -21,6 +21,7 @@ from agent_sec_cli.daemon.errors import (
     DaemonRuntimePathError,
     DaemonTimeoutError,
     InternalDaemonError,
+    PayloadTooLargeError,
     ResponseTooLargeError,
     ShutdownError,
 )
@@ -29,13 +30,11 @@ from agent_sec_cli.daemon.gateway import (
     PreparedDaemonRequest,
     _log_request_completion,
 )
-from agent_sec_cli.daemon.handlers.prompt_scan import (
-    register_prompt_scan_methods,
-)
 from agent_sec_cli.daemon.handlers.security_query import (
     register_security_query_methods,
 )
 from agent_sec_cli.daemon.handlers.skill_ledger import (
+    METHOD_SKILLFS_NOTIFY_CHANGE,
     register_skill_ledger_methods,
 )
 from agent_sec_cli.daemon.health import register_health_methods
@@ -45,7 +44,6 @@ from agent_sec_cli.daemon.protocol import (
     DEFAULT_MAX_REQUEST_BYTES,
     DEFAULT_MAX_RESPONSE_BYTES,
     DaemonResponse,
-    NDJSONFrameParser,
     error_response,
     generate_request_id,
     parse_request_line,
@@ -58,19 +56,88 @@ from agent_sec_cli.daemon.runtime import (
     lock_path_for_socket,
     resolve_socket_path,
 )
+from agent_sec_cli.skill_ledger.skillfs_peer_auth import (
+    AUTH_FRAME_LIMIT,
+    AUTH_HANDSHAKE_TIMEOUT_SECONDS,
+    NOTIFY_CLIENT_DOMAIN,
+    NOTIFY_SERVER_DOMAIN,
+    AuthenticatedSession,
+    SharedSecret,
+    SkillFsPeerAuthError,
+    build_auth_challenge_frame,
+    build_auth_proof_frame,
+    classify_initial_frame,
+    configured_notify_key_path,
+    verify_auth_proof_frame,
+)
 
 LOGGER = logging.getLogger("agent-sec-core.daemon")
 DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 2.0
 DEFAULT_REQUEST_READ_TIMEOUT_MS = 5000
 SocketIdentity = tuple[int, int]
+_AUTH_WIRE_FRAME_LIMIT = AUTH_FRAME_LIMIT + 1
+
+
+class _SilentClose(Exception):
+    """Close an unauthenticated or invalid authenticated connection quietly."""
+
+
+class _ConnectionFrameReader:
+    """Read bounded NDJSON frames while retaining coalesced trailing frames."""
+
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self._reader = reader
+        self._buffer = bytearray()
+
+    async def read_frame(
+        self,
+        max_frame_bytes_including_delimiter: int,
+        *,
+        deadline: float | None,
+        allow_eof_terminated: bool,
+    ) -> bytes:
+        """Read one frame with a wire-size limit that includes the delimiter."""
+        while True:
+            newline_index = self._buffer.find(b"\n")
+            if newline_index >= 0:
+                frame_size = newline_index + 1
+                if frame_size > max_frame_bytes_including_delimiter:
+                    raise PayloadTooLargeError(max_frame_bytes_including_delimiter)
+                frame = bytes(self._buffer[:frame_size])
+                del self._buffer[:frame_size]
+                return frame
+
+            if len(self._buffer) > max_frame_bytes_including_delimiter:
+                raise PayloadTooLargeError(max_frame_bytes_including_delimiter)
+
+            chunk = await self._read_chunk(deadline)
+            if chunk:
+                self._buffer.extend(chunk)
+                continue
+
+            if self._buffer and allow_eof_terminated:
+                frame = bytes(self._buffer)
+                self._buffer.clear()
+                return frame
+            if self._buffer:
+                raise BadRequestError("incomplete daemon request")
+            raise BadRequestError("empty daemon request")
+
+    async def _read_chunk(self, deadline: float | None) -> bytes:
+        if deadline is None:
+            return await self._reader.read(4096)
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        return await asyncio.wait_for(self._reader.read(4096), timeout=remaining)
 
 
 def create_default_registry() -> MethodRegistry:
     """Create the default daemon method registry."""
     registry = MethodRegistry()
     register_health_methods(registry)
-    register_prompt_scan_methods(registry)
     register_skill_ledger_methods(registry)
     register_security_query_methods(registry)
     return registry
@@ -133,7 +200,7 @@ class DaemonServer:
         self.max_connections = max_connections
         self.request_read_timeout_ms = request_read_timeout_ms
         self.runtime = DaemonRuntime(socket_path=resolved_socket_path)
-        register_default_jobs(self.runtime.jobs, self.runtime.prompt_scan_state)
+        register_default_jobs(self.runtime.jobs)
         self.gateway = DaemonGateway(self.registry, self.runtime)
         self._server: asyncio.Server | None = None
         self._lock: SingleInstanceLock | None = None
@@ -142,9 +209,14 @@ class DaemonServer:
         self._drain_timeout_seconds = DEFAULT_DRAIN_TIMEOUT_SECONDS
         self._previous_umask: int | None = None
         self._socket_identity: SocketIdentity | None = None
+        self._notify_auth_secret: SharedSecret | None = None
 
     async def start(self) -> None:
         """Prepare runtime paths, bind the Unix socket, and start jobs."""
+        notify_key_path = configured_notify_key_path()
+        self._notify_auth_secret = (
+            None if notify_key_path is None else SharedSecret.load(notify_key_path)
+        )
         self._set_daemon_umask()
         try:
             self._lock = prepare_socket_path(self.socket_path)
@@ -247,16 +319,101 @@ class DaemonServer:
         started = time.monotonic()
         response: DaemonResponse | None = None
         prepared_request: PreparedDaemonRequest | None = None
+        parsed_request_method: str | None = None
+        authenticated_session: AuthenticatedSession | None = None
+        silent_close = False
+        frame_reader = _ConnectionFrameReader(reader)
 
         try:
-            line = await asyncio.wait_for(
-                read_request_frame(reader, self.max_request_bytes),
-                timeout=self.request_read_timeout_ms / 1000,
+            request_timeout_seconds = self.request_read_timeout_ms / 1000
+            request_deadline = started + request_timeout_seconds
+            auth_deadline = started + min(
+                request_timeout_seconds,
+                AUTH_HANDSHAKE_TIMEOUT_SECONDS,
             )
-            bytes_in = len(line)
-            request = parse_request_line(line, max_request_bytes=self.max_request_bytes)
+            initial_deadline = (
+                auth_deadline
+                if self._notify_auth_secret is not None
+                else request_deadline
+            )
+            # A partial first frame cannot yet be classified safely, so a
+            # configured peer key bounds that pre-authentication hold time.
+            try:
+                initial_frame = await frame_reader.read_frame(
+                    max(self.max_request_bytes, _AUTH_WIRE_FRAME_LIMIT),
+                    deadline=initial_deadline,
+                    allow_eof_terminated=True,
+                )
+            except (asyncio.TimeoutError, DaemonError) as exc:
+                if self._notify_auth_secret is not None:
+                    raise _SilentClose from exc
+                raise
+
+            bytes_in = len(initial_frame)
+            try:
+                is_auth_init = classify_initial_frame(initial_frame)
+            except SkillFsPeerAuthError as exc:
+                raise _SilentClose from exc
+
+            if is_auth_init:
+                if self._notify_auth_secret is None:
+                    raise _SilentClose
+                try:
+                    (
+                        authenticated_session,
+                        handshake_bytes_in,
+                        handshake_bytes_out,
+                    ) = await self._authenticate_notify_client(
+                        frame_reader,
+                        writer,
+                        self._notify_auth_secret,
+                        auth_deadline,
+                    )
+                    bytes_in += handshake_bytes_in
+                    bytes_out += handshake_bytes_out
+                    request_line, protected_bytes_in = (
+                        await self._read_authenticated_request(
+                            frame_reader,
+                            authenticated_session,
+                            started=time.monotonic(),
+                        )
+                    )
+                    bytes_in += protected_bytes_in
+                except (
+                    asyncio.TimeoutError,
+                    ConnectionError,
+                    DaemonError,
+                    OSError,
+                    SkillFsPeerAuthError,
+                ) as exc:
+                    raise _SilentClose from exc
+
+                request = parse_request_line(
+                    request_line,
+                    max_request_bytes=self.max_request_bytes,
+                )
+                parsed_request_method = request.method
+                if request.method != METHOD_SKILLFS_NOTIFY_CHANGE:
+                    raise BadRequestError(
+                        "authenticated daemon connection only accepts "
+                        f"{METHOD_SKILLFS_NOTIFY_CHANGE}"
+                    )
+            else:
+                request = parse_request_line(
+                    initial_frame,
+                    max_request_bytes=self.max_request_bytes,
+                )
+                parsed_request_method = request.method
+                if (
+                    self._notify_auth_secret is not None
+                    and request.method == METHOD_SKILLFS_NOTIFY_CHANGE
+                ):
+                    raise _SilentClose
+
             prepared_request = self.gateway.prepare(request)
             response = await self.gateway.execute(prepared_request)
+        except _SilentClose:
+            silent_close = True
         except asyncio.TimeoutError:
             response = error_response(
                 fallback_request_id,
@@ -286,40 +443,127 @@ class DaemonServer:
             )
             response = error_response(request_id, InternalDaemonError())
         finally:
-            if response is None:
-                response = error_response(
-                    _request_id_for_response(prepared_request, fallback_request_id),
-                    ShutdownError(),
-                )
-            with contextlib.suppress(
-                ConnectionError,
-                BrokenPipeError,
-                OSError,
-                asyncio.CancelledError,
-            ):
-                bytes_out, response = await self._write_response(writer, response)
-            if prepared_request is not None:
-                self.gateway.complete(
-                    prepared=prepared_request,
-                    response=response,
-                    started=started,
-                    bytes_in=bytes_in,
-                    bytes_out=bytes_out,
-                )
-            elif not response.ok:
-                _log_request_completion(
-                    request_id=fallback_request_id,
-                    method=None,
-                    response=response,
-                    started=started,
-                    bytes_in=bytes_in,
-                    bytes_out=bytes_out,
-                )
+            if silent_close:
+                await self._close_writer(writer)
+            else:
+                if response is None:
+                    response = error_response(
+                        _request_id_for_response(
+                            prepared_request,
+                            fallback_request_id,
+                        ),
+                        ShutdownError(),
+                    )
+                with contextlib.suppress(
+                    ConnectionError,
+                    BrokenPipeError,
+                    OSError,
+                    asyncio.CancelledError,
+                ):
+                    response_bytes_out, response = await self._write_response(
+                        writer,
+                        response,
+                        authenticated_session=authenticated_session,
+                    )
+                    bytes_out += response_bytes_out
+                if prepared_request is not None:
+                    self.gateway.complete(
+                        prepared=prepared_request,
+                        response=response,
+                        started=started,
+                        bytes_in=bytes_in,
+                        bytes_out=bytes_out,
+                    )
+                elif not response.ok:
+                    _log_request_completion(
+                        request_id=fallback_request_id,
+                        method=parsed_request_method,
+                        response=response,
+                        started=started,
+                        bytes_in=bytes_in,
+                        bytes_out=bytes_out,
+                    )
+
+    async def _authenticate_notify_client(
+        self,
+        frame_reader: _ConnectionFrameReader,
+        writer: asyncio.StreamWriter,
+        secret: SharedSecret,
+        deadline: float,
+    ) -> tuple[AuthenticatedSession, int, int]:
+        nonce, challenge_frame = build_auth_challenge_frame()
+        await self._write_auth_frame(writer, challenge_frame, deadline)
+
+        proof_frame = await frame_reader.read_frame(
+            _AUTH_WIRE_FRAME_LIMIT,
+            deadline=deadline,
+            allow_eof_terminated=False,
+        )
+        verify_auth_proof_frame(
+            proof_frame,
+            expected_kind="auth.proof",
+            secret=secret,
+            domain=NOTIFY_CLIENT_DOMAIN,
+            nonce=nonce,
+        )
+
+        accepted_frame = build_auth_proof_frame(
+            "auth.ok",
+            secret,
+            NOTIFY_SERVER_DOMAIN,
+            nonce,
+        )
+        await self._write_auth_frame(writer, accepted_frame, deadline)
+        return (
+            AuthenticatedSession(
+                secret,
+                nonce,
+                NOTIFY_CLIENT_DOMAIN,
+                NOTIFY_SERVER_DOMAIN,
+            ),
+            len(proof_frame),
+            len(challenge_frame) + len(accepted_frame),
+        )
+
+    async def _read_authenticated_request(
+        self,
+        frame_reader: _ConnectionFrameReader,
+        session: AuthenticatedSession,
+        *,
+        started: float,
+    ) -> tuple[bytes, int]:
+        deadline = started + (self.request_read_timeout_ms / 1000)
+        payload_frame = await frame_reader.read_frame(
+            self.max_request_bytes,
+            deadline=deadline,
+            allow_eof_terminated=False,
+        )
+        auth_frame = await frame_reader.read_frame(
+            _AUTH_WIRE_FRAME_LIMIT,
+            deadline=deadline,
+            allow_eof_terminated=False,
+        )
+        payload = payload_frame[:-1]
+        session.verify_payload(payload, auth_frame, "client")
+        return payload, len(payload_frame) + len(auth_frame)
+
+    async def _write_auth_frame(
+        self,
+        writer: asyncio.StreamWriter,
+        frame: bytes,
+        deadline: float,
+    ) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        writer.write(frame)
+        await asyncio.wait_for(writer.drain(), timeout=remaining)
 
     async def _write_response(
         self,
         writer: asyncio.StreamWriter,
         response: DaemonResponse,
+        authenticated_session: AuthenticatedSession | None = None,
     ) -> tuple[int, DaemonResponse]:
         try:
             raw_response = serialize_response(response)
@@ -342,6 +586,12 @@ class DaemonServer:
             if len(raw_response) > self.max_response_bytes:
                 raw_response = b""
 
+        if raw_response and authenticated_session is not None:
+            raw_response = authenticated_session.protect_payload(
+                raw_response[:-1],
+                "server",
+            )
+
         bytes_out = 0
         try:
             if raw_response:
@@ -351,14 +601,17 @@ class DaemonServer:
                     await writer.drain()
             return bytes_out, response
         finally:
-            writer.close()
-            with contextlib.suppress(
-                ConnectionError,
-                BrokenPipeError,
-                OSError,
-                asyncio.CancelledError,
-            ):
-                await writer.wait_closed()
+            await self._close_writer(writer)
+
+    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        with contextlib.suppress(
+            ConnectionError,
+            BrokenPipeError,
+            OSError,
+            asyncio.CancelledError,
+        ):
+            await writer.wait_closed()
 
     async def _write_immediate_error(
         self,
@@ -407,25 +660,6 @@ class DaemonServer:
         if self._previous_umask is not None:
             os.umask(self._previous_umask)
             self._previous_umask = None
-
-
-async def read_request_frame(
-    reader: asyncio.StreamReader,
-    max_request_bytes: int,
-) -> bytes:
-    """Read the first request frame from a stream with a byte limit."""
-    parser = NDJSONFrameParser(max_request_bytes)
-    while True:
-        chunk = await reader.read(4096)
-        if not chunk:
-            frames = parser.flush()
-            if not frames:
-                raise BadRequestError("empty daemon request")
-            return frames[0]
-
-        frames = parser.feed(chunk)
-        if frames:
-            return frames[0]
 
 
 def prepare_socket_path(socket_path: Path) -> SingleInstanceLock:

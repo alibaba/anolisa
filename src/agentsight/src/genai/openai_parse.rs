@@ -12,6 +12,14 @@ use crate::analyzer::message::types::OpenAIChatMessage;
 use crate::analyzer::{HttpRecord, ParsedApiMessage};
 use std::collections::HashMap;
 
+/// Upper bound on tool-call slots reconstructed from one response.
+///
+/// The DashScope native envelope addresses tool calls by a wire-supplied
+/// `index`, and slots are allocated up to that index. Real responses use small
+/// contiguous indices; the cap keeps a malformed or hostile value from turning
+/// a single JSON field into an unbounded allocation.
+const MAX_TOOL_CALL_SLOTS: u64 = 256;
+
 impl GenAIBuilder {
     /// 从 HTTP request body 直接解析 LLMRequest（OpenAI/Anthropic 格式）
     pub(super) fn parse_request_body(body: &str) -> Option<LLMRequest> {
@@ -350,11 +358,20 @@ impl GenAIBuilder {
     /// - tool_calls deltas (fragmented by index) → merged ToolCall parts
     /// - finish_reason from the last non-null value in choices
     ///
+    /// Falls back to the DashScope/Bailian native envelope (`output.…`) when the
+    /// OpenAI shape yields nothing. `body` may be a JSON array of SSE chunks or
+    /// a single JSON object (non-streaming native response).
+    ///
     /// Returns (parts, finish_reason) or None if no content found.
     pub(super) fn extract_parts_from_sse_body(
         body: &str,
     ) -> Option<(Vec<MessagePart>, Option<String>)> {
-        let chunks: Vec<serde_json::Value> = serde_json::from_str(body).ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+        let chunks: Vec<serde_json::Value> = match parsed {
+            serde_json::Value::Array(chunks) => chunks,
+            obj @ serde_json::Value::Object(_) => vec![obj],
+            _ => return None,
+        };
 
         let mut content_buf = String::new();
         let mut reasoning_buf = String::new();
@@ -398,7 +415,12 @@ impl GenAIBuilder {
                         }
                         if let Some(func) = tc.get("function") {
                             if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                entry.1 = name.to_string();
+                                if !name.is_empty() {
+                                    entry.1 = name.to_string();
+                                }
+                                // Empty string must not overwrite an existing name: some
+                                // backends (e.g. deepseek models on DashScope) repeat
+                                // name:"" on every continuation delta.
                             }
                             if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
                                 entry.2.push_str(args);
@@ -448,10 +470,188 @@ impl GenAIBuilder {
         }
 
         if parts.is_empty() {
+            return Self::extract_dashscope_native_parts(&chunks);
+        }
+        Some((parts, finish_reason))
+    }
+
+    /// Reconstruct assistant output from the DashScope/Bailian **native**
+    /// envelope, which has no OpenAI-style `choices[].delta`.
+    ///
+    /// Handled shapes:
+    /// - `output.text` (`result_format: text`, the protocol default)
+    /// - `output.choices[].message.content` (`result_format: message`), where
+    ///   `content` is either a string or multimodal blocks `[{"text": …}]`
+    /// - `output.choices[].message.tool_calls` (arguments arrive whole, not
+    ///   fragmented, and repeat on every chunk)
+    ///
+    /// Streaming defaults to `incremental_output=false`, i.e. every chunk
+    /// repeats the **cumulative** text; with `incremental_output=true` each
+    /// chunk carries only the delta. Both are supported by replacing the buffer
+    /// when the new value extends it and appending otherwise — AgentSight is a
+    /// passive observer and cannot see the request's `incremental_output` flag
+    /// on the response path.
+    fn extract_dashscope_native_parts(
+        chunks: &[serde_json::Value],
+    ) -> Option<(Vec<MessagePart>, Option<String>)> {
+        /// Accumulate cumulative-or-incremental text into `buf`.
+        fn accumulate(buf: &mut String, next: &str) {
+            if next.is_empty() {
+                return;
+            }
+            if next.starts_with(buf.as_str()) {
+                *buf = next.to_string();
+            } else {
+                buf.push_str(next);
+            }
+        }
+
+        /// Native `content` is a string or an array of `{"text": …}` blocks.
+        fn content_text(content: &serde_json::Value) -> String {
+            if let Some(s) = content.as_str() {
+                return s.to_string();
+            }
+            content
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default()
+        }
+
+        let mut content_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut finish_reason: Option<String> = None;
+        // Native tool calls repeat in full on every chunk, so the last value
+        // per index wins rather than being concatenated.
+        let mut tool_calls: Vec<(String, String, String)> = Vec::new();
+        let mut saw_native_envelope = false;
+
+        for chunk in chunks {
+            let Some(output) = chunk.get("output").filter(|o| o.is_object()) else {
+                continue;
+            };
+            saw_native_envelope = true;
+
+            if let Some(text) = output.get("text").and_then(|t| t.as_str()) {
+                accumulate(&mut content_buf, text);
+            }
+            if let Some(fr) = Self::dashscope_terminal_finish_reason(output) {
+                finish_reason = Some(fr);
+            }
+
+            for choice in output
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .map(|c| c.as_slice())
+                .unwrap_or_default()
+            {
+                if let Some(fr) = Self::dashscope_terminal_finish_reason(choice) {
+                    finish_reason = Some(fr);
+                }
+                let Some(message) = choice.get("message") else {
+                    continue;
+                };
+                if let Some(content) = message.get("content") {
+                    accumulate(&mut content_buf, &content_text(content));
+                }
+                if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
+                    accumulate(&mut reasoning_buf, reasoning);
+                }
+                for (idx, tc) in message
+                    .get("tool_calls")
+                    .and_then(|t| t.as_array())
+                    .map(|t| t.as_slice())
+                    .unwrap_or_default()
+                    .iter()
+                    .enumerate()
+                {
+                    let idx = tc
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(idx as u64);
+                    // `index` comes off the wire, and the slot vector is grown
+                    // to fit it. Bound it so a malformed or hostile response
+                    // cannot turn one field into a multi-hundred-MB
+                    // allocation inside a passive observer.
+                    if idx >= MAX_TOOL_CALL_SLOTS {
+                        log::debug!(
+                            "[GenAI] dropping dashscope tool_call with out-of-range index {idx}"
+                        );
+                        continue;
+                    }
+                    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let func = tc.get("function");
+                    let name = func
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let args = func
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+
+                    if tool_calls.len() <= idx as usize {
+                        tool_calls.resize(idx as usize + 1, Default::default());
+                    }
+                    let entry = &mut tool_calls[idx as usize];
+                    if !id.is_empty() {
+                        entry.0 = id.to_string();
+                    }
+                    if !name.is_empty() {
+                        entry.1 = name.to_string();
+                    }
+                    if !args.is_empty() {
+                        entry.2 = args.to_string();
+                    }
+                }
+            }
+        }
+
+        if !saw_native_envelope {
+            return None;
+        }
+
+        let mut parts = Vec::new();
+        if !reasoning_buf.is_empty() {
+            parts.push(MessagePart::Reasoning {
+                content: reasoning_buf,
+            });
+        }
+        if !content_buf.is_empty() {
+            parts.push(MessagePart::Text {
+                content: content_buf,
+            });
+        }
+        for (id, name, arguments) in tool_calls {
+            if id.is_empty() && name.is_empty() {
+                continue;
+            }
+            parts.push(MessagePart::ToolCall {
+                id: if id.is_empty() { None } else { Some(id) },
+                name,
+                arguments: serde_json::from_str(&arguments).ok(),
+            });
+        }
+
+        if parts.is_empty() {
             None
         } else {
             Some((parts, finish_reason))
         }
+    }
+
+    /// Read a DashScope native `finish_reason`, ignoring the in-progress
+    /// placeholder (the *literal string* `"null"`) and empty values.
+    fn dashscope_terminal_finish_reason(node: &serde_json::Value) -> Option<String> {
+        node.get("finish_reason")
+            .and_then(|r| r.as_str())
+            .filter(|r| !r.is_empty() && *r != "null")
+            .map(|r| r.to_string())
     }
 }
 
@@ -654,9 +854,173 @@ mod tests {
         assert_eq!(finish, Some("tool_calls".to_string()));
     }
 
+    /// Regression: deepseek models on DashScope repeat `id:""` + `name:""` on every
+    /// continuation delta. The empty name used to overwrite the real one, so reported
+    /// tool calls ended up with an empty name.
+    #[test]
+    fn test_extract_parts_from_sse_body_tool_calls_empty_name_in_continuation() {
+        let body = r#"[
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":"","arguments":"{\"file_path\""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":"","arguments":": \"/tmp/a.md\"}"}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","type":"function","function":{"name":"list_dir","arguments":""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"","type":"function","function":{"name":"","arguments":"{\"path\": \"/tmp\"}"}}]},"finish_reason":"tool_calls"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments.as_ref().unwrap()["file_path"], "/tmp/a.md");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_2"));
+                assert_eq!(name, "list_dir");
+                assert_eq!(arguments.as_ref().unwrap()["path"], "/tmp");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
     #[test]
     fn test_extract_parts_from_sse_body_empty() {
         let body = r#"[{"choices":[{"delta":{}}]}]"#;
+        assert!(GenAIBuilder::extract_parts_from_sse_body(body).is_none());
+    }
+
+    /// DashScope native streaming defaults to `incremental_output=false`, so
+    /// every chunk repeats the *cumulative* text. Concatenating would produce
+    /// "你你好你好吗". The reconstruction must replace instead.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_cumulative() {
+        let body = r#"[
+            {"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"你"}}]},"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11},"request_id":"r1"},
+            {"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"你好"}}]},"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12},"request_id":"r1"},
+            {"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"你好吗"}}]},"usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13},"request_id":"r1"}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "你好吗"));
+        assert_eq!(finish, Some("stop".to_string()));
+    }
+
+    /// With `incremental_output=true` each chunk carries only the delta.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_incremental() {
+        let body = r#"[
+            {"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"Hello "}}]}},
+            {"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"world"}}]}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "Hello world"));
+        assert_eq!(finish, Some("stop".to_string()));
+    }
+
+    /// `result_format` defaults to `text`, which puts the answer directly on
+    /// `output.text` with no `choices` array.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_text_format() {
+        let body = r#"[
+            {"output":{"finish_reason":"null","text":"1, 2"}},
+            {"output":{"finish_reason":"stop","text":"1, 2, 3."}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "1, 2, 3."));
+        assert_eq!(finish, Some("stop".to_string()));
+    }
+
+    /// Native tool calls arrive whole (arguments are not fragmented) under
+    /// `output.choices[].message.tool_calls`, and repeat cumulatively.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_tool_calls() {
+        let body = r#"[
+            {"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}},
+            {"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Beijing\"}"}}]}}]}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments.as_ref().unwrap()["city"], "Beijing");
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    /// Non-streaming native responses are a single JSON object, not an array.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_single_object() {
+        let body = r#"{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"1, 2, 3."}}]},"usage":{"input_tokens":8,"output_tokens":4,"total_tokens":12},"request_id":"r1"}"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "1, 2, 3."));
+        assert_eq!(finish, Some("stop".to_string()));
+    }
+
+    /// Multimodal content is an array of `{"text": ...}` / `{"image": ...}` blocks.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_multimodal_content_blocks() {
+        let body = r#"{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"text":"这是一只猫。"}]}}]},"usage":{"input_tokens":30,"output_tokens":12,"image_tokens":1247}}"#;
+        let (parts, _finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "这是一只猫。"));
+    }
+
+    /// A hostile or malformed `index` must not be honoured: slots are allocated
+    /// up to that value, so an unbounded one would let a single JSON field
+    /// drive a huge allocation inside a passive observer.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_rejects_absurd_tool_call_index() {
+        let body = r#"[
+            {"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"hi","tool_calls":[{"index":4294967295,"id":"call_x","function":{"name":"boom","arguments":"{}"}}]}}]}}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        // Text is still recovered; only the out-of-range tool call is dropped.
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], MessagePart::Text { content } if content == "hi"));
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    /// A large-but-permitted index still works, so the cap is not over-tight.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_allows_in_range_tool_call_index() {
+        let body = r#"[
+            {"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"index":8,"id":"call_y","function":{"name":"ok","arguments":"{}"}}]}}]}}
+        ]"#;
+        let (parts, _) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::ToolCall { name, .. } if name == "ok"))
+        );
+    }
+
+    /// A native envelope with no content at all yields nothing.
+    #[test]
+    fn test_extract_parts_from_sse_body_dashscope_native_no_content() {
+        let body = r#"[{"output":{"choices":[{"finish_reason":"null","message":{"role":"assistant","content":""}}]}}]"#;
         assert!(GenAIBuilder::extract_parts_from_sse_body(body).is_none());
     }
 

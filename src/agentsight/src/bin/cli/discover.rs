@@ -16,6 +16,10 @@ pub struct DiscoverCommand {
     /// List all known agents and show currently matched PIDs
     #[structopt(long)]
     pub list_known: bool,
+
+    /// Path to JSON configuration file
+    #[structopt(short, long, default_value = "/etc/agentsight/config.json")]
+    pub config: String,
 }
 
 impl DiscoverCommand {
@@ -28,9 +32,41 @@ impl DiscoverCommand {
         self.scan_agents();
     }
 
+    /// Cmdline rules the tracer would use: the configured file when it can be
+    /// parsed, otherwise the rules embedded in the binary.
+    ///
+    /// Reading the same file as `trace` is what makes this command able to
+    /// confirm a custom rule. A successfully parsed file is used as-is — even
+    /// an empty rule set — so discovery mirrors what `trace` would actually
+    /// match; the built-in fallback only covers a missing or invalid file
+    /// (fresh install, non-root user, malformed JSON).
+    fn cmdline_rules(&self) -> Vec<agentsight::config::CmdlineRule> {
+        let content = match std::fs::read_to_string(&self.config) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!(
+                    "Hint: cannot read config {} ({e}); falling back to built-in cmdline rules.",
+                    self.config
+                );
+                return agentsight::default_cmdline_rules();
+            }
+        };
+
+        match agentsight::config::parse_json_rules(&content) {
+            Ok((rules, _, _)) => rules,
+            Err(e) => {
+                eprintln!(
+                    "Hint: cannot parse config {} ({e}); falling back to built-in cmdline rules.",
+                    self.config
+                );
+                agentsight::default_cmdline_rules()
+            }
+        }
+    }
+
     /// List all known agents that can be detected
     fn list_known_agents(&self) {
-        let rules = agentsight::default_cmdline_rules();
+        let rules = self.cmdline_rules();
         let matchers: Vec<CmdlineGlobMatcher> = rules
             .iter()
             .filter_map(CmdlineGlobMatcher::from_config)
@@ -72,7 +108,8 @@ impl DiscoverCommand {
 
     /// Scan the system for running AI agents
     fn scan_agents(&self) {
-        let mut scanner = AgentScanner::from_rules(&agentsight::default_cmdline_rules(), &[]);
+        let rules = self.cmdline_rules();
+        let mut scanner = AgentScanner::from_rules(&rules, &[]);
         let agents = scanner.scan();
 
         if agents.is_empty() {

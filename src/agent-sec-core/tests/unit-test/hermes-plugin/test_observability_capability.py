@@ -30,6 +30,36 @@ def _make_capability() -> ObservabilityCapability:
     return cap
 
 
+def test_observability_timeout_env_overrides_config(monkeypatch):
+    monkeypatch.setenv("OBSERVABILITY_TIMEOUT", "3")
+    cap = _make_capability()
+
+    assert cap._timeout == 3
+
+
+def test_observability_timeout_is_capped(monkeypatch):
+    for value in ("7", "999999"):
+        monkeypatch.setenv("OBSERVABILITY_TIMEOUT", value)
+        cap = _make_capability()
+        assert cap._timeout == 5.0
+
+
+def test_observability_config_timeout_is_capped(monkeypatch):
+    monkeypatch.delenv("OBSERVABILITY_TIMEOUT", raising=False)
+    cap = ObservabilityCapability()
+    cap._timeout = 7.0
+    cap._on_register({})
+
+    assert cap._timeout == 5.0
+
+
+def test_invalid_observability_timeout_env_uses_config(monkeypatch):
+    for value in ("", "invalid", "0", "-1"):
+        monkeypatch.setenv("OBSERVABILITY_TIMEOUT", value)
+        cap = _make_capability()
+        assert cap._timeout == 5.0
+
+
 def test_get_hooks_define_registers_expected_hooks():
     cap = _make_capability()
 

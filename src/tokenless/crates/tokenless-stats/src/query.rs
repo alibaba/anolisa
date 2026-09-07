@@ -2,8 +2,35 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::record::StatsRecord;
-use crate::recorder::StatsSummary;
+use crate::record::{CompressionMode, StatsRecord};
+use crate::recorder::{RetrieveTotals, StatsSummary};
+
+/// Partition a record slice into the active view summaries report over and
+/// the count of dry-run rows they exclude (roadmap §4.6: predicted savings
+/// stay available for explicit comparison, never mixed into applied totals).
+fn active_records(records: &[StatsRecord]) -> (Vec<&StatsRecord>, usize) {
+    let active: Vec<&StatsRecord> = records
+        .iter()
+        .filter(|r| r.mode != CompressionMode::DryRun)
+        .collect();
+    let excluded = records.len() - active.len();
+    (active, excluded)
+}
+
+/// Truncation attribution over the active view: (compressions with at least
+/// one unmarked truncation, total truncation events). Legacy NULL rows
+/// count zero.
+fn truncation_totals(active: &[&StatsRecord]) -> (usize, i64) {
+    let events: i64 = active
+        .iter()
+        .filter_map(|r| r.unrecoverable_truncations)
+        .sum();
+    let compressions = active
+        .iter()
+        .filter(|r| r.unrecoverable_truncations.is_some_and(|n| n > 0))
+        .count();
+    (compressions, events)
+}
 
 /// Format a number with thousands separators for readability.
 fn format_num(n: usize) -> String {
@@ -20,15 +47,21 @@ fn format_num(n: usize) -> String {
 
 /// Format a summary report with overall stats and breakdown by operation type.
 ///
+/// Totals cover active rows only; dry-run rows are excluded with a visible
+/// count (use `stats summary --compare` for predicted-savings comparison).
 /// When `session_total_tokens` is provided, adds an "Actual Savings Rate"
 /// section showing the percentage of the entire session's token consumption
-/// that tokenless saved — not just the tool-response portion.
+/// that tokenless saved — not just the tool-response portion. `retrieve`
+/// carries whole-table retrieve aggregates (the `records` slice may be
+/// limited) for the attribution block; `None` omits the retrieve lines.
 pub fn format_summary(
     records: &[StatsRecord],
     title: Option<&str>,
     session_total_tokens: Option<usize>,
+    retrieve: Option<&RetrieveTotals>,
 ) -> String {
-    let total = StatsSummary::from_records(records);
+    let (active, excluded) = active_records(records);
+    let total = StatsSummary::from_record_refs(active.iter().copied());
 
     let mut output = String::new();
 
@@ -39,7 +72,11 @@ pub fn format_summary(
         output.push('\n');
     }
 
-    output.push_str(&format!("Total Records: {}\n\n", total.total_records));
+    output.push_str(&format!("Total Records: {}", total.total_records));
+    if excluded > 0 {
+        output.push_str(&format!(" ({excluded} dry-run records excluded)"));
+    }
+    output.push_str("\n\n");
 
     output.push_str("Character Savings:\n");
     output.push_str(&format!("  Before: {} chars\n", total.total_before_chars));
@@ -61,7 +98,7 @@ pub fn format_summary(
 
     // Breakdown by operation type
     let mut by_op: HashMap<&str, StatsSummary> = HashMap::new();
-    for r in records {
+    for r in &active {
         let op = r.operation.as_str();
         let entry = by_op.entry(op).or_default();
         entry.total_records += 1;
@@ -93,6 +130,31 @@ pub fn format_summary(
             s.tokens_percent()
         ));
     }
+
+    // Attribution: net savings after retrieve read-back, plus truncation
+    // exposure (roadmap §4.6 report).
+    let (truncated_compressions, truncation_events) = truncation_totals(&active);
+    output.push('\n');
+    output.push_str("Attribution:\n");
+    output.push_str(&format!(
+        "  Gross Savings:  {} tokens\n",
+        format_num(total.tokens_saved())
+    ));
+    if let Some(retrieve) = retrieve {
+        let net = total.tokens_saved() as i64 - retrieve.retrieved_tokens as i64;
+        output.push_str(&format!(
+            "  Retrieved:      {} tokens\n",
+            format_num(retrieve.retrieved_tokens as usize)
+        ));
+        output.push_str(&format!("  Net Savings:    {net} tokens\n"));
+        output.push_str(&format!(
+            "  Retrieves:      {} hits / {} misses / {} errors\n",
+            retrieve.hits, retrieve.misses, retrieve.errors
+        ));
+    }
+    output.push_str(&format!(
+        "  Unrecoverable:  {truncated_compressions} compressions with unmarked truncations, {truncation_events} events\n"
+    ));
 
     // Actual savings rate vs total session consumption
     if let Some(session_total) = session_total_tokens {
@@ -146,11 +208,21 @@ pub fn format_summary(
 /// When `session_total_tokens` is provided, extra fields
 /// (`session_total_tokens`, `actual_savings_tokens`, `actual_savings_percent`)
 /// are added to the "total" object.
-pub fn format_summary_json(records: &[StatsRecord], session_total_tokens: Option<usize>) -> String {
-    let total = StatsSummary::from_records(records);
+///
+/// Totals cover active rows only; the excluded dry-run count and the §4.6
+/// attribution report land as top-level keys (never inside `total`, whose
+/// key set intentionally matches every `by_operation` entry). Retrieve
+/// aggregates are whole-table and appear only when `retrieve` is `Some`.
+pub fn format_summary_json(
+    records: &[StatsRecord],
+    session_total_tokens: Option<usize>,
+    retrieve: Option<&RetrieveTotals>,
+) -> String {
+    let (active, excluded) = active_records(records);
+    let total = StatsSummary::from_record_refs(active.iter().copied());
 
     let mut by_op: BTreeMap<&str, StatsSummary> = BTreeMap::new();
-    for r in records {
+    for r in &active {
         let entry = by_op.entry(r.operation.as_str()).or_default();
         entry.total_records += 1;
         entry.total_before_chars += r.before_chars;
@@ -214,8 +286,41 @@ pub fn format_summary_json(records: &[StatsRecord], session_total_tokens: Option
         }
     }
 
+    let (truncated_compressions, truncation_events) = truncation_totals(&active);
+    let mut attribution = serde_json::json!({
+        "gross_savings_tokens": total.tokens_saved(),
+        "compressions_with_unrecoverable_truncations": truncated_compressions,
+        "unrecoverable_truncation_events": truncation_events,
+    });
+    if let Some(retrieve) = retrieve
+        && let Some(obj) = attribution.as_object_mut()
+    {
+        obj.insert(
+            "retrieved_tokens".to_string(),
+            serde_json::json!(retrieve.retrieved_tokens),
+        );
+        obj.insert(
+            "net_savings_tokens".to_string(),
+            serde_json::json!(total.tokens_saved() as i64 - retrieve.retrieved_tokens as i64),
+        );
+        obj.insert(
+            "retrieve_hits".to_string(),
+            serde_json::json!(retrieve.hits),
+        );
+        obj.insert(
+            "retrieve_misses".to_string(),
+            serde_json::json!(retrieve.misses),
+        );
+        obj.insert(
+            "retrieve_errors".to_string(),
+            serde_json::json!(retrieve.errors),
+        );
+    }
+
     let output = serde_json::json!({
-        "schema_version": "1.0",
+        "schema_version": "1.1",
+        "dry_run_records_excluded": excluded,
+        "attribution": attribution,
         "total": total_json,
         "by_operation": by_op_json,
     });
@@ -350,10 +455,7 @@ pub fn format_compare(baseline: &[StatsRecord], tokenless: &[StatsRecord]) -> St
         } else {
             0.0
         };
-        output.push_str(&format!(
-            "{:<22}{:>12}{:>14}{:>10}{:>11.1}%\n",
-            op, b, t, saved, pct
-        ));
+        output.push_str(&format!("{op:<22}{b:>12}{t:>14}{saved:>10}{pct:>11.1}%\n"));
     }
 
     output.push_str(&"-".repeat(68));
@@ -424,12 +526,72 @@ mod tests {
     #[test]
     fn test_format_summary() {
         let records = vec![test_record()];
-        let output = format_summary(&records, Some("Test Summary"), None);
+        let output = format_summary(&records, Some("Test Summary"), None, None);
 
         assert!(output.contains("Test Summary"));
         assert!(output.contains("Total Records: 1"));
         assert!(output.contains("Character Savings"));
         assert!(output.contains("Token Savings"));
+    }
+
+    #[test]
+    fn summaries_exclude_dry_run_rows_and_report_attribution() {
+        let active = test_record();
+        let mut dry = test_record();
+        dry.id = 2;
+        dry.mode = CompressionMode::DryRun;
+        let mut truncated = test_record();
+        truncated.id = 3;
+        truncated.unrecoverable_truncations = Some(2);
+        let records = vec![active, dry, truncated];
+        let retrieve = RetrieveTotals {
+            hits: 3,
+            misses: 1,
+            errors: 0,
+            retrieved_tokens: 150,
+        };
+
+        let text = format_summary(&records, None, None, Some(&retrieve));
+        assert!(text.contains("Total Records: 2 (1 dry-run records excluded)"));
+        // Active gross = 2 x (400 - 200); net = 400 - 150.
+        assert!(text.contains("Gross Savings:  400 tokens"));
+        assert!(text.contains("Retrieved:      150 tokens"));
+        assert!(text.contains("Net Savings:    250 tokens"));
+        assert!(text.contains("Retrieves:      3 hits / 1 misses / 0 errors"));
+        assert!(
+            text.contains("Unrecoverable:  1 compressions with unmarked truncations, 2 events")
+        );
+
+        let json = format_summary_json(&records, None, Some(&retrieve));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["dry_run_records_excluded"], 1);
+        assert_eq!(parsed["total"]["records"], 2);
+        let attribution = &parsed["attribution"];
+        assert_eq!(attribution["gross_savings_tokens"], 400);
+        assert_eq!(attribution["retrieved_tokens"], 150);
+        assert_eq!(attribution["net_savings_tokens"], 250);
+        assert_eq!(attribution["retrieve_hits"], 3);
+        assert_eq!(attribution["retrieve_misses"], 1);
+        assert_eq!(attribution["retrieve_errors"], 0);
+        assert_eq!(
+            attribution["compressions_with_unrecoverable_truncations"],
+            1
+        );
+        assert_eq!(attribution["unrecoverable_truncation_events"], 2);
+    }
+
+    #[test]
+    fn summaries_without_retrieve_totals_omit_the_retrieve_lines() {
+        let records = vec![test_record()];
+        let text = format_summary(&records, None, None, None);
+        assert!(text.contains("Gross Savings"));
+        assert!(!text.contains("Retrieved:"));
+        assert!(!text.contains("Net Savings"));
+
+        let json = format_summary_json(&records, None, None);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["attribution"].get("retrieved_tokens").is_none());
+        assert!(parsed["attribution"].get("gross_savings_tokens").is_some());
     }
 
     #[test]
@@ -493,11 +655,11 @@ mod tests {
     #[test]
     fn test_format_summary_json_valid() {
         let records = vec![test_record()];
-        let output = format_summary_json(&records, None);
+        let output = format_summary_json(&records, None, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         // schema_version
-        assert_eq!(parsed.get("schema_version").unwrap(), "1.0");
+        assert_eq!(parsed.get("schema_version").unwrap(), "1.1");
 
         let total = parsed.get("total").unwrap();
         // StatsRecord::new(op, agent, before_chars=1000, before_tokens=400,
@@ -524,7 +686,7 @@ mod tests {
     #[test]
     fn test_format_summary_json_empty() {
         let records: Vec<StatsRecord> = vec![];
-        let output = format_summary_json(&records, None);
+        let output = format_summary_json(&records, None, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         let total = parsed.get("total").unwrap();
@@ -545,7 +707,7 @@ mod tests {
     #[test]
     fn test_format_summary_json_field_consistency() {
         let records = vec![test_record()];
-        let output = format_summary_json(&records, None);
+        let output = format_summary_json(&records, None, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         let total_keys: std::collections::BTreeSet<String> = parsed
@@ -576,7 +738,7 @@ mod tests {
         r3.operation = OperationType::CompressSchema;
 
         let records = vec![r2, r1, r3]; // intentionally unordered
-        let output = format_summary_json(&records, None);
+        let output = format_summary_json(&records, None, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         let ops = parsed.get("by_operation").unwrap().as_object().unwrap();
@@ -591,7 +753,7 @@ mod tests {
     #[test]
     fn test_format_summary_with_session_total() {
         let records = vec![test_record()];
-        let output = format_summary(&records, Some("Test Summary"), Some(10_000));
+        let output = format_summary(&records, Some("Test Summary"), Some(10_000), None);
         assert!(output.contains("Overall Savings vs Total Consumption"));
         assert!(output.contains("10,000 tokens"));
         assert!(output.contains("Tool Response:"));
@@ -603,14 +765,14 @@ mod tests {
     #[test]
     fn test_format_summary_without_session_total() {
         let records = vec![test_record()];
-        let output = format_summary(&records, Some("Test Summary"), None);
+        let output = format_summary(&records, Some("Test Summary"), None, None);
         assert!(!output.contains("Overall Savings vs Total Consumption"));
     }
 
     #[test]
     fn test_format_summary_json_with_session_total() {
         let records = vec![test_record()];
-        let output = format_summary_json(&records, Some(10_000));
+        let output = format_summary_json(&records, Some(10_000), None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let total = parsed.get("total").unwrap();
         assert_eq!(total.get("session_total_tokens").unwrap(), 10_000);
@@ -627,7 +789,7 @@ mod tests {
     #[test]
     fn test_format_summary_json_without_session_total() {
         let records = vec![test_record()];
-        let output = format_summary_json(&records, None);
+        let output = format_summary_json(&records, None, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let total = parsed.get("total").unwrap();
         assert!(total.get("session_total_tokens").is_none());
@@ -741,7 +903,7 @@ mod tests {
     #[test]
     fn test_format_summary_with_zero_session_total() {
         let records = vec![test_record()];
-        let output = format_summary(&records, Some("Test"), Some(0));
+        let output = format_summary(&records, Some("Test"), Some(0), None);
         assert!(output.contains("Overall Savings vs Total Consumption"));
     }
 

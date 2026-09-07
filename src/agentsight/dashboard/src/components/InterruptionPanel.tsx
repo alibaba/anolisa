@@ -13,6 +13,8 @@ import {
   fetchConversationInterruptions,
   resolveInterruption,
 } from '../utils/apiClient';
+import { useI18n, useLocaleTag, interruptionTypeKey } from '../i18n';
+import { formatNs } from '../utils/datetime';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,18 +24,6 @@ const SEVERITY_DOT: Record<InterruptionSeverity, string> = {
   medium:   'bg-yellow-400',
   low:      'bg-blue-400',
 };
-
-const TYPE_LABELS: Record<string, string> = {
-  llm_error:        'LLM Error',
-  sse_truncated:    'SSE Truncated',
-  agent_crash:      'Agent Crash',
-  token_limit:      'Token Limit',
-  context_overflow: 'Context Overflow',
-};
-
-function formatNs(ns: number): string {
-  return new Date(ns / 1_000_000).toLocaleString();
-}
 
 function parseDetail(raw: string | null): React.ReactNode {
   if (!raw) return null;
@@ -57,17 +47,18 @@ interface RowProps {
 }
 
 const InterruptionRow: React.FC<RowProps> = ({ event, onResolved }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const [expanded, setExpanded] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [resolveErr, setResolveErr] = useState<string | null>(null);
 
   const dotStyle = SEVERITY_DOT[event.severity as InterruptionSeverity] ?? 'bg-gray-400';
-  const typeLabel = TYPE_LABELS[event.interruption_type] ?? event.interruption_type;
+  const typeKey = interruptionTypeKey(event.interruption_type);
+  const typeLabel = typeKey ? t(typeKey) : event.interruption_type;
 
   const handleResolve = async () => {
-    const confirmed = window.confirm(
-      '标记为已处理后，此中断事件将不再计入未处理统计（badge 数字将减少）。\n\n确认标记为已处理吗？'
-    );
+    const confirmed = window.confirm(t('comp.interrupt.markResolvedConfirm'));
     if (!confirmed) return;
     setResolving(true);
     setResolveErr(null);
@@ -75,7 +66,7 @@ const InterruptionRow: React.FC<RowProps> = ({ event, onResolved }) => {
       await resolveInterruption(event.interruption_id);
       onResolved(event);
     } catch (e: any) {
-      setResolveErr(e.message ?? '操作失败，请稍后重试');
+      setResolveErr(e.message ?? t('comp.interrupt.operationFailed'));
     } finally {
       setResolving(false);
     }
@@ -87,22 +78,22 @@ const InterruptionRow: React.FC<RowProps> = ({ event, onResolved }) => {
         <div className="flex items-center gap-2 min-w-0">
           <span className={`inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 ${dotStyle}`} />
           <span className="font-medium text-sm text-gray-800 truncate">{typeLabel}</span>
-          <span className="text-xs text-gray-400">{formatNs(event.occurred_at_ns)}</span>
+          <span className="text-xs text-gray-400">{formatNs(event.occurred_at_ns, locale)}</span>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           <button
             onClick={handleResolve}
             disabled={resolving}
-            title="标记为已处理，不再计入未处理统计"
+            title={t('comp.interrupt.markResolvedTitle')}
             className="text-xs px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white disabled:opacity-50"
           >
-            {resolving ? '…' : 'Resolve'}
+            {resolving ? '…' : t('common.resolve')}
           </button>
           <button
             onClick={() => setExpanded(x => !x)}
             className="text-xs px-2 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-gray-50"
           >
-            {expanded ? 'Hide' : 'Detail'}
+            {expanded ? t('common.collapse') : t('common.details')}
           </button>
         </div>
       </div>
@@ -112,7 +103,7 @@ const InterruptionRow: React.FC<RowProps> = ({ event, onResolved }) => {
       )}
 
       {event.call_id && (
-        <div className="mt-1 text-xs text-gray-400">call: {event.call_id}</div>
+        <div className="mt-1 text-xs text-gray-400">{t('comp.interrupt.callLabel', { id: event.call_id })}</div>
       )}
 
       {expanded && (
@@ -143,6 +134,7 @@ interface Props {
 }
 
 export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, onClose, onResolvedEvent }) => {
+  const { t } = useI18n();
   const [events, setEvents] = useState<InterruptionRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -154,6 +146,14 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       let data: InterruptionRecord[];
       if (conversationId) {
         data = await fetchConversationInterruptions(conversationId);
+        // Passing both ids narrows the panel to one session's share of the
+        // conversation, matching the badge that opens it: that badge is keyed
+        // on (session_id, conversation_id), so an interruption detected before
+        // its session was resolved is counted by the unassigned-session row
+        // instead of by this session.
+        if (sessionId) {
+          data = data.filter((event) => event.session_id === sessionId);
+        }
       } else if (sessionId) {
         data = await fetchSessionInterruptions(sessionId);
       } else {
@@ -161,11 +161,11 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       }
       setEvents(data);
     } catch (e: any) {
-      setError(e.message ?? 'Failed to load interruptions');
+      setError(e.message ?? t('comp.interrupt.failedToLoad'));
     } finally {
       setLoading(false);
     }
-  }, [sessionId, conversationId]);
+  }, [sessionId, conversationId, t]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -188,10 +188,10 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
         <div>
-          <h3 className="font-semibold text-base text-gray-800">Interruptions</h3>
+          <h3 className="font-semibold text-base text-gray-800">{t('comp.interrupt.interruptions')}</h3>
           {!loading && (
             <p className="text-xs text-gray-400">
-              {unresolvedCount} 条未处理
+              {t('comp.interrupt.unresolvedCount', { n: unresolvedCount })}
             </p>
           )}
         </div>
@@ -199,7 +199,7 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
           <button
             onClick={onClose}
             className="text-gray-400 hover:text-gray-700 text-xl leading-none"
-            title="Close"
+            title={t('common.close')}
           >
             ×
           </button>
@@ -209,13 +209,13 @@ export const InterruptionPanel: React.FC<Props> = ({ sessionId, conversationId, 
       {/* Body */}
       <div className="flex-1 px-4 py-3">
         {loading && (
-          <p className="text-sm text-gray-400 animate-pulse">Loading…</p>
+          <p className="text-sm text-gray-400 animate-pulse">{t('common.loading')}</p>
         )}
         {error && (
           <p className="text-sm text-red-500">{error}</p>
         )}
         {!loading && !error && events.length === 0 && (
-          <p className="text-sm text-gray-400">No interruption events recorded for this session.</p>
+          <p className="text-sm text-gray-400">{t('comp.interrupt.noEvents')}</p>
         )}
         {events.map(e => (
           <InterruptionRow key={e.interruption_id} event={e} onResolved={handleResolved} />

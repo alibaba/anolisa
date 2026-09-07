@@ -14,6 +14,7 @@ use super::{
     buffer_to_lines, buffer_to_styled_lines, display_width, wrap_plain_line, RatatuiInlineRenderer,
 };
 use crate::tools::display::ToolPresentationKind;
+use crate::types::CardKind;
 
 #[derive(Debug, Clone)]
 pub struct ActivityRowModel<'a> {
@@ -274,7 +275,7 @@ fn plain_tool_invocation_card_lines(
     content_width: usize,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(card.title.clone());
+    lines.push(CardKind::ToolCall.title(&card.title));
     lines.extend(wrapped_tool_invocation_semantic_lines(
         card,
         card.debug_ref.is_some(),
@@ -300,7 +301,7 @@ fn styled_tool_invocation_card_lines(
     let block = Block::bordered()
         .padding(Padding::horizontal(1))
         .title(Line::from(Span::styled(
-            format!(" {} ", card.title),
+            format!(" {} ", CardKind::ToolCall.title(&card.title)),
             Style::default().add_modifier(Modifier::BOLD),
         )))
         .border_set(ROUNDED)

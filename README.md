@@ -25,12 +25,12 @@ responses that reach the model before they cost you — while keeping the Shell,
 Agent framework, and sandbox you already run.
 
 [中文版](README_zh.md) · [Website](https://agentic-os.sh/) ·
-[Quick Start](docs/QUICKSTART.md) ·
-[User Guide](docs/user-guide/en/README.md) ·
-[Contributing](CONTRIBUTING.md)
+[Quick Start](https://agentic-os.sh/docs/quickstart/) ·
+[User Guide](https://agentic-os.sh/docs/user-guide/) ·
+[Contributing](https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING.md)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](docs/user-guide/en/installation.md)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/alibaba/anolisa/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/docs/user-guide/installation/)
 
 </div>
 
@@ -42,12 +42,42 @@ execution environments. Keep the Shell, Agent framework, and sandbox you
 already use. ANOLISA CLI provides a single installation entry point, while each
 capability can be enabled independently.
 
-<p align="center">
-  <img
-    src="docs/images/readme/highlights.png"
-    alt="ANOLISA product highlights"
-  />
-</p>
+**New to ANOLISA?**
+[Choose your first outcome in the Quick Start →](https://agentic-os.sh/docs/quickstart/)
+
+## Components
+
+<table width="100%">
+  <thead>
+    <tr>
+      <th width="340">Agent entry</th>
+      <th width="340">Context efficiency</th>
+      <th width="340">Runtime &amp; security</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/cosh-ng/quickstart/">cosh-ng</a></strong><br><sub>Shell copilot</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/">Token-less</a></strong><br><sub>Tool-output compression</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/ws-ckpt/">ws-ckpt</a></strong><br><sub>Checkpoint and rollback</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/os-skills/">OS Skills</a></strong><br><sub>System and DevOps expertise</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agent-observability/agentsight/">AgentSight</a></strong><br><sub>Trace and Token visibility</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/skillfs/">SkillFS</a></strong><br><sub>Focused Skill views</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/user-entrypoint/ktuner/">ktuner</a></strong><br><sub>Kernel tuning</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/token-saving/agent-memory/">Agent Memory</a></strong><br><sub>Cross-session memory</sub></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/quickstart/">Agent Sec Core</a></strong><br><sub>Sandbox and verification</sub></td>
+    </tr>
+    <tr>
+      <td></td>
+      <td></td>
+      <td><strong><a href="https://agentic-os.sh/docs/user-guide/runtime/blaze/">Blaze</a></strong><br><sub>Sandbox lifecycle</sub></td>
+    </tr>
+  </tbody>
+</table>
 
 ## What it solves
 
@@ -60,17 +90,62 @@ then adds an Agent that can understand intent, use tools and Skills, and ask
 for approval before risky work. Shell commands and natural language share one
 terminal instead of forcing users into a separate chat application.
 
-[Get started with cosh-ng →](docs/user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md)
+[Get started with cosh-ng →](https://agentic-os.sh/docs/user-guide/user-entrypoint/cosh-ng/quickstart/)
 
 <p align="center"><strong>02 · CONTEXT EFFICIENCY</strong></p>
 
 <h3 align="center">See where Tokens go and cut waste before it reaches the model</h3>
 
-Token-less removes redundancy from tool schemas and responses.
-[Agent Memory](src/agent-memory/README.md) reuses context across sessions,
-[SkillFS](src/skillfs/README.md) exposes Skills as views and mounts them on
-demand so only the relevant ones enter the context, and
-[AgentSight](src/agentsight/README.md) records where Tokens are actually spent.
+[Token-less](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/)
+removes redundancy from tool schemas and responses before they reach the model.
+[Agent Memory](https://agentic-os.sh/docs/user-guide/token-saving/agent-memory/)
+reuses useful context across sessions.
+[SkillFS](https://agentic-os.sh/docs/user-guide/runtime/skillfs/) keeps the
+current Skill view focused and makes other Skills discoverable when needed.
+[AgentSight](https://agentic-os.sh/docs/user-guide/agent-observability/agentsight/)
+shows where Tokens are spent.
+
+### See an Agent run from the kernel up
+
+On Linux, AgentSight uses eBPF to observe an Agent without changing its code.
+Follow user input through model and tool calls, with Token use and sub-agent
+branches in the same view.
+
+[Open the AgentSight guide →](https://agentic-os.sh/docs/user-guide/agent-observability/agentsight/)
+
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        preload="metadata"
+        src="https://github.com/user-attachments/assets/ed6952c6-19da-44c7-ae35-85d753bdccf9"
+      ></video>
+    </td>
+  </tr>
+</table>
+
+### Try Token-less with Claude Code in 3 minutes
+
+Install Token-less and connect it to Claude Code:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+anolisa install tokenless
+anolisa adapter enable tokenless claude-code
+```
+
+Restart Claude Code, run one tool-heavy task, then inspect the result:
+
+```bash
+tokenless stats summary
+tokenless stats list --limit 5
+```
+
+[Open the full Token-less Quick Start →](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/)
+· [Read the user manual](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/user-manual/)
 
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
@@ -92,13 +167,6 @@ demand so only the relevant ones enter the context, and
   </sub>
 </p>
 
-<p align="center">
-  <img
-    src="docs/images/readme/tokenless-response.png"
-    alt="Token-less response compression in the terminal"
-  />
-</p>
-
 `debug` and `trace` are dropped by the field blacklist, `metadata` as null, and
 `tags` / `extra` as empty values. Compression runs between the Agent and the
 model, so no Agent framework code changes. Dropped array items stay retrievable
@@ -110,20 +178,42 @@ through a `<<tokenless:KEY>>` marker, which keeps the compression reversible.
 | ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | 198.91 µs |
 
 Savings apply to the tool responses entering the context, not to the whole
-session bill — the [Token-less README](src/tokenless/README.md) explains how to
-estimate the effect for a given workload.
-
-[Read the Token-less user manual →](docs/user-guide/en/token-saving/tokenless/user-manual.md)
+session bill. The [Token-less user manual](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/user-manual/)
+explains how to estimate the effect for a given workload.
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 
 <h3 align="center">Give every Agent execution a boundary and a way back</h3>
 
 ANOLISA is building out the Agent execution environment:
-[Agent Sec Core](src/agent-sec-core/README.md) isolates risky operations, and
-[ws-ckpt](src/ws-ckpt/README.md) keeps recovery points for workspace changes.
+[Agent Sec Core](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/quickstart/)
+isolates risky operations, and
+[ws-ckpt](https://agentic-os.sh/docs/user-guide/runtime/ws-ckpt/) keeps recovery
+points for workspace changes.
 
-[Start with ANOLISA CLI →](docs/user-guide/en/user-entrypoint/anolisa-cli.md)
+### Catch a changed Skill before it runs
+
+When a signed Skill changes, the Agent reports `drifted` before using it again.
+A rescan records blocking findings as `deny`.
+
+[Try the Agent demo →](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/qoder-skill-ledger-demo/)
+· [Skill Ledger guide](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/skill-ledger/)
+
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        preload="metadata"
+        src="https://github.com/user-attachments/assets/aad6e296-7c5a-4a81-be2e-ea4f49e43637"
+      ></video>
+    </td>
+  </tr>
+</table>
+
+[Choose a runtime or security starting point →](https://agentic-os.sh/docs/quickstart/)
+· [Start with ANOLISA CLI](https://agentic-os.sh/docs/user-guide/user-entrypoint/anolisa-cli/)
 
 ## Install
 
@@ -140,16 +230,16 @@ anolisa install tokenless
 Run `cosh` to enter the AI-native terminal. Token-less can also optimize tool
 calls from an existing Agent without changing its framework.
 
-[Read the Quick Start →](docs/QUICKSTART.md)
+[Read the Quick Start →](https://agentic-os.sh/docs/quickstart/)
 
 ## Documentation
 
-[Quick Start](docs/QUICKSTART.md) ·
-[Installation](docs/user-guide/en/installation.md) ·
-[User Guide](docs/user-guide/en/README.md) ·
-[Troubleshooting](docs/user-guide/en/troubleshooting.md) ·
-[Build from Source](docs/BUILDING.md) ·
-[Changelog](CHANGELOG.md)
+[Quick Start](https://agentic-os.sh/docs/quickstart/) ·
+[Installation](https://agentic-os.sh/docs/user-guide/installation/) ·
+[User Guide](https://agentic-os.sh/docs/user-guide/) ·
+[Troubleshooting](https://agentic-os.sh/docs/user-guide/troubleshooting/) ·
+[Build from Source](https://agentic-os.sh/docs/building/) ·
+[Changelog](https://agentic-os.sh/changelog/)
 
 ## Community
 
@@ -163,9 +253,12 @@ Scan with DingTalk to join the ANOLISA community.
 
 - [Open an issue](https://github.com/alibaba/anolisa/issues) for bugs and
   feature requests.
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
-- Report vulnerabilities through the [Security Policy](SECURITY.md).
+- Read [CONTRIBUTING.md](https://github.com/alibaba/anolisa/blob/main/CONTRIBUTING.md)
+  before submitting a pull request.
+- Report vulnerabilities through the
+  [Security Policy](https://github.com/alibaba/anolisa/blob/main/SECURITY.md).
 
 ## License
 
-ANOLISA is released under the [Apache License 2.0](LICENSE).
+ANOLISA is released under the
+[Apache License 2.0](https://github.com/alibaba/anolisa/blob/main/LICENSE).

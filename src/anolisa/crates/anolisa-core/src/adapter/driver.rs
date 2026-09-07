@@ -8,6 +8,7 @@
 //! stay centralized. The split is deliberate — **driver owns framework
 //! semantics, Manager owns dangerous-resource boundaries**.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ use anolisa_platform::fs_layout::FsLayout;
 
 use super::AdapterError;
 use super::claim::AdapterClaim;
+use super::managed_files::MaterializedMapping;
 
 /// Read-only host facts a driver may inspect during [`FrameworkDriver::detect`].
 #[derive(Debug, Clone, Default)]
@@ -62,6 +64,9 @@ pub struct DriverCtx<'a> {
     /// Plugin id declared in the component's adapter manifest, if any.
     /// A driver may fall back to it when the bundle does not name one.
     pub declared_plugin_id: Option<String>,
+    /// Explicit framework profiles selected by the caller for profile-scoped
+    /// adapters. Drivers that are not profile-scoped ignore this list.
+    pub requested_profiles: Vec<String>,
     /// Adapter type declared in the component manifest. Absent means the
     /// legacy plugin adapter model.
     pub adapter_type: Option<String>,
@@ -110,9 +115,6 @@ impl DriverCtx<'_> {
 pub struct AdapterBundle {
     /// Resource root the bundle was read from.
     pub resource_root: PathBuf,
-    /// Digest of the resource tree, for drift/upgrade detection. `None`
-    /// when the driver declined to compute one.
-    pub digest: Option<String>,
     /// Framework-native plugin id resolved from the bundle (or the
     /// manifest-declared fallback).
     pub plugin_id: Option<String>,
@@ -265,8 +267,13 @@ pub enum AdapterConditionKind {
     SourceAvailable,
     /// The framework itself is detectable on the host.
     FrameworkDetected,
-    /// The installed resource bundle still matches the enable-time digest.
-    ResourceBundleMatches,
+    /// Package-manager-owned source files still match current package metadata.
+    ManagedBundleMatches,
+    /// The package-manager-owned adapter inputs still equal the enable-time
+    /// revision, including the resolved source root.
+    SourceRevisionMatches,
+    /// Files ANOLISA explicitly copied still match their receipt entries.
+    MaterializedBundleMatches,
     /// The plugin is still present in the framework registry.
     PluginRegistered,
     /// The framework reports the plugin's declared resources as loaded.
@@ -457,6 +464,30 @@ pub trait AdapterOps {
     /// [`AdapterError::Io`] on filesystem failure;
     /// [`AdapterError::ClaimValidation`] if either path fails boundary check.
     fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), AdapterError>;
+
+    /// Remove exactly one filesystem entry without recursively deleting a
+    /// directory. Files and symlinks are unlinked; empty directories are
+    /// removed so a materialized path can change from a directory prefix to
+    /// a file. Returns `Ok(false)` when the path does not exist.
+    ///
+    /// The Manager validates that `path` is under an allowed root. Refusing
+    /// non-empty directories preserves runtime-created files that were never
+    /// owned by an adapter receipt.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::Io`] on filesystem failure, including a non-empty
+    /// directory; [`AdapterError::ClaimValidation`] if `path` fails boundary
+    /// validation.
+    fn remove_path(&self, path: &Path) -> Result<bool, AdapterError> {
+        Err(AdapterError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation provider does not support exact path removal",
+            ),
+        })
+    }
 
     /// Remove a directory tree rooted at `path`. The Manager validates
     /// that `path` is under an allowed external root before executing.
@@ -668,6 +699,45 @@ pub trait FrameworkDriver: Send + Sync {
         Ok(())
     }
 
+    /// Source-to-resource copies this driver will explicitly materialize.
+    ///
+    /// The Manager maps only package-owned source entries through these
+    /// declarations before apply. Framework-native staging or copies remain
+    /// outside this contract.
+    fn materialized_mappings(
+        &self,
+        _resource_root: &Path,
+        _adapter_type: Option<&str>,
+        _declared_skills: &[DeclaredSkill],
+    ) -> Vec<MaterializedMapping> {
+        Vec::new()
+    }
+
+    /// Concrete destination roots for [`Self::materialized_mappings`].
+    ///
+    /// Dry-run cleanup compares these paths with the prior receipt so its
+    /// stale-output plan matches live re-enable even when a stable resource
+    /// id moves to a different framework path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same destination or identifier validation error as
+    /// [`Self::prepare_enable`].
+    fn materialized_destination_roots(
+        &self,
+        _bundle: &AdapterBundle,
+        _ctx: &DriverCtx,
+    ) -> Result<BTreeMap<String, PathBuf>, AdapterError> {
+        Ok(BTreeMap::new())
+    }
+
+    /// Whether this claim is expected to carry a materialized-file list.
+    /// Receipts with an empty list report `Unknown`; drivers whose framework
+    /// performs its own copy omit the condition entirely.
+    fn materialized_verification_applicable(&self, _claim: &AdapterClaim) -> bool {
+        false
+    }
+
     /// Idempotently apply an already-persisted enable receipt to framework
     /// state, reusing the [`PreparedEnable`] state produced by
     /// [`Self::prepare_enable`] so no read-only host probe runs twice in one
@@ -723,7 +793,7 @@ pub fn find_binary_in_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
         .map(|m| m.permissions().mode() & 0o111 != 0)
@@ -731,6 +801,6 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(_path: &Path) -> bool {
+pub(crate) fn is_executable(_path: &Path) -> bool {
     true
 }

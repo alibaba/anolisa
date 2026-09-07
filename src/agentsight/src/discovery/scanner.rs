@@ -1,16 +1,19 @@
 //! Agent process scanner
 //!
 //! This module provides functionality to scan the system for running AI agent processes
-//! by examining /proc filesystem entries and handling process lifecycle events.
+//! by examining procfs entries and handling process lifecycle events.
 //! It also manages deny rules and domain rules for unified rule-based decisions.
+//!
+//! Every procfs read here resolves through [`crate::utils::procfs`], so an
+//! observer in a container can be pointed at a bind-mounted host procfs.
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 
 use super::agent::{AgentInfo, DiscoveredAgent};
 use super::matcher::{CmdlineGlobMatcher, ProcessContext, match_domain_glob};
 use crate::config::{CmdlineRule, HttpsRule};
+use crate::utils::procfs::{proc_pid_entry, proc_root};
 
 /// Scanner for discovering AI agent processes on the system
 ///
@@ -84,7 +87,7 @@ impl AgentScanner {
         if !self.matches_domain(domain) {
             return false;
         }
-        let cmdline = read_cmdline(&format!("/proc/{pid}/cmdline"));
+        let cmdline = read_cmdline(pid);
         // Fail-closed: if cmdline is empty (process already exited or unreadable),
         // do NOT attach — deny rules cannot be evaluated reliably.
         if cmdline.is_empty() {
@@ -96,8 +99,9 @@ impl AgentScanner {
 
     /// Scan the system for running AI agent processes
     ///
-    /// This method iterates over /proc/[pid]/ directories and attempts to match
-    /// each process against the known agent list based on process name.
+    /// This method iterates over the `<procfs root>/[pid]/` directories and
+    /// attempts to match each process against the known agent list based on
+    /// process name.
     /// Discovered agents are automatically added to `tracked_agents`.
     ///
     /// # Returns
@@ -106,9 +110,8 @@ impl AgentScanner {
     pub fn scan(&mut self) -> Vec<DiscoveredAgent> {
         let mut discovered = Vec::new();
 
-        // Read /proc directory
-        let proc_path = Path::new("/proc");
-        let entries = match fs::read_dir(proc_path) {
+        // Read the procfs root directory
+        let entries = match fs::read_dir(proc_root()) {
             Ok(e) => e,
             Err(_) => return discovered,
         };
@@ -147,26 +150,24 @@ impl AgentScanner {
     /// `Some(DiscoveredAgent)` if the process is a known agent, `None` otherwise.
     pub fn on_process_create(&mut self, pid: u32, bpf_comm: &str) -> Option<&DiscoveredAgent> {
         // Use BPF comm as primary source (already updated at sys_exit_execve time).
-        // Fallback to /proc/[pid]/comm only if BPF comm is empty or too short.
+        // Fallback to `<procfs root>/[pid]/comm` only if BPF comm is empty or too short.
         let comm = if bpf_comm.len() >= 3 {
             bpf_comm.to_string()
         } else {
-            // Fallback: read from /proc/[pid]/comm
-            let comm_path = format!("/proc/{pid}/comm");
-            fs::read_to_string(&comm_path)
+            // Fallback: read from <procfs root>/[pid]/comm
+            fs::read_to_string(proc_pid_entry(pid, "comm"))
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| bpf_comm.to_string())
         };
 
-        // Read full command line from /proc/[pid]/cmdline
-        let cmdline_args = read_cmdline(&format!("/proc/{pid}/cmdline"));
+        // Read full command line from <procfs root>/[pid]/cmdline
+        let cmdline_args = read_cmdline(pid);
         log::trace!("Process created: pid={pid}, comm='{comm}', cmdline={cmdline_args:?}");
 
-        // Read executable path from /proc/[pid]/exe (symlink)
-        let exe_path_str = format!("/proc/{pid}/exe");
-        let exe = fs::read_link(&exe_path_str)
+        // Read executable path from <procfs root>/[pid]/exe (symlink)
+        let exe = fs::read_link(proc_pid_entry(pid, "exe"))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
@@ -225,20 +226,15 @@ impl AgentScanner {
 
     /// Attempt to match a process against known agents
     pub fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
-        let proc_dir = format!("/proc/{pid}");
-
-        // Read process name from /proc/[pid]/comm
-        let comm_path = format!("{proc_dir}/comm");
-        let comm = fs::read_to_string(&comm_path).ok()?;
+        // Read process name from <procfs root>/[pid]/comm
+        let comm = fs::read_to_string(proc_pid_entry(pid, "comm")).ok()?;
         let process_name = comm.trim().to_string();
 
-        // Read full command line from /proc/[pid]/cmdline
-        let cmdline_path = format!("{proc_dir}/cmdline");
-        let cmdline_args = read_cmdline(&cmdline_path);
+        // Read full command line from <procfs root>/[pid]/cmdline
+        let cmdline_args = read_cmdline(pid);
 
-        // Read executable path from /proc/[pid]/exe (symlink)
-        let exe_path = format!("{proc_dir}/exe");
-        let exe = fs::read_link(&exe_path)
+        // Read executable path from <procfs root>/[pid]/exe (symlink)
+        let exe = fs::read_link(proc_pid_entry(pid, "exe"))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
@@ -259,7 +255,15 @@ impl AgentScanner {
     }
 
     /// Find the first matching agent for a process context
+    ///
+    /// Deny rules take precedence over allow rules: without this check,
+    /// agent-spawned helper subprocesses (e.g. an SFTP server launched
+    /// through the agent's shell wrapper) match the broad allow rules and
+    /// show up as discovered agents.
     fn find_match(&self, ctx: &ProcessContext) -> Option<AgentInfo> {
+        if self.deny_matchers.iter().any(|m| m.matches(ctx)) {
+            return None;
+        }
         for matcher in &self.matchers {
             if matcher.matches(ctx) {
                 return Some(matcher.info().clone());
@@ -274,23 +278,26 @@ impl AgentScanner {
     }
 }
 
-/// Read the process comm (`/proc/<pid>/comm`), trimmed.
+/// Read the process comm (`<procfs root>/<pid>/comm`), trimmed.
 ///
 /// Returns `None` when the file is unreadable (process gone) or empty. This is
 /// the *process* name (main-thread comm), not a per-event worker-thread name.
 pub fn read_comm(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/comm"))
+    fs::read_to_string(proc_pid_entry(pid, "comm"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-/// Read and parse cmdline file
+/// Read and parse a process's cmdline
 ///
 /// The cmdline file contains arguments separated by null bytes.
-/// Returns a vector of command line arguments.
-pub fn read_cmdline(path: &str) -> Vec<String> {
-    match fs::read(path) {
+/// Returns a vector of command line arguments, empty when the process is gone.
+///
+/// Takes the pid rather than a path so every caller resolves through the
+/// configured procfs root (see [`crate::utils::procfs`]).
+pub fn read_cmdline(pid: impl std::fmt::Display) -> Vec<String> {
+    match fs::read(proc_pid_entry(pid, "cmdline")) {
         Ok(data) => {
             // Split by null bytes and collect non-empty strings
             data.split(|&b| b == 0)
@@ -393,6 +400,78 @@ mod tests {
     }
 
     #[test]
+    fn test_find_match_deny_takes_precedence_over_allow() {
+        let rules = vec![
+            CmdlineRule {
+                patterns: vec!["node*".to_string(), "*agent*".to_string()],
+                agent_name: Some("Agent".to_string()),
+                allow: true,
+            },
+            CmdlineRule {
+                patterns: vec!["*".to_string(), "*".to_string(), "-c".to_string()],
+                agent_name: None,
+                allow: false,
+            },
+        ];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+
+        let denied = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec![
+                "node".to_string(),
+                "/usr/lib/agent/cli.js".to_string(),
+                "-c".to_string(),
+                "/usr/libexec/openssh/sftp-server".to_string(),
+            ],
+            exe_path: String::new(),
+        };
+        assert!(scanner.find_match(&denied).is_none());
+
+        let allowed = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec!["node".to_string(), "/usr/lib/agent/cli.js".to_string()],
+            exe_path: String::new(),
+        };
+        assert_eq!(
+            scanner.find_match(&allowed).map(|i| i.name),
+            Some("Agent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_default_rules_deny_sftp_subprocess() {
+        let scanner = AgentScanner::from_rules(&crate::config::default_cmdline_rules(), &[]);
+
+        // SFTP subprocess spawned through the cosh shell wrapper must not be
+        // reported as a Cosh agent.
+        let sftp = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec![
+                "node".to_string(),
+                "/usr/lib/copilot-shell/cli.js".to_string(),
+                "-c".to_string(),
+                "/usr/libexec/openssh/sftp-server".to_string(),
+            ],
+            exe_path: String::new(),
+        };
+        assert!(scanner.find_match(&sftp).is_none());
+
+        // A genuine interactive cosh process still matches.
+        let cosh = ProcessContext {
+            comm: String::new(),
+            cmdline_args: vec![
+                "node".to_string(),
+                "/usr/lib/copilot-shell/cli.js".to_string(),
+            ],
+            exe_path: String::new(),
+        };
+        assert_eq!(
+            scanner.find_match(&cosh).map(|i| i.name),
+            Some("Cosh".to_string())
+        );
+    }
+
+    #[test]
     fn test_read_comm_current_process() {
         // The current process comm is readable and non-empty.
         let comm = read_comm(std::process::id());
@@ -412,5 +491,32 @@ mod tests {
         // The current test process should not match any agent rule.
         let result = scanner.try_match_process(std::process::id());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scan_without_rules_finds_nothing() {
+        let mut scanner = AgentScanner::from_rules(&[], &[]);
+        // Exercises the full procfs walk; with no rules nothing can match.
+        assert!(scanner.scan().is_empty());
+    }
+
+    #[test]
+    fn test_on_dns_event_unreadable_pid_fails_closed() {
+        let https_rules = vec![crate::config::HttpsRule {
+            pattern: "example.com".to_string(),
+        }];
+        let scanner = AgentScanner::from_rules(&[], &https_rules);
+        // The domain matches, but the (impossible) pid's cmdline is unreadable:
+        // deny rules cannot be evaluated, so no attach happens.
+        assert!(scanner.matches_domain("example.com"));
+        assert!(!scanner.on_dns_event(u32::MAX, "example.com"));
+    }
+
+    #[test]
+    fn test_on_process_create_unreadable_pid_matches_nothing() {
+        let mut scanner = AgentScanner::from_rules(&[], &[]);
+        // u32::MAX exceeds the kernel's pid_max, so every procfs read fails;
+        // the short BPF comm forces the comm-read fallback as well.
+        assert!(scanner.on_process_create(u32::MAX, "x").is_none());
     }
 }

@@ -397,9 +397,19 @@ async fn run(cli: Cli) -> Result<()> {
             ws_ckpt_daemon::run_daemon(config).await?;
         }
         Commands::Init { workspace } => {
-            let request = Request::Init {
-                workspace: resolve_workspace_arg(&workspace),
-            };
+            let workspace = resolve_workspace_arg(&workspace);
+            // Catch a plain missing path here so the caller gets that answer
+            // instead of the daemon's namespace-scoped one, which has to hedge
+            // about shared volumes. symlink_metadata, not exists(): a dangling
+            // workspace symlink is the daemon's re-init recovery path. Only
+            // NotFound is conclusive — the daemon is privileged and may reach
+            // paths this process cannot stat, so any other error goes to it.
+            if let Err(e) = std::fs::symlink_metadata(&workspace) {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    anyhow::bail!("path does not exist: {}", workspace);
+                }
+            }
+            let request = Request::Init { workspace };
             let response = send_request_to_daemon(&request).await?;
             handle_response(response, &request).await?;
         }
@@ -668,7 +678,7 @@ async fn send_request_to_daemon(request: &Request) -> Result<Response> {
         match e.kind() {
             std::io::ErrorKind::NotFound => {
                 eprintln!("\x1b[31m\u{2717} Daemon is not running.\x1b[0m");
-                eprintln!("  Start it with 'systemctl start ws-ckpt'.");
+                eprintln!("  Start the systemd service `ws-ckpt`, or its daemon container.");
                 process::exit(1);
             }
             std::io::ErrorKind::ConnectionRefused => {
@@ -1698,20 +1708,18 @@ async fn handle_global_config_update(
     // ConfigReport so JSON mode can emit the landed state on stdout
     // without a follow-up `Config` round-trip.
     let mut reloaded_config: Option<ws_ckpt_common::ConfigReport> = None;
+    let mut daemon_file: Option<ws_ckpt_common::FileConfig> = None;
+    let mut reload_error: Option<String> = None;
     match send_request_to_daemon(&Request::ReloadGlobalConfig).await {
-        Ok(Response::ReloadConfigOk { config }) => {
+        Ok(Response::ReloadConfigOk { config, file }) => {
             status_sink(format_args!(
                 "\x1b[32m\u{2713} Daemon reloaded configuration\x1b[0m"
             ));
-            if has_img_settings {
-                status_sink(format_args!(
-                    "\x1b[33m\u{26a0} Note: btrfs-loop image settings (img-size, img-max-percent) require daemon restart to take effect.\x1b[0m"
-                ));
-            }
             reloaded_config = Some(config);
+            daemon_file = file;
         }
         Ok(Response::Error { message, .. }) => {
-            eprintln!("\x1b[33m\u{26a0} Daemon reload failed: {}\x1b[0m", message);
+            reload_error = Some(format!("daemon reload failed: {}", message));
         }
         Err(_) => {
             status_sink(format_args!(
@@ -1719,6 +1727,37 @@ async fn handle_global_config_update(
             ));
         }
         _ => {}
+    }
+
+    // The daemon reloads CONFIG_FILE_PATH as *it* sees it. When CLI and daemon
+    // do not share that path — k8s sidecar puts them in separate container
+    // filesystems — the reload succeeds against an absent file, the daemon
+    // falls back to built-in defaults, and the policy silently never applies.
+    // Compare the file the daemon parsed against the one just written so that
+    // case surfaces as a failure instead of a green checkmark. Comparing files
+    // rather than effective values also covers the bootstrap-only image
+    // settings, which no post-reload runtime view can confirm.
+    if let Some(landed) = &daemon_file {
+        let unlanded = unlanded_global_settings(&fc, landed);
+        if !unlanded.is_empty() {
+            reload_error = Some(format!(
+                "daemon did not load the settings written to {}:\n  {}\n\
+                 The daemon reloads its own view of that path — if it runs in a \
+                 separate container or mount namespace, {} must be on a volume \
+                 shared with this CLI.",
+                CONFIG_FILE_PATH,
+                unlanded.join("\n  "),
+                CONFIG_FILE_PATH
+            ));
+        }
+    }
+
+    // Only advise a restart once the file is known to have reached the daemon;
+    // otherwise the restart would reload the same unseen file.
+    if has_img_settings && reload_error.is_none() && reloaded_config.is_some() {
+        status_sink(format_args!(
+            "\x1b[33m\u{26a0} Note: btrfs-loop image settings (img-size, img-max-percent) require daemon restart to take effect.\x1b[0m"
+        ));
     }
 
     // JSON mode emits the post-update state on stdout so callers don't need
@@ -1735,7 +1774,102 @@ async fn handle_global_config_update(
         }
     }
 
+    if let Some(err) = reload_error {
+        anyhow::bail!("{}", err);
+    }
+
     Ok(())
+}
+
+/// Fields where the config file just written differs from the one the daemon
+/// parsed, rendered as `field: file has X, daemon has Y`.
+///
+/// Compares the two files rather than file-against-effective-runtime so that
+/// `img_size` and `img_max_percent` are covered too: those apply at bootstrap
+/// only, so no post-reload runtime view can tell a daemon that read them from
+/// one that never saw the file.
+fn unlanded_global_settings(
+    saved: &ws_ckpt_common::FileConfig,
+    landed: &ws_ckpt_common::FileConfig,
+) -> Vec<String> {
+    /// Renders an unset optional as `unset` so the two sides stay comparable.
+    fn shown<T: std::fmt::Display>(v: Option<T>) -> String {
+        v.map_or_else(|| "unset".to_string(), |v| v.to_string())
+    }
+
+    // Whole-struct equality is the gate, not the per-field list below. A field
+    // added to FileConfig later is caught by `==` before anyone remembers to
+    // extend this function; the per-field lines only make the failure legible.
+    if saved == landed {
+        return Vec::new();
+    }
+
+    let mut unlanded = Vec::new();
+    if saved.auto_cleanup != landed.auto_cleanup {
+        unlanded.push(format!(
+            "auto-cleanup: file has {}, daemon has {}",
+            shown(saved.auto_cleanup),
+            shown(landed.auto_cleanup)
+        ));
+    }
+    if saved.auto_cleanup_keep != landed.auto_cleanup_keep {
+        unlanded.push(format!(
+            "auto-cleanup-keep: file has {}, daemon has {}",
+            shown(saved.auto_cleanup_keep.as_ref().map(format_retention)),
+            shown(landed.auto_cleanup_keep.as_ref().map(format_retention))
+        ));
+    }
+    if saved.auto_cleanup_interval_secs != landed.auto_cleanup_interval_secs {
+        unlanded.push(format!(
+            "auto-cleanup-interval: file has {}, daemon has {}",
+            shown(saved.auto_cleanup_interval_secs),
+            shown(landed.auto_cleanup_interval_secs)
+        ));
+    }
+    if saved.health_check_interval_secs != landed.health_check_interval_secs {
+        unlanded.push(format!(
+            "health-check-interval: file has {}, daemon has {}",
+            shown(saved.health_check_interval_secs),
+            shown(landed.health_check_interval_secs)
+        ));
+    }
+    if saved.backend.r#type != landed.backend.r#type {
+        unlanded.push(format!(
+            "backend type: file has {}, daemon has {}",
+            saved.backend.r#type, landed.backend.r#type
+        ));
+    }
+    let saved_loop = saved.backend.btrfs_loop.as_ref();
+    let landed_loop = landed.backend.btrfs_loop.as_ref();
+    let (saved_size, landed_size) = (
+        saved_loop.and_then(|b| b.img_size),
+        landed_loop.and_then(|b| b.img_size),
+    );
+    if saved_size != landed_size {
+        unlanded.push(format!(
+            "img-size: file has {}, daemon has {}",
+            shown(saved_size),
+            shown(landed_size)
+        ));
+    }
+    let (saved_pct, landed_pct) = (
+        saved_loop.and_then(|b| b.img_max_percent),
+        landed_loop.and_then(|b| b.img_max_percent),
+    );
+    if saved_pct != landed_pct {
+        unlanded.push(format!(
+            "img-max-percent: file has {}, daemon has {}",
+            shown(saved_pct),
+            shown(landed_pct)
+        ));
+    }
+    // The `==` gate above already proved the two differ; if none of the known
+    // fields account for it, the difference is in a field this build does not
+    // know about. Still surface something rather than an empty list.
+    if unlanded.is_empty() {
+        unlanded.push("config file contents differ (unrecognized field)".to_string());
+    }
+    unlanded
 }
 
 /// Render a daemon-returned [`ConfigReport`] as the same [`GlobalConfigJson`]
@@ -3124,6 +3258,82 @@ mod tests {
             }
             _ => panic!("expected Recover"),
         }
+    }
+
+    // ── unlanded_global_settings: `config -g` write must actually reach the daemon ──
+
+    fn img_config(
+        img_size: Option<u64>,
+        img_max_percent: Option<f64>,
+    ) -> ws_ckpt_common::FileConfig {
+        ws_ckpt_common::FileConfig {
+            backend: ws_ckpt_common::BackendConfig {
+                btrfs_loop: Some(ws_ckpt_common::BtrfsLoopConfig {
+                    img_size,
+                    img_max_percent,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_unlanded_settings_when_daemon_reloaded_same_file() {
+        let saved = ws_ckpt_common::FileConfig {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(3)),
+            health_check_interval_secs: Some(30),
+            ..Default::default()
+        };
+        assert!(unlanded_global_settings(&saved, &saved).is_empty());
+    }
+
+    #[test]
+    fn unlanded_settings_reported_when_daemon_never_saw_the_file() {
+        // Sidecar case: daemon's own /etc/ws-ckpt/config.toml is absent, so it
+        // reloads into built-in defaults while the CLI wrote a real policy.
+        let saved = ws_ckpt_common::FileConfig {
+            auto_cleanup: Some(true),
+            auto_cleanup_keep: Some(CleanupRetention::Count(3)),
+            auto_cleanup_interval_secs: Some(600),
+            health_check_interval_secs: Some(30),
+            ..Default::default()
+        };
+        let unlanded = unlanded_global_settings(&saved, &ws_ckpt_common::FileConfig::default());
+        assert_eq!(unlanded.len(), 4, "got: {:?}", unlanded);
+        assert!(unlanded[0].starts_with("auto-cleanup: file has true, daemon has unset"));
+    }
+
+    #[test]
+    fn img_only_write_is_reported_when_daemon_never_saw_the_file() {
+        // Bootstrap-only settings are the case a runtime view cannot catch: the
+        // daemon would keep the running image size either way.
+        let saved = img_config(Some(64), Some(75.0));
+        let unlanded = unlanded_global_settings(&saved, &ws_ckpt_common::FileConfig::default());
+        assert_eq!(unlanded.len(), 2, "got: {:?}", unlanded);
+        assert!(unlanded[0].starts_with("img-size: file has 64, daemon has unset"));
+    }
+
+    #[test]
+    fn img_write_the_daemon_read_is_not_reported() {
+        let saved = img_config(Some(64), None);
+        assert!(unlanded_global_settings(&saved, &saved).is_empty());
+    }
+
+    #[test]
+    fn age_retention_compares_by_value() {
+        let saved = ws_ckpt_common::FileConfig {
+            auto_cleanup_keep: Some(CleanupRetention::age("30d").unwrap()),
+            ..Default::default()
+        };
+        assert!(unlanded_global_settings(&saved, &saved).is_empty());
+
+        let stale = ws_ckpt_common::FileConfig {
+            auto_cleanup_keep: Some(CleanupRetention::age("7d").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(unlanded_global_settings(&saved, &stale).len(), 1);
     }
 
     // ── disabled_warning_for: warn whenever the user touched a policy field but effective stays disabled ──

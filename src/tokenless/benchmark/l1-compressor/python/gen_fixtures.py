@@ -22,6 +22,8 @@ generates the canonical fixtures once; everything else loads them.
 
 Outputs (under ``fixtures/``, pretty-printed, deterministic — no RNG):
     records.json        1000 uniform records; backs response_items(n) latency.
+    record_reduction.json
+                        64 records with a critical anomaly in the middle.
     tool_response.json  a realistic tool result (envelope + first 60 records +
                         trace/logs); the canonical response payload measured
                         for BOTH latency (Rust) and compression rate (Python).
@@ -44,9 +46,13 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 # heaviest latency point — is served entirely from the fixture.
 RECORD_COUNT = 1000
 
-# How many records the canonical tool response embeds. Exceeds the default
-# array-truncation limit (32) so the response compressor has real work to do.
+# How many records the canonical tool response embeds. The surrounding and
+# per-record diagnostic fields give lossless cleanup measurable work to do.
 TOOL_RESPONSE_ITEMS = 60
+
+# A focused Record Reduction fixture kept separate from the canonical response
+# so existing benchmark inputs remain byte-identical.
+RECORD_REDUCTION_ITEMS = 64
 
 # Rounds in a simulated agent session (cost analysis reuses the canonical
 # response, varying only the tool index).
@@ -56,10 +62,8 @@ SESSION_ROUNDS = 50
 def _record(i: int) -> dict:
     """One canonical record.
 
-    Fields are chosen to exercise every response-compression path on a single
-    shape: ``debug`` triggers drop-field, ``snippet`` triggers string
-    truncation, and the scalar columns (id/name/path/status/score) are what
-    TOON encodes into a compact table.
+    Fields combine removable diagnostics with scalar columns that TOON can
+    encode into a compact table.
     """
     return {
         "id": i,
@@ -85,6 +89,23 @@ def build_tool_response(records: list[dict]) -> dict:
         "trace": "step-by-step debug trace of the tool invocation " * 10,
         "logs": [f"log entry number {i}" for i in range(40)],
     }
+
+
+def build_record_reduction() -> list[dict]:
+    """Records with an error and numeric anomaly away from either boundary."""
+    records = [
+        {
+            "id": i,
+            "status": "ok",
+            "latency_ms": 10,
+            "message": f"request-{i} " + "completed normally " * 6,
+        }
+        for i in range(RECORD_REDUCTION_ITEMS)
+    ]
+    records[31]["status"] = "failed"
+    records[31]["latency_ms"] = 10_000
+    records[31]["message"] = "critical anomaly in the middle of the collection"
+    return records
 
 
 def build_schema() -> dict:
@@ -128,6 +149,7 @@ def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     records = build_records()
     _write("records.json", records)
+    _write("record_reduction.json", build_record_reduction())
     _write("tool_response.json", build_tool_response(records))
     _write("schema_search.json", build_schema())
 

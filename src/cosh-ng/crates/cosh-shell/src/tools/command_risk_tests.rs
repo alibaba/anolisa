@@ -140,6 +140,63 @@ fn command_risk_assessment_awk_is_not_auto_allowlisted() {
 }
 
 #[test]
+fn command_risk_assessment_detects_awk_system_calls_with_separators() {
+    for command in [
+        "awk 'BEGIN { system(\"id\") }'",
+        "awk 'BEGIN { system (\"id\") }'",
+        "awk 'BEGIN { system\t(\"id\") }'",
+        "awk 'BEGIN { system\n(\"id\") }'",
+        r#"awk 'BEGIN { system \
+(\"id\") }'"#,
+        "awk 'BEGIN { system \\\r\n(\"id\") }'",
+        "awk 'BEGIN { if ($0 ~ /#/) system (\"id\") }'",
+        "awk 'BEGIN { ratio = 8 / 2; system (\"id\"); pattern = /safe/ }'",
+    ] {
+        let assessment = auto(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}"
+        );
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::RemoteCodeExecution),
+            "{command}: {:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"awk-shell-execution"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+}
+
+#[test]
+fn command_risk_assessment_fails_closed_for_ambiguous_awk_contexts() {
+    for command in [
+        "awk 'BEGIN { if (\"x\" ~ /\"/) print \"x\"; system(\"id\") }'",
+        "awk 'BEGIN { # \"\nsystem(\"id\") }'",
+    ] {
+        let assessment = auto(command);
+        assert_eq!(assessment.impact, RiskImpact::High, "{command}");
+        assert!(
+            assessment
+                .side_effects
+                .contains(&SideEffectClass::RemoteCodeExecution),
+            "{command}: {:?}",
+            assessment.side_effects
+        );
+        assert!(
+            assessment.reasons.contains(&"awk-shell-execution"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn command_risk_assessment_high_risk_cases() {
     for (command, reason) in [
         ("sudo id", "privilege-escalation"),

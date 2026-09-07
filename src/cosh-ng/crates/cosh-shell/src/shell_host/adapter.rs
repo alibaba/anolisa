@@ -9,10 +9,13 @@ pub(super) trait ShellAdapter {
     fn marker_filename(&self) -> &'static str;
     fn marker_script(&self) -> &'static str;
     fn isolates_readline(&self) -> bool;
+    fn supports_zsh_path_prompt_buffering(&self) -> bool {
+        false
+    }
     fn configure_command(
         &self,
         command: &mut Command,
-        marker_path: &Path,
+        marker_path: Option<&Path>,
         config: &ShellHostConfig,
     );
 }
@@ -39,19 +42,29 @@ impl ShellAdapter for BashAdapter {
     fn configure_command(
         &self,
         command: &mut Command,
-        marker_path: &Path,
+        marker_path: Option<&Path>,
         config: &ShellHostConfig,
     ) {
-        if config.native_mode {
-            command.args(["--rcfile"]).arg(marker_path).arg("-i");
+        if let Some(marker_path) = marker_path {
+            if config.native_mode {
+                command.args(["--rcfile"]).arg(marker_path).arg("-i");
+            } else {
+                command
+                    .args(["--noprofile", "--rcfile"])
+                    .arg(marker_path)
+                    .arg("-i");
+            }
+            if config.login_shell {
+                command.env("COSH_LOGIN_SHELL", "1");
+            }
         } else {
-            command
-                .args(["--noprofile", "--rcfile"])
-                .arg(marker_path)
-                .arg("-i");
-        }
-        if config.login_shell {
-            command.env("COSH_LOGIN_SHELL", "1");
+            if !config.native_mode {
+                command.args(["--noprofile", "--norc"]);
+            }
+            if config.login_shell {
+                command.arg("--login");
+            }
+            command.arg("-i");
         }
     }
 }
@@ -75,20 +88,34 @@ impl ShellAdapter for ZshAdapter {
         false
     }
 
+    fn supports_zsh_path_prompt_buffering(&self) -> bool {
+        true
+    }
+
     fn configure_command(
         &self,
         command: &mut Command,
-        _marker_path: &Path,
+        marker_path: Option<&Path>,
         config: &ShellHostConfig,
     ) {
-        command.arg("-i").env("ZDOTDIR", &config.work_dir);
-        if config.native_mode {
-            if let Some(original) = configured_original_zdotdir(config) {
-                command.env("COSH_ZDOTDIR_ORIG", original);
+        if marker_path.is_some() {
+            command.arg("-i").env("ZDOTDIR", &config.work_dir);
+            if config.native_mode {
+                if let Some(original) = configured_original_zdotdir(config) {
+                    command.env("COSH_ZDOTDIR_ORIG", original);
+                }
             }
-        }
-        if config.login_shell {
-            command.env("COSH_LOGIN_SHELL", "1");
+            if config.login_shell {
+                command.env("COSH_LOGIN_SHELL", "1");
+            }
+        } else {
+            if !config.native_mode {
+                command.env("ZDOTDIR", &config.work_dir);
+            }
+            if config.login_shell {
+                command.arg("-l");
+            }
+            command.arg("-i");
         }
     }
 }
@@ -111,12 +138,14 @@ fn configured_original_zdotdir(config: &ShellHostConfig) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::ShellIntegration;
     use super::*;
     use std::ffi::OsStr;
     use std::path::PathBuf;
 
     fn test_config(native_mode: bool, login_shell: bool) -> ShellHostConfig {
         let mut config = ShellHostConfig::new("test", PathBuf::from("/tmp/test"));
+        config.integration = ShellIntegration::Enhanced;
         config.native_mode = native_mode;
         config.login_shell = login_shell;
         config
@@ -137,7 +166,7 @@ mod tests {
         let config = test_config(true, false);
         let mut cmd = Command::new("bash");
         let marker = PathBuf::from("/tmp/marker.bash");
-        BashAdapter.configure_command(&mut cmd, &marker, &config);
+        BashAdapter.configure_command(&mut cmd, Some(&marker), &config);
         let args = collect_args(&cmd);
         assert!(!args.contains(&"--noprofile".to_string()));
         assert!(args.contains(&"--rcfile".to_string()));
@@ -149,7 +178,7 @@ mod tests {
         let config = test_config(false, false);
         let mut cmd = Command::new("bash");
         let marker = PathBuf::from("/tmp/marker.bash");
-        BashAdapter.configure_command(&mut cmd, &marker, &config);
+        BashAdapter.configure_command(&mut cmd, Some(&marker), &config);
         let args = collect_args(&cmd);
         assert!(args.contains(&"--noprofile".to_string()));
         assert!(args.contains(&"--rcfile".to_string()));
@@ -160,7 +189,7 @@ mod tests {
         let config = test_config(true, true);
         let mut cmd = Command::new("bash");
         let marker = PathBuf::from("/tmp/marker.bash");
-        BashAdapter.configure_command(&mut cmd, &marker, &config);
+        BashAdapter.configure_command(&mut cmd, Some(&marker), &config);
         assert!(has_env(&cmd, "COSH_LOGIN_SHELL"));
     }
 
@@ -169,7 +198,7 @@ mod tests {
         let config = test_config(true, false);
         let mut cmd = Command::new("bash");
         let marker = PathBuf::from("/tmp/marker.bash");
-        BashAdapter.configure_command(&mut cmd, &marker, &config);
+        BashAdapter.configure_command(&mut cmd, Some(&marker), &config);
         assert!(!has_env(&cmd, "COSH_LOGIN_SHELL"));
     }
 
@@ -178,7 +207,7 @@ mod tests {
         let config = test_config(true, true);
         let mut cmd = Command::new("zsh");
         let marker = PathBuf::from("/tmp/marker.zsh");
-        ZshAdapter.configure_command(&mut cmd, &marker, &config);
+        ZshAdapter.configure_command(&mut cmd, Some(&marker), &config);
         assert!(has_env(&cmd, "COSH_LOGIN_SHELL"));
     }
 
@@ -190,7 +219,7 @@ mod tests {
             .push(("HOME".to_string(), "/tmp/cosh-test-home".to_string()));
         let mut cmd = Command::new("zsh");
         let marker = PathBuf::from("/tmp/marker.zsh");
-        ZshAdapter.configure_command(&mut cmd, &marker, &config);
+        ZshAdapter.configure_command(&mut cmd, Some(&marker), &config);
 
         assert!(cmd.get_envs().any(|(key, value)| {
             key == OsStr::new("COSH_ZDOTDIR_ORIG")
@@ -203,7 +232,7 @@ mod tests {
         let config = test_config(false, false);
         let mut cmd = Command::new("zsh");
         let marker = PathBuf::from("/tmp/marker.zsh");
-        ZshAdapter.configure_command(&mut cmd, &marker, &config);
+        ZshAdapter.configure_command(&mut cmd, Some(&marker), &config);
         assert!(!has_env(&cmd, "COSH_ZDOTDIR_ORIG"));
     }
 }

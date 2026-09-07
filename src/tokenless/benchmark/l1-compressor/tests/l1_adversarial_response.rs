@@ -14,16 +14,17 @@
 
 //! Response compression robustness — 16 selected legitimate JSON Value boundary cases.
 //!
-//! Every test asserts `compress` returns a valid JSON value WITHOUT panicking
-//! on edge-case input. The compressor must never crash, hang, or blow the
-//! stack on any structurally valid JSON. 16 tests.
+//! In-range inputs return valid JSON without panicking. Inputs beyond
+//! `serde_json`'s parser depth limit return a structured error instead of
+//! risking a stack overflow. 16 tests.
 
 use serde_json::{Value, json};
-use tokenless_schema::ResponseCompressor;
+use tokenless_bench::compress_json;
+use tokenless_compressors::{JsonCompressionContext, JsonCompressor, RecoveryMethod};
 
 /// Compress and assert the result is still valid JSON (serializable).
 fn compress_ok(v: &Value) -> Value {
-    let out = ResponseCompressor::new().compress(v);
+    let out = compress_json(v);
     // Round-trips through the serializer without error → structurally valid.
     let _ = serde_json::to_string(&out).expect("compressed output must serialize");
     out
@@ -33,8 +34,8 @@ fn compress_ok(v: &Value) -> Value {
 fn huge_flat_array() {
     let arr: Vec<i64> = (0..100_000).collect();
     let out = compress_ok(&json!(arr));
-    // Default truncate_arrays_at=32 → 32 kept + 1 marker.
-    assert_eq!(out.as_array().unwrap().len(), 33);
+    // Default truncate_arrays_at=32 + array_tail_preserve=8 → 32 head + 1 marker + 8 tail.
+    assert_eq!(out.as_array().unwrap().len(), 41);
 }
 
 #[test]
@@ -44,14 +45,25 @@ fn huge_string() {
 }
 
 #[test]
-fn very_deep_nesting_does_not_overflow() {
-    // 500 levels: the depth guard (default max_depth=8) collapses long before
-    // the stack is at risk.
+fn very_deep_nesting_returns_a_parser_error() {
     let mut v = json!("leaf");
     for _ in 0..500 {
         v = json!({ "child": v });
     }
-    let _ = compress_ok(&v);
+    let input = serde_json::to_string(&v).unwrap();
+    let result = JsonCompressor::default().compress(
+        &input,
+        &JsonCompressionContext {
+            // Matches the shared helper; recovery is inert without a Stash.
+            recovery: &RecoveryMethod::Shell,
+            stash: None,
+            allow_toon: false,
+            preserve_top_level_shape: false,
+            min_toon_chars: usize::MAX,
+            allow_unrecoverable: true,
+        },
+    );
+    assert!(result.is_err());
 }
 
 #[test]

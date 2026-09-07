@@ -108,7 +108,7 @@ struct AuditCursorV1 {
 ///
 /// Returns `AuditCursorInvalid` for malformed, unsupported, or filter-mismatched
 /// cursors and `InvalidInput` for page sizes outside `1..=1000`.
-// Keep the workspace Rust 1.74 MSRV; `Option::is_none_or` is newer.
+// Keep the explicit predicates readable across the inclusive filter bounds.
 #[allow(clippy::unnecessary_map_or)]
 pub fn query_events(
     root: &Path,
@@ -626,7 +626,9 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = (pair[0] as char).to_digit(16)?;
             let low = (pair[1] as char).to_digit(16)?;

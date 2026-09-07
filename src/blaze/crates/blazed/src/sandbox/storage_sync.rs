@@ -450,11 +450,8 @@ mod tests {
     use blaze_core::backend::{BackendKind, SpawnRequest};
     use blaze_core::config::TemplateSection;
     use blaze_core::error::{BlazeError, Result as CoreResult};
-    use blaze_core::lifecycle::{
-        BackendOwnership, OperationKind, SandboxInstance, SandboxState, StartPath,
-    };
+    use blaze_core::lifecycle::{BackendOwnership, OperationKind, SandboxInstance, SandboxState};
     use blaze_core::policy::{BackendConfigs, WorkloadClass};
-    use blaze_core::pool::PoolManager;
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
@@ -464,8 +461,10 @@ mod tests {
     use crate::sandbox::manager::{SandboxManagerInit, SandboxManagerResources};
     use crate::sandbox::template::TemplateCatalog;
     use crate::spawner::{
-        BackendInstance, BackendSpawner, MockSpawner, SpawnResult, SpawnerRegistry,
+        BackendInstance, BackendSpawnRequest, MockSpawner, SpawnResult, SpawnerRegistry,
+        spawn_with_runtime_directory,
     };
+    use crate::state_store::{OwnedRunDir, StateStore};
 
     use super::*;
 
@@ -635,10 +634,6 @@ mod tests {
         fn pool_status(&self) -> PoolStatus {
             self.inner.pool_status()
         }
-
-        async fn drain_pool(&self) -> CoreResult<usize> {
-            self.inner.drain_pool().await
-        }
     }
 
     fn manager(
@@ -663,11 +658,10 @@ mod tests {
         spawners.insert(BackendKind::Mock, Arc::new(MockSpawner));
         let (manager, resources) = SandboxManager::new(SandboxManagerInit {
             instances: HashMap::new(),
-            pool: PoolManager::new(),
             spawners,
             active_backend: BackendKind::Mock,
             storage,
-            state_dir,
+            state_store: StateStore::new(state_dir),
             rootfs_size: 64,
             mem_size: 32,
             template_catalog,
@@ -723,7 +717,6 @@ mod tests {
             BackendKind::Mock,
             WorkloadClass::AgentTool,
             "sha256:sync-test".into(),
-            StartPath::Cold,
             "sync-test".into(),
         );
         metadata.id = id;
@@ -751,17 +744,24 @@ mod tests {
                 rootfs_diff_path: PathBuf::new(),
                 instance_dir: PathBuf::new(),
             });
-            let owner = MockSpawner
-                .spawn(SpawnRequest {
-                    instance_id: id,
-                    run_dir,
-                    binary_path: PathBuf::new(),
-                    storage: slot,
-                    backend: BackendConfigs::default(),
-                    vm: None,
-                })
-                .await
-                .expect("mock owner");
+            let run_dir = OwnedRunDir::for_test(id, run_dir);
+            let owner = spawn_with_runtime_directory(
+                &MockSpawner,
+                BackendSpawnRequest::new(
+                    SpawnRequest {
+                        instance_id: id,
+                        binary_path: PathBuf::new(),
+                        storage: slot,
+                        backend: BackendConfigs::default(),
+                        vm: None,
+                    },
+                    run_dir.clone(),
+                )
+                .expect("matching backend request"),
+            )
+            .await
+            .expect("mock owner");
+            drop(run_dir);
             manager
                 .insert_backend_owner(id, owner)
                 .expect("register owner");

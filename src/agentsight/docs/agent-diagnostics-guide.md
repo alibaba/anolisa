@@ -60,7 +60,7 @@ AgentSight 支持两种 Agent 发现机制：
   "https": [
     {"rule": ["*.openai.com"]},
     {"rule": ["*.anthropic.com"]},
-    {"rule": ["dashscope.aliyuncs.com"]}
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]}
   ]
 }
 ```
@@ -111,9 +111,11 @@ AgentSight 对所有发现的 Agent 进程提供**两层监控**：
 | `NoPort` | 进程存活但无监听端口（仍可检测崩溃） |
 | `Offline` | 进程异常退出（仅关联了 crash 事件时保留） |
 
-### 2.4 Dashboard 侧边栏展示规则
+### 2.4 Dashboard 展示规则
 
-Dashboard 右侧「Agent 状态」侧边栏实时展示已发现的 Agent 进程健康状态，展示规则如下：
+Dashboard 的「Agent 看板」从 `genai_events.db` 与 `trajectories.db` 汇总历史活动，展示所有曾被采集到的 Agent、最后活跃时间、活动量、Token 与数据来源。
+
+独立的「运行时健康」区域继续实时展示已发现的 Agent 进程健康状态，展示规则如下：
 
 - **正常退出**（无未完成的 LLM 调用）：静默移除，不在侧边栏展示，不生成中断事件
 - **异常退出**（存在 pending LLM 调用被中断）：生成 `agent_crash` 中断事件，侧边栏展示崩溃记录，保留 5 分钟后自动清理
@@ -124,8 +126,11 @@ Dashboard 右侧「Agent 状态」侧边栏实时展示已发现的 Agent 进程
 ### 2.5 API 查询
 
 ```bash
-# 查询所有 Agent 健康状态
+# 查询历史 Agent 活动
 curl http://127.0.0.1:7396/api/agent-health
+
+# 查询当前进程健康（支持 include_clients=true）
+curl http://127.0.0.1:7396/api/agent-process-health
 ```
 
 响应示例：
@@ -134,15 +139,15 @@ curl http://127.0.0.1:7396/api/agent-health
 {
   "agents": [
     {
-      "pid": 12345,
       "agent_name": "OpenClaw",
-      "status": "healthy",
-      "ports": [8080],
-      "latency_ms": 12,
-      "last_check_time": 1717830000000
+      "last_seen_ns": 1717830000000000000,
+      "genai_calls": 128,
+      "genai_tokens": 500000,
+      "trajectory_steps": 42,
+      "trajectory_tokens": 120000,
+      "source": "genai_events+trajectories"
     }
-  ],
-  "last_scan_time": 1717830000000
+  ]
 }
 ```
 
@@ -382,7 +387,7 @@ sudo agentsight trace --daemon
   "https": [
     {"rule": ["*.openai.com"]},
     {"rule": ["*.anthropic.com"]},
-    {"rule": ["dashscope.aliyuncs.com"]}
+    {"rule": ["dashscope.aliyuncs.com", "*.maas.aliyuncs.com"]}
   ],
   "cmdline": {
     "allow": [
@@ -466,7 +471,12 @@ AgentSight 自动识别并解析以下 LLM API 格式：
 | OpenAI / 兼容 API | OpenAI Chat Completions | 完整 |
 | Anthropic (Claude) | Messages API（含 cache token） | 完整 |
 | Google Gemini | GenerateContent API | 完整 |
-| 通义千问 (Qwen) | DashScope API | 完整 |
+| 通义千问 (Qwen) | DashScope OpenAI 兼容模式（`/compatible-mode/v1/chat/completions`） | 完整 |
+| 百炼 / DashScope 原生 | `/api/v1/services/aigc/text-generation/generation`、`/api/v1/services/aigc/multimodal-generation/generation` | 完整（多模态 `image_tokens` 计入 input） |
+
+> 百炼原生协议是 Dify / LangGraph 中「百炼」类型节点发出的请求格式，与 OpenAI 兼容模式并行存在：
+> 请求把 messages 嵌在 `input` 对象里，响应把结果包在 `output` 里且顶层无 `model`（model 名取自请求体），
+> 流式响应不发 `data: [DONE]`，以 `output.finish_reason` 作为结束标志。
 
 ---
 
@@ -483,12 +493,13 @@ AgentSight 自动识别并解析以下 LLM API 格式：
 | `/api/grader/evaluate` | POST | 手动评估 Conversation 质量 |
 | `/api/grader/latest` | GET | 查询最新 Conversation 评估结果 |
 | `/api/agent-names` | GET | Agent 名称列表 |
-| `/api/agent-health` | GET | Agent 健康状态 |
+| `/api/agent-health` | GET | SQLite 历史 Agent 活动 |
+| `/api/agent-process-health` | GET | 当前 Agent 进程健康状态 |
 | `/api/interruptions` | GET | 中断事件列表 |
 | `/api/interruptions/count` | GET | 中断统计（按严重级别） |
 | `/api/interruptions/stats` | GET | 中断统计（按类型） |
 | `/api/interruptions/session-counts` | GET | 各 Session 的中断聚合 |
-| `/api/interruptions/conversation-counts` | GET | 各 Conversation 的中断聚合 |
+| `/api/interruptions/conversation-counts` | GET | 各 Session + Conversation 的中断聚合 |
 | `/api/sessions/{id}/interruptions` | GET | 指定 Session 的中断 |
 | `/api/conversations/{id}/interruptions` | GET | 指定 Conversation 的中断 |
 | `/api/export/atif/trace/{id}` | GET | ATIF 格式导出 |

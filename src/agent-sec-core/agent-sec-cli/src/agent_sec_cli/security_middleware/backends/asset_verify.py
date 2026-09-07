@@ -2,7 +2,10 @@
 
 from typing import Any
 
-from agent_sec_cli.asset_verify import run_verification
+from agent_sec_cli.asset_verify import (
+    format_verification_result,
+    run_verification,
+)
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.context import RequestContext
 from agent_sec_cli.security_middleware.result import ActionResult
@@ -34,30 +37,16 @@ class AssetVerifyBackend(BaseBackend):
                 error_type=type(exc).__name__,
             )
 
-        passed = results["passed"]
-        failed = results["failed"]
-
-        # Build human-readable output
-        output_lines: list[str] = []
-        for name in passed:
-            output_lines.append(f"[OK] {name}")
-        for item in failed:
-            output_lines.append(f"[ERROR] {item['name']}")
-            output_lines.append(f"  {item['error']}")
-
-        output_lines.append("")
-        output_lines.append("=" * 50)
-        output_lines.append(f"PASSED: {len(passed)}")
-        output_lines.append(f"FAILED: {len(failed)}")
-        output_lines.append("=" * 50)
-        status = "VERIFICATION PASSED" if not failed else "VERIFICATION FAILED"
-        output_lines.append(status)
-
-        has_failures = len(failed) > 0
+        has_failures = results["outcome"] == "failed"
 
         return ActionResult(
             success=(not has_failures),
-            stdout="\n".join(output_lines) + "\n",
-            data={"passed": len(passed), "failed": len(failed)},
+            stdout=format_verification_result(results),
+            data={
+                "outcome": results["outcome"],
+                "checked": results["checked"],
+                "passed": len(results["passed"]),
+                "failed": len(results["failed"]),
+            },
             exit_code=1 if has_failures else 0,
         )

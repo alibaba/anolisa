@@ -110,8 +110,25 @@ fn test_parse_output_invalid_json() {
 fn test_parse_output_tool_calls_only() {
     let json = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"read_file"},{"type":"tool_call","name":"write_file"}]}]"#;
     let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
-    assert_eq!(tools, vec!["read_file", "write_file"]);
+    let names: Vec<&str> = tools.iter().map(|k| k.name.as_str()).collect();
+    assert_eq!(names, vec!["read_file", "write_file"]);
+    // No arguments field -> no fingerprint
+    assert!(tools.iter().all(|k| k.args_fingerprint.is_none()));
     assert!(text.is_empty());
+}
+
+#[test]
+fn test_parse_output_tool_call_args_fingerprint() {
+    // Same tool with different arguments must yield different keys (#2691),
+    // while identical arguments yield identical keys.
+    let json_a = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"terminal","arguments":{"command":"pip list"}}]}]"#;
+    let json_b = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"terminal","arguments":{"command":"cat foo"}}]}]"#;
+    let (tools_a, _) = parse_output_messages_for_loop_detection(Some(json_a));
+    let (tools_a2, _) = parse_output_messages_for_loop_detection(Some(json_a));
+    let (tools_b, _) = parse_output_messages_for_loop_detection(Some(json_b));
+    assert!(tools_a[0].args_fingerprint.is_some());
+    assert_eq!(tools_a, tools_a2);
+    assert_ne!(tools_a, tools_b);
 }
 
 #[test]
@@ -126,7 +143,8 @@ fn test_parse_output_text_only() {
 fn test_parse_output_mixed() {
     let json = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"search"},{"type":"text","content":"Found results"}]}]"#;
     let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
-    assert_eq!(tools, vec!["search"]);
+    let names: Vec<&str> = tools.iter().map(|k| k.name.as_str()).collect();
+    assert_eq!(names, vec!["search"]);
     assert_eq!(text, "Found results");
 }
 
@@ -807,6 +825,10 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
         .insert("sse_event_count".to_string(), "2".to_string());
     call.metadata
         .insert("call_kind".to_string(), "main".to_string());
+    call.metadata.insert(
+        "first_output_timestamp_ns".to_string(),
+        (BASE_NS + STEP_NS / 2).to_string(),
+    );
 
     store
         .complete_pending(&GenAISemanticEvent::LLMCall(call))
@@ -818,17 +840,25 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
         .unwrap();
     assert_eq!(total, 1, "complete must update the idle snapshot row");
 
-    let (status, call_id, trace_id, origin): (String, String, String, String) = conn
+    let (status, call_id, trace_id, origin, first_output): (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+    ) = conn
         .query_row(
-            "SELECT status, call_id, trace_id, pending_origin FROM genai_events",
+            "SELECT status, call_id, trace_id, pending_origin, first_output_timestamp_ns
+             FROM genai_events",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
     assert_eq!(status, "complete");
     assert_eq!(call_id, "real-response-id");
     assert_eq!(trace_id, "real-response-id");
     assert_eq!(origin, "idle_drain");
+    assert_eq!(first_output, Some(BASE_NS + STEP_NS / 2));
     drop(conn);
     cleanup_db(&path);
 }
@@ -1009,9 +1039,8 @@ fn test_prune_old_records() {
 }
 
 #[test]
-fn test_wal_checkpoint_methods() {
+fn test_wal_checkpoint_method() {
     let (store, path) = create_populated_store("wal_ckpt");
-    store.checkpoint().unwrap();
     store.wal_checkpoint().unwrap();
     cleanup_db(&path);
 }
@@ -1359,4 +1388,223 @@ fn test_update_fallback_session_id_keeps_non_hex_32_chars() {
         );
         assert_eq!(session_id_of(&store, "c1").as_deref(), Some(existing));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Size-based pruning (check_and_prune_if_needed / startup cleanup)
+// ---------------------------------------------------------------------------
+
+/// Cap the genai database at 1MB for size-limit tests.
+///
+/// All tests set the same value, so parallel execution never observes
+/// conflicting limits, and other tests' databases stay far below the
+/// resulting 0.9MB prune threshold.
+fn set_test_db_limit() {
+    unsafe { std::env::set_var("AGENTSIGHT_GENAI_DB_MAX_SIZE_MB", "1") };
+}
+
+fn unique_size_test_db(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "test_genai_size_{label}_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+fn cleanup_size_test_db(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+}
+
+/// Insert `rows` records of roughly `payload` bytes each via direct SQL,
+/// bypassing store_event's size checks so the test controls the file size.
+fn grow_db(store: &GenAISqliteStore, rows: usize, payload: usize) {
+    let blob = "x".repeat(payload);
+    {
+        let conn = store.conn.lock().unwrap();
+        for i in 0..rows {
+            conn.execute(
+                "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json)
+                 VALUES ('llm_call', ?1, ?2)",
+                rusqlite::params![i as i64, blob],
+            )
+            .unwrap();
+        }
+    }
+    store.wal_checkpoint().unwrap();
+}
+
+fn row_count(store: &GenAISqliteStore) -> i64 {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row("SELECT COUNT(*) FROM genai_events", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Covers all three adaptive prune branches: overshoot 1-2x (10% per
+/// iteration), 2-5x (25%), and 5x+ (50%). Each scenario must converge
+/// below the prune threshold within the iteration bound.
+#[test]
+fn check_and_prune_converges_for_all_overshoot_levels() {
+    set_test_db_limit();
+    // (label, rows x 10KB) => ~1.5MB / ~3MB / ~6MB against a 1MB cap.
+    for (label, rows) in [("low", 150), ("mid", 300), ("high", 600)] {
+        let path = unique_size_test_db(label);
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        grow_db(&store, rows, 10 * 1024);
+        let threshold = super::schema::get_prune_threshold();
+        assert!(
+            store.get_total_db_size() > threshold,
+            "{label}: setup must exceed the prune threshold"
+        );
+
+        store.check_and_prune_if_needed().unwrap();
+
+        // Convergence is on logical size: the physical file keeps its peak
+        // size (freed pages stay on the freelist, #2888).
+        assert!(
+            store.effective_db_size() < threshold,
+            "{label}: logical size must drop below threshold, got {} bytes",
+            store.effective_db_size()
+        );
+        assert!(
+            row_count(&store) < rows as i64,
+            "{label}: oldest records must have been deleted"
+        );
+        drop(store);
+        cleanup_size_test_db(&path);
+    }
+}
+
+/// A no-op when the database is already within the threshold.
+#[test]
+fn check_and_prune_noop_below_threshold() {
+    set_test_db_limit();
+    let path = unique_size_test_db("noop");
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    grow_db(&store, 10, 64);
+
+    store.check_and_prune_if_needed().unwrap();
+
+    assert_eq!(
+        row_count(&store),
+        10,
+        "below-threshold prune must not delete"
+    );
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+/// When another connection holds a read snapshot, the truncating WAL
+/// checkpoint returns busy and the prune loop must stop instead of deleting
+/// round after round against a size that cannot converge (only the WAL keeps
+/// growing) — under the pre-fix behavior the loop deleted until the table was
+/// empty.
+#[test]
+fn check_and_prune_stops_when_wal_checkpoint_busy() {
+    set_test_db_limit();
+    let path = unique_size_test_db("busy");
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    grow_db(&store, 300, 10 * 1024);
+    store.wal_checkpoint().unwrap();
+
+    // Hold a read snapshot on a separate connection: this blocks
+    // `PRAGMA wal_checkpoint(TRUNCATE)` from completing (busy).
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM genai_events;")
+        .unwrap();
+
+    store.check_and_prune_if_needed().unwrap();
+
+    let rows = row_count(&store);
+    assert!(
+        rows > 0,
+        "prune must stop once the WAL cannot be truncated, not delete everything \
+         (remaining: {rows})"
+    );
+    drop(reader);
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+/// Reopening an oversized database triggers the startup cleanup path in
+/// `new_with_path_and_batch`.
+#[test]
+fn startup_cleanup_prunes_oversized_db() {
+    set_test_db_limit();
+    let path = unique_size_test_db("startup");
+    {
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        grow_db(&store, 300, 10 * 1024); // ~3MB > 1MB cap
+    }
+
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    let threshold = super::schema::get_prune_threshold();
+    assert!(
+        store.effective_db_size() < threshold,
+        "startup cleanup must bring the logical size below the threshold"
+    );
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+#[test]
+fn agent_activity_summaries_group_names_and_aggregate_calls() {
+    let path = unique_size_test_db("agent_activity");
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name,
+              input_tokens, output_tokens, cache_read_tokens, event_json)
+             VALUES ('llm_call', 100, 150, 'Claude', 10, 5, 2, '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name,
+              input_tokens, output_tokens, cache_creation_tokens, event_json)
+             VALUES ('llm_call', 200, 0, 'claude', 20, 10, 3, '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, agent_name, input_tokens,
+              output_tokens, event_json)
+             VALUES ('tool_use', 300, 'Claude', 999, 999, '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, process_name, input_tokens,
+              output_tokens, event_json)
+             VALUES ('llm_call', 250, 'Codex', 7, 3, '{}')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let summaries = store.list_agent_activity_summaries().unwrap();
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].agent_name, "Codex");
+    assert_eq!(summaries[0].last_seen_ns, 250);
+    assert_eq!(summaries[0].total_calls, 1);
+    assert_eq!(summaries[0].total_tokens, 10);
+    assert_eq!(summaries[1].agent_name, "Claude");
+    assert_eq!(summaries[1].last_seen_ns, 200);
+    assert_eq!(summaries[1].total_calls, 2);
+    assert_eq!(summaries[1].total_tokens, 50);
+
+    drop(store);
+    cleanup_size_test_db(&path);
 }

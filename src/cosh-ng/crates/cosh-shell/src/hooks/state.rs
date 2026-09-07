@@ -4,6 +4,32 @@ use super::prelude::{FindingSeverity, HookEngine, HookFinding};
 
 const MAX_HOOK_DISPLAY_EVENTS: usize = 128;
 
+/// Option indices for the hook-action disambiguation panel shown when a hook
+/// id collides between the shell layer and the agent layer.
+pub(crate) const HOOK_ACTION_SHELL: usize = 0;
+pub(crate) const HOOK_ACTION_AGENT: usize = 1;
+pub(crate) const HOOK_ACTION_BOTH: usize = 2;
+pub(crate) const HOOK_ACTION_OPTION_COUNT: usize = 3;
+
+/// Whether the pending disambiguation is an enable or disable action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookActionKind {
+    Enable,
+    Disable,
+}
+
+/// Pending interactive disambiguation when a hook id collides between the
+/// shell layer (`HookEngine`) and the agent layer (`cosh-core registry`).
+/// The user picks which layer(s) to enable/disable via a question panel
+/// before the action is applied.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingHookAction {
+    pub(crate) panel_id: String,
+    pub(crate) hook_id: String,
+    pub(crate) action: HookActionKind,
+    pub(crate) selected_option: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct HookRuntimeState {
     pub(crate) handled_command_hooks: HashSet<String>,
@@ -21,6 +47,7 @@ pub(crate) struct HookRuntimeState {
     pub(crate) noisy_groups: HashSet<String>,
     pub(crate) display_events: Vec<RuntimeHookDisplayEvent>,
     pub(crate) interruption_budget: HashMap<String, InterruptionBudgetRecord>,
+    pub(crate) pending_action: Option<PendingHookAction>,
 }
 
 impl HookRuntimeState {

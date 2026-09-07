@@ -8,6 +8,7 @@ mod list_directory;
 pub mod mcp;
 pub mod read_file;
 mod read_many_files;
+mod runtime_context;
 mod save_memory;
 pub mod shell;
 pub mod shell_evidence;
@@ -60,7 +61,7 @@ pub(super) fn expand_tilde(path_str: &str) -> PathBuf {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolKind {
     ReadOnly,
     /// A network request that can reach services outside the local process.
@@ -70,6 +71,8 @@ pub enum ToolKind {
     ShellEvidence,
     /// An external tool discovered from a configured MCP server.
     Mcp,
+    /// A side effect that only the negotiated Gateway host may execute.
+    HostedSideEffect,
     /// A tool contributed by an extension-owned external runtime.
     External,
     Other,
@@ -77,11 +80,23 @@ pub enum ToolKind {
 
 pub struct ToolContext {
     pub cwd: PathBuf,
-    #[allow(dead_code)]
     pub session_id: String,
-    #[allow(dead_code)]
     pub project_root: PathBuf,
     workspace: SessionWorkspace,
+    runtime: ToolRuntimeContext,
+}
+
+/// Runtime-owned metadata exposed to tools without placing dynamic values in
+/// the provider's cached system prompt.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolRuntimeContext {
+    pub(crate) model: String,
+    pub(crate) approval_mode: String,
+    pub(crate) session_resumed: bool,
+    pub(crate) compaction_revision: u64,
+    pub(crate) compacted_through: Option<usize>,
+    pub(crate) tools: Vec<String>,
+    pub(crate) active_extensions: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -154,20 +169,23 @@ impl ToolContext {
             session_id,
             project_root,
             workspace,
+            runtime: ToolRuntimeContext::default(),
         }
     }
 
-    pub(crate) fn with_workspace(
+    pub(crate) fn with_runtime(
         cwd: PathBuf,
         session_id: String,
         project_root: PathBuf,
         workspace: SessionWorkspace,
+        runtime: ToolRuntimeContext,
     ) -> Self {
         Self {
             cwd,
             session_id,
             project_root,
             workspace,
+            runtime,
         }
     }
 
@@ -286,11 +304,22 @@ impl ToolRegistry {
         registry.register(Box::new(glob::GlobTool));
         registry.register(Box::new(list_directory::ListDirectoryTool));
         registry.register(Box::new(read_many_files::ReadManyFilesTool));
+        registry.register(Box::new(runtime_context::RuntimeContextTool));
         registry.register(Box::new(save_memory::SaveMemoryTool));
         registry.register(Box::new(todo::TodoTool::new()));
         registry.register(Box::new(web_fetch::WebFetchTool::new()));
         registry.register(Box::new(skill::SkillTool::new(Arc::clone(&skill_manager))));
         registry.skill_manager = Some(skill_manager);
+        registry
+    }
+
+    /// Returns the task-only audited tool inventory for Gateway brokered v1.
+    ///
+    /// The inventory is constructed directly instead of filtering the legacy
+    /// registry so new legacy tools cannot become exposed by accident.
+    pub(crate) fn gateway_brokered_v1() -> Self {
+        let mut registry = Self::new();
+        registry.ask_user_question_enabled = true;
         registry
     }
 
@@ -473,10 +502,23 @@ mod tests {
             "glob",
             "list_directory",
             "read_many_files",
+            "runtime_context",
             "save_memory",
             "web_fetch",
         ] {
             assert!(registry.contains(name), "missing default tool: {name}");
+        }
+    }
+
+    #[test]
+    fn brokered_inventory_is_explicit_and_task_only() {
+        let registry = ToolRegistry::gateway_brokered_v1();
+
+        assert_eq!(registry.names(), vec!["ask_user_question"]);
+        assert!(registry.supports_ask_user_question());
+        assert!(!registry.contains("workspace_checkpoint_create"));
+        for legacy_side_effect in ["shell", "write_file", "edit", "save_memory"] {
+            assert!(!registry.contains(legacy_side_effect));
         }
     }
 

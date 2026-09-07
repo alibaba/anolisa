@@ -155,6 +155,10 @@ turns=0
 reloads=0
 while IFS= read -r line; do
   case "$line" in
+    *'"subtype":"initialize"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"subtype":"initialize","protocol_version":1,"capabilities":{}}}}\n' "$request_id"
+      ;;
     *'"type":"user"'*)
       turns=$((turns + 1))
       if [ "$turns" -eq 1 ] && [ ! -f "__GATE__" ]; then
@@ -244,7 +248,7 @@ fn agent_request_does_not_serialize_internal_context_binding() {
 #[test]
 fn prepare_invocation_approval_modes() {
     let recommend = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Recommend);
-    assert!(recommend.args.contains(&"strict".to_string()));
+    assert!(recommend.args.contains(&"recommend".to_string()));
 
     let auto = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
     assert!(auto.args.contains(&"auto".to_string()));
@@ -254,7 +258,7 @@ fn prepare_invocation_approval_modes() {
 }
 
 #[test]
-fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
+fn shell_handoff_continuation_keeps_recommend_args_without_recommend_claim() {
     let mut request = test_request();
     request.context_hints = vec![
         crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
@@ -262,7 +266,7 @@ fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
     ];
     let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
 
-    assert!(inv.args.contains(&"strict".to_string()));
+    assert!(inv.args.contains(&"recommend".to_string()));
     assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
     assert!(
         inv.prompt
@@ -652,6 +656,10 @@ if [ "$1" = "--session-control" ]; then
 fi
 while IFS= read -r line; do
   case "$line" in
+    *'"subtype":"initialize"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"subtype":"initialize","protocol_version":1,"capabilities":{{}}}}}}}}\n' "$request_id"
+      ;;
     *'"type":"user"'*)
       printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"done"}}'
       ;;
@@ -1140,6 +1148,10 @@ turns=0
 reloads=0
 while IFS= read -r line; do
   case "$line" in
+    *'"subtype":"initialize"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"subtype":"initialize","protocol_version":1,"capabilities":{}}}}\n' "$request_id"
+      ;;
     *'"type":"user"'*)
       turns=$((turns + 1))
       printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done-r%s"}\n' "$reloads"
@@ -1189,4 +1201,75 @@ done
     );
     drop(adapter);
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// Verifies that `registry_query_short` forwards `--workspace` to the
+/// short-lived `cosh-core --registry` subprocess using the correct
+/// priority: `shell_cwd` -> active session scope -> omit `--workspace`.
+/// Also pins the last-known-value retention when `set_shell_cwd(None)`
+/// is called after a valid cwd.
+#[test]
+fn registry_query_short_workspace_priority() {
+    let script = write_mock_core(
+        "workspace-priority",
+        r#"#!/bin/sh
+workspace=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) shift; workspace="${1:-}";;
+  esac
+  shift
+done
+IFS= read -r line || exit 1
+request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"workspace":"%s"}}\n' "$request_id" "$workspace"
+exit 0
+"#,
+    );
+
+    // 1. shell_cwd wins over session scope.
+    {
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
+        adapter.set_shell_cwd(Some("/shell/cwd/path"));
+        *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/session/scope/path".to_string(),
+        );
+        let result = adapter
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .expect("shell_cwd should take priority");
+        assert_eq!(result["workspace"], "/shell/cwd/path");
+    }
+
+    // 2. Falls back to session scope when shell_cwd is absent.
+    {
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
+        *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/session/scope/path".to_string(),
+        );
+        let result = adapter
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .expect("session scope should be used as fallback");
+        assert_eq!(result["workspace"], "/session/scope/path");
+    }
+
+    // 3. set_shell_cwd(None) retains the last known value instead of
+    //    clearing it, so subsequent registry queries keep using the real
+    //    shell cwd rather than silently degrading to session scope.
+    {
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
+        adapter.set_shell_cwd(Some("/shell/cwd/path"));
+        adapter.set_shell_cwd(None);
+        *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/session/scope/path".to_string(),
+        );
+        let result = adapter
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .expect("last-known shell_cwd should survive None update");
+        assert_eq!(result["workspace"], "/shell/cwd/path");
+    }
+
+    let _ = std::fs::remove_file(&script);
 }

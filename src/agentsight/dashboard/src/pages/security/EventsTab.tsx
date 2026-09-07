@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n } from '../../i18n';
 import type {
   SecurityApiResponse,
   SecurityEventRecord,
@@ -33,12 +34,14 @@ export const EventsTab: React.FC<{
   loadEvents,
   onSelectEvent,
   onViewTimeline,
-}) => (
+}) => {
+  const { t } = useI18n();
+  return (
   <section className="space-y-4">
     <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
         <label className="text-xs text-gray-500">
-          Category
+          {t('sec.category')}
           <select
             value={eventFilters.category}
             onChange={(event) => setEventFilters((current) => ({
@@ -47,14 +50,14 @@ export const EventsTab: React.FC<{
             }))}
             className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
           >
-            <option value="">全部</option>
+            <option value="">{t('sec.all')}</option>
             {categoryFilterOptions.map((value) => (
               <option key={value} value={value}>{value}</option>
             ))}
           </select>
         </label>
         <label className="text-xs text-gray-500">
-          Result
+          {t('sec.result')}
           <select
             value={eventFilters.result}
             onChange={(event) => setEventFilters((current) => ({
@@ -63,14 +66,14 @@ export const EventsTab: React.FC<{
             }))}
             className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
           >
-            <option value="">全部</option>
+            <option value="">{t('sec.all')}</option>
             {resultFilterOptions.map((value) => (
               <option key={value} value={value}>{value}</option>
             ))}
           </select>
         </label>
         <label className="text-xs text-gray-500">
-          Verdict
+          {t('sec.verdict')}
           <select
             value={eventFilters.verdict}
             onChange={(event) => setEventFilters((current) => ({
@@ -79,15 +82,15 @@ export const EventsTab: React.FC<{
             }))}
             className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-400"
           >
-            <option value="">全部</option>
+            <option value="">{t('sec.all')}</option>
             {verdictFilterOptions.map((value) => (
               <option key={value} value={value}>{value}</option>
             ))}
           </select>
         </label>
         {[
-          ['session_id', 'Session ID'],
-          ['run_id', 'Run ID'],
+          ['session_id', t('sec.sessionId')],
+          ['run_id', t('sec.runId')],
         ].map(([key, label]) => (
           <label key={key} className="text-xs text-gray-500">
             {label}
@@ -109,7 +112,7 @@ export const EventsTab: React.FC<{
             disabled={eventsLoading}
             className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            查询
+            {t('common.query')}
           </button>
           <button
             onClick={() => {
@@ -118,7 +121,7 @@ export const EventsTab: React.FC<{
             }}
             className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
-            清空
+            {t('sec.clear')}
           </button>
         </div>
       </div>
@@ -132,4 +135,5 @@ export const EventsTab: React.FC<{
       onViewTimeline={onViewTimeline}
     />
   </section>
-);
+  );
+};

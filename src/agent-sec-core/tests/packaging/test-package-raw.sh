@@ -9,8 +9,19 @@ trap 'rm -rf "$TMP"' EXIT
 BUILD="$TMP/build"
 VERSION="$(python3 "$ROOT/packaging/raw/verify_release.py" \
     "$ROOT" "$ROOT/.anolisa/component.toml")"
+ASSET_VERIFY_SOURCE_CONFIG="$ROOT/agent-sec-cli/src/agent_sec_cli/asset_verify/config.conf"
+ASSET_VERIFY_PACKAGE_PATH="lib/anolisa/sec-core/python3.11/site-packages/agent_sec_cli/asset_verify/config.conf"
+
+assert_asset_verify_config() {
+    local config="$1"
+
+    cmp "$ASSET_VERIFY_SOURCE_CONFIG" "$config"
+    test "$(grep -Fc '/usr/share/anolisa/skills' "$config")" = "1"
+    test "$(grep -Fc '/usr/local/share/anolisa/skills' "$config")" = "1"
+}
 
 install -d -m 0755 \
+    "$BUILD/site-packages/agent_sec_cli/asset_verify" \
     "$BUILD/site-packages/agent_sec_cli/daemon" \
     "$BUILD/site-packages/agent_sec_cli/__pycache__" \
     "$BUILD/python-runtime/bin" \
@@ -37,6 +48,8 @@ printf 'def main():\n    return 0\n' > \
     "$BUILD/site-packages/agent_sec_cli/cli.py"
 printf 'def main():\n    return 0\n' > \
     "$BUILD/site-packages/agent_sec_cli/daemon/server.py"
+cp "$ASSET_VERIFY_SOURCE_CONFIG" \
+    "$BUILD/site-packages/agent_sec_cli/asset_verify/config.conf"
 printf 'host-specific bytecode\n' > \
     "$BUILD/site-packages/agent_sec_cli/__pycache__/cli.cpython-311.pyc"
 
@@ -148,6 +161,7 @@ test "$(stat -c '%a' \
 test "$(stat -c '%a' "$STAGE/.anolisa/component.toml")" = "644"
 test -z "$(find "$STAGE" -type l -print -quit)"
 cmp "$ROOT/.anolisa/component.toml" "$STAGE/.anolisa/component.toml"
+assert_asset_verify_config "$STAGE/$ASSET_VERIFY_PACKAGE_PATH"
 
 RPM_STAGE="$TMP/rpm-stage"
 MANIFEST_STAGE="$TMP/manifest-stage"
@@ -261,6 +275,7 @@ for expected in \
     "./lib/anolisa/sec-core/python3.11/runtime/lib/libpython3.11.so.1.0" \
     "./lib/anolisa/sec-core/python3.11/runtime/lib/python3.11/LICENSE.txt" \
     "./lib/anolisa/sec-core/python3.11/runtime/lib/tk8.6/demos/license.terms" \
+    "./$ASSET_VERIFY_PACKAGE_PATH" \
     "./lib/anolisa/sec-core/python3.11/site-packages/agent_sec_cli/cli.py" \
     "./adapters/sec-core/openclaw/openclaw.plugin.json" \
     "./adapters/sec-core/hermes/plugin.yaml" \
@@ -291,6 +306,9 @@ fi
 
 tar -xzOf "$OUT_ONE/$ARTIFACT" ./.anolisa/component.toml > "$TMP/contract.toml"
 cmp "$ROOT/.anolisa/component.toml" "$TMP/contract.toml"
+tar -xzOf "$OUT_ONE/$ARTIFACT" "./$ASSET_VERIFY_PACKAGE_PATH" \
+    > "$TMP/asset-verify-config.conf"
+assert_asset_verify_config "$TMP/asset-verify-config.conf"
 tar -xzOf "$OUT_ONE/$ARTIFACT" ./bin/agent-sec-cli > "$TMP/agent-sec-cli"
 tar -xzOf "$OUT_ONE/$ARTIFACT" ./bin/agent-sec-python > "$TMP/agent-sec-python"
 tar -xzOf "$OUT_ONE/$ARTIFACT" \

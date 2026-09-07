@@ -161,6 +161,10 @@ ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cl
 ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
 ```
 
+The global config file is read by the daemon, so `config -g` does more than write it: after saving `/etc/ws-ckpt/config.toml` it asks the daemon to reload, then compares what the daemon actually loaded against what was written. On any mismatch the command lists each differing field and exits non-zero instead of reporting success.
+
+This matters most in a Kubernetes sidecar deployment, where the CLI (app container) and the daemon run in separate containers with separate filesystems. Mount `/etc/ws-ckpt` on a volume shared by both containers (an `emptyDir` is enough); otherwise every `config -g` setting silently stays at the daemon's built-in default. The bundled `k8s-sidecar-example.yaml` already wires this shared volume up.
+
 ---
 
 ## Important Notes

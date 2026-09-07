@@ -104,6 +104,8 @@ impl ParsedSseEvent {
     ///   `response.completed` routinely exceeds 16 KB and spans multiple TLS
     ///   records, so the stream must stay open until the full JSON is available
     ///   or the HTTP chunked terminator (`0\r\n\r\n`) fires a synthetic done.
+    /// - DashScope/Bailian native protocol: a terminal `finish_reason` inside
+    ///   the `output` **object**. It never sends `data: [DONE]`.
     pub fn is_done(&self) -> bool {
         if self.is_synthetic_done {
             return true;
@@ -138,9 +140,43 @@ impl ParsedSseEvent {
                 {
                     return true;
                 }
+                if Self::is_dashscope_native_done(&v) {
+                    return true;
+                }
             }
         }
         false
+    }
+
+    /// DashScope/Bailian native protocol terminator detection.
+    ///
+    /// The end of stream is signalled by a terminal `finish_reason`, either at
+    /// `output.finish_reason` (`result_format: text`) or
+    /// `output.choices[].finish_reason` (`result_format: message`). In-progress
+    /// chunks carry the *literal string* `"null"` there, so only the known
+    /// terminal values below are accepted — an unrecognised value falls back to
+    /// the HTTP chunked terminator rather than truncating the stream early.
+    ///
+    /// `output` must be an object: the OpenAI Responses API also uses the key,
+    /// but as an array of output items.
+    fn is_dashscope_native_done(v: &serde_json::Value) -> bool {
+        fn is_terminal(node: &serde_json::Value) -> bool {
+            matches!(
+                node.get("finish_reason").and_then(|r| r.as_str()),
+                Some("stop" | "length" | "tool_calls" | "content_filter")
+            )
+        }
+
+        let Some(output) = v.get("output").filter(|o| o.is_object()) else {
+            return false;
+        };
+        if is_terminal(output) {
+            return true;
+        }
+        output
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .is_some_and(|choices| choices.iter().any(is_terminal))
     }
 
     /// Get data length
@@ -495,6 +531,67 @@ mod tests {
         let ev = make_event(data);
         let parsed = ParsedSseEvent::new(None, None, None, 0, 5, ev);
         assert!(parsed.is_done());
+    }
+
+    /// DashScope native protocol never sends `data: [DONE]`. Its terminator is
+    /// a real `finish_reason` inside the `output` object; without recognising
+    /// it the stream only ends via the chunked terminator, which the
+    /// interruption detector may read as `sse_truncated`.
+    #[test]
+    fn test_parsed_sse_event_is_done_dashscope_native_text_mode() {
+        let data = br#"{"output":{"finish_reason":"stop","text":"hi"},"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"request_id":"r1"}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_parsed_sse_event_is_done_dashscope_native_message_mode() {
+        let data = br#"{"output":{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]},"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"request_id":"r1"}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(parsed.is_done());
+    }
+
+    #[test]
+    fn test_parsed_sse_event_is_done_dashscope_native_tool_calls() {
+        let data = br#"{"output":{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[]}}]},"request_id":"r1"}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(parsed.is_done());
+    }
+
+    /// In-progress native chunks carry the *literal string* `"null"` as
+    /// finish_reason. Treating those as terminal would truncate the stream.
+    #[test]
+    fn test_parsed_sse_event_not_done_dashscope_native_in_progress() {
+        for data in [
+            br#"{"output":{"finish_reason":"null","text":"hi"},"request_id":"r1"}"#.as_slice(),
+            br#"{"output":{"choices":[{"finish_reason":"null","message":{"content":"h"}}]}}"#
+                .as_slice(),
+            br#"{"output":{"choices":[{"finish_reason":"","message":{"content":"h"}}]}}"#
+                .as_slice(),
+            br#"{"output":{"choices":[{"message":{"content":"h"}}]}}"#.as_slice(),
+        ] {
+            let ev = make_event(data);
+            let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+            assert!(
+                !parsed.is_done(),
+                "in-progress native chunk must keep the stream open: {}",
+                String::from_utf8_lossy(data)
+            );
+        }
+    }
+
+    /// Regression guard: the Responses API nests `output` as an *array* under
+    /// `response`; incremental events must not be mistaken for a native
+    /// terminator.
+    #[test]
+    fn test_parsed_sse_event_not_done_responses_api_output_array() {
+        let data = br#"{"type":"response.output_item.done","output_index":0,"output":[{"finish_reason":"stop"}]}"#;
+        let ev = make_event(data);
+        let parsed = ParsedSseEvent::new(None, None, None, 0, data.len(), ev);
+        assert!(!parsed.is_done());
     }
 
     #[test]

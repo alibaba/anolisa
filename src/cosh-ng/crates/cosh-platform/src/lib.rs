@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::result_large_err,
+    reason = "crate APIs share public CoshError; per-function allows obscure one API trade-off"
+)]
 //! cosh-platform: Distribution Abstraction Layer for the cosh deterministic interaction layer.
 //!
 //! Detects the current distro and routes pkg/svc operations to the
@@ -13,6 +17,7 @@ pub mod svc;
 
 pub mod validate;
 
+use std::io::Read;
 use std::process::{Command, Output};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -22,11 +27,19 @@ use cosh_types::error::{CoshError, ErrorCode};
 const PKG_TIMEOUT: Duration = Duration::from_secs(120);
 const SVC_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum bytes to collect from a single stdout or stderr pipe.
+/// Output beyond this limit is treated as an error to prevent OOM.
+const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Run an external command with a timeout. Reads stdout/stderr in background
 /// threads to avoid pipe-buffer deadlock. Returns `ErrorCode::Timeout` if the
-/// process exceeds the deadline. The deadline also covers draining stdout and
-/// stderr: a grandchild that keeps the pipes open after the direct child
-/// exited gets its whole process group killed instead of stalling the caller.
+/// process exceeds the deadline, or `ErrorCode::OutputTooLarge` if either pipe
+/// exceeds `MAX_OUTPUT_BYTES`. Truncation is detected while the child still
+/// runs, so `OutputTooLarge` is returned before the deadline even when a
+/// grandchild keeps the process group alive past the size limit. The deadline
+/// also covers draining stdout and stderr: a grandchild that keeps the pipes
+/// open after the direct child exited gets its whole process group killed
+/// instead of stalling the caller.
 pub fn run_command(
     cmd: &mut Command,
     timeout: Duration,
@@ -53,7 +66,23 @@ pub fn run_command(
     let stderr_rx = drain_pipe(child.stderr.take());
 
     let deadline = Instant::now() + timeout;
+    // Cache outputs received early so the post-exit drain does not
+    // re-consume them. Polling here also lets the loop detect a truncated
+    // pipe while the child still runs: without it a grandchild that keeps
+    // the group alive past the size limit would mask OutputTooLarge as
+    // Timeout by waiting until the deadline.
+    let mut stdout_out: Option<DrainedOutput> = None;
+    let mut stderr_out: Option<DrainedOutput> = None;
     let status = loop {
+        if probe_truncated(&stdout_rx, &mut stdout_out) {
+            kill_group_and_reap(&mut child);
+            return Err(output_too_large_error("stdout", subsystem));
+        }
+        if probe_truncated(&stderr_rx, &mut stderr_out) {
+            kill_group_and_reap(&mut child);
+            return Err(output_too_large_error("stderr", subsystem));
+        }
+
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
@@ -75,20 +104,33 @@ pub fn run_command(
     };
 
     // The direct child has exited, but a grandchild may still hold the
-    // pipes open; draining past the deadline kills the leftover group.
-    let Some(stdout) = recv_until(&stdout_rx, deadline) else {
-        kill_group(pgid);
-        return Err(timeout_error(timeout, subsystem));
-    };
-    let Some(stderr) = recv_until(&stderr_rx, deadline) else {
-        kill_group(pgid);
-        return Err(timeout_error(timeout, subsystem));
-    };
+    // pipes open; drain both in parallel so a truncated stderr is not
+    // masked by a blocking stdout recv (or vice versa).
+    loop {
+        if probe_truncated(&stdout_rx, &mut stdout_out) {
+            kill_group(pgid);
+            return Err(output_too_large_error("stdout", subsystem));
+        }
+        if probe_truncated(&stderr_rx, &mut stderr_out) {
+            kill_group(pgid);
+            return Err(output_too_large_error("stderr", subsystem));
+        }
+        if stdout_out.is_some() && stderr_out.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            kill_group(pgid);
+            return Err(timeout_error(timeout, subsystem));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stdout = stdout_out.unwrap();
+    let stderr = stderr_out.unwrap();
 
     Ok(Output {
         status,
-        stdout,
-        stderr,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
     })
 }
 
@@ -100,6 +142,14 @@ fn timeout_error(timeout: Duration, subsystem: &str) -> CoshError {
     )
     .recoverable(true)
     .with_hint("The operation took too long. Retry or check system load.")
+}
+
+fn output_too_large_error(pipe: &str, subsystem: &str) -> CoshError {
+    CoshError::new(
+        ErrorCode::OutputTooLarge,
+        format!("Command {pipe} exceeded {} bytes", MAX_OUTPUT_BYTES),
+        subsystem,
+    )
 }
 
 /// SIGKILLs the whole group, then fallback-kills and reaps the direct child.
@@ -119,34 +169,81 @@ fn kill_group(pgid: u32) {
     }
 }
 
+/// Output collected from one pipe, plus a flag indicating whether the
+/// pipe was truncated because it exceeded the size limit.
+struct DrainedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
 /// Drains one output pipe on a background thread; the receiver yields the
-/// collected bytes once the pipe reaches EOF.
-fn drain_pipe<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+/// collected bytes once the pipe reaches EOF or the size limit is hit.
+fn drain_pipe<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<DrainedOutput> {
     let (tx, rx) = mpsc::channel();
     match pipe {
         Some(r) => {
             std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut std::io::BufReader::new(r), &mut buf).ok();
-                let _ = tx.send(buf);
+                let mut buf = Vec::with_capacity(4096);
+                let mut reader = std::io::BufReader::new(r);
+                let mut truncated = false;
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match reader.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if buf.len() > MAX_OUTPUT_BYTES.saturating_sub(n) {
+                                let take = MAX_OUTPUT_BYTES.saturating_sub(buf.len());
+                                buf.extend_from_slice(&chunk[..take]);
+                                truncated = true;
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = tx.send(DrainedOutput {
+                    bytes: buf,
+                    truncated,
+                });
             });
         }
         None => {
-            let _ = tx.send(Vec::new());
+            let _ = tx.send(DrainedOutput {
+                bytes: Vec::new(),
+                truncated: false,
+            });
         }
     }
     rx
 }
 
-/// Receives drained output within the remaining deadline; `None` means a
-/// pipe holder (e.g. a background grandchild) outlived the budget.
-fn recv_until(rx: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Option<Vec<u8>> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(remaining) {
-        Ok(buf) => Some(buf),
-        Err(mpsc::RecvTimeoutError::Timeout) => None,
-        // The reader thread died without sending; treat as empty output.
-        Err(mpsc::RecvTimeoutError::Disconnected) => Some(Vec::new()),
+/// Non-blocking probe of a drained pipe.
+///
+/// Returns `true` when the pipe has reported truncation, so the caller
+/// can kill the group and surface `OutputTooLarge` before the deadline.
+/// A non-truncated result is stashed in `cached` so a later probe (in the
+/// wait loop or the post-exit drain) does not re-consume it. A
+/// `Disconnected` channel is stashed as empty output so the post-exit
+/// drain does not stall waiting for a result that will never arrive.
+fn probe_truncated(rx: &mpsc::Receiver<DrainedOutput>, cached: &mut Option<DrainedOutput>) -> bool {
+    if cached.is_some() {
+        return false;
+    }
+    match rx.try_recv() {
+        Ok(out) if out.truncated => true,
+        Ok(out) => {
+            *cached = Some(out);
+            false
+        }
+        Err(mpsc::TryRecvError::Empty) => false,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            *cached = Some(DrainedOutput {
+                bytes: Vec::new(),
+                truncated: false,
+            });
+            false
+        }
     }
 }
 
@@ -307,5 +404,137 @@ mod tests {
 
         release_marker_probe(&marker);
         assert!(!marker.exists(), "grandchild survived the drain timeout");
+    }
+
+    #[test]
+    fn drain_pipe_truncates_when_output_exceeds_limit() {
+        let data = vec![b'x'; MAX_OUTPUT_BYTES + 1];
+        let rx = drain_pipe(Some(std::io::Cursor::new(data)));
+        let output = rx.recv().expect("drain thread should send output");
+        assert!(output.truncated, "output should be marked truncated");
+        assert_eq!(output.bytes.len(), MAX_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn drain_pipe_keeps_small_output_intact() {
+        let data = vec![b'h'; 100];
+        let rx = drain_pipe(Some(std::io::Cursor::new(data.clone())));
+        let output = rx.recv().expect("drain thread should send output");
+        assert!(!output.truncated);
+        assert_eq!(output.bytes, data);
+    }
+
+    #[test]
+    fn run_command_rejects_oversized_stdout() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("yes | head -c {}", MAX_OUTPUT_BYTES + 1));
+        let err = run_command(&mut cmd, Duration::from_secs(10), "test").unwrap_err();
+        assert!(
+            matches!(err.code, ErrorCode::OutputTooLarge),
+            "expected OutputTooLarge, got {:?}: {}",
+            err.code,
+            err.message
+        );
+    }
+
+    /// A command that emits output past the size limit and then keeps the
+    /// process group alive must return `OutputTooLarge` before the deadline,
+    /// not `Timeout`. Reproduces the P2 finding where the wait loop only
+    /// watched `try_wait` + deadline and read `truncated` afterwards, so a
+    /// grandchild holding the pipes open masked the size error as a timeout.
+    #[test]
+    fn run_command_output_too_large_beats_timeout_and_kills_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let pid_file = dir.path().join("pids");
+        let trigger = marker.with_extension("trigger");
+        // Emit output past the size limit, then keep the group alive via a
+        // backgrounded grandchild holding stdout; `sleep 30` ensures the
+        // direct child also outlives the deadline without the early kill.
+        let script = format!(
+            "(while [ ! -e '{}' ]; do sleep 0.05; done; : > '{}') & \
+             echo $$ $! > '{}'; \
+             head -c {} /dev/zero; \
+             sleep 30",
+            trigger.display(),
+            marker.display(),
+            pid_file.display(),
+            MAX_OUTPUT_BYTES + 1
+        );
+
+        let started = Instant::now();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        // 2s is well past the time `head` needs to emit the oversized output,
+        // so an implementation that only checks truncation after the child
+        // exits would return Timeout here instead of OutputTooLarge.
+        let err = run_command(&mut cmd, Duration::from_secs(2), "test").unwrap_err();
+        assert!(
+            matches!(err.code, ErrorCode::OutputTooLarge),
+            "expected OutputTooLarge, got {:?}: {}",
+            err.code,
+            err.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "OutputTooLarge must return before the deadline, took {:?}",
+            started.elapsed()
+        );
+
+        let pids = read_pids(&pid_file);
+        let _cleanup = PidCleanup(pids.clone());
+
+        // The grandchild pipe/process holder must be killed with the group.
+        for pid in &pids {
+            assert_process_gone(*pid);
+        }
+
+        release_marker_probe(&marker);
+        assert!(!marker.exists(), "grandchild survived the truncation kill");
+    }
+
+    /// After the direct child exits, a grandchild holds stdout open and
+    /// also overflows stderr past the size limit.  The post-exit drain must
+    /// detect the truncated stderr in parallel with the open stdout, not
+    /// block on stdout until the deadline and return Timeout.
+    #[test]
+    fn run_command_stderr_too_large_after_child_exit_with_grandchild_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pids");
+        // Direct child exits immediately; the backgrounded grandchild
+        // inherits stdout (keeping it open via sleep) and overflows stderr.
+        let script = format!(
+            "(sleep 0.3; head -c {} /dev/zero >&2; sleep 30) & \
+             echo $$ $! > '{}'; exit 0",
+            MAX_OUTPUT_BYTES + 1,
+            pid_file.display()
+        );
+
+        let started = Instant::now();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        // 10s is well past the time head needs to overflow stderr (~1s), but
+        // well before the grandchild's sleep 30 ends.  The old sequential
+        // drain blocked on stdout until the deadline and returned Timeout;
+        // the parallel drain must surface OutputTooLarge immediately.
+        let err = run_command(&mut cmd, Duration::from_secs(10), "test").unwrap_err();
+        assert!(
+            matches!(err.code, ErrorCode::OutputTooLarge),
+            "expected OutputTooLarge for stderr, got {:?}: {}",
+            err.code,
+            err.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "OutputTooLarge must return well before the deadline, took {:?}",
+            started.elapsed()
+        );
+
+        let pids = read_pids(&pid_file);
+        let _cleanup = PidCleanup(pids.clone());
+        for pid in &pids {
+            assert_process_gone(*pid);
+        }
     }
 }

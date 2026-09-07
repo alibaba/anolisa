@@ -94,20 +94,64 @@ static inline u32 get_task_ns_pid(struct task_struct *task)
   return BPF_CORE_READ(pid, numbers[level].nr);
 }
 
-/* Convenience wrapper: get the namespace PID of the current task.
+/* Set by user-space when it observes /proc through the initial pid namespace;
+ * see probes::pidns::proc_root_is_init_pidns() for how that is determined.
+ * Defaults to false so an unconfigured object keeps the historical behaviour. */
+const volatile bool observer_pidns_is_init = false;
+
+/*
+ * current_observer_pid - the current process's PID *as user-space sees it*.
+ *
+ * Every consumer of an event pid resolves it against user-space's own /proc --
+ * cmdline, maps, cgroup, and the /proc/<pid>/root uprobe paths -- and /proc is
+ * rendered in the *reader's* pid namespace. So the number reported here has to
+ * be the one valid in user-space's namespace.
+ *
+ * get_task_ns_pid() returns the target's *innermost* namespace pid. That is the
+ * right answer only when observer and target share a namespace: agentsight on a
+ * host, or a sidecar with shareProcessNamespace, which is why the distinction
+ * went unnoticed. It is the wrong answer when user-space sits in the initial
+ * namespace and the target is inside a container -- a DaemonSet with
+ * hostPID:true -- because a container-local pid either does not exist on the
+ * host or, worse, belongs to an unrelated process that then gets probed in its
+ * place.
+ *
+ * For an initial-namespace observer the correct number is simply the host tgid,
+ * which every task has, so no namespace walking is needed. Note that
+ * bpf_get_ns_current_pid_tgid() cannot serve here: it returns -EINVAL unless the
+ * namespace named by (dev, ino) is the *current task's own*, so it does not
+ * translate into an ancestor namespace.
+ *
+ * We take the tgid rather than the tid for the same reason get_task_ns_pid()
+ * reads the group leader: a syscall may run on a worker thread (e.g.
+ * aiohttp/uvloop doing getaddrinfo in a thread pool), and the event pid must
+ * stay process-level so it correlates with sslsniff and cmdline/DNS discovery.
+ */
+static __always_inline u32 current_observer_pid(void)
+{
+    if (observer_pidns_is_init)
+        return (u32)(bpf_get_current_pid_tgid() >> 32);
+
+    return get_task_ns_pid((struct task_struct *)bpf_get_current_task());
+}
+
+/* Convenience wrapper: get the observer-namespace PID of the current task.
  * In non-container scenarios this equals bpf_get_current_pid_tgid() >> 32. */
 static __always_inline u32 current_ns_pid(void)
 {
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    return get_task_ns_pid(task);
+    return current_observer_pid();
 }
 
 /*
  * is_pid_traced - check whether the current process should be traced.
  *
- * Returns the namespace PID (to use for event->pid) if the process is traced,
- * or 0 if it should be skipped. Checks both host PID and container ns_pid so
- * that user-space can register either PID and get correct matching.
+ * Returns the PID to use for event->pid if the process is traced, or 0 if it
+ * should be skipped. Checks both the host PID and the observer-namespace PID,
+ * so user-space may register either and still get a match.
+ *
+ * The returned pid is deliberately whichever key hit the map: that keeps
+ * event->pid equal to the pid user-space registered, which is what lets
+ * ConnectionId(pid, ssl_ptr) correlate with the discovery-side caches.
  */
 #ifndef NO_TRACED_PROCESSES_MAP
 static __always_inline u32 is_pid_traced(u32 host_pid)
@@ -116,15 +160,14 @@ static __always_inline u32 is_pid_traced(u32 host_pid)
     if (traced)
         return host_pid;
 
-    /* Container scenario: host PID != namespace PID.
-     * Resolve the current task's ns_pid and retry the lookup. */
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    u32 ns_pid = get_task_ns_pid(task);
+    /* Container scenario: host PID != observer-namespace PID.
+     * Resolve the pid as user-space sees it and retry the lookup. */
+    u32 observer_pid = current_observer_pid();
 
-    if (ns_pid != host_pid) {
-        traced = bpf_map_lookup_elem(&traced_processes, &ns_pid);
+    if (observer_pid != host_pid) {
+        traced = bpf_map_lookup_elem(&traced_processes, &observer_pid);
         if (traced)
-            return ns_pid;
+            return observer_pid;
     }
 
     return 0;

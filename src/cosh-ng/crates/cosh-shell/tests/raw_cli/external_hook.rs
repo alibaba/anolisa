@@ -26,6 +26,16 @@ fn install_user_hook(home: &Path, name: &str, body: &str) {
     write_executable(&hooks_dir.join(name), body);
 }
 
+fn hook_status_count(output: &str, label: &str) -> usize {
+    let start = output.find(label).expect("hook status label") + label.len();
+    output[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("hook status count")
+}
+
 fn spawn_hook_session(
     home: &Path,
     command: &[u8],
@@ -35,7 +45,10 @@ fn spawn_hook_session(
     let (session_started_tx, session_started_rx) = mpsc::channel();
     let session = thread::spawn(move || {
         let home = home.to_string_lossy().into_owned();
-        run_raw_cli_with_args_env_and_delayed_input_after_start(
+        // These tests measure hook deadlines after observing the hook PID.
+        // Keep startup outside the independent hook-start watchdog and away
+        // from competing raw CLI sessions.
+        run_raw_cli_serial_with_args_env_and_delayed_input_after_ready(
             "fake",
             &[],
             &[("HOME", home.as_str())],
@@ -47,6 +60,161 @@ fn spawn_hook_session(
         )
     });
     (session, session_started_rx)
+}
+
+fn large_hook_input_command() -> Vec<u8> {
+    // Produce more than the maximum Linux pipe capacity using lines below
+    // the redaction line limit. The short source avoids spending the hook
+    // startup watchdog on echoing and parsing a 1 MiB interactive command.
+    b"printf '%32767s\\n' {1..40}\n".to_vec()
+}
+
+#[test]
+fn raw_cli_external_hook_executes_pinned_file_after_path_replacement() {
+    let home = temp_shell_home("external-hook-pinned-exec");
+    let hook_path = home.join(".copilot-shell/cosh/hooks/pinned.sh");
+    let outside_path = home.join("outside.sh");
+    let original_marker = home.join("original.marker");
+    let outside_marker = home.join("outside.marker");
+
+    install_user_hook(
+        &home,
+        "pinned.sh",
+        &format!(
+            "#!/bin/sh\n# cosh-hook: pinned-hook\n# match-commands: echo\n\
+             : > '{}'\nprintf '%s\\n' '{{\"hook_id\":\"pinned-hook\",\"severity\":\"warning\",\"title\":\"PINNED ORIGINAL HOOK\",\"description\":\"original\",\"suggestion\":\"none\"}}'\n",
+            original_marker.display()
+        ),
+    );
+    write_executable(
+        &outside_path,
+        &format!(
+            "#!/bin/sh\n: > '{}'\nprintf '%s\\n' '{{\"hook_id\":\"outside\",\"severity\":\"warning\",\"title\":\"REPLACED OUTSIDE HOOK\",\"description\":\"outside\",\"suggestion\":\"none\"}}'\n",
+            outside_marker.display()
+        ),
+    );
+
+    // The engine loads user hooks before launching bash. Replacing the path
+    // from .bashrc therefore exercises the load-to-exec window end to end.
+    fs::write(
+        home.join(".bashrc"),
+        format!(
+            "rm -f -- '{}'\nln -s -- '{}' '{}'\n",
+            hook_path.display(),
+            outside_path.display(),
+            hook_path.display()
+        ),
+    )
+    .unwrap();
+
+    let home_str = home.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "bash"],
+        &[("HOME", home_str.as_str()), ("COSH_SHELL_ISOLATED", "0")],
+        vec![
+            (b"echo pinned-hook-check\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(output.contains("PINNED ORIGINAL HOOK"), "{output}");
+    assert!(!output.contains("REPLACED OUTSIDE HOOK"), "{output}");
+    assert!(original_marker.exists(), "original pinned hook did not run");
+    assert!(
+        !outside_marker.exists(),
+        "replacement hook unexpectedly ran"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_cli_project_hook_rejects_symlinked_cosh_directory() {
+    use std::os::unix::fs::symlink;
+
+    let home = temp_shell_home("project-hook-symlinked-cosh");
+    let project = home.join("project");
+    let outside_cosh = home.join("outside-cosh");
+    let outside_hooks = outside_cosh.join("hooks");
+    let marker = home.join("outside-hook.marker");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside_hooks).unwrap();
+    write_executable(
+        &outside_hooks.join("outside.sh"),
+        &format!(
+            "#!/bin/sh\n# cosh-hook: outside-project\n# match-commands: echo\n\
+             : > '{}'\nprintf '%s\\n' '{{\"hook_id\":\"outside-project\",\"severity\":\"warning\",\"title\":\"OUTSIDE PROJECT HOOK\",\"description\":\"outside\",\"suggestion\":\"none\"}}'\n",
+            marker.display()
+        ),
+    );
+    symlink(&outside_cosh, project.join(".cosh")).unwrap();
+    let trust_store = home.join("trusted-project-hooks");
+    fs::write(
+        &trust_store,
+        format!(
+            "# cosh-shell trusted project hook roots\n{}\n",
+            project.display()
+        ),
+    )
+    .unwrap();
+    let home_str = home.to_string_lossy().into_owned();
+    let trust_store_str = trust_store.to_string_lossy().into_owned();
+
+    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("COSH_SHELL_PROJECT_TRUST_STORE", trust_store_str.as_str()),
+        ],
+        &project,
+        vec![
+            (b"echo project-symlink-check\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    assert!(!output.contains("OUTSIDE PROJECT HOOK"), "{output}");
+    assert!(!marker.exists(), "symlinked project hook unexpectedly ran");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn raw_cli_untrusted_project_hook_registry_is_bounded() {
+    const EXPECTED_PROJECT_HOOK_LIMIT: usize = 64;
+
+    // This same regression is also run under `prlimit --nofile=64:64` so the
+    // assertion stays valid when real descriptor headroom lowers the count.
+    let home = temp_shell_home("project-hook-registry-limit");
+    let project = home.join("project");
+    let hooks_dir = project.join(".cosh/hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    for index in 0..=EXPECTED_PROJECT_HOOK_LIMIT {
+        write_executable(
+            &hooks_dir.join(format!("project-{index}.sh")),
+            &format!("#!/bin/sh\n# cosh-hook: project-{index}\n"),
+        );
+    }
+    let home_str = home.to_string_lossy().into_owned();
+
+    let output = run_raw_cli_with_args_env_current_dir_and_delayed_input(
+        "fake",
+        &[],
+        &[("HOME", home_str.as_str())],
+        &project,
+        vec![
+            (b"/hooks\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+
+    let project_count = hook_status_count(&output, "project=");
+    let untrusted_count = hook_status_count(&output, "untrusted=");
+    assert!(project_count > 0, "{output}");
+    assert!(project_count <= EXPECTED_PROJECT_HOOK_LIMIT, "{output}");
+    assert_eq!(untrusted_count, project_count, "{output}");
+    let _ = fs::remove_dir_all(&home);
 }
 
 fn wait_for_pids(path: &Path, count: usize) -> Option<Vec<i32>> {
@@ -148,9 +316,10 @@ fn raw_cli_external_hook_ignoring_large_stdin_respects_deadline() {
     );
     install_user_hook(&home, "ignore_stdin.sh", &body);
 
-    // One valid UTF-8 line larger than a pipe buffer makes the serialized
-    // hook payload block when the hook never reads stdin.
-    let (session, session_started) = spawn_hook_session(&home, b"printf '%1048576s' x\n");
+    // Keep the serialized hook input larger than a pipe buffer without an
+    // oversized output line, which bounded retention replaces fail-closed.
+    let command = large_hook_input_command();
+    let (session, session_started) = spawn_hook_session(&home, &command);
     session_started.recv().expect("raw CLI session to start");
     let pids = wait_for_pids(&pid_file, 1);
     let ready_at = std::time::Instant::now();
@@ -208,7 +377,8 @@ fn raw_cli_external_hook_stdin_holder_is_killed() {
     );
     install_user_hook(&home, "stdin_holder.sh", &body);
 
-    let (session, session_started) = spawn_hook_session(&home, b"printf '%1048576s' x\n");
+    let command = large_hook_input_command();
+    let (session, session_started) = spawn_hook_session(&home, &command);
     session_started.recv().expect("raw CLI session to start");
     let pids = wait_for_pids(&pid_file, 2);
     let ready_at = std::time::Instant::now();

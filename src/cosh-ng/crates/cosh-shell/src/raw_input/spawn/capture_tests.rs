@@ -71,6 +71,7 @@ fn generation_cutoff_does_not_retry_input_into_the_replacement_capture() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_input_chunk(
@@ -79,8 +80,10 @@ fn generation_cutoff_does_not_retry_input_into_the_replacement_capture() {
         &mut card_state,
         &mut quarantine,
         &mut deferred_input,
-        None,
-        Some(41),
+        RelayReadContext {
+            expected_capture_generation: Some(41),
+            ..RelayReadContext::default()
+        },
         &mut relay,
     )
     .expect("relay stale input");
@@ -125,6 +128,7 @@ fn generation_cutoff_does_not_retry_input_into_the_replacement_capture() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
     relay_input_chunk(
         b"later",
@@ -132,8 +136,10 @@ fn generation_cutoff_does_not_retry_input_into_the_replacement_capture() {
         &mut card_state,
         &mut quarantine,
         &mut deferred_input,
-        None,
-        Some(41),
+        RelayReadContext {
+            expected_capture_generation: Some(41),
+            ..RelayReadContext::default()
+        },
         &mut relay,
     )
     .expect("relay input across draining snapshot");

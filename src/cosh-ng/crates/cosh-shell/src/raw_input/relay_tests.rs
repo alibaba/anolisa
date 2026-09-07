@@ -7,13 +7,15 @@ use std::time::{Duration, Instant};
 use super::super::generation::LineSubmitCounter;
 use super::super::mode::current_raw_input_mode;
 use super::super::spawn::{
-    finish_input_relay, relay_input_bytes, relay_late_capture_input, RawInputRelayState,
+    finish_input_relay, input_relay_context, relay_input_bytes, relay_late_capture_input,
+    RawInputRelayState, RawInputShellRoute,
 };
 use super::super::{
     update_input_mode, PromptGhostCandidate, RawInputCapture, RawObserverAction, RawRelayAction,
     UserPtyInputGeneration,
 };
 use super::*;
+use crate::input::AssistanceControl;
 
 fn output_file(label: &str) -> (std::path::PathBuf, File) {
     let path = std::env::temp_dir().join(format!(
@@ -28,6 +30,65 @@ fn output_file(label: &str) -> (std::path::PathBuf, File) {
         .open(&path)
         .expect("test output file");
     (path, file)
+}
+
+struct PausingEventSink {
+    sender: mpsc::Sender<RawInputEvent>,
+    published: mpsc::SyncSender<()>,
+    resume: Mutex<mpsc::Receiver<()>>,
+}
+
+impl RawInputEventSink for PausingEventSink {
+    fn send(&self, event: RawInputEvent) -> Result<(), mpsc::SendError<RawInputEvent>> {
+        self.sender.send(event)?;
+        self.published.send(()).expect("publish barrier");
+        self.resume
+            .lock()
+            .expect("resume lock")
+            .recv()
+            .expect("resume event send");
+        Ok(())
+    }
+}
+
+#[test]
+fn pty_user_write_waits_until_its_event_is_visible() {
+    let (path, mut master) = output_file("event-before-pty-write");
+    let (event_tx, event_rx) = mpsc::channel();
+    let (published_tx, published_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let sink = PausingEventSink {
+        sender: event_tx,
+        published: published_tx,
+        resume: Mutex::new(resume_rx),
+    };
+    let writer = thread::spawn(move || {
+        write_user_bytes_to_pty(
+            &mut master,
+            &UserPtyInputGeneration::default(),
+            &mut LineSubmitCounter::default(),
+            &sink,
+            &super::super::MainPromptGate::default(),
+            b"echo ordered\n",
+        )
+    });
+
+    published_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("event publication");
+    assert!(matches!(
+        event_rx.try_recv().expect("visible PTY write event"),
+        RawInputEvent::PtyUserWrite {
+            line_submits: 1,
+            ..
+        }
+    ));
+    assert!(fs::read(&path).expect("read pre-write output").is_empty());
+
+    resume_tx.send(()).expect("allow PTY write");
+    writer.join().expect("writer join").expect("PTY write");
+    assert_eq!(fs::read(&path).expect("read PTY output"), b"echo ordered\n");
+    fs::remove_file(path).ok();
 }
 
 fn selection_input_mode() -> Arc<Mutex<RawInputMode>> {
@@ -61,6 +122,201 @@ fn expect_prompt_ghost_dismissal(receiver: &mpsc::Receiver<RawInputEvent>) {
         }
     }
     panic!("missing prompt ghost dismissal event");
+}
+
+#[test]
+fn shift_tab_toggles_enhanced_routing_only_at_an_empty_prompt() {
+    let (path, mut master) = output_file("assistance-toggle");
+    let state_file = path.with_extension("enabled");
+    fs::write(&state_file, b"enabled\n").expect("initial state file");
+    let control = AssistanceControl::enabled(state_file.clone());
+    let classifier = InputClassifier::default().with_assistance_control(control.clone());
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let (tx, rx) = mpsc::channel();
+    let gate = MainPromptGate::default();
+    gate.set_at_prompt(true);
+    control.set_at_prompt(true);
+    let mut state = RawInputRelayState::with_generation_and_gate(
+        UserPtyInputGeneration::default(),
+        gate.clone(),
+        false,
+    );
+
+    for bytes in [b"\x1b".as_slice(), b"[".as_slice(), b"Z".as_slice()] {
+        relay_input_bytes(
+            bytes,
+            Instant::now(),
+            &mut master,
+            &tx,
+            &classifier,
+            &input_mode,
+            &mut state,
+        )
+        .expect("split Shift+Tab");
+    }
+
+    assert!(!control.is_enabled());
+    assert!(!state_file.exists());
+    assert!(rx
+        .try_iter()
+        .any(|event| event == RawInputEvent::AssistanceToggled));
+    assert!(fs::read(&path).expect("toggle output").is_empty());
+
+    relay_input_bytes(
+        b"/help\n",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("shell-only input");
+    assert_eq!(fs::read(&path).expect("shell-only output"), b"/help\n");
+
+    gate.set_at_prompt(true);
+    control.set_at_prompt(true);
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("reenable assistance");
+    assert!(control.is_enabled());
+    assert!(state_file.is_file());
+
+    relay_input_bytes(
+        b"draft",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("draft input");
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("draft Shift+Tab");
+    assert!(control.is_enabled());
+    assert!(fs::read(&path)
+        .expect("draft output")
+        .ends_with(b"draft\x1b[Z"));
+
+    fs::remove_file(path).ok();
+    fs::remove_file(state_file).ok();
+}
+
+#[test]
+fn visible_shell_only_insight_owns_shift_tab() {
+    let (path, mut master) = output_file("assistance-toggle-shell-only-insight");
+    let state_file = path.with_extension("enabled");
+    fs::write(&state_file, b"enabled\n").expect("initial state file");
+    let control = AssistanceControl::enabled(state_file.clone());
+    control.toggle().expect("disable assistance");
+    control.set_at_prompt(true);
+    let classifier = InputClassifier::default().with_assistance_control(control.clone());
+    let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
+        text: "analyze failed input".to_string(),
+        route: PromptGhostRoute::AgentIntercept {
+            suggestion_id: Some("insight-1".to_string()),
+        },
+    }));
+    let (tx, rx) = mpsc::channel();
+    let gate = MainPromptGate::default();
+    gate.set_at_prompt(true);
+    let mut state = RawInputRelayState::with_generation_and_gate(
+        UserPtyInputGeneration::default(),
+        gate,
+        false,
+    );
+
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("Shift+Tab over shell-only insight");
+
+    assert!(!control.is_enabled());
+    assert!(!state_file.exists());
+    assert_eq!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::PromptGhost {
+            text: "analyze failed input".to_string(),
+            route: PromptGhostRoute::AgentIntercept {
+                suggestion_id: Some("insight-1".to_string()),
+            },
+        }
+    );
+    assert!(rx.try_iter().next().is_none());
+    assert!(fs::read(&path).expect("toggle output").is_empty());
+}
+
+#[test]
+fn visible_failure_insight_owns_split_shift_tab() {
+    let (path, mut master) = output_file("assistance-disable-over-insight");
+    let state_file = path.with_extension("enabled");
+    fs::write(&state_file, b"enabled\n").expect("initial state file");
+    let control = AssistanceControl::enabled(state_file.clone());
+    control.set_at_prompt(true);
+    let classifier = InputClassifier::default().with_assistance_control(control.clone());
+    let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
+        text: "analyze failed input".to_string(),
+        route: PromptGhostRoute::AgentIntercept {
+            suggestion_id: Some("insight-1".to_string()),
+        },
+    }));
+    let (tx, rx) = mpsc::channel();
+    let gate = MainPromptGate::default();
+    gate.set_at_prompt(true);
+    let mut state = RawInputRelayState::with_generation_and_gate(
+        UserPtyInputGeneration::default(),
+        gate,
+        false,
+    );
+
+    for bytes in [b"\x1b".as_slice(), b"[".as_slice(), b"Z".as_slice()] {
+        relay_input_bytes(
+            bytes,
+            Instant::now(),
+            &mut master,
+            &tx,
+            &classifier,
+            &input_mode,
+            &mut state,
+        )
+        .expect("split Shift+Tab over failure insight");
+    }
+
+    assert!(control.is_enabled());
+    assert!(state_file.is_file());
+    assert_eq!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::PromptGhost {
+            text: "analyze failed input".to_string(),
+            route: PromptGhostRoute::AgentIntercept {
+                suggestion_id: Some("insight-1".to_string()),
+            },
+        }
+    );
+    assert!(rx.try_iter().next().is_none());
+    assert!(fs::read(&path).expect("toggle output").is_empty());
 }
 
 struct ChannelReader {
@@ -1844,6 +2100,7 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     assert!(relay_prompt_ghost_input(
@@ -1885,7 +2142,7 @@ fn shell_rewrite_tab_writes_to_native_line_editor_without_agent_intercept() {
 }
 
 #[test]
-fn native_slash_tab_is_not_redrawn_before_shell_completion() {
+fn zsh_native_slash_tab_is_handed_to_shell_immediately() {
     let (path, mut master) = output_file("native-slash-tab");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -1896,6 +2153,7 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let main_prompt_gate = super::super::MainPromptGate::default();
+    let mut zsh_path_prompt_buffering = ZshPathPromptBuffering::new();
     let mut relay = InputRelayContext {
         master: &mut master,
         input_classifier: &classifier,
@@ -1908,11 +2166,13 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: Some(&mut zsh_path_prompt_buffering),
     };
 
     relay_passthrough_input(b"/ho", &mut relay).expect("buffer slash prefix");
-    relay_passthrough_input(b"\t", &mut relay).expect("send completion to shell");
-    master.sync_all().expect("sync test output");
+    relay_passthrough_input(b"\t\r", &mut relay)
+        .expect("split completion from coalesced submission");
+    relay.master.sync_all().expect("sync test output");
 
     let events = rx.try_iter().collect::<Vec<_>>();
     assert!(events.iter().any(|event| matches!(
@@ -1924,8 +2184,199 @@ fn native_slash_tab_is_not_redrawn_before_shell_completion() {
         RawInputEvent::CandidateRedraw { input, .. } if input.contains(&b'\t')
     )));
     assert!(events.contains(&RawInputEvent::CandidateClearLine));
+    let writes = events
+        .iter()
+        .filter_map(|event| match event {
+            RawInputEvent::PtyUserWrite {
+                generation,
+                line_submits,
+            } => Some((*generation, *line_submits)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(writes, vec![(1, 0)]);
     assert_eq!(fs::read(&path).expect("read test output"), b"/ho\t");
-    assert!(!line_buffer.is_active());
+    assert!(!relay.line_buffer.is_active());
+
+    relay_passthrough_input(b"\r", &mut relay).expect("submit after visible completion");
+    relay.master.sync_all().expect("sync confirmed submission");
+    assert_eq!(fs::read(&path).expect("read test output"), b"/ho\t\r");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn zsh_candidate_submit_precedes_later_tab_in_same_read() {
+    let cwd = tempfile::tempdir().expect("temp cwd");
+    let (path, mut master) = output_file("candidate-submit-before-tab");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    classifier
+        .shell_path_command_names()
+        .set(Some(Vec::new()), Some(Vec::new()));
+    classifier.prompt_cwd().set(Some(
+        cwd.path()
+            .canonicalize()
+            .expect("canonical cwd")
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut zsh_path_prompt_buffering = ZshPathPromptBuffering::new();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: false,
+        zsh_path_prompt_buffering: Some(&mut zsh_path_prompt_buffering),
+    };
+
+    relay_passthrough_input("打开./definitely-not-command".as_bytes(), &mut relay)
+        .expect("buffer missing path candidate");
+    relay_passthrough_input(b"\r\t", &mut relay).expect("route submit before later tab");
+    relay.master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::NativePathPromptIntercept { input, .. }
+                if input == "打开./definitely-not-command"
+        )),
+        "{events:?}"
+    );
+    assert!(!fs::read(&path)
+        .expect("read test output")
+        .starts_with("打开./definitely-not-command".as_bytes()));
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn zsh_tab_handoff_drains_preserved_input_at_eof() {
+    let (path, mut master) = output_file("tab-handoff-typeahead");
+    let (tx, _rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let classifier = InputClassifier::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    let mut state = RawInputRelayState::with_shell_route(
+        UserPtyInputGeneration::default(),
+        RawInputShellRoute::new(main_prompt_gate, false, Some(ZshPathPromptBuffering::new())),
+    );
+    {
+        let mut relay = input_relay_context(&mut master, &classifier, &tx, &input_mode, &mut state);
+        relay_passthrough_input(b"/ho", &mut relay).expect("buffer slash prefix");
+        relay_passthrough_input(b"\t\r echo preserved\r", &mut relay)
+            .expect("preserve typeahead after protected submit");
+    }
+    master.sync_all().expect("sync test output");
+    assert_eq!(fs::read(&path).expect("read held output"), b"/ho\t");
+
+    {
+        let mut relay = input_relay_context(&mut master, &classifier, &tx, &input_mode, &mut state);
+        relay_passthrough_input(b"echo next\r", &mut relay)
+            .expect("retain input arriving before the handoff deadline");
+    }
+    master.sync_all().expect("sync retained output");
+    assert_eq!(fs::read(&path).expect("read retained output"), b"/ho\t");
+
+    finish_input_relay(&mut master, &tx, &classifier, &input_mode, &mut state)
+        .expect("EOF drains preserved typeahead");
+    master.sync_all().expect("sync replayed output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"/ho\t\x03 echo preserved\recho next\rexit\n"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn zsh_space_prefix_returns_to_shell_when_ascii_command_resolves() {
+    let (path, mut master) = output_file("native-space-prefix");
+    let (tx, _rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default();
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    let mut zsh_path_prompt_buffering = ZshPathPromptBuffering::new();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: false,
+        zsh_path_prompt_buffering: Some(&mut zsh_path_prompt_buffering),
+    };
+
+    relay_passthrough_input(b" ", &mut relay).expect("hold unresolved space prefix");
+    assert!(relay.line_buffer.is_active());
+    assert_eq!(fs::read(&path).expect("read held output"), b"");
+
+    relay_passthrough_input(b"echo", &mut relay).expect("return ASCII command to ZLE");
+    relay.master.sync_all().expect("sync returned command");
+    assert!(!relay.line_buffer.is_active());
+    assert_eq!(fs::read(&path).expect("read returned output"), b" echo");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn native_exact_slash_tab_submit_keeps_readline_guard() {
+    let (path, mut master) = output_file("native-slash-tab-submit");
+    let (tx, _rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: true,
+        zsh_path_prompt_buffering: None,
+    };
+
+    relay_passthrough_input(b"/help\t\n", &mut relay).expect("submit completed slash");
+    master.sync_all().expect("sync test output");
+
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"/help\t\x1b[99~\n"
+    );
     fs::remove_file(path).ok();
 }
 
@@ -1953,6 +2404,7 @@ fn native_shell_input_reports_editing_then_empty_without_content() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_passthrough_input(b"partial", &mut relay).expect("type partial line");
@@ -2006,6 +2458,7 @@ fn agent_prompt_tab_stays_local_until_enter_and_keeps_suggestion_id() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2080,6 +2533,7 @@ fn selection_enter_submits_the_active_prompt_without_shell_execution() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_prompt_ghost_input(b"\r", "inspect disk pressure", &route, &mut relay)
@@ -2133,6 +2587,7 @@ fn clearing_accepted_agent_prompt_emits_binding_dismissal() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2176,6 +2631,7 @@ fn unsupported_arrow_after_agent_prompt_tab_cancels_without_writing_to_shell() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2230,6 +2686,7 @@ fn split_cursor_sequences_after_agent_prompt_tab_never_reach_shell() {
             exit_tracker: &mut exit_tracker,
             main_prompt_gate: &main_prompt_gate,
             slash_route_enabled: false,
+            zsh_path_prompt_buffering: None,
         };
 
         relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2280,6 +2737,7 @@ fn clearing_and_submitting_in_one_buffer_dismisses_binding() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_prompt_ghost_input(b"\t", "analyze failure", &route, &mut relay)
@@ -2321,6 +2779,7 @@ fn passthrough_relay_fixture<'a>(
         exit_tracker,
         main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     }
 }
 
@@ -2905,10 +3364,10 @@ fn routing_c3_wrapped_multiline_paste_stays_shell_owned_across_chunks() {
     fs::remove_file(path).ok();
 }
 
-// A pasted slash command remains Shell-owned and never upgrades into the
-// draft card; native bracketed-paste semantics require Enter after the closer.
+// A pasted slash command remains pending until the explicit Enter after the
+// closer, then the Rust relay owns it without relying on a shell DEBUG trap.
 #[test]
-fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
+fn routing_c3_wrapped_slash_paste_intercepts_on_explicit_enter() {
     let (path, mut master) = output_file("escape-slash-paste");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -2933,16 +3392,14 @@ fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
         &main_prompt_gate,
     );
 
-    let mut paste = b"\x1b[200~".to_vec();
-    paste.extend_from_slice(b"/mode approval trust confirm\n");
-    paste.extend_from_slice(b"\x1b[201~");
-    relay_passthrough_input(&paste, &mut relay).expect("pasted slash command");
-    // The opener itself may split across reads (#1721): the held partial
-    // must join the classification input so the slash prefix stays visible.
-    relay_passthrough_input(b"\x1b[2", &mut relay).expect("split opener head");
-    let mut tail = b"00~".to_vec();
-    tail.extend_from_slice(b"/mode approval trust confirm\n\x1b[201~");
-    relay_passthrough_input(&tail, &mut relay).expect("split opener tail");
+    relay_passthrough_input(b"\x1b[200~/mode approval", &mut relay)
+        .expect("paste opener and partial payload");
+    relay_passthrough_input(b" trust confirm\n\x1b[201~", &mut relay)
+        .expect("paste payload and closer");
+    assert!(rx
+        .try_iter()
+        .all(|event| !matches!(event, RawInputEvent::UserIntercept(..))));
+    relay_passthrough_input(b"\n", &mut relay).expect("submit pasted slash");
     let _ = relay;
     master.sync_all().expect("sync test output");
 
@@ -2956,8 +3413,8 @@ fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
                     if input == "/mode approval trust confirm"
             ))
             .count(),
-        0,
-        "ordinary paste must not enter slash ownership: {events:?}"
+        1,
+        "submitted slash paste must stay Rust-owned: {events:?}"
     );
     assert!(
         !events
@@ -2965,6 +3422,7 @@ fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
             .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
         "slash paste must never open the draft card: {events:?}"
     );
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
     fs::remove_file(path).ok();
 }
 
@@ -3460,7 +3918,7 @@ fn native_exact_slash_routes_to_shell_when_at_prompt() {
     let mut line_buffer = CandidateLineBuffer::default();
     let mut native_line_state = NativeLineState::default();
     let mut exit_tracker = ExplicitExitTracker::default();
-    let classifier = InputClassifier::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
     let input_generation = UserPtyInputGeneration::default();
     let mut line_submits = LineSubmitCounter::default();
     let mut relay = InputRelayContext {
@@ -3475,6 +3933,7 @@ fn native_exact_slash_routes_to_shell_when_at_prompt() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: true,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_passthrough_input(b"/mode approval\n", &mut relay).expect("route exact slash");
@@ -3492,17 +3951,193 @@ fn native_exact_slash_routes_to_shell_when_at_prompt() {
     assert!(events.contains(&RawInputEvent::CandidateClearLine));
     assert_eq!(
         fs::read(&path).expect("read test output"),
-        b"/mode approval\n"
+        b"/mode approval\x1b[99~\n"
     );
-    // The submission lowers the prompt gate until the next prompt_ready
-    // marker (#1721 D16), so racing follow-up slash bytes fall back to
-    // the Rust intercept path.
+    // The private no-op submission lowers the prompt gate until its bounded
+    // prompt hook commits slash history and emits prompt_ready.
     assert!(!main_prompt_gate.is_at_prompt());
     assert!(matches!(
         *input_mode.lock().expect("input mode"),
         RawInputMode::Passthrough
     ));
     fs::remove_file(path).ok();
+}
+
+#[test]
+fn private_history_submission_uses_private_slash_guard() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            true,
+            false,
+            &classifier,
+            &line_submits,
+            b"\x01 \x05\n",
+        ),
+        Some(b"\x01 \x05\x1b[100~\n".to_vec())
+    );
+}
+
+#[test]
+fn recoverable_history_submission_uses_distinct_guard() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    assert_eq!(
+        guarded_bash_submission(true, true, true, &classifier, &line_submits, b"\x01 \x05\n",),
+        Some(b"\x01 \x05\x1b[101~\n".to_vec())
+    );
+}
+
+#[test]
+fn slash_guard_precedes_ctrl_o_submission() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            false,
+            &classifier,
+            &line_submits,
+            b"/skills detail xlsx\x0f",
+        ),
+        Some(b"/skills detail xlsx\x1b[99~\x0f".to_vec())
+    );
+}
+
+#[test]
+fn slash_guard_ignores_pasted_newlines() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let paste = b"\x1b[200~/skills detail\nnext line\x1b[201~";
+
+    assert_eq!(
+        guarded_bash_submission(true, false, false, &classifier, &line_submits, paste),
+        None
+    );
+
+    let mut submitted = paste.to_vec();
+    submitted.push(b'\r');
+    let mut expected = paste.to_vec();
+    expected.extend_from_slice(b"\x1b[99~\r");
+    assert_eq!(
+        guarded_bash_submission(true, false, false, &classifier, &line_submits, &submitted,),
+        Some(expected)
+    );
+}
+
+#[test]
+fn slash_guard_does_not_infer_follow_up_readline_ownership() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            false,
+            &classifier,
+            &line_submits,
+            b"/mode approval\r\x1b[D/skills detail $(touch should-not-run)\r",
+        ),
+        Some(b"/mode approval\x1b[99~\r\x1b[D/skills detail $(touch should-not-run)\r".to_vec())
+    );
+}
+
+#[test]
+fn slash_guard_stops_after_ordinary_shell_submission() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            false,
+            &classifier,
+            &line_submits,
+            b"/mode approval\necho ordinary\n/skills detail $(touch should-not-run)\n",
+        ),
+        Some(
+            b"/mode approval\x1b[99~\necho ordinary\n/skills detail $(touch should-not-run)\n"
+                .to_vec()
+        )
+    );
+}
+
+#[test]
+fn slash_guard_does_not_trust_blank_bytes_with_dirty_mirror() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+
+    // `required` may represent an ordinary command recalled outside the
+    // mirror. The raw blank only submits that unknown line; it does not prove
+    // that a later slash is still owned by Readline.
+    assert_eq!(
+        guarded_bash_submission(
+            true,
+            false,
+            false,
+            &classifier,
+            &line_submits,
+            b"\n/skills detail $(touch should-not-run)\n",
+        ),
+        Some(b"\x1b[99~\n/skills detail $(touch should-not-run)\n".to_vec())
+    );
+}
+
+#[test]
+fn bash_slash_guard_skips_clean_ordinary_and_empty_submissions() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let mut state = NativeLineState::default();
+
+    state.observe_shell_bytes(b"echo ordinary");
+    assert!(!bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+    ));
+    state.clear();
+    assert!(!bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+    ));
+}
+
+#[test]
+fn bash_slash_guard_keeps_exact_and_readline_owned_submissions() {
+    let classifier = InputClassifier::default();
+    let line_submits = LineSubmitCounter::default();
+    let mut state = NativeLineState::default();
+
+    assert!(bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"/help\r",
+    ));
+    state.observe_shell_bytes(b"\x1b[A");
+    assert!(bash_submission_needs_guard(
+        true,
+        true,
+        &classifier,
+        &state,
+        &line_submits,
+        b"\r",
+    ));
 }
 
 #[test]
@@ -3529,6 +4164,7 @@ fn native_exact_slash_falls_back_to_rust_intercept_when_not_at_prompt() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: true,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_passthrough_input(b"/mode approval\n", &mut relay).expect("fall back to intercept");
@@ -3574,23 +4210,204 @@ fn native_shell_submission_lowers_gate_before_follow_up_slash() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: true,
+        zsh_path_prompt_buffering: None,
     };
 
-    relay_passthrough_input(b"python\n", &mut relay).expect("submit shell command");
+    relay_passthrough_input(b"python\n/mode approval\n", &mut relay)
+        .expect("submit shell command and queued slash");
     assert!(
         !main_prompt_gate.is_at_prompt(),
         "plain submission must lower the gate synchronously"
     );
-    relay_passthrough_input(b"/mode approval\n", &mut relay).expect("slash after submit");
     master.sync_all().expect("sync test output");
 
     let events = rx.try_iter().collect::<Vec<_>>();
     assert!(events.iter().any(|event| matches!(
         event,
-        RawInputEvent::UserIntercept(input, InterceptReason::Slash) if input == "/mode approval"
+        RawInputEvent::UserInterceptAtPrompt {
+            input,
+            reason: InterceptReason::Slash,
+            pending_submits: 1,
+        } if input == "/mode approval"
     )));
     // Only the shell command reaches the PTY; the slash stays Rust-side.
     assert_eq!(fs::read(&path).expect("read test output"), b"python\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn same_batch_follow_up_slash_stays_batch_owned_and_guarded() {
+    let (path, mut master) = output_file("same-batch-follow-up-slash");
+    let (tx, rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let main_prompt_gate = super::super::MainPromptGate::default();
+    main_prompt_gate.set_at_prompt(true);
+    let mut line_buffer = CandidateLineBuffer::default();
+    let mut native_line_state = NativeLineState::default();
+    let mut exit_tracker = ExplicitExitTracker::default();
+    let classifier = InputClassifier::default().with_bash_slash_submission_guard(true);
+    let input_generation = UserPtyInputGeneration::default();
+    let mut line_submits = LineSubmitCounter::default();
+    let mut relay = InputRelayContext {
+        master: &mut master,
+        input_classifier: &classifier,
+        input_events: &tx,
+        input_mode: &input_mode,
+        input_generation: &input_generation,
+        line_submits: &mut line_submits,
+        line_buffer: &mut line_buffer,
+        native_line_state: &mut native_line_state,
+        exit_tracker: &mut exit_tracker,
+        main_prompt_gate: &main_prompt_gate,
+        slash_route_enabled: true,
+        zsh_path_prompt_buffering: None,
+    };
+
+    relay_passthrough_input(
+        b"/mode approval\n/skills detail $(touch should-not-run)\n",
+        &mut relay,
+    )
+    .expect("submit guarded slash and queued follow-up slash");
+    master.sync_all().expect("sync test output");
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+            | RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason: InterceptReason::Slash,
+                ..
+            } if input == "/skills detail $(touch should-not-run)"
+    )));
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"/mode approval\x1b[99~\n/skills detail $(touch should-not-run)\x1b[99~\n",
+        "the whole shell-owned batch must keep every exact slash guarded"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn chunked_native_submission_defers_follow_up_control() {
+    let (path, master) = output_file("chunked-native-submit-before-control");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let relay = super::super::spawn_raw_input_relay(
+        ChannelReader {
+            receiver: input_rx,
+            pending: Vec::new(),
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode,
+        UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
+        false,
+    );
+
+    input_tx
+        .send(b"echo ok".to_vec())
+        .expect("send partial line");
+    let mut events = Vec::new();
+    loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("partial line relay event");
+        let relayed = matches!(
+            event,
+            RawInputEvent::PtyUserWrite {
+                line_submits: 0,
+                ..
+            }
+        );
+        events.push(event);
+        if relayed {
+            break;
+        }
+    }
+    input_tx
+        .send(b"\n/mode routing shell-only\n".to_vec())
+        .expect("send submit and control");
+    drop(input_tx);
+    relay.join().expect("relay thread").expect("relay result");
+    events.extend(event_rx.try_iter());
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason: InterceptReason::Slash,
+                pending_submits: 1,
+            } if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+                if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"echo ok\nexit\n"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn chunked_action_submission_defers_follow_up_control() {
+    let (path, master) = output_file("chunked-action-submit-before-control");
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let relay = super::super::spawn_raw_action_relay(
+        vec![
+            RawRelayAction::write(b"echo ok"),
+            RawRelayAction::write(b"\n/mode routing shell-only\n"),
+        ],
+        master.try_clone().expect("clone output file"),
+        0,
+        event_tx,
+        InputClassifier::default(),
+        input_mode,
+        UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
+        false,
+    );
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason: InterceptReason::Slash,
+                pending_submits: 1,
+            } if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+                if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"echo ok\nexit\n"
+    );
     fs::remove_file(path).ok();
 }
 
@@ -3619,6 +4436,7 @@ fn native_hint_prefix_slash_keeps_rust_intercept_when_routed() {
         exit_tracker: &mut exit_tracker,
         main_prompt_gate: &main_prompt_gate,
         slash_route_enabled: true,
+        zsh_path_prompt_buffering: None,
     };
 
     relay_passthrough_input(b"/sk\n", &mut relay).expect("hint prefix intercept");

@@ -1,30 +1,145 @@
+use std::fs;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("cosh-core");
-    path
+mod common;
+
+fn one_shot_prompt_ask_command(home: &std::path::Path) -> Command {
+    let config_dir = home.join(".copilot-shell");
+    fs::create_dir_all(&config_dir).expect("create config directory");
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[ai]
+active_provider = "mock"
+
+[ai.providers.mock]
+type = "mock"
+
+[hooks]
+enabled = true
+
+[[hooks.UserPromptSubmit]]
+command = '''python3 -c 'print("{\"decision\":\"ask\",\"reason\":\"needs review\"}")' '''
+name = "prompt-ask"
+"#,
+    )
+    .expect("write cosh-core config");
+
+    let mut command = common::cosh_core_command(home);
+    command
+        .args(["--headless", "review this prompt"])
+        .env("COSH_STATES_DIR", home.join("states"))
+        .env("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1")
+        .env_remove("COSH_AI_PROVIDER")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn wait_with_stdin_open(mut child: Child, stdin: std::process::ChildStdin) -> std::process::Output {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().expect("poll cosh-core").is_some() {
+            drop(stdin);
+            return child.wait_with_output().expect("collect cosh-core output");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            drop(stdin);
+            let output = child.wait_with_output().expect("collect timed out output");
+            panic!(
+                "one-shot cosh-core did not exit\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn output_messages(output: &std::process::Output) -> Vec<Value> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .unwrap_or_else(|error| panic!("invalid JSONL output: {error}: {line}"))
+        })
+        .collect()
+}
+
+#[test]
+fn one_shot_prompt_ask_times_out_with_open_stdin() {
+    let home = tempfile::tempdir().expect("temp home");
+    let mut child = one_shot_prompt_ask_command(home.path())
+        .spawn()
+        .expect("spawn cosh-core");
+    let stdin = child.stdin.take().expect("piped stdin");
+
+    let output = wait_with_stdin_open(child, stdin);
+
+    assert_eq!(output.status.code(), Some(1), "status={:?}", output.status);
+    let messages = output_messages(&output);
+    assert!(messages.iter().any(|message| {
+        message["type"] == "control_request"
+            && message["request"]["subtype"] == "can_use_tool"
+            && message["request"]["hook_requires_approval"] == true
+    }));
+    let result = messages
+        .iter()
+        .find(|message| message["type"] == "result")
+        .expect("terminal result");
+    assert_eq!(result["is_error"], true);
+    assert!(result["errors"][0]
+        .as_str()
+        .is_some_and(|error| error.contains("prompt approval timed out")));
+}
+
+#[test]
+fn one_shot_prompt_ask_accepts_an_approval_response() {
+    let home = tempfile::tempdir().expect("temp home");
+    let mut child = one_shot_prompt_ask_command(home.path())
+        .spawn()
+        .expect("spawn cosh-core");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    writeln!(
+        stdin,
+        r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"req-0","response":{{"behavior":"allow"}}}}}}"#
+    )
+    .expect("write approval response");
+    stdin.flush().expect("flush approval response");
+
+    let output = wait_with_stdin_open(child, stdin);
+
+    assert!(
+        output.status.success(),
+        "status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages = output_messages(&output);
+    let result = messages
+        .iter()
+        .find(|message| message["type"] == "result")
+        .expect("terminal result");
+    assert_eq!(result["is_error"], false);
 }
 
 fn interact(messages: &[&str]) -> Vec<Value> {
-    let bin = binary_path();
     let home = tempfile::tempdir().expect("temp home");
-    let mut child = Command::new(&bin)
-        .env("HOME", home.path())
+    let mut child = common::cosh_core_command(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
+        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", common::binary_path().display()));
 
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -174,9 +289,7 @@ name = "test-hook"
     )
     .unwrap();
 
-    let bin = binary_path();
-    let mut child = Command::new(&bin)
-        .env("HOME", home.path())
+    let mut child = common::cosh_core_command(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

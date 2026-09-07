@@ -13,7 +13,13 @@ use std::path::{Path, PathBuf};
 use anolisa_platform::fs_layout::FsLayout;
 use thiserror::Error;
 
-use crate::domain::{InstallationScope, ProviderBinding};
+use crate::component_snapshot::{
+    ComponentSnapshot, ComponentSnapshotRequest, JournalProvenance, NativePackageProvenance,
+    NativePackageSnapshot, OwnedFileObservation, OwnedFilesProvenance, OwnedFilesSnapshot,
+    OwnedFilesVerdict, PendingJournalSnapshot, ProbeEvidence, SnapshotContractError, SnapshotProbe,
+    StateProvenance, StateSnapshot,
+};
+use crate::domain::{Installation, InstallationScope, NativePm, ProviderBinding};
 use crate::integrity::{IntegrityStatus, check_owned_file};
 use crate::planner::{Facts, NativeProbe, RecordFacts};
 use crate::providers::{DelegatedProvider, ProviderError};
@@ -320,6 +326,267 @@ pub enum FactsError {
         #[source]
         source: TransactionError,
     },
+    /// Snapshot request and collected evidence violate the observation contract.
+    #[error(transparent)]
+    SnapshotContract(#[from] SnapshotContractError),
+    /// A requested snapshot probe has no usable source.
+    #[error("snapshot probe {probe:?} has no usable source: {reason}")]
+    SnapshotSource {
+        /// Probe that cannot be collected.
+        probe: SnapshotProbe,
+        /// Why the required source is unavailable.
+        reason: String,
+    },
+    /// Snapshot evidence cannot safely drive lifecycle planning.
+    #[error("snapshot probe {probe:?} cannot drive lifecycle planning: {reason}")]
+    SnapshotEvidence {
+        /// Probe whose evidence is insufficient.
+        probe: SnapshotProbe,
+        /// Why the evidence cannot be projected.
+        reason: String,
+    },
+}
+
+/// Collect the initial component snapshot probes from existing read-only sources.
+///
+/// The native source is currently RPM-only because [`NativePm`] has no other
+/// production adapter. Provider and journal failures remain typed errors for
+/// mutation callers; read-only consumers may later choose to turn them into
+/// [`ProbeEvidence::Unavailable`] without changing the snapshot contract.
+///
+/// # Errors
+///
+/// Returns [`FactsError`] when a requested source is missing, a read fails, or
+/// the collected evidence violates the snapshot request.
+pub fn assemble_component_snapshot(
+    request: ComponentSnapshotRequest,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: Option<&DelegatedProvider<'_>>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+) -> Result<ComponentSnapshot, FactsError> {
+    if matches!(request.scope(), InstallationScope::User { .. })
+        && request.requests(SnapshotProbe::NativePackage)
+    {
+        return Err(SnapshotContractError::UnsupportedProbeScope {
+            probe: SnapshotProbe::NativePackage,
+            scope: request.scope(),
+        }
+        .into());
+    }
+
+    let record = store.record_facts(ObjectKind::Component, request.component());
+    let state = if request.requests(SnapshotProbe::State) {
+        let provenance = StateProvenance {
+            path: layout.state_dir.join("installed.toml"),
+        };
+        match &record {
+            RecordFacts::Absent => ProbeEvidence::Absent { provenance },
+            RecordFacts::Active(installation) => ProbeEvidence::Present {
+                provenance,
+                value: StateSnapshot::Active(Box::new(installation.clone())),
+            },
+            RecordFacts::Quarantined(reason) => ProbeEvidence::Present {
+                provenance,
+                value: StateSnapshot::Quarantined(reason.clone()),
+            },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    let owned_files = if request.requests(SnapshotProbe::OwnedFiles) {
+        let provenance = OwnedFilesProvenance {
+            state_path: layout.state_dir.join("installed.toml"),
+        };
+        match observe_owned_files_for_record(
+            &record,
+            store,
+            ObjectKind::Component,
+            request.component(),
+            layout,
+        ) {
+            Some(value) => ProbeEvidence::Present { provenance, value },
+            None => ProbeEvidence::Absent { provenance },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    let native_package_evidence = if request.requests(SnapshotProbe::NativePackage) {
+        let package = native_package.ok_or_else(|| FactsError::SnapshotSource {
+            probe: SnapshotProbe::NativePackage,
+            reason: "no native package identity was resolved".to_string(),
+        })?;
+        let provider = provider.ok_or_else(|| FactsError::SnapshotSource {
+            probe: SnapshotProbe::NativePackage,
+            reason: "no native package provider was supplied".to_string(),
+        })?;
+        let provenance = NativePackageProvenance {
+            manager: NativePm::Rpm,
+            package: package.to_string(),
+        };
+        match provider.observe(package, observed_at)? {
+            NativeProbe::NotProbed => {
+                unreachable!("DelegatedProvider::observe always performs the requested probe")
+            }
+            NativeProbe::Absent => ProbeEvidence::Absent { provenance },
+            NativeProbe::Present { observation, .. } => ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::Installed(observation),
+            },
+            NativeProbe::MultipleVersions { .. } => ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::MultipleVersions,
+            },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    let pending_journal = if request.requests(SnapshotProbe::PendingJournal) {
+        let provenance = JournalProvenance {
+            directory: journal_dir.to_path_buf(),
+        };
+        match pending_journal_for(
+            JournalEvidence::new(journal_dir, &store.operations),
+            request.component(),
+        )? {
+            Some(path) => ProbeEvidence::Present {
+                provenance,
+                value: PendingJournalSnapshot { path },
+            },
+            None => ProbeEvidence::Absent { provenance },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    ComponentSnapshot::from_parts_with_owned_files(
+        request,
+        state,
+        owned_files,
+        native_package_evidence,
+        pending_journal,
+    )
+    .map_err(FactsError::from)
+}
+
+/// Project a component snapshot into the existing lifecycle planner facts.
+///
+/// State and journal evidence are mandatory because the lifecycle planner
+/// cannot represent either probe as not requested. A native probe may remain
+/// unrequested for owned-only and user-scope plans.
+///
+/// # Errors
+///
+/// Returns [`FactsError::SnapshotEvidence`] when required evidence was not
+/// requested or a requested source was unavailable.
+pub fn lifecycle_facts_from_snapshot(
+    snapshot: &ComponentSnapshot,
+    active_adapter_claims: Vec<String>,
+    owned_files_verified: Option<bool>,
+) -> Result<Facts, FactsError> {
+    let record = match snapshot.state() {
+        ProbeEvidence::Absent { .. } => RecordFacts::Absent,
+        ProbeEvidence::Present {
+            value: StateSnapshot::Active(installation),
+            ..
+        } => RecordFacts::Active(installation.as_ref().clone()),
+        ProbeEvidence::Present {
+            value: StateSnapshot::Quarantined(reason),
+            ..
+        } => RecordFacts::Quarantined(reason.clone()),
+        ProbeEvidence::NotRequested => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::State,
+                reason: "state was not requested".to_string(),
+            });
+        }
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::State,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    let native = match snapshot.native_package() {
+        ProbeEvidence::NotRequested => NativeProbe::NotProbed,
+        ProbeEvidence::Absent { .. } => NativeProbe::Absent,
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::Installed(observation),
+        } => NativeProbe::Present {
+            package: provenance.package.clone(),
+            observation: observation.clone(),
+        },
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::MultipleVersions,
+        } => NativeProbe::MultipleVersions {
+            package: provenance.package.clone(),
+        },
+        ProbeEvidence::Present {
+            value: NativePackageSnapshot::UnexpectedOutput { detail },
+            ..
+        } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::NativePackage,
+                reason: detail.clone(),
+            });
+        }
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::NativePackage,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    let pending_journal = match snapshot.pending_journal() {
+        ProbeEvidence::Absent { .. } => false,
+        ProbeEvidence::Present { .. } => true,
+        ProbeEvidence::NotRequested => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::PendingJournal,
+                reason: "pending journal was not requested".to_string(),
+            });
+        }
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::PendingJournal,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    let snapshot_owned_files_verified = match snapshot.owned_files() {
+        ProbeEvidence::NotRequested => owned_files_verified,
+        ProbeEvidence::Absent { .. } => None,
+        ProbeEvidence::Present { value, .. } => match value.verdict {
+            OwnedFilesVerdict::Verified => Some(true),
+            OwnedFilesVerdict::Drifted => Some(false),
+            OwnedFilesVerdict::Inconclusive => None,
+        },
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::OwnedFiles,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    Ok(Facts {
+        scope: snapshot.request().scope(),
+        record,
+        native,
+        pending_journal,
+        active_adapter_claims,
+        owned_files_verified: snapshot_owned_files_verified,
+    })
 }
 
 /// Assemble [`Facts`] for one object.
@@ -356,7 +623,13 @@ pub fn assemble_facts(
         .collect();
 
     let owned_files_verified = if req.verify_owned_files {
-        verify_owned_files(&record, store, req.kind, req.name, layout)
+        observe_owned_files_for_record(&record, store, req.kind, req.name, layout).and_then(
+            |observation| match observation.verdict {
+                OwnedFilesVerdict::Verified => Some(true),
+                OwnedFilesVerdict::Drifted => Some(false),
+                OwnedFilesVerdict::Inconclusive => None,
+            },
+        )
     } else {
         None
     };
@@ -371,33 +644,32 @@ pub fn assemble_facts(
     })
 }
 
-/// Integrity verdict over a record's owned file list: `Some(true)` when
-/// every probe is healthy, `Some(false)` on any hard finding, `None` when
-/// the list cannot be judged — nothing to verify (no record, delegated
-/// binding, empty file list), or at least one file was too large to hash.
+/// Integrity observations over a record's owned file list. `None` means
+/// there is nothing to verify (no record, delegated binding, or empty file
+/// list); an over-budget path is retained with an inconclusive verdict.
 ///
 /// A quarantined record is verified against the legacy record's file list —
 /// that verdict is the evidence repair's R6 exit (rebuild the owned record)
-/// consumes. R6 treats `Some(true)` as a positive assertion that the
+/// consumes. R6 treats `Verified` as a positive assertion that the
 /// original file list still checks out, so a run that skipped a file must
-/// not report it: an over-limit file yields `None`, which fails R6 closed
+/// not report it: an over-limit file yields `Inconclusive`, which fails R6 closed
 /// (`RecordUnrecoverable`) rather than laundering unread bytes back into an
 /// active record.
 ///
-/// For an active record the caller only acts on `Some(false)` (replay), so
-/// `None` and `Some(true)` behave alike there — an over-limit file does not
+/// For an active record the caller only acts on `Drifted` (replay), so
+/// `Inconclusive` and `Verified` behave alike there — an over-limit file does not
 /// trigger a spurious reinstall.
 ///
 /// `Skipped` (not ANOLISA-owned) and `Unverified` (no recorded digest) count
 /// as healthy: neither proves drift, and treating absence of evidence as
 /// damage would route every digest-less install into repair.
-fn verify_owned_files(
+fn observe_owned_files_for_record(
     record: &RecordFacts,
     store: &StateStore,
     kind: ObjectKind,
     name: &str,
     layout: &FsLayout,
-) -> Option<bool> {
+) -> Option<OwnedFilesSnapshot> {
     let files: &[crate::state::OwnedFile] = match record {
         RecordFacts::Active(installation) => match &installation.binding {
             ProviderBinding::Owned { artifact } => &artifact.files,
@@ -412,23 +684,55 @@ fn verify_owned_files(
         }
         RecordFacts::Absent => return None,
     };
+    observe_owned_file_contract(files, layout)
+}
+
+/// Observe the owned-file contract of an active installation.
+///
+/// Returns `None` for delegated installations and owned records without
+/// declared files. Per-path results are retained so read-only consumers can
+/// explain the aggregate verdict without probing the filesystem again.
+pub fn observe_owned_files(
+    installation: &Installation,
+    layout: &FsLayout,
+) -> Option<OwnedFilesSnapshot> {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => observe_owned_file_contract(&artifact.files, layout),
+        ProviderBinding::Delegated { .. } => None,
+    }
+}
+
+fn observe_owned_file_contract(
+    files: &[crate::state::OwnedFile],
+    layout: &FsLayout,
+) -> Option<OwnedFilesSnapshot> {
     if files.is_empty() {
         return None;
     }
-    let mut skipped_a_file = false;
-    for file in files {
-        match check_owned_file(layout, file) {
-            IntegrityStatus::Ok | IntegrityStatus::Skipped | IntegrityStatus::Unverified => {}
-            // The bytes were never read, so this file can be neither
-            // vouched for nor condemned. Downgrade the whole verdict to
-            // "cannot judge" instead of letting it pass as verified.
-            IntegrityStatus::ProbeLimitExceeded { .. } => skipped_a_file = true,
-            // Any hard finding is decisive on its own — report damage even
-            // if another file was skipped.
-            _ => return Some(false),
-        }
-    }
-    (!skipped_a_file).then_some(true)
+
+    let mut verdict = OwnedFilesVerdict::Verified;
+    let observations = files
+        .iter()
+        .map(|file| {
+            let status = check_owned_file(layout, file);
+            if status.is_failure() {
+                verdict = OwnedFilesVerdict::Drifted;
+            } else if matches!(status, IntegrityStatus::ProbeLimitExceeded { .. })
+                && verdict != OwnedFilesVerdict::Drifted
+            {
+                verdict = OwnedFilesVerdict::Inconclusive;
+            }
+            OwnedFileObservation {
+                path: file.path.clone(),
+                status,
+            }
+        })
+        .collect();
+
+    Some(OwnedFilesSnapshot {
+        verdict,
+        files: observations,
+    })
 }
 
 /// First pending journal attributed to `subject`, if any.
@@ -612,6 +916,192 @@ mod tests {
         assert!(matches!(
             facts.native,
             NativeProbe::Present { ref package, .. } if package == "cosh"
+        ));
+    }
+
+    #[test]
+    fn component_snapshot_projects_typed_sources_into_lifecycle_facts() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let store = StateStore::empty();
+        let mut query = FakeQuery::default();
+        query.installed.insert(
+            "cosh".to_string(),
+            InstalledOutcome::Present(pkg_info("cosh", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+        let snapshot = assemble_component_snapshot(
+            ComponentSnapshotRequest::new(
+                "cosh",
+                InstallationScope::System,
+                [
+                    SnapshotProbe::State,
+                    SnapshotProbe::NativePackage,
+                    SnapshotProbe::PendingJournal,
+                ],
+            ),
+            Some("cosh"),
+            NOW,
+            &store,
+            Some(&provider),
+            &layout,
+            &layout.state_dir.join("journal"),
+        )
+        .expect("snapshot");
+
+        assert!(matches!(
+            snapshot.state(),
+            ProbeEvidence::Absent { provenance }
+                if provenance.path == layout.state_dir.join("installed.toml")
+        ));
+        assert!(matches!(
+            snapshot.native_package(),
+            ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::Installed(observation),
+            } if provenance.manager == NativePm::Rpm
+                && provenance.package == "cosh"
+                && observation.version == "2.7.0"
+        ));
+        assert!(matches!(
+            snapshot.pending_journal(),
+            ProbeEvidence::Absent { provenance }
+                if provenance.directory == layout.state_dir.join("journal")
+        ));
+
+        let facts =
+            lifecycle_facts_from_snapshot(&snapshot, Vec::new(), None).expect("lifecycle facts");
+        assert!(matches!(facts.record, RecordFacts::Absent));
+        assert!(matches!(
+            facts.native,
+            NativeProbe::Present { ref package, ref observation }
+                if package == "cosh" && observation.version == "2.7.0"
+        ));
+        assert!(!facts.pending_journal);
+    }
+
+    #[test]
+    fn component_snapshot_projects_owned_file_integrity() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let file_path = layout.bin_dir.join("skillfs");
+        fs::write(&file_path, b"binary").expect("write owned file");
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let hash = Sha256::digest(b"binary");
+            hash.iter().fold(String::new(), |mut digest, byte| {
+                use std::fmt::Write;
+                let _ = write!(digest, "{byte:02x}");
+                digest
+            })
+        };
+        let owned_file = OwnedFile {
+            path: file_path.clone(),
+            owner: FileOwner::Anolisa,
+            sha256: Some(digest),
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        };
+        let mut store = StateStore::empty();
+        store.upsert(owned_installation("skillfs", vec![owned_file]));
+        let request = || {
+            ComponentSnapshotRequest::new(
+                "skillfs",
+                InstallationScope::System,
+                [
+                    SnapshotProbe::State,
+                    SnapshotProbe::OwnedFiles,
+                    SnapshotProbe::PendingJournal,
+                ],
+            )
+        };
+
+        let snapshot = assemble_component_snapshot(
+            request(),
+            None,
+            NOW,
+            &store,
+            None,
+            &layout,
+            &layout.state_dir.join("journal"),
+        )
+        .expect("healthy snapshot");
+        assert!(matches!(
+            snapshot.owned_files(),
+            ProbeEvidence::Present {
+                provenance,
+                value: OwnedFilesSnapshot {
+                    verdict: OwnedFilesVerdict::Verified,
+                    ..
+                },
+            } if provenance.state_path == layout.state_dir.join("installed.toml")
+        ));
+        let facts =
+            lifecycle_facts_from_snapshot(&snapshot, Vec::new(), None).expect("healthy facts");
+        assert_eq!(facts.owned_files_verified, Some(true));
+
+        fs::remove_file(file_path).expect("remove owned file");
+        let snapshot = assemble_component_snapshot(
+            request(),
+            None,
+            NOW,
+            &store,
+            None,
+            &layout,
+            &layout.state_dir.join("journal"),
+        )
+        .expect("drifted snapshot");
+        assert!(matches!(
+            snapshot.owned_files(),
+            ProbeEvidence::Present {
+                value: OwnedFilesSnapshot {
+                    verdict: OwnedFilesVerdict::Drifted,
+                    ..
+                },
+                ..
+            }
+        ));
+        let facts =
+            lifecycle_facts_from_snapshot(&snapshot, Vec::new(), None).expect("drifted facts");
+        assert_eq!(facts.owned_files_verified, Some(false));
+    }
+
+    #[test]
+    fn component_snapshot_rejects_user_native_probe_before_query() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let store = StateStore::empty();
+        let mut query = FakeQuery::default();
+        query
+            .installed
+            .insert("cosh".to_string(), InstalledOutcome::Fail);
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+
+        let error = assemble_component_snapshot(
+            ComponentSnapshotRequest::new(
+                "cosh",
+                InstallationScope::User { uid: 1000 },
+                [SnapshotProbe::NativePackage],
+            ),
+            Some("cosh"),
+            NOW,
+            &store,
+            Some(&provider),
+            &layout,
+            &layout.state_dir.join("journal"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FactsError::SnapshotContract(SnapshotContractError::UnsupportedProbeScope {
+                probe: SnapshotProbe::NativePackage,
+                scope: InstallationScope::User { uid: 1000 },
+            })
         ));
     }
 
@@ -1279,6 +1769,8 @@ mod tests {
                 enabled_at: NOW.to_string(),
                 resource_root: PathBuf::new(),
                 bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: 1,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),

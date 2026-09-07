@@ -233,6 +233,15 @@ jobs:
       - name: Regression test tokenless catalog version mismatch detection
         run: bash tests/test-check-component-versions.sh
 
+  check-build-runtime-deps:
+    name: Check build runtime dependencies
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test aggregated runtime dependency preflight
+        run: bash tests/test-build-all-runtime-deps.sh
+
   # =========================================================================
   # Step 3: Build & Lint copilot-shell
   # =========================================================================
@@ -356,7 +365,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.93.0'
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt, clippy
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -464,6 +473,20 @@ jobs:
           fi
           echo "requirements.txt is in sync with uv.lock."
 
+      - name: Rust format & lint check
+        run: |
+          cd src/agent-sec-core
+          make rust-fmt-check
+          make rust-lint
+          # cargo-llvm-cov cannot instrument doctests on stable, so the coverage
+          # step below skips them; run the crate's public examples here instead.
+          cd agent-sec-cli && cargo test --doc -p prompt-scanner
+
+      - name: Run AgentSecCore V2 Rust tests
+        run: |
+          cd src/agent-sec-core/v2
+          cargo test --workspace --locked
+
       - name: Run Rust tests with coverage
         run: |
           cd src/agent-sec-core
@@ -473,24 +496,33 @@ jobs:
         if: always()
         shell: bash
         run: |
-          COV_FILE="src/agent-sec-core/rust-coverage.xml"
-          if [ -f "$COV_FILE" ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
-            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+          cd src/agent-sec-core
+          # One row per Rust workspace: linux-sandbox and the agent-sec-cli
+          # library crates are separate cargo workspaces with separate reports.
+          emit_rust_cov_row() {
+            local cov_file="$1" label="agent-sec-core/$2"
+            if [ ! -f "$cov_file" ]; then
+              echo "### ⚠️ ${label} Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            local line_rate lines_valid lines_covered line_pct
+            line_rate=$(grep -oP 'line-rate="\K[^"]+' "$cov_file" | head -1)
+            lines_valid=$(grep -oP 'lines-valid="\K[^"]+' "$cov_file" | head -1)
+            lines_covered=$(grep -oP 'lines-covered="\K[^"]+' "$cov_file" | head -1)
+            line_pct=$(echo "$line_rate * 100" | bc -l | xargs printf '%.1f')
             {
-              echo "### 🧪 agent-sec-core/linux-sandbox (Rust) Test Coverage"
+              echo "### 🧪 ${label} (Rust) Test Coverage"
               echo ""
               echo "| Metric | Coverage | Detail |"
               echo "|--------|----------|--------|"
-              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Line Coverage | **${line_pct}%** | ${lines_covered}/${lines_valid} lines |"
               echo ""
               echo "> ℹ️ cargo-llvm-cov 不支持分支覆盖统计，仅展示行覆盖率。"
             } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### ⚠️ linux-sandbox Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          }
+
+          emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
+          emit_rust_cov_row rust-coverage.xml linux-sandbox
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -571,9 +603,15 @@ jobs:
           fi
 
           # --- Rust ---
-          if [ -f rust-coverage.xml ]; then
-            echo "--- Rust incremental coverage ---"
-            RUST_OUTPUT=$(diff-cover rust-coverage.xml --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+          # One Cobertura report per Rust workspace (cargo-llvm-cov cannot merge
+          # profiles across workspaces).  diff-cover accepts several reports and
+          # unions them, so every workspace report lands in a single Rust row.
+          shopt -s nullglob
+          RUST_REPORTS=(rust*-coverage.xml)
+          shopt -u nullglob
+          if [ "${#RUST_REPORTS[@]}" -gt 0 ]; then
+            echo "--- Rust incremental coverage (${RUST_REPORTS[*]}) ---"
+            RUST_OUTPUT=$(diff-cover "${RUST_REPORTS[@]}" --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
             echo "$RUST_OUTPUT"
             RUST_STATS=$(extract_diff_cov_stats "$RUST_OUTPUT")
             RUST_PCT=$(echo "$RUST_STATS" | cut -d'|' -f1)
@@ -677,13 +715,32 @@ jobs:
       - name: Lint
         run: |
           cd src/agentsight
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --all-targets -- -D warnings
+
+      - name: Build enforcer (actplane feature + attested build)
+        run: |
+          cd src/agentsight
+          cargo build -p agentsight-enforcer --no-default-features --features actplane
+          ./scripts/build-enforcer.sh
+
+      - name: Test raw packaging
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --no-project make test-raw-package
+
+      - name: Test doctests
+        run: |
+          cd src/agentsight
+          cargo test --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --doc
 
       - name: Run tests with coverage
         run: |
           cd src/agentsight
-          cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs|src/local/)'
+          # Cap parallelism: full-core parallel compile/link/test of instrumented
+          # binaries has OOM-killed the self-hosted runner mid-step.
+          JOBS=$(( ($(nproc) + 1) / 2 ))
+          cargo llvm-cov --workspace --exclude ebpf-ifc-engine --exclude actplane-ifc-compiler --cobertura --output-path coverage.xml \
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/|crates/ebpf-ifc-engine/|crates/actplane-ifc-compiler/)' \
+            -j "$JOBS" -- --test-threads="$JOBS"
 
       - name: Generate coverage summary
         if: always()
@@ -842,31 +899,43 @@ jobs:
           cd src/tokenless/benchmark/l2-module
           cargo test --release --locked
 
-      - name: Run hook integration tests (Python)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Python integration tests
         run: |
-          cd src/tokenless
-          python3 tests/test_compress_response_hook.py
-          python3 tests/test_hermes_plugin_import.py
+          make -C src/tokenless test-integration
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install RTK Rust toolchain
+        run: rustup toolchain install 1.91.0 --profile minimal
+
+      - name: Build and test Tokenless Python packages
+        env:
+          RUSTUP_TOOLCHAIN: '1.91.0'
+        run: |
+          make -C src/tokenless \
+            test-python-runtime test-agentscope-integration
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - uses: extractions/setup-just@v2
-
       - name: npm packaging smoke test (native Linux)
         # rtk v0.43.0 declares rust-version = "1.91", above the 1.89.0 pin
-        # used by the workspace MSRV checks earlier in this job. Only this
-        # packaging step builds rtk, so it runs on its own 1.91 toolchain
-        # via RUSTUP_TOOLCHAIN while the MSRV pin stays intact.
+        # used by the workspace MSRV checks earlier in this job. Packaging
+        # runs on its own 1.91 toolchain while the MSRV pin stays intact.
         env:
           RUSTUP_TOOLCHAIN: '1.91.0'
         run: |
           set -euo pipefail
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           make -C src/tokenless npm-package
           # Install root + platform tarballs into a scratch project and verify
-          # all three binaries actually run. The root install omits registry
+          # both binaries actually run. The root install omits registry
           # optional deps (unpublished during CI); the platform tarball
           # installed in step 1 satisfies the platform lookup instead.
           DIST="$GITHUB_WORKSPACE/src/tokenless/npm/dist"
@@ -874,10 +943,10 @@ jobs:
           cd "$SMOKE"
           npm init -y >/dev/null
           npm install --no-audit --no-fund "$DIST"/tokenless-linux-x64/*.tgz
-          npm install --no-audit --no-fund --omit=optional "$DIST"/tokenless/*.tgz
+          npm install --no-audit --no-fund --omit=optional \
+            --install-strategy=nested "$DIST"/tokenless/*.tgz
           ./node_modules/.bin/tokenless --version
           ./node_modules/.bin/rtk --version
-          ./node_modules/.bin/toon --version
           # Verify the bundled OpenClaw adapter was built and packaged
           test -f ./node_modules/anolisa-tokenless/adapters/tokenless/openclaw/dist/index.js
           # Verify adapter install scripts are executable
@@ -894,7 +963,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: 'rustfmt, clippy'
 
@@ -925,7 +994,7 @@ jobs:
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
         run: |
-          cargo install cargo-tarpaulin --locked
+          cargo install cargo-tarpaulin --version 0.37.2 --locked
           cd src/ws-ckpt/src
           cargo tarpaulin --workspace --out Stdout --fail-under 45
 
@@ -1005,7 +1074,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.88.0'
+          toolchain: '1.93.1'
           components: 'rustfmt, clippy, llvm-tools-preview'
 
       - name: Install cargo-llvm-cov
@@ -1160,10 +1229,13 @@ jobs:
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     timeout-minutes: 15
+    env:
+      # This override takes precedence over the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.88.0'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1172,7 +1244,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config ripgrep
+          sudo apt-get install -y pkg-config ripgrep
 
       - name: Run process and PTY integration tests
         env:
@@ -1188,10 +1260,17 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    env:
+      # Keep lint upgrades explicit; this overrides the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.97.1'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: 'rustfmt, clippy'
 
@@ -1202,7 +1281,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config ripgrep
+          sudo apt-get install -y pkg-config ripgrep shellcheck
 
       - name: Check formatting
         run: |
@@ -1232,10 +1311,12 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    env:
+      RUSTUP_TOOLCHAIN: '1.88.0'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1244,7 +1325,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y pkg-config
 
       - name: Build release workspace
         run: |

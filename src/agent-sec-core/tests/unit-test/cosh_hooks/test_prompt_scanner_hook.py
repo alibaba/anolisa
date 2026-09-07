@@ -241,13 +241,13 @@ class TestCoshHookSubprocess:
             separators=(",", ":"),
         )
         assert output == {"decision": "allow"}
+        # Prompt is piped via stdin (not --text argv) — avoids /proc/cmdline
+        # exposure and ARG_MAX limits, matching codex/hermes/qoder/qwen.
         assert captured["args"] == [
             "agent-sec-cli",
             "--trace-context",
             expected_context,
             "scan-prompt",
-            "--text",
-            "hello",
             "--mode",
             "standard",
             "--format",
@@ -255,4 +255,87 @@ class TestCoshHookSubprocess:
             "--source",
             "user_input",
         ]
+        assert "--text" not in captured["args"]
+        assert "hello" not in captured["args"]
+        assert captured["kwargs"]["input"] == "hello"
         assert captured["kwargs"]["check"] is False
+
+    def test_prompt_passed_via_stdin_not_argv(self, monkeypatch, capsys):
+        """Prompt text must be passed via stdin (input kwarg), not --text argv.
+
+        Mirrors codex/hermes/qoder/qwen — avoids /proc/<pid>/cmdline
+        exposure and ARG_MAX limits.
+        """
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["input"] = kwargs.get("input")
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            prompt_scanner_hook.sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "sensitive data here"})),
+        )
+
+        prompt_scanner_hook.main()
+
+        # Must NOT appear in argv (avoids /proc/cmdline leak & ARG_MAX)
+        assert "--text" not in captured["args"]
+        assert "sensitive data here" not in captured["args"]
+        # Must be piped via stdin
+        assert captured["input"] == "sensitive data here"
+
+
+# ---------------------------------------------------------------------------
+# Scan mode configuration diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _run_hook_process(scan_mode: str | None) -> subprocess.CompletedProcess[str]:
+    """Run the hook with one PROMPT_SCANNER_SCAN_MODE value and keep stderr.
+
+    The empty prompt short-circuits before the CLI call, so stderr carries the
+    configuration diagnostic alone.
+    """
+    env = os.environ.copy()
+    if scan_mode is None:
+        env.pop("PROMPT_SCANNER_SCAN_MODE", None)
+    else:
+        env["PROMPT_SCANNER_SCAN_MODE"] = scan_mode
+    proc = subprocess.run(
+        [sys.executable, _COSH_HOOK],
+        input=json.dumps({"prompt": ""}),
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=15,
+        env=env,
+    )
+    assert proc.returncode == 0, f"Hook stderr: {proc.stderr}"
+    return proc
+
+
+class TestScanModeDiagnostics:
+    """Only a misconfigured PROMPT_SCANNER_SCAN_MODE may reach stderr."""
+
+    def test_invalid_scan_mode_reports_fallback(self):
+        proc = _run_hook_process("banana")
+        assert (
+            "[prompt-scanner] invalid PROMPT_SCANNER_SCAN_MODE 'banana'; "
+            "using 'standard'" in proc.stderr
+        )
+
+    @pytest.mark.parametrize("scan_mode", ["fast", "standard", "strict", "  STRICT "])
+    def test_valid_scan_mode_stays_silent(self, scan_mode):
+        assert _run_hook_process(scan_mode).stderr == ""
+
+    def test_unset_scan_mode_stays_silent(self):
+        assert _run_hook_process(None).stderr == ""

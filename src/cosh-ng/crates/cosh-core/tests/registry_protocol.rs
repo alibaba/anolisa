@@ -1,8 +1,106 @@
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
+
+fn model_server() -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request);
+        let body = r#"{"id":"home-model","object":"model"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
+fn rejecting_model_server(status: u16) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request);
+        let body = r#"{"error":{"code":"invalid_api_key"}}"#;
+        write!(
+            stream,
+            "HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
+fn aliyun_response_server(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let count = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..count]);
+        assert!(request.starts_with("POST /api/v1/openapi/initial HTTP/1.1"));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    (format!("http://{address}"), thread)
+}
+
+fn aliyun_copilot_rejection_server(
+    status: u16,
+    body: &'static str,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        for (expected_path, response_status, response_body) in [
+            (
+                "/api/v1/openapi/initial",
+                200,
+                r#"{"code":"Success","data":{"role_exist":true}}"#,
+            ),
+            (
+                "/api/v1/copilot/generate_copilot_stream_response",
+                status,
+                body,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let count = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(
+                request.starts_with(&format!("POST {expected_path} HTTP/1.1")),
+                "{request}"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 {response_status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        }
+    });
+    (format!("http://{address}"), thread)
+}
 
 fn binary_path() -> std::path::PathBuf {
     let mut path = std::env::current_exe()
@@ -824,13 +922,15 @@ api_key = "sk-project"
     )
     .unwrap();
 
+    let (base_url, server) = model_server();
     let resp = run_registry_request_with_context(
         "auth",
         "configure",
         serde_json::json!({
             "provider_id": "home-provider",
-            "provider_type": "dashscope",
+            "provider_type": "openai_compat",
             "values": {
+                "base_url": base_url,
                 "api_key": "sk-home",
                 "model": "home-model"
             }
@@ -838,6 +938,7 @@ api_key = "sk-project"
         home.path(),
         Some(project.path()),
     );
+    server.join().unwrap();
     assert_eq!(resp["success"], true);
 
     let home_config = std::fs::read_to_string(home_config_dir.join("config.toml")).unwrap();
@@ -883,6 +984,135 @@ fn registry_auth_configure_rejects_invalid_base_url_without_writing_config() {
 }
 
 #[test]
+fn registry_auth_preflight_rejection_is_classified_without_writing_config() {
+    for (status, expected_code) in [(401, "invalid_credentials"), (403, "permission_denied")] {
+        let home = tempfile::tempdir().expect("temp home");
+        let config_path = home.path().join(".copilot-shell/config.toml");
+        let (base_url, server) = rejecting_model_server(status);
+        let response = run_registry_request_with_context(
+            "auth",
+            "configure",
+            serde_json::json!({
+                "provider_id": "rejected-provider",
+                "provider_type": "dashscope",
+                "values": {
+                    "base_url": base_url,
+                    "api_key": "sk-not-logged",
+                    "model": "home-model"
+                }
+            }),
+            home.path(),
+            None,
+        );
+        server.join().unwrap();
+
+        assert_eq!(response["success"], false, "{response}");
+        assert_eq!(response["data"]["error_code"], expected_code, "{response}");
+        assert!(!config_path.exists());
+        assert!(!response.to_string().contains("sk-not-logged"));
+    }
+}
+
+#[test]
+fn registry_auth_rejects_missing_aliyun_role_without_writing_config() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_path = home.path().join(".copilot-shell/config.toml");
+    let (base_url, server) =
+        aliyun_response_server(r#"{"code":"Success","data":{"role_exist":false}}"#);
+    let response = run_registry_request_with_context(
+        "auth",
+        "configure",
+        serde_json::json!({
+            "provider_id": "sysom-not-ready",
+            "provider_type": "aliyun",
+            "values": {
+                "base_url": base_url,
+                "access_key_id": "test-access-key",
+                "access_key_secret": "test-secret",
+                "model": "qwen-test"
+            }
+        }),
+        home.path(),
+        None,
+    );
+    server.join().unwrap();
+
+    assert_eq!(response["success"], false, "{response}");
+    assert_eq!(response["data"]["error_code"], "service_not_ready");
+    assert!(!config_path.exists());
+    assert!(!response.to_string().contains("test-secret"));
+}
+
+#[test]
+fn registry_auth_rejects_unusable_aliyun_model_without_writing_config() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_path = home.path().join(".copilot-shell/config.toml");
+    let (base_url, server) = aliyun_copilot_rejection_server(400, r#"{"Code":"ModelNotFound"}"#);
+    let response = run_registry_request_with_context(
+        "auth",
+        "configure",
+        serde_json::json!({
+            "provider_id": "sysom-bad-model",
+            "provider_type": "aliyun",
+            "values": {
+                "base_url": base_url,
+                "access_key_id": "test-access-key",
+                "access_key_secret": "test-secret",
+                "model": "definitely-not-a-real-sysom-model"
+            }
+        }),
+        home.path(),
+        None,
+    );
+    server.join().unwrap();
+
+    assert_eq!(response["success"], false, "{response}");
+    assert_eq!(response["data"]["error_code"], "model_unavailable");
+    assert!(!config_path.exists());
+    assert!(!response.to_string().contains("test-secret"));
+}
+
+#[test]
+fn registry_auth_activate_clears_a_stale_model() {
+    let home = tempfile::tempdir().expect("temp home");
+    let home_config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&home_config_dir).unwrap();
+    let config_path = home_config_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[ai]
+active_provider = "old-provider"
+active_model = "old-model"
+
+[ai.providers.old-provider]
+type = "dashscope"
+api_key = "sk-old"
+model = "old-model"
+
+[ai.providers.no-model]
+type = "dashscope"
+api_key = "sk-new"
+"#,
+    )
+    .unwrap();
+
+    let response = run_registry_request_with_context(
+        "auth",
+        "activate",
+        serde_json::json!({ "provider_id": "no-model" }),
+        home.path(),
+        None,
+    );
+
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["active_provider"], "no-model");
+    let persisted = std::fs::read_to_string(config_path).unwrap();
+    assert!(persisted.contains("active_provider = \"no-model\""));
+    assert!(!persisted.contains("active_model = \"old-model\""));
+}
+
+#[test]
 fn registry_auth_delete_removes_user_provider_and_credentials() {
     let home = tempfile::tempdir().expect("temp home");
     let home_config_dir = home.path().join(".copilot-shell");
@@ -893,6 +1123,7 @@ fn registry_auth_delete_removes_user_provider_and_credentials() {
         r#"
 [ai]
 active_provider = "remove-me"
+active_model = "delete-model"
 
 [ai.providers.keep-me]
 type = "dashscope"
@@ -921,6 +1152,7 @@ model = "remove-model"
     let persisted = std::fs::read_to_string(&config_path).unwrap();
     assert!(!persisted.contains("[ai.providers.remove-me]"));
     assert!(!persisted.contains("sk-remove"));
+    assert!(!persisted.contains("active_model = \"delete-model\""));
     assert!(persisted.contains("[ai.providers.keep-me]"));
     assert!(persisted.contains("sk-keep"));
 }

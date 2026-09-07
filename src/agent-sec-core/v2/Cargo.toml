@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "3"
+members = [
+    "apps/asc-daemon",
+    "crates/daemon/asc-daemon-core",
+    "crates/daemon/asc-daemon-handler",
+    "crates/daemon/asc-daemon-protocol",
+    "crates/daemon/asc-daemon-service",
+    "crates/foundation/asc-foundation-types",
+    "crates/policy/asc-pap",
+    "crates/policy/asc-pap-repository-memory",
+    "crates/policy/asc-policy-engine",
+    "crates/policy/asc-policy-types",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+repository = "https://github.com/alibaba/anolisa"
+publish = false
+
+[workspace.dependencies]
+asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
+asc-daemon-handler = { path = "crates/daemon/asc-daemon-handler" }
+asc-daemon-protocol = { path = "crates/daemon/asc-daemon-protocol" }
+asc-daemon-service = { path = "crates/daemon/asc-daemon-service" }
+asc-foundation-types = { path = "crates/foundation/asc-foundation-types" }
+asc-pap = { path = "crates/policy/asc-pap" }
+asc-pap-repository-memory = { path = "crates/policy/asc-pap-repository-memory" }
+asc-policy-engine = { path = "crates/policy/asc-policy-engine" }
+asc-policy-types = { path = "crates/policy/asc-policy-types" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "=0.3.44", features = ["parsing"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

@@ -99,7 +99,7 @@ pub enum RetentionExecutionStatus {
 ///
 /// The returned thread is intentionally detached by long-lived callers. Coordination remains
 /// bounded by `retention.lock`, so concurrent Core processes cannot delete the same segment.
-// Keep the workspace Rust 1.74 MSRV; `Option::is_none_or` is newer.
+// Keep the explicit predicates aligned with the query filter implementation.
 #[allow(clippy::unnecessary_map_or)]
 pub fn schedule_retention(root: PathBuf, settings: AuditSettings, component: AuditComponentName) {
     let now = Utc::now();

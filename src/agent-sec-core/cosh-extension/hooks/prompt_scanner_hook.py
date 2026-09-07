@@ -45,12 +45,21 @@ _RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().
 _DEFAULT_MODE = _RAW_SCAN_MODE
 if _DEFAULT_MODE not in {"fast", "standard", "strict"}:
     _DEFAULT_MODE = "standard"
-print(
-    f"[prompt-scanner] scan mode configured: raw={_RAW_SCAN_MODE!r}, "
-    f"effective={_DEFAULT_MODE!r}",
-    file=sys.stderr,
-)
 _DEFAULT_SOURCE = "user_input"
+
+
+def _warn_invalid_scan_mode() -> None:
+    """Report a PROMPT_SCANNER_SCAN_MODE value that silently fell back.
+
+    Mirrors the pii-checker and skill-ledger hooks: only the misconfiguration
+    is surfaced, so a correctly configured hook stays silent.
+    """
+    if "PROMPT_SCANNER_SCAN_MODE" in os.environ and _RAW_SCAN_MODE != _DEFAULT_MODE:
+        print(
+            f"[prompt-scanner] invalid PROMPT_SCANNER_SCAN_MODE {_RAW_SCAN_MODE!r}; "
+            f"using {_DEFAULT_MODE!r}",
+            file=sys.stderr,
+        )
 
 
 # -- helpers ---------------------------------------------------------------
@@ -122,6 +131,8 @@ def main() -> None:
         print(_allow())
         return
 
+    _warn_invalid_scan_mode()
+
     # 1. Read stdin JSON (UserPromptSubmit event)
     try:
         input_data = json.load(sys.stdin)
@@ -136,13 +147,13 @@ def main() -> None:
         return
 
     # 3. Call CLI. Model download/loading is owned by the daemon.
+    # Pipe prompt via stdin (not --text argv) to avoid /proc/<pid>/cmdline
+    # exposure and ARG_MAX limits — mirrors codex/hermes/qoder/qwen.
     try:
         cmd = with_trace_context(
             [
                 "agent-sec-cli",
                 "scan-prompt",
-                "--text",
-                prompt_text,
                 "--mode",
                 _DEFAULT_MODE,
                 "--format",
@@ -158,6 +169,7 @@ def main() -> None:
             check=False,
             text=True,
             timeout=10,
+            input=prompt_text,
         )
     except subprocess.TimeoutExpired as exc:
         print(

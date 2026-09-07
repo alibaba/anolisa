@@ -66,11 +66,15 @@ jobs:
         working-directory: src/agentsight
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Test raw packaging
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --no-project make test-raw-package
+
       - name: Run tests with coverage
         working-directory: src/agentsight
         run: |
           cargo llvm-cov --workspace --cobertura --output-path coverage.xml \
-            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/optimize\.rs|src/local/)'
+            --ignore-filename-regex '(\.skel\.rs|target/debug/build|target/release/build|src/probes/|src/bin/|crates/agentsight-opt/src/bin/analyze\.rs|crates/agentsight-opt/src/llm/client\.rs|crates/agentsight-opt/src/(perf|cost)/llm\.rs|src/server/(optimize|causal)\.rs|src/local/)'
 
       - name: Upload coverage artifact
         if: always()
@@ -163,4 +167,3 @@ jobs:
               exec "$CARGO_BIN" test --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
             '
-

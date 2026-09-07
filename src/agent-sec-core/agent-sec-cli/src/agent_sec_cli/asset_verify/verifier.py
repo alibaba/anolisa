@@ -9,7 +9,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Literal, NotRequired, TypedDict
 
 try:
     import pgpy
@@ -17,6 +19,7 @@ except ImportError:
     pgpy = None
 
 from agent_sec_cli.asset_verify.errors import (
+    ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
     ErrManifestMissing,
@@ -37,16 +40,50 @@ GPG_BIN = shutil.which("gpg") or shutil.which("gpg2")
 SIGNING_DIR = ".skill-meta"
 
 
-def load_config(config_path: Path) -> dict[str, list[str] | str]:
-    """Load verification config file"""
+VerificationOutcome = Literal["verified", "failed", "no_candidates"]
+
+
+class VerificationConfig(TypedDict):
+    """Parsed asset-verification configuration."""
+
+    skills_dirs: list[str]
+    trusted_keys_dir: NotRequired[str]
+
+
+class VerificationFailure(TypedDict):
+    """One skill that failed verification."""
+
+    name: str
+    error: str
+
+
+class SkillsDirectoryResult(TypedDict):
+    """Verification result for one configured skills root."""
+
+    checked: int
+    passed: list[str]
+    failed: list[VerificationFailure]
+
+
+class VerificationResult(TypedDict):
+    """Structured verification result shared by all entry points."""
+
+    outcome: VerificationOutcome
+    checked: int
+    passed: list[str]
+    failed: list[VerificationFailure]
+
+
+def load_config(config_path: Path) -> VerificationConfig:
+    """Load verification config file."""
     if not config_path.exists():
         raise ErrConfigMissing(str(config_path))
 
-    config = {"skills_dirs": []}
+    config: VerificationConfig = {"skills_dirs": []}
     in_list = False
 
-    with open(config_path, "r") as f:
-        for line in f:
+    with open(config_path, "r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -55,17 +92,49 @@ def load_config(config_path: Path) -> dict[str, list[str] | str]:
                 if line == "]":
                     in_list = False
                 else:
-                    config["skills_dirs"].append(line.rstrip(","))
+                    value = line.rstrip(",").strip()
+                    if not value:
+                        raise ErrConfigInvalid(
+                            str(config_path), "empty skills_dir entry"
+                        )
+                    config["skills_dirs"].append(value)
             elif "=" in line:
                 key, val = line.split("=", 1)
                 key, val = key.strip(), val.strip()
                 if key == "skills_dir":
                     if val == "[":
                         in_list = True
+                    elif val == "[]":
+                        continue
+                    elif not val:
+                        raise ErrConfigInvalid(
+                            str(config_path), "empty skills_dir value"
+                        )
+                    elif val.startswith("[") or val.endswith("]"):
+                        raise ErrConfigInvalid(
+                            str(config_path),
+                            f"unsupported skills_dir list syntax on line {line_number}",
+                        )
                     else:
                         config["skills_dirs"].append(val)
                 elif key == "trusted_keys_dir":
+                    if not val:
+                        raise ErrConfigInvalid(
+                            str(config_path), "empty trusted_keys_dir value"
+                        )
                     config["trusted_keys_dir"] = val
+                else:
+                    raise ErrConfigInvalid(
+                        str(config_path),
+                        f"unknown config key '{key}' on line {line_number}",
+                    )
+            else:
+                raise ErrConfigInvalid(
+                    str(config_path), f"malformed entry on line {line_number}"
+                )
+
+    if in_list:
+        raise ErrConfigInvalid(str(config_path), "unterminated skills_dir list")
     return config
 
 
@@ -149,8 +218,6 @@ def verify_signature_gpg(
             skill_name, "Neither pgpy nor gpg available for signature verification"
         )
 
-    import tempfile
-
     with tempfile.TemporaryDirectory() as gnupg_home:
         # Set proper permissions for GNUPGHOME (GPG requires 700)
         os.chmod(gnupg_home, 0o700)
@@ -165,6 +232,7 @@ def verify_signature_gpg(
             result = subprocess.run(
                 [GPG_BIN, "--batch", "--yes", "--import", key_file],
                 capture_output=True,
+                check=False,
                 env=env,
             )
             if result.returncode != 0:
@@ -186,6 +254,7 @@ def verify_signature_gpg(
                 manifest_path,
             ],
             capture_output=True,
+            check=False,
             env=env,
         )
 
@@ -267,29 +336,58 @@ def verify_skill(skill_dir: str, trusted_keys: list) -> tuple[bool, str]:
     return True, skill_name
 
 
-def verify_skills_dir(skills_dir: str, trusted_keys: list) -> dict[str, list]:
-    """Verify all skills in a directory"""
-    results = {"passed": [], "failed": []}
+def verify_skills_dir(skills_dir: str, trusted_keys: list) -> SkillsDirectoryResult:
+    """Verify all candidate skills in one best-effort search root.
 
-    if not os.path.isdir(skills_dir):
-        print(f"[WARN] Skills directory not found: {skills_dir}")
-        return results
+    Missing roots are valid because packaged and raw installations use different
+    locations. Existing roots that cannot be enumerated still raise an error.
+    """
+    root = Path(skills_dir)
+    try:
+        entries = sorted(root.iterdir(), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return {
+            "checked": 0,
+            "passed": [],
+            "failed": [],
+        }
 
-    for entry in sorted(os.listdir(skills_dir)):
-        skill_path = os.path.join(skills_dir, entry)
-        if not os.path.isdir(skill_path) or entry.startswith("."):
+    passed: list[str] = []
+    failed: list[VerificationFailure] = []
+    checked = 0
+
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if not stat.S_ISDIR(entry.stat().st_mode):
             continue
 
+        checked += 1
         try:
-            _, skill_name = verify_skill(skill_path, trusted_keys)
-            results["passed"].append(skill_name)
+            _, skill_name = verify_skill(str(entry), trusted_keys)
+            passed.append(skill_name)
         except Exception as e:
-            results["failed"].append({"name": entry, "error": str(e)})
+            failed.append({"name": entry.name, "error": str(e)})
 
-    return results
+    return {
+        "checked": checked,
+        "passed": passed,
+        "failed": failed,
+    }
 
 
-def run_verification(skill: str | None = None) -> dict[str, list]:
+def _verification_outcome(
+    checked: int, failed: list[VerificationFailure]
+) -> VerificationOutcome:
+    """Return the semantic outcome for a completed verification run."""
+    if failed:
+        return "failed"
+    if checked == 0:
+        return "no_candidates"
+    return "verified"
+
+
+def run_verification(skill: str | None = None) -> VerificationResult:
     """Run verification and return structured results.
 
     Handles the full workflow: load trusted keys, verify single skill or
@@ -300,30 +398,81 @@ def run_verification(skill: str | None = None) -> dict[str, list]:
                all directories listed in ``config.conf`` are scanned.
 
     Returns:
-        dict with ``passed`` (list[str]) and ``failed`` (list[dict]) keys.
+        Structured outcome, checked count, and per-skill results.
     """
     trusted_keys = load_trusted_keys(DEFAULT_TRUSTED_KEYS_DIR)
 
     if skill is not None:
         try:
             verify_skill(skill, trusted_keys)
-            return {"passed": [os.path.basename(skill)], "failed": []}
-        except Exception as e:
             return {
+                "outcome": "verified",
+                "checked": 1,
+                "passed": [os.path.basename(os.path.normpath(skill))],
+                "failed": [],
+            }
+        except Exception as e:
+            failed: list[VerificationFailure] = [
+                {
+                    "name": os.path.basename(os.path.normpath(skill)),
+                    "error": str(e),
+                }
+            ]
+            return {
+                "outcome": "failed",
+                "checked": 1,
                 "passed": [],
-                "failed": [{"name": os.path.basename(skill), "error": str(e)}],
+                "failed": failed,
             }
 
     config = load_config(DEFAULT_CONFIG)
     all_passed: list[str] = []
-    all_failed: list[dict] = []
+    all_failed: list[VerificationFailure] = []
+    checked = 0
+    seen_roots: set[Path] = set()
 
     for skills_dir in config.get("skills_dirs", []):
+        canonical_root = Path(skills_dir).resolve(strict=False)
+        if canonical_root in seen_roots:
+            continue
+        seen_roots.add(canonical_root)
+
         results = verify_skills_dir(skills_dir, trusted_keys)
+        checked += results["checked"]
         all_passed.extend(results["passed"])
         all_failed.extend(results["failed"])
 
-    return {"passed": all_passed, "failed": all_failed}
+    return {
+        "outcome": _verification_outcome(checked, all_failed),
+        "checked": checked,
+        "passed": all_passed,
+        "failed": all_failed,
+    }
+
+
+def format_verification_result(results: VerificationResult) -> str:
+    """Render the canonical human-readable verification result."""
+    output_lines: list[str] = []
+    for name in results["passed"]:
+        output_lines.append(f"[OK] {name}")
+    for item in results["failed"]:
+        output_lines.append(f"[ERROR] {item['name']}")
+        output_lines.append(f"  {item['error']}")
+
+    output_lines.append("")
+    output_lines.append("=" * 50)
+    output_lines.append(f"CHECKED: {results['checked']}")
+    output_lines.append(f"PASSED: {len(results['passed'])}")
+    output_lines.append(f"FAILED: {len(results['failed'])}")
+    output_lines.append("=" * 50)
+
+    status = {
+        "verified": "VERIFICATION PASSED",
+        "failed": "VERIFICATION FAILED",
+        "no_candidates": "VERIFICATION SKIPPED: NO CANDIDATE SKILLS",
+    }[results["outcome"]]
+    output_lines.append(status)
+    return "\n".join(output_lines) + "\n"
 
 
 def main() -> int:
@@ -335,28 +484,11 @@ def main() -> int:
 
     try:
         results = run_verification(args.skill)
-
-        for name in results["passed"]:
-            print(f"[OK] {name}")
-
-        for item in results["failed"]:
-            print(f"[ERROR] {item['name']}")
-            print(f"  {item['error']}")
-
-        print(f"\n{'=' * 50}")
-        print(f"PASSED: {len(results['passed'])}")
-        print(f"FAILED: {len(results['failed'])}")
-        print(f"{'=' * 50}")
-
-        if results["failed"]:
-            print("VERIFICATION FAILED")
-            return 1
-        else:
-            print("VERIFICATION PASSED")
-            return 0
+        print(format_verification_result(results), end="")
+        return 1 if results["outcome"] == "failed" else 0
 
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] {e}", file=sys.stderr)
         return 1
 
 

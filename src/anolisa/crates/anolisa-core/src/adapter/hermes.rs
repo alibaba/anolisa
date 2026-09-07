@@ -15,10 +15,9 @@
 //! tests to point at a fake CLI); `HERMES_HOME` overrides the home
 //! directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-use sha2::{Digest, Sha256};
 
 use super::AdapterError;
 use super::claim::{
@@ -30,6 +29,7 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
+use super::managed_files::{MaterializedMapping, copy_materialized_resource};
 
 /// Default timeout for a Hermes CLI invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
@@ -123,7 +123,6 @@ impl FrameworkDriver for HermesDriver {
 
         Ok(AdapterBundle {
             resource_root: root.clone(),
-            digest: digest_tree(root),
             plugin_id,
         })
     }
@@ -219,7 +218,9 @@ impl FrameworkDriver for HermesDriver {
                 adapter_type: ctx.adapter_type.clone(),
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
-                bundle_digest: bundle.digest.clone(),
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -238,6 +239,58 @@ impl FrameworkDriver for HermesDriver {
         ))
     }
 
+    fn materialized_mappings(
+        &self,
+        resource_root: &Path,
+        adapter_type: Option<&str>,
+        declared_skills: &[super::driver::DeclaredSkill],
+    ) -> Vec<MaterializedMapping> {
+        let mut mappings = Vec::new();
+        if adapter_type != Some("skill_bundle") {
+            mappings.push(MaterializedMapping {
+                resource_id: RES_PLUGIN.to_string(),
+                source_root: resource_root.to_path_buf(),
+                excluded_prefixes: vec![PathBuf::from("skills")],
+            });
+        }
+        for skill in declared_skills {
+            mappings.push(MaterializedMapping {
+                resource_id: format!("hermes_skill_{}", skill.name),
+                source_root: skill
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| resource_root.join("skills").join(&skill.name)),
+                excluded_prefixes: Vec::new(),
+            });
+        }
+        mappings
+    }
+
+    fn materialized_destination_roots(
+        &self,
+        bundle: &AdapterBundle,
+        ctx: &DriverCtx,
+    ) -> Result<BTreeMap<String, PathBuf>, AdapterError> {
+        let home = require_home(ctx)?;
+        let mut roots = BTreeMap::new();
+        if !ctx.is_skill_bundle() {
+            let plugin_id = require_plugin_id(bundle)?;
+            validate_plugin_id(&plugin_id)?;
+            roots.insert(RES_PLUGIN.to_string(), home.join("plugins").join(plugin_id));
+        }
+        for skill in &ctx.declared_skills {
+            roots.insert(
+                format!("hermes_skill_{}", skill.name),
+                home.join("skills").join(&skill.name),
+            );
+        }
+        Ok(roots)
+    }
+
+    fn materialized_verification_applicable(&self, _claim: &AdapterClaim) -> bool {
+        true
+    }
+
     fn apply_enable(
         &self,
         claim: &mut AdapterClaim,
@@ -245,7 +298,7 @@ impl FrameworkDriver for HermesDriver {
         ctx: &DriverCtx,
         _progress: &mut dyn super::driver::EnableProgress,
     ) -> Result<(), AdapterError> {
-        let home = require_home(ctx)?;
+        require_home(ctx)?;
 
         if !ctx.is_skill_bundle() {
             let plugin_id = claim_plugin_id(claim).ok_or_else(|| AdapterError::BundleInvalid {
@@ -254,8 +307,7 @@ impl FrameworkDriver for HermesDriver {
             })?;
             validate_plugin_id(&plugin_id)?;
 
-            let plugin_dest = home.join("plugins").join(&plugin_id);
-            copy_bundle_excluding_skills(&claim.resource_root, &plugin_dest, ctx)?;
+            copy_materialized_resource(claim, RES_PLUGIN, &claim.resource_root, ctx.ops)?;
 
             let enable_cmd = build_enable_cmd(&plugin_id);
             let program = enable_cmd.program.clone();
@@ -273,8 +325,8 @@ impl FrameworkDriver for HermesDriver {
                 .source
                 .clone()
                 .unwrap_or_else(|| claim.resource_root.join("skills").join(&skill.name));
-            let dst = home.join("skills").join(&skill.name);
-            ctx.ops.copy_tree(&src, &dst)?;
+            let resource_id = format!("hermes_skill_{}", skill.name);
+            copy_materialized_resource(claim, &resource_id, &src, ctx.ops)?;
         }
 
         Ok(())
@@ -298,10 +350,7 @@ impl FrameworkDriver for HermesDriver {
             resource: None,
         });
 
-        // 2. Resource bundle still matches the enable-time digest?
-        conditions.push(self.bundle_match_condition(claim));
-
-        // 3. Plugin still registered? Skill-only receipts have no plugin
+        // 2. Plugin still registered? Skill-only receipts have no plugin
         //    registry entry by design, so status does not require one.
         let plugin_registered = if claim.is_skill_bundle() {
             conditions.push(AdapterCondition {
@@ -410,20 +459,20 @@ impl FrameworkDriver for HermesDriver {
 
         if let DriverPayload::Hermes(ref hermes) = claim.driver_payload {
             for skill_res_id in &hermes.skill_resources {
-                if let Some(resource) = claim.resource(skill_res_id) {
-                    if let ClaimResourceKind::ExternalPath { path } = &resource.kind {
-                        match ctx.ops.remove_tree(path) {
-                            Ok(true) => {
-                                messages.push(format!("removed skill dir {}", path.display()));
-                            }
-                            Ok(false) => {} // already gone
-                            Err(err) => {
-                                cleanup_complete = false;
-                                messages.push(format!(
-                                    "failed to remove skill dir {}: {err}",
-                                    path.display()
-                                ));
-                            }
+                if let Some(resource) = claim.resource(skill_res_id)
+                    && let ClaimResourceKind::ExternalPath { path } = &resource.kind
+                {
+                    match ctx.ops.remove_tree(path) {
+                        Ok(true) => {
+                            messages.push(format!("removed skill dir {}", path.display()));
+                        }
+                        Ok(false) => {} // already gone
+                        Err(err) => {
+                            cleanup_complete = false;
+                            messages.push(format!(
+                                "failed to remove skill dir {}: {err}",
+                                path.display()
+                            ));
                         }
                     }
                 }
@@ -438,32 +487,6 @@ impl FrameworkDriver for HermesDriver {
 }
 
 impl HermesDriver {
-    /// Build the `ResourceBundleMatches` condition by re-digesting the
-    /// resource root and comparing to the enable-time digest.
-    fn bundle_match_condition(&self, claim: &AdapterClaim) -> AdapterCondition {
-        let kind = AdapterConditionKind::ResourceBundleMatches;
-        match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-            (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-                kind,
-                status: ConditionStatus::True,
-                reason: None,
-                resource: None,
-            },
-            (Some(_), Some(_)) => AdapterCondition {
-                kind,
-                status: ConditionStatus::False,
-                reason: Some("resource bundle changed since enable".to_string()),
-                resource: None,
-            },
-            _ => AdapterCondition {
-                kind,
-                status: ConditionStatus::Unknown,
-                reason: Some("no digest recorded or resource root unavailable".to_string()),
-                resource: None,
-            },
-        }
-    }
-
     /// Run `hermes plugins list` and decide whether `plugin_id` is still
     /// registered. Returns `(plugin_condition, verification_condition,
     /// plugin_registered_status)`.
@@ -659,38 +682,6 @@ fn read_yaml_id(root: &Path, filename: &str) -> Result<Option<String>, AdapterEr
     Ok(None)
 }
 
-/// Copy the bundle directory into the plugin destination, skipping the
-/// `skills/` subdirectory (delivered separately to `$HERMES_HOME/skills/`).
-/// All IO goes through `ctx.ops` so the Manager enforces path boundaries.
-fn copy_bundle_excluding_skills(
-    src: &Path,
-    dst: &Path,
-    ctx: &DriverCtx,
-) -> Result<(), AdapterError> {
-    let entries = std::fs::read_dir(src).map_err(|source| AdapterError::Io {
-        path: src.to_path_buf(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| AdapterError::Io {
-            path: src.to_path_buf(),
-            source,
-        })?;
-        let name = entry.file_name();
-        if name == "skills" {
-            continue;
-        }
-        let src_child = entry.path();
-        let dst_child = dst.join(&name);
-        if src_child.is_dir() {
-            ctx.ops.copy_tree(&src_child, &dst_child)?;
-        } else {
-            ctx.ops.copy_file(&src_child, &dst_child)?;
-        }
-    }
-    Ok(())
-}
-
 /// Human-readable form of a command for dry-run/preview output. Display
 /// only — never parsed back into an argv.
 fn display_command(cmd: &FrameworkCommand) -> String {
@@ -789,43 +780,6 @@ fn summarize(
         ConditionStatus::False => AdapterSummary::Degraded,
         ConditionStatus::Unknown => AdapterSummary::Unknown,
     }
-}
-
-/// SHA-256 digest of a directory tree, stable across runs: files are
-/// hashed in sorted relative-path order as `path\0len\0bytes`. Returns
-/// `None` on any IO error so callers fall back to `Unknown` rather than a
-/// wrong verdict.
-fn digest_tree(root: &Path) -> Option<String> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_files(root, &mut files).ok()?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for path in &files {
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let bytes = std::fs::read(path).ok()?;
-        hasher.update(rel.to_string_lossy().as_bytes());
-        hasher.update([0u8]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update([0u8]);
-        hasher.update(&bytes);
-    }
-    Some(format!("sha256:{:x}", hasher.finalize()))
-}
-
-/// Recursively collect regular-file paths under `dir`. Symlinks are not
-/// followed into directories (their link path is recorded as a file).
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            collect_files(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// ISO 8601 UTC timestamp, second precision.
@@ -990,22 +944,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn digest_tree_is_stable_and_detects_change() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("a.txt"), b"hello").expect("write");
-        std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
-        std::fs::write(dir.path().join("sub/b.txt"), b"world").expect("write");
-
-        let d1 = digest_tree(dir.path()).expect("digest");
-        let d2 = digest_tree(dir.path()).expect("digest again");
-        assert_eq!(d1, d2, "digest must be stable");
-
-        std::fs::write(dir.path().join("sub/b.txt"), b"WORLD").expect("rewrite");
-        let d3 = digest_tree(dir.path()).expect("digest after change");
-        assert_ne!(d1, d3, "digest must change when a file changes");
-    }
-
     // -- review fix coverage: lazy plugin_id, YAML entry, skills allowlist --
 
     use crate::adapter::claim::{DriverPayload, HermesClaim};
@@ -1053,6 +991,7 @@ mod tests {
             resource_root: dir.path().to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-a")),
             declared_plugin_id: Some("agent-sec".to_string()),
+            requested_profiles: Vec::new(),
             adapter_type: None,
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
@@ -1067,6 +1006,47 @@ mod tests {
             .read_bundle(&ctx)
             .expect("must succeed without parsing manifest");
         assert_eq!(bundle.plugin_id.as_deref(), Some("agent-sec"));
+    }
+
+    #[test]
+    fn materialized_mappings_separate_plugin_and_declared_skills() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = anolisa_platform::fs_layout::FsLayout::user(dir.path().join("home"));
+        let ops = StubOps;
+        let ctx = DriverCtx {
+            component: "agent-sec-core".into(),
+            framework: "hermes".into(),
+            layout: &layout,
+            resource_root: dir.path().join("bundle"),
+            user_home: Some(dir.path().join("home")),
+            declared_plugin_id: Some("agent-sec".into()),
+            requested_profiles: Vec::new(),
+            adapter_type: Some("plugin".into()),
+            declared_skills: vec![super::super::driver::DeclaredSkill {
+                name: "sec-audit".into(),
+                source: None,
+            }],
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
+            dry_run: false,
+            ops: &ops,
+        };
+        let mappings = HermesDriver::new().materialized_mappings(
+            &ctx.resource_root,
+            ctx.adapter_type.as_deref(),
+            &ctx.declared_skills,
+        );
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].resource_id, RES_PLUGIN);
+        assert_eq!(mappings[0].source_root, ctx.resource_root);
+        assert_eq!(mappings[0].excluded_prefixes, vec![PathBuf::from("skills")]);
+        assert_eq!(mappings[1].resource_id, "hermes_skill_sec-audit");
+        assert_eq!(
+            mappings[1].source_root,
+            ctx.resource_root.join("skills/sec-audit")
+        );
     }
 
     #[test]
@@ -1104,6 +1084,7 @@ mod tests {
             resource_root: root.to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-c")),
             declared_plugin_id: Some("test-plugin".to_string()),
+            requested_profiles: Vec::new(),
             adapter_type: None,
             declared_skills: vec![DeclaredSkill {
                 name: "sec-audit".to_string(),
@@ -1119,7 +1100,6 @@ mod tests {
 
         let bundle = AdapterBundle {
             resource_root: root.to_path_buf(),
-            digest: None,
             plugin_id: Some("test-plugin".to_string()),
         };
 
@@ -1172,6 +1152,7 @@ mod tests {
             resource_root: dir.path().to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-d")),
             declared_plugin_id: None,
+            requested_profiles: Vec::new(),
             adapter_type: Some("skill_bundle".to_string()),
             declared_skills: vec![DeclaredSkill {
                 name: "install-hermes".to_string(),

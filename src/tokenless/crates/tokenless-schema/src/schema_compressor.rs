@@ -1,9 +1,9 @@
 use regex::Regex;
 use serde_json::Value;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use tokenless_ccr::StashStore;
-
-use crate::response_compressor::{stash_suffix, stash_suffix_char_len};
+use tokenless_ccr::{RecoveryMethod, StashStore, StashWrite, truncation_suffix_for};
 
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
@@ -19,6 +19,7 @@ fn char_index(s: &str, n: usize) -> usize {
 /// by truncating descriptions, removing titles/examples, and applying
 /// smart compression to reduce token usage.
 pub struct SchemaCompressor {
+    recovery: RecoveryMethod,
     func_desc_max_len: usize,
     param_desc_max_len: usize,
     drop_examples: bool,
@@ -27,15 +28,30 @@ pub struct SchemaCompressor {
     max_depth: usize,
     /// Optional reversible stash. When present, truncated descriptions are
     /// stashed (verbatim original, including markdown) and a
-    /// `<<tokenless:KEY>>` marker is appended so the LLM can retrieve the
+    /// recovery instruction is appended so the LLM can retrieve the
     /// full original. When `None`, truncation is lossy — the pre-stash
-    /// behavior. Mirrors `ResponseCompressor::stash_store`.
+    /// behavior.
     stash_store: Option<Arc<dyn StashStore>>,
+    /// Unique stash rows created this session, plus refreshes of keys this
+    /// session did not create. CLI `compress-schema --batch` calls
+    /// `compress()` once per item, so the counter accumulates until rollback
+    /// or [`Self::clear_stash_session`]. An in-session refresh of a pending
+    /// key does not increment again.
+    stash_writes: Cell<usize>,
+    /// Number of stash writes / rollback deletes that failed. Same session
+    /// accumulator as `stash_writes`.
+    stash_errors: Cell<usize>,
+    /// Keys created during this compressor session, mapped to the latest
+    /// generation this session still owns. Not reset at each `compress()` so
+    /// CLI `--batch` can roll back every discarded item. In-session refreshes
+    /// update the generation only when the store reports an unbroken chain.
+    stash_keys_created: RefCell<HashMap<String, u64>>,
 }
 
 impl Default for SchemaCompressor {
     fn default() -> Self {
         Self {
+            recovery: RecoveryMethod::Shell,
             func_desc_max_len: 256,
             param_desc_max_len: 160,
             drop_examples: true,
@@ -43,14 +59,17 @@ impl Default for SchemaCompressor {
             drop_markdown: true,
             // Bound recursion to keep deeply-nested or pathological schemas
             // (e.g. attacker-crafted ~1000-level JSON) from blowing the stack.
-            // Schemas tolerate more depth than runtime responses because
+            // Schemas tolerate substantial depth because
             // OpenAPI/JSON-Schema definitions legitimately stack anyOf /
-            // oneOf / allOf branches several layers deep — 8 (the
-            // ResponseCompressor default) would truncate real-world tool
-            // descriptions. 32 keeps a wide safety margin below the
+            // oneOf / allOf branches several layers deep; a shallow
+            // content-compression limit would truncate real-world
+            // tool descriptions. 32 keeps a wide safety margin below the
             // ~1024-frame default stack while leaving real schemas intact.
             max_depth: 32,
             stash_store: None,
+            stash_writes: Cell::new(0),
+            stash_errors: Cell::new(0),
+            stash_keys_created: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -62,11 +81,17 @@ impl SchemaCompressor {
     }
 
     /// Attach a reversible stash store. When set, truncated descriptions
-    /// carry a `<<tokenless:KEY>>` marker and the verbatim original is
+    /// carry an entry-point-specific recovery instruction and the verbatim original is
     /// stashed for retrieval; when unset (the default), truncation stays
     /// lossy.
     pub fn with_stash_store(mut self, store: Arc<dyn StashStore>) -> Self {
         self.stash_store = Some(store);
+        self
+    }
+
+    /// Selects the already-registered recovery entry point before building candidates.
+    pub fn with_recovery(mut self, recovery: RecoveryMethod) -> Self {
+        self.recovery = recovery;
         self
     }
 
@@ -106,55 +131,172 @@ impl SchemaCompressor {
         self
     }
 
-    /// Compress an OpenAI Function Calling schema
+    /// Unique stash rows created this session, plus refreshes of keys this
+    /// session did not create. Duplicate payloads first created this session
+    /// (including `--batch` items that stash the same description) count once;
+    /// repeated refreshes of a pre-existing key count once per refresh.
+    pub fn stash_writes(&self) -> usize {
+        self.stash_writes.get()
+    }
+
+    /// Number of stash writes / rollback deletes that failed this session.
+    pub fn stash_errors(&self) -> usize {
+        self.stash_errors.get()
+    }
+
+    /// Keys of stash rows created this session, pending commit or rollback.
+    /// Each corresponds to a marker embedded in the compressed output, so on
+    /// an applied result these are exactly the emitted keys.
+    pub fn stash_keys(&self) -> Vec<String> {
+        self.stash_keys_created.borrow().keys().cloned().collect()
+    }
+
+    /// Delete stash entries created during this compressor session.
+    ///
+    /// Call this when the compressed output (and its embedded markers) will
+    /// never be emitted — e.g. the CLI no-savings path that falls back to the
+    /// original input, including `compress-schema --batch`. Returns how many
+    /// keys were successfully removed.
+    ///
+    /// Session semantics: [`compress`](Self::compress) does **not** reset the
+    /// pending-key list. Keys accumulate from construction until this method
+    /// or [`clear_stash_session`](Self::clear_stash_session). That matches
+    /// CLI `--batch` (compress every item, then one all-or-nothing rollback).
+    /// Call rollback only after every emit/discard decision for the session.
+    /// If a programmatic caller emits some results and later discards others
+    /// on the same instance, call [`clear_stash_session`](Self::clear_stash_session)
+    /// after keeping output so a later rollback cannot delete those markers.
+    pub fn rollback_stash_writes(&self) -> usize {
+        let Some(store) = self.stash_store.as_ref() else {
+            return 0;
+        };
+        let writes = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
+        let mut removed = 0usize;
+        for (key, generation) in &writes {
+            match store.delete(key, *generation) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    self.record_stash_error();
+                    eprintln!("[tokenless] stash: rollback delete failed for key {key}: {e}");
+                }
+            }
+        }
+        self.stash_writes
+            .set(self.stash_writes.get().saturating_sub(removed));
+        removed
+    }
+
+    /// Forget pending rollback keys without deleting stash rows.
+    ///
+    /// Use after deciding to **keep** compressed output from this session
+    /// (markers were emitted) and starting a new independent
+    /// compress/rollback cycle on the same `SchemaCompressor`. Does not
+    /// touch the store.
+    pub fn clear_stash_session(&self) {
+        self.stash_keys_created.borrow_mut().clear();
+        self.stash_writes.set(0);
+        self.stash_errors.set(0);
+    }
+
+    fn record_stash_success(&self, write: &StashWrite) {
+        let mut pending = self.stash_keys_created.borrow_mut();
+        if write.created {
+            self.stash_writes.set(self.stash_writes.get() + 1);
+            pending.insert(write.key.clone(), write.generation);
+        } else if let Some(&expected) = pending.get(&write.key) {
+            if write.previous_generation == Some(expected) {
+                // Unbroken in-session refresh (duplicate payloads, including
+                // `--batch`): update generation so rollback CAS matches.
+                pending.insert(write.key.clone(), write.generation);
+            } else {
+                // A foreign writer refreshed (and likely emitted a marker)
+                // between our create and this write. Drop ownership so
+                // rollback cannot delete the live row those markers need.
+                pending.remove(&write.key);
+            }
+        } else {
+            // Refresh of a key this session never created. Another emitted
+            // marker may still need it, so it stays off the rollback list.
+            self.stash_writes.set(self.stash_writes.get() + 1);
+        }
+    }
+
+    fn record_stash_error(&self) {
+        self.stash_errors.set(self.stash_errors.get() + 1);
+    }
+
+    /// Compress a function-calling tool declaration or request envelope.
+    ///
+    /// Supports these declaration and wrapper shapes:
+    /// - OpenAI `{"function": {name, description, parameters}}`
+    /// - Gemini `{"functionDeclarations": [{name, description, parametersJsonSchema}, ...]}`
+    /// - Bare `{name, description, parameters}` declarations, optionally with
+    ///   `"type": "function"`
+    /// - Request envelopes whose top-level `tools` array contains any of the
+    ///   shapes above
+    ///
+    /// The Gemini SDK stores the parameter schema under `parametersJsonSchema`
+    /// (JSON Schema format, used by copilot-shell's `DeclarativeTool`); the
+    /// OpenAI wrapper and bare schema use `parameters`. Both are compressed.
+    ///
+    /// This does not reset stash session state. Pending rollback keys
+    /// accumulate until
+    /// [`rollback_stash_writes`](Self::rollback_stash_writes) or
+    /// [`clear_stash_session`](Self::clear_stash_session).
     pub fn compress(&self, tool: &Value) -> Value {
         let original_text = serde_json::to_string(tool).unwrap_or_default();
 
         let mut result = tool.clone();
 
-        // Check if this is a function wrapper or direct schema
-        if let Some(function) = result.get_mut("function") {
-            // Compress function-level description
-            if let Some(desc) = function.get("description").and_then(|d| d.as_str()) {
-                let compressed = self.truncate_description(desc, self.func_desc_max_len);
-                function["description"] = Value::String(compressed);
-            }
-
-            // Optionally remove title
-            #[allow(clippy::collapsible_if)]
-            if self.drop_titles {
-                if let Some(obj) = function.as_object_mut() {
-                    obj.remove("title");
+        // Dispatch by wrapper shape: a request `tools` array, Gemini
+        // `functionDeclarations`, an OpenAI `function`, or a bare declaration.
+        if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+            for entry in tools {
+                let is_bare_declaration = entry.get("type").is_none()
+                    && entry.get("name").and_then(Value::as_str).is_some()
+                    && (entry.get("parameters").is_some()
+                        || entry.get("parametersJsonSchema").is_some());
+                let is_function = entry.get("type").and_then(Value::as_str) == Some("function")
+                    || entry.get("function").is_some()
+                    || entry.get("functionDeclarations").is_some()
+                    || is_bare_declaration;
+                if is_function {
+                    *entry = self.compress(entry);
                 }
             }
-
-            // Compress parameters
-            if let Some(params) = function.get_mut("parameters") {
-                self.compress_json_schema(params, 1);
+        } else if let Some(decls) = result.get_mut("functionDeclarations") {
+            // Gemini tools format: a Tool object wraps an array of
+            // declarations `{ "functionDeclarations": [{name, description,
+            // parametersJsonSchema}, ...] }`. Compress each declaration in
+            // place and leave the rest of the Tool object (e.g.
+            // googleSearchRetrieval, codeExecution) untouched.
+            if let Some(arr) = decls.as_array_mut() {
+                for decl in arr.iter_mut() {
+                    self.compress_declaration(decl);
+                }
             }
+        } else if let Some(function) = result.get_mut("function") {
+            // OpenAI wrapper: { "function": {name, description, parameters} }
+            self.compress_declaration(function);
         } else {
-            // Direct schema (no function wrapper)
-            // Compress top-level description
-            if let Some(desc) = result.get("description").and_then(|d| d.as_str()) {
-                let compressed = self.truncate_description(desc, self.func_desc_max_len);
-                result["description"] = Value::String(compressed);
-            }
-
-            // Optionally remove title
-            #[allow(clippy::collapsible_if)]
-            if self.drop_titles {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.remove("title");
+            // Direct schema (no function wrapper). Let compress_json_schema
+            // handle description, title removal, and nested properties at
+            // depth 0 — doing it here first would stash description as K1,
+            // then compress_json_schema would stash the marker string as K2,
+            // requiring two retrieves to recover the original.
+            if result.is_object() {
+                // Compress the parameter schema if present.
+                // compress_json_schema does not recurse into
+                // `parameters`/`parametersJsonSchema` (not JSON Schema
+                // keywords), so handle both explicitly — Gemini SDK uses
+                // parametersJsonSchema, OpenAI/bare use parameters.
+                if let Some(params) = result.get_mut("parametersJsonSchema") {
+                    self.compress_json_schema(params, 1);
                 }
-            }
-
-            // Compress parameters if present
-            if let Some(params) = result.get_mut("parameters") {
-                self.compress_json_schema(params, 1);
-            }
-
-            // If this looks like a JSON Schema itself, compress it recursively
-            if result.get("type").is_some() || result.get("properties").is_some() {
+                if let Some(params) = result.get_mut("parameters") {
+                    self.compress_json_schema(params, 1);
+                }
                 self.compress_json_schema(&mut result, 0);
             }
         }
@@ -168,14 +310,49 @@ impl SchemaCompressor {
         result
     }
 
+    /// Compress a single function declaration — the `{name, description,
+    /// parameters}` object shared by the OpenAI `function` wrapper and each
+    /// entry of the Gemini `functionDeclarations` array.
+    ///
+    /// The parameter schema may live under `parametersJsonSchema` (Gemini SDK
+    /// JSON Schema format, used by copilot-shell's `DeclarativeTool`) or
+    /// `parameters` (legacy Gemini Schema object format / OpenAI wrapper).
+    /// The two are mutually exclusive; compress whichever is present.
+    fn compress_declaration(&self, decl: &mut Value) {
+        let Some(obj) = decl.as_object_mut() else {
+            return;
+        };
+
+        // Compress function-level description
+        if let Some(desc) = obj.get("description").and_then(|d| d.as_str()) {
+            let compressed = self.truncate_description(desc, self.func_desc_max_len);
+            obj.insert("description".to_string(), Value::String(compressed));
+        }
+
+        // Optionally remove title
+        if self.drop_titles {
+            obj.remove("title");
+        }
+
+        // Compress the parameter schema. Gemini SDK stores it under
+        // `parametersJsonSchema` (copilot-shell's DeclarativeTool path); the
+        // legacy `parameters` field uses the Gemini Schema object format.
+        // Both are handled so the registry path and OpenAI wrappers compress.
+        if let Some(params) = obj.get_mut("parametersJsonSchema") {
+            self.compress_json_schema(params, 1);
+        }
+        if let Some(params) = obj.get_mut("parameters") {
+            self.compress_json_schema(params, 1);
+        }
+    }
+
     /// Recursively compress a JSON Schema
     pub fn compress_json_schema(&self, schema: &mut Value, depth: usize) {
         // Stack-overflow guard for pathological schemas. Beyond max_depth we
         // stop descending — the deepest nodes keep their original shape, which
         // is acceptable since this path is best-effort token reduction.
-        // Use `>` (not `>=`) so the threshold matches response_compressor.rs
-        // semantics: a node at depth==max_depth is still processed, only its
-        // grandchildren (depth+1 > max_depth) are skipped.
+        // Use `>` (not `>=`): a node at depth==max_depth is still processed,
+        // only its grandchildren (depth+1 > max_depth) are skipped.
         if depth > self.max_depth {
             return;
         }
@@ -257,7 +434,7 @@ impl SchemaCompressor {
 
     /// Intelligently truncate a description string. When a stash store is
     /// attached, the verbatim original `desc` (including markdown, before
-    /// stripping) is stashed and a `<<tokenless:KEY>>` marker is appended so
+    /// stripping) is stashed and a recovery instruction is appended so
     /// the LLM can retrieve the full original; the stash suffix length is
     /// reserved from `max_len` so the result still honors the limit. On stash
     /// failure the suffix is dropped (lossy truncation, the pre-stash
@@ -278,9 +455,13 @@ impl SchemaCompressor {
         // the final string still fits `max_len`. Fit is checked before any
         // stash call so a too-small `max_len` cannot orphan a stash entry
         // whose marker never reaches the LLM.
-        let stash_active = self.stash_store.is_some() && max_len > stash_suffix_char_len();
+        let suffix_len = truncation_suffix_for("000000000000000000000000", &self.recovery)
+            .chars()
+            .count();
+        let stash_active =
+            self.stash_store.is_some() && self.recovery.is_available() && max_len > suffix_len;
         let effective_max = if stash_active {
-            max_len - stash_suffix_char_len()
+            max_len - suffix_len
         } else {
             max_len
         };
@@ -293,13 +474,21 @@ impl SchemaCompressor {
         }
 
         // Truncation will happen. Stash the ORIGINAL desc (verbatim, with
-        // markdown) so retrieval yields the unredacted original — matching
-        // ResponseCompressor's "retrieval yields the original content
-        // verbatim" contract.
+        // markdown) so retrieval yields the unredacted original verbatim.
         let stash_key = if stash_active {
-            self.stash_store
-                .as_ref()
-                .and_then(|store| store.stash(desc).ok())
+            match self.stash_store.as_ref() {
+                Some(store) => match store.stash(desc) {
+                    Ok(write) => {
+                        self.record_stash_success(&write);
+                        Some(write.key)
+                    }
+                    Err(_) => {
+                        self.record_stash_error();
+                        None
+                    }
+                },
+                None => None,
+            }
         } else {
             None
         };
@@ -333,7 +522,11 @@ impl SchemaCompressor {
         };
 
         match stash_key {
-            Some(key) => format!("{}{}", truncated, stash_suffix(&key)),
+            Some(key) => format!(
+                "{}{}",
+                truncated,
+                truncation_suffix_for(&key, &self.recovery)
+            ),
             None => truncated,
         }
     }

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import typer
+from agent_sec_cli.capabilities.cli import app as capabilities_app
 from agent_sec_cli.cli_logging import setup_cli_logging
 from agent_sec_cli.correlation_context import (
     init_invocation_context,
@@ -35,7 +36,7 @@ try:
 
     __version__ = get_version("agent-sec-cli")
 except Exception:
-    __version__ = "0.10.0"  # pragma: no cover
+    __version__ = "0.12.0"  # pragma: no cover
 
 app = typer.Typer(
     name="agent-sec-cli",
@@ -132,6 +133,7 @@ def main_callback(
 # Mount skill-ledger as a subcommand group: agent-sec-cli skill-ledger <cmd>
 app.add_typer(skill_ledger_app, name="skill-ledger")
 app.add_typer(observability_app, name="observability")
+app.add_typer(capabilities_app, name="capabilities")
 
 # ---------------------------------------------------------------------------
 # Command: harden
@@ -282,7 +284,7 @@ def verify(
     """Skill integrity verification."""
     result = invoke("verify", skill=skill)
     if result.stdout:
-        typer.echo(result.stdout)
+        typer.echo(result.stdout, nl=False)
     if result.error:
         typer.echo(result.error, err=True)
     raise typer.Exit(code=result.exit_code)
@@ -530,6 +532,18 @@ def events(
             err=True,
         )
         # Don't reject — allow future categories, just warn
+
+    if last_hours is not None and last_hours < 0:
+        typer.echo("Error: --last-hours must be non-negative.", err=True)
+        raise typer.Exit(code=1)
+
+    if limit <= 0:
+        typer.echo("Error: --limit must be positive.", err=True)
+        raise typer.Exit(code=1)
+
+    if offset < 0:
+        typer.echo("Error: --offset must be non-negative.", err=True)
+        raise typer.Exit(code=1)
 
     if last_hours is not None and (since is not None or until is not None):
         typer.echo(

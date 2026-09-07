@@ -19,6 +19,7 @@ use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
 use super::AppState;
 use super::secret;
+use super::semantic_search;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
@@ -180,7 +181,7 @@ impl OptimizeState {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
-    fn build_client(&self) -> Result<LlmClient, HttpResponse> {
+    pub(super) fn build_client(&self) -> Result<LlmClient, HttpResponse> {
         let config = self.snapshot();
         let Some(api_key) = config.effective_api_key() else {
             return Err(HttpResponse::BadRequest().json(serde_json::json!({
@@ -205,6 +206,32 @@ fn optimize_state(data: &AppState) -> Result<&Arc<OptimizeState>, HttpResponse> 
         HttpResponse::ServiceUnavailable()
             .json(serde_json::json!({"error": "optimization feature unavailable"}))
     })
+}
+
+// ─── Semantic session search ────────────────────────────────────────────────
+
+/// POST /api/sessions/search — delegates ranking to the shared module.
+#[post("/sessions/search")]
+pub async fn semantic_search_sessions(
+    data: web::Data<AppState>,
+    body: web::Json<semantic_search::SemanticSearchRequest>,
+) -> impl Responder {
+    let state = match optimize_state(&data) {
+        Ok(s) => s,
+        Err(_) => {
+            return HttpResponse::Ok()
+                .json(semantic_search::SemanticSearchResponse { results: vec![] });
+        }
+    };
+    let client = match state.build_client() {
+        Ok(c) => c,
+        Err(_) => {
+            return HttpResponse::Ok()
+                .json(semantic_search::SemanticSearchResponse { results: vec![] });
+        }
+    };
+    let request = body.into_inner();
+    semantic_search::handle_semantic_search(&client, &request).await
 }
 
 /// Load a session's captured events and build the ATIF trajectory that the

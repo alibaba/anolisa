@@ -66,14 +66,16 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         ],
     );
     let _ = fs::remove_dir_all(&home);
-    let normalized = output.replace('\r', "");
+    let normalized = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-2"), "{output}");
     assert!(!output.contains("auto-approved by provider"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(normalized.contains("\nsudo -V\n"), "{output}");
+    // The provider-native replay stays suppressed, while the approved command
+    // is presented exactly once as the shell-owned command line.
+    assert_eq!(count_occurrences(&normalized, "\nsudo -V\n"), 1, "{output}");
     assert!(
         output.contains("COSH CORE HOST EXECUTED ECHO FINAL"),
         "{output}"
@@ -425,4 +427,66 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         output.contains("COSH CORE PROVIDER NATIVE NON SHELL FINAL"),
         "{output}"
     );
+}
+
+#[test]
+fn raw_cli_path_prompt_remains_visible_before_first_tool_call() {
+    let home = temp_shell_home("cosh-core-path-prompt-visible");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-path-prompt-visible","model":"cosh-core-test"}'
+read -r user_message
+case "$user_message" in
+  *README.md*)
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-path-prompt-visible","message":{"content":[{"type":"tool_use","id":"call_cosh_core_read","name":"Read","input":{"file_path":"README.md"}}]}}'
+    printf '%s\n' '{"type":"user","session_id":"sess-cosh-core-path-prompt-visible","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_cosh_core_read","is_error":false,"content":"path prompt read output"}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-path-prompt-visible","is_error":false,"result":"done"}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-path-prompt-visible","is_error":true,"result":"missing path prompt"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
+    let prompt = "帮我读一下这个文件./README.md";
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+            ("LANG", "C.UTF-8"),
+            ("LC_ALL", "C.UTF-8"),
+        ],
+        vec![
+            (prompt.as_bytes().to_vec(), Duration::from_millis(500)),
+            (b"\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(2_500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    let request_notice = format!("Agent input: {prompt}");
+    let prompt_pos = output
+        .find(&request_notice)
+        .unwrap_or_else(|| panic!("path prompt notice was not rendered: {output}"));
+    let tool_pos = output
+        .find("Read completed")
+        .unwrap_or_else(|| panic!("first tool result was not rendered: {output}"));
+    assert!(prompt_pos < tool_pos, "{output}");
+    assert_eq!(output.matches(&request_notice).count(), 1, "{output}");
+    assert!(
+        !output.contains("Received shell prompt request"),
+        "{output}"
+    );
+    assert!(!output.contains("command not found"), "{output}");
+    assert!(!output.contains("missing path prompt"), "{output}");
 }

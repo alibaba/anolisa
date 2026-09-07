@@ -10,6 +10,9 @@ fn actplane_capabilities_are_observe_and_audit_only() {
     assert!(!capabilities.policy_handoff);
     assert!(!capabilities.alternate_pid_retarget);
     assert!(!capabilities.test_development);
+    // Static default is false; ActPlaneBackend overrides it at runtime from the
+    // actually loaded profile (agent-file-guard enables it).
+    assert!(!capabilities.file_delete_guard);
 }
 
 #[test]
@@ -22,6 +25,7 @@ fn mock_capabilities_are_explicitly_test_only() {
     assert!(capabilities.policy_handoff);
     assert!(capabilities.alternate_pid_retarget);
     assert!(capabilities.test_development);
+    assert!(capabilities.file_delete_guard);
 }
 
 #[test]

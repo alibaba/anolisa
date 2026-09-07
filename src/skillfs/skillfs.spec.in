@@ -62,6 +62,16 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/runtime/skills/skillfs/
 
 %changelog
+* Thu Aug 27 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.4.2-1
+- Add an optional Alibaba Cloud Linux 4 sidecar image and operator guidance.
+- Retry startup reconciles after transient notify daemon endpoint failures.
+- Fix flat writes and renames for categorized Skill sources.
+
+* Fri Aug 21 2026 kongche-jbw <kongche.jbw@alibaba-inc.com> - 0.4.1-1
+- Add Kubernetes sidecar deployment and authenticated container peers.
+- Fix nested Hermes activation and harden metadata and backing aliases.
+- Tighten sidecar health recovery without restarting the workload.
+
 * Fri Jul 24 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.4.0-1
 - Release read-time OS transforms and live Skill Ledger integration.
 

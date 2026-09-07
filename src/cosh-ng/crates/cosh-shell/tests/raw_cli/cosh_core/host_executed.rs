@@ -396,7 +396,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         ],
     );
     let _ = fs::remove_dir_all(&home);
-    let normalized = output.replace('\r', "");
+    let normalized = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
@@ -408,6 +408,8 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         !output.contains("duplicate request was not denied"),
         "{output}"
     );
+    // The transport wrapper remains hidden, while the approved command is
+    // presented exactly once as the shell-owned command line.
     assert_eq!(count_occurrences(&normalized, "\ndf -h\n"), 1, "{output}");
     assert_eq!(count_occurrences(&normalized, "Filesystem"), 1, "{output}");
     assert!(

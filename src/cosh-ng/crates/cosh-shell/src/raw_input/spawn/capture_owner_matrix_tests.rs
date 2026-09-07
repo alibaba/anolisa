@@ -132,6 +132,7 @@ fn replay_rejects_when_live_owner_superseded_the_drain_terminal() {
         exit_tracker: &mut harness.exit_tracker,
         main_prompt_gate: &harness.main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
     replay_or_reject_after_drain(
         installed,
@@ -330,6 +331,7 @@ fn superseded_hold_owner_rejects_ctrl_c_without_control_events() {
         exit_tracker: &mut harness.exit_tracker,
         main_prompt_gate: &harness.main_prompt_gate,
         slash_route_enabled: false,
+        zsh_path_prompt_buffering: None,
     };
     replay_or_reject_after_drain(
         installed,

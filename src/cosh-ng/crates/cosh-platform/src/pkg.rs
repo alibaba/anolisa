@@ -12,10 +12,19 @@ use crate::{run_command, PKG_TIMEOUT};
 
 /// Execute a package install operation on the detected distro.
 ///
-/// When `dry_run` is true, the package manager's simulation mode is used
-/// (e.g. `dnf --assumeno`, `apt-get --dry-run`) to validate that the package
-/// exists and *could* be installed without actually modifying the system.
-/// For Brew (which has no native dry-run), `brew info` is used instead.
+/// When `dry_run` is true, the package manager's simulation mode is used to
+/// check that dependency resolution succeeds against the current metadata
+/// without changing the installed package set: dnf resolves the transaction and
+/// declines it (`--assumeno`), apt-get and zypper use their native `--dry-run`,
+/// and Brew (which has no simulation mode) falls back to `brew info`.
+///
+/// A dry-run never downloads packages and never writes to the rpm/dpkg
+/// database. Two consequences follow. It is not free of I/O: dnf and zypper
+/// read repository metadata and fetch it over the network when the local copy
+/// is missing or expired. And success is not a promise that the real
+/// transaction applies — download, signature, file-conflict, scriptlet, and
+/// concurrent-state failures all occur after the point where the simulation
+/// stops.
 pub fn pkg_install(
     distro: &Distro,
     package: &str,
@@ -64,7 +73,7 @@ pub fn pkg_install(
         }
     };
 
-    let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
+    let output = run_command(&mut pkg_command(cmd, &args, dry_run), PKG_TIMEOUT, "pkg")?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -93,6 +102,15 @@ pub fn pkg_install(
                 "Try 'cosh pkg search {}' to check availability",
                 package
             )))
+        } else if dry_run && mgr == PkgManager::Dnf && is_dnf_dry_run_abort(&stderr, &stdout) {
+            // dnf exits 1 once it declines the resolved transaction, so the
+            // simulation succeeded: the package is installable.
+            Ok(PkgInstallResult {
+                package: package.to_string(),
+                version: "(dry-run)".to_string(),
+                already_installed: false,
+                dependencies_installed: vec![],
+            })
         } else if stderr.contains("already installed")
             || stderr.contains("is already the newest")
             || stdout.contains("already installed")
@@ -284,6 +302,7 @@ pub fn pkg_list(distro: &Distro, installed_only: bool) -> Result<PkgListResult, 
 /// When `dry_run` is true, the package manager's simulation mode is used
 /// to validate that the package is installed and *could* be removed without
 /// actually modifying the system. For Brew, `brew list` is used instead.
+/// See [`pkg_install`] for the dry-run guarantees each backend provides.
 pub fn pkg_remove(
     distro: &Distro,
     package: &str,
@@ -327,7 +346,7 @@ pub fn pkg_remove(
         }
     };
 
-    let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
+    let output = run_command(&mut pkg_command(cmd, &args, dry_run), PKG_TIMEOUT, "pkg")?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -382,6 +401,14 @@ pub fn pkg_remove(
                 .recoverable(true)
                 .with_hint("Check installed packages with 'cosh pkg list --installed'"))
             }
+        } else if dry_run && mgr == PkgManager::Dnf && is_dnf_dry_run_abort(&stderr, &stdout) {
+            // dnf exits 1 once it declines the resolved transaction, so the
+            // simulation succeeded: the package is removable.
+            Ok(PkgRemoveResult {
+                package: package.to_string(),
+                version_removed: "(dry-run)".to_string(),
+                dependencies_removed: vec![],
+            })
         } else {
             Err(CoshError::new(
                 ErrorCode::PkgBackendError,
@@ -390,6 +417,29 @@ pub fn pkg_remove(
             ))
         }
     }
+}
+
+// --- Backend invocation ---
+
+/// Build a package-manager invocation.
+///
+/// Dry-run invocations pin the backend's locale to `C`: their entire result is
+/// derived from the backend's messages — dnf reports a completed simulation
+/// only by declining the transaction — so a translated message would silently
+/// reroute the outcome. `LANGUAGE` is pinned as well because dnf resolves
+/// messages through Python's gettext, which honors `LANGUAGE` even under a `C`
+/// locale.
+///
+/// Real invocations keep the caller's environment. They run rpm scriptlets and
+/// package-manager plugins that inherit it, so overriding the locale there
+/// would change more than the diagnostics this module classifies.
+fn pkg_command(program: &str, args: &[&str], dry_run: bool) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    if dry_run {
+        command.env("LC_ALL", "C").env("LANGUAGE", "C");
+    }
+    command
 }
 
 // --- Detection helpers (extracted for testability) ---
@@ -428,11 +478,62 @@ fn is_remove_not_found(stdout: &str) -> bool {
     stdout.contains("No match for argument") || stdout.contains("No packages marked for removal")
 }
 
+/// Detect dnf declining the resolved transaction at the confirmation prompt,
+/// which is how the dnf backend reports a completed dry-run: resolution
+/// succeeded and dnf exited 1 in response to `--assumeno`.
+///
+/// dnf5 raises a confirmation-specific error, but dnf4 prints a bare
+/// "Operation aborted." that it reuses for refusals raised *before* the prompt
+/// (bootc protected paths, unsupported persistence, read-only `/usr`). Those
+/// refusals mean a real invocation would fail too, so they are excluded
+/// instead of being reported as a successful simulation.
+///
+/// dnf4 names those causes on the informational channel only, so this relies on
+/// the caller pinning verbosity ([`DNF_PIN_DEBUGLEVEL`],
+/// [`DNF_PIN_ERRORLEVEL`]); without it a quiet `dnf.conf` would strip the cause
+/// and leave a refusal indistinguishable from a declined confirmation.
+fn is_dnf_dry_run_abort(stderr: &str, stdout: &str) -> bool {
+    let mentions = |needle: &str| stderr.contains(needle) || stdout.contains(needle);
+
+    if mentions("usr_drift_protected_paths")
+        || mentions("Persistent transactions aren't supported")
+        || mentions("configured to be read-only")
+    {
+        return false;
+    }
+
+    mentions("Operation aborted by the user") || mentions("Operation aborted.")
+}
+
 // --- Argument builders ---
+
+// dnf's default verbosity, pinned on the command line (which outranks
+// `dnf.conf`) for dry-run invocations. `debuglevel=0` maps the informational
+// output that names an abort's cause to a level above every real one, and
+// `errorlevel=0` does the same to the abort message itself, so a site config
+// could otherwise reduce a refused transaction to a bare, unclassifiable
+// "Operation aborted." — see [`is_dnf_dry_run_abort`].
+const DNF_PIN_DEBUGLEVEL: &str = "--setopt=debuglevel=2";
+const DNF_PIN_ERRORLEVEL: &str = "--setopt=errorlevel=2";
+
+// dnf has no `--dry-run` flag. `--assumeno` is the closest equivalent: dnf
+// resolves the transaction, prints it, then exits 1 before downloading any
+// package or opening the rpmdb for writing, and it keeps dnf from prompting on
+// the stdin cosh inherits. `-y` is left out of the dry-run branch because dnf
+// evaluates `assumeno` first, so pairing the two only implies a confirmation
+// that never happens. `--downloadonly` and `--setopt=tsflags=test` are
+// deliberately avoided: both fetch every package in the transaction, a far
+// larger side effect than the simulation they would replace.
 
 fn build_dnf_install_args(package: &str, dry_run: bool) -> Vec<&str> {
     if dry_run {
-        vec!["install", "-y", "--assumeno", package]
+        vec![
+            "install",
+            "--assumeno",
+            DNF_PIN_DEBUGLEVEL,
+            DNF_PIN_ERRORLEVEL,
+            package,
+        ]
     } else {
         vec!["install", "-y", package]
     }
@@ -456,7 +557,13 @@ fn build_zypper_install_args(package: &str, dry_run: bool) -> Vec<&str> {
 
 fn build_dnf_remove_args(package: &str, dry_run: bool) -> Vec<&str> {
     if dry_run {
-        vec!["remove", "-y", "--assumeno", package]
+        vec![
+            "remove",
+            "--assumeno",
+            DNF_PIN_DEBUGLEVEL,
+            DNF_PIN_ERRORLEVEL,
+            package,
+        ]
     } else {
         vec!["remove", "-y", package]
     }
@@ -1040,7 +1147,10 @@ mod tests {
     #[test]
     fn test_build_dnf_install_args_dry_run() {
         let args = build_dnf_install_args("nginx", true);
-        assert_eq!(args, vec!["install", "-y", "--assumeno", "nginx"]);
+        assert_eq!(args[0], "install");
+        assert_eq!(args[1], "--assumeno");
+        assert_eq!(args.last(), Some(&"nginx"));
+        assert!(!args.contains(&"-y"), "dry-run must not confirm");
     }
 
     #[test]
@@ -1071,6 +1181,43 @@ mod tests {
     fn test_build_dnf_remove_args() {
         let args = build_dnf_remove_args("nginx", false);
         assert_eq!(args, vec!["remove", "-y", "nginx"]);
+    }
+
+    #[test]
+    fn test_build_dnf_remove_args_dry_run() {
+        let args = build_dnf_remove_args("nginx", true);
+        assert_eq!(args[0], "remove");
+        assert_eq!(args[1], "--assumeno");
+        assert_eq!(args.last(), Some(&"nginx"));
+    }
+
+    // is_dnf_dry_run_abort tells a declined confirmation from a pre-confirmation
+    // refusal by the cause dnf reports alongside it, and dnf4 reports those
+    // causes on the informational channel only. Losing this pinning would let a
+    // quiet dnf.conf strip the cause and turn refusals into false successes.
+    #[test]
+    fn test_build_dnf_dry_run_args_pin_verbosity() {
+        let install = build_dnf_install_args("nginx", true);
+        let remove = build_dnf_remove_args("nginx", true);
+        for args in [&install, &remove] {
+            assert!(args.contains(&DNF_PIN_DEBUGLEVEL), "missing: {args:?}");
+            assert!(args.contains(&DNF_PIN_ERRORLEVEL), "missing: {args:?}");
+        }
+    }
+
+    // A dry-run that downloads the whole transaction defeats its purpose; guard
+    // both dnf builders against reintroducing the download-based flags.
+    #[test]
+    fn test_build_dnf_dry_run_args_never_download() {
+        let install = build_dnf_install_args("nginx", true);
+        let remove = build_dnf_remove_args("nginx", true);
+        for args in [&install, &remove] {
+            assert!(!args.contains(&"--downloadonly"), "unexpected: {args:?}");
+            assert!(
+                !args.iter().any(|arg| arg.contains("tsflags")),
+                "unexpected: {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -1278,6 +1425,80 @@ mod tests {
     fn test_detect_remove_not_found_dnf_no_packages_marked() {
         let stdout = "No packages marked for removal.\nDependencies resolved.\nNothing to do.";
         assert!(is_remove_not_found(stdout));
+    }
+
+    // --- pkg_command locale scoping ---
+
+    // The locale override exists only to keep dry-run classification readable.
+    // Real invocations must inherit the caller's environment because rpm
+    // scriptlets and package-manager plugins run inside it.
+    #[test]
+    fn test_pkg_command_pins_locale_for_dry_run() {
+        let command = pkg_command("dnf", &["install", "--assumeno", "nginx"], true);
+        let names: Vec<String> = command
+            .get_envs()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"LC_ALL".to_string()));
+        assert!(names.contains(&"LANGUAGE".to_string()));
+    }
+
+    #[test]
+    fn test_pkg_command_keeps_locale_for_real_run() {
+        let command = pkg_command("dnf", &["install", "-y", "nginx"], false);
+        assert_eq!(command.get_envs().count(), 0);
+    }
+
+    // --- is_dnf_dry_run_abort detection tests ---
+
+    // A bare abort with no cause reported means the confirmation was declined:
+    // the dry-run args pin dnf's verbosity so a suppressed cause cannot reach
+    // this point. See test_build_dnf_dry_run_args_pin_verbosity.
+    #[test]
+    fn test_detect_dnf_dry_run_abort_stderr() {
+        let stderr = "Error: Operation aborted.";
+        assert!(is_dnf_dry_run_abort(stderr, ""));
+    }
+
+    #[test]
+    fn test_detect_dnf_dry_run_abort_stdout() {
+        let stdout = "Transaction Summary\n=====\nInstall  2 Packages\n\nOperation aborted.";
+        assert!(is_dnf_dry_run_abort("", stdout));
+    }
+
+    #[test]
+    fn test_detect_dnf_dry_run_abort_false_positive() {
+        let stderr = "Error: Transaction test error: file conflict";
+        assert!(!is_dnf_dry_run_abort(stderr, "Dependencies resolved."));
+    }
+
+    #[test]
+    fn test_detect_dnf5_dry_run_abort_by_user() {
+        let stderr = "Error: Operation aborted by the user.";
+        assert!(is_dnf_dry_run_abort(stderr, ""));
+    }
+
+    // dnf reuses the "Operation aborted" prefix for refusals raised before the
+    // confirmation prompt. A real invocation cannot apply those transactions,
+    // so the dry-run must surface the error instead of claiming success.
+    #[test]
+    fn test_detect_dnf_dry_run_abort_rejects_protected_paths() {
+        let stderr = "Error: Operation aborted. Pass --setopt=usr_drift_protected_paths=";
+        assert!(!is_dnf_dry_run_abort(stderr, ""));
+    }
+
+    #[test]
+    fn test_detect_dnf_dry_run_abort_rejects_bootc_persist() {
+        let stderr = "Error: Operation aborted.";
+        let stdout = "Persistent transactions aren't supported on bootc systems.";
+        assert!(!is_dnf_dry_run_abort(stderr, stdout));
+    }
+
+    #[test]
+    fn test_detect_dnf_dry_run_abort_rejects_read_only_bootc() {
+        let stderr = "Error: Operation aborted.";
+        let stdout = "This bootc system is configured to be read-only.";
+        assert!(!is_dnf_dry_run_abort(stderr, stdout));
     }
 
     // --- is_pkg_not_found detection tests ---

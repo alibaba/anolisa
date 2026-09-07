@@ -15,8 +15,9 @@ git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 ```
 
-The common prerequisites are Git, Bash, `make`, a C compiler for native Rust
-or Python extensions, and a working network connection for package downloads.
+The common prerequisites are Git, Bash 4.3 or newer, `make`, a C compiler for
+native Rust or Python extensions, and a working network connection for package
+downloads.
 Platform-specific requirements are listed in the component matrix below. The
 repository does not define one global Rust version. Use the `rust-toolchain.toml`
 or `rust-version` declared by the component you are changing.
@@ -54,7 +55,7 @@ component.
 |------|-----------------|
 | Node.js | `src/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
 | Python and uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` requires Python `==3.11.6`; use `uv` for that project. Do not replace this with a repository-wide Python minimum. |
-| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `src/anolisa/rust-toolchain.toml` and `src/blaze/rust-toolchain.toml` pin `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `src/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/blaze/rust-toolchain.toml` pins `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
 | cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
 | agent-sec-core | Linux sandbox runtime and integration checks may need bubblewrap, GnuPG, and `jq`. |
 | agentsight | Linux eBPF builds need clang, LLVM, libbpf and ELF development headers, kernel headers, and a BTF-enabled kernel. `make build-mac` builds the macOS local viewer without eBPF. |
@@ -67,6 +68,15 @@ When a component has a pinned toolchain, run its commands from that component
 directory so rustup can select the pin automatically. For an unpinned
 component, check its `Cargo.toml` and the installed stable toolchain before
 building.
+
+uv-managed Python runtimes default to the official
+`astral-sh/python-build-standalone` downloads on GitHub. If that endpoint is
+unreachable, set `UV_PYTHON_INSTALL_MIRROR` to the base URL of a compatible
+mirror before building:
+
+```bash
+export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standalone"
+```
 
 ## 4. Unified build script
 
@@ -87,6 +97,15 @@ system dependency installation may still request `sudo`. Use `--system` (or
 `--install-mode system`) for system paths; the script stages files and may
 invoke `sudo`. `--no-install` builds and stages artifacts without installing
 them.
+
+Before installing component files, the script collects and checks the runtime
+contract for every selected component. In user mode, missing native runtime
+packages are reported together with one package-manager command and the script
+exits without installing component files. In system mode, installable native
+runtime packages are handled in one transaction, while missing language
+runtimes or platform capabilities stop the run before package mutation. A
+system install that needs Node.js requires Node.js 20 or newer in the standard
+system PATH.
 
 ```bash
 # Default six components, user install
@@ -116,6 +135,10 @@ them.
 ./scripts/build-all.sh --non-interactive
 ./scripts/build-all.sh --help
 ```
+
+`--ignore-deps` skips both dependency setup and runtime dependency
+verification. Use it only on a pre-provisioned host; the caller is responsible
+for ensuring that installed components have all required runtimes.
 
 Valid `--component` names are `cosh`, `skills`, `sec-core`, `tokenless`,
 `ws-ckpt`, `memory`, `cosh-ng`, and `sight`. The script may build a component

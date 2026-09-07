@@ -508,7 +508,9 @@ fn decode_utf16(raw: &[u8], little_endian: bool) -> (Vec<u8>, u64) {
 
 fn decode_utf16_bytes(bytes: &[u8], little_endian: bool) -> String {
     let units = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|bytes| read_utf16_unit([bytes[0], bytes[1]], little_endian))
         .collect::<Vec<_>>();
     let has_partial_unit = bytes.len() & 1 == 1;

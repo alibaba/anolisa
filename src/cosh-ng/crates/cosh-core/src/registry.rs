@@ -323,7 +323,7 @@ pub(crate) async fn handle_registry_request(
     live_runtime: Option<&LiveExtensionRuntime>,
 ) -> OutputMessage {
     match domain {
-        "auth" => handle_auth(request_id, action, params, config),
+        "auth" => handle_auth(request_id, action, params, config).await,
         "extensions" => {
             handle_extensions(
                 request_id,
@@ -843,8 +843,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auth_state_marks_system_providers_as_not_editable() {
+    #[tokio::test]
+    async fn auth_state_marks_system_providers_as_not_editable() {
         let mut config = CoreConfig::default();
         config.ai.active_provider = Some("system-provider".to_string());
         config.ai.providers.insert(
@@ -870,7 +870,7 @@ mod tests {
         );
         config.ai.providers.extend(config.user_ai.providers.clone());
 
-        let response = handle_auth("test-1", "state", &Value::Null, &mut config);
+        let response = handle_auth("test-1", "state", &Value::Null, &mut config).await;
         let OutputMessage::RegistryResponse {
             success: true,
             data: Some(data),
@@ -895,8 +895,8 @@ mod tests {
         assert_eq!(user["editable"], true);
     }
 
-    #[test]
-    fn auth_configure_rejects_invalid_provider_id() {
+    #[tokio::test]
+    async fn auth_configure_rejects_invalid_provider_id() {
         let mut config = CoreConfig::default();
         let response = handle_auth(
             "test-1",
@@ -909,7 +909,8 @@ mod tests {
                 }
             }),
             &mut config,
-        );
+        )
+        .await;
 
         let OutputMessage::RegistryResponse { success, error, .. } = response else {
             panic!("unexpected response: {response:?}");
@@ -919,8 +920,8 @@ mod tests {
         assert!(config.user_ai.providers.is_empty());
     }
 
-    #[test]
-    fn auth_configure_rejects_invalid_base_url_without_mutating_config() {
+    #[tokio::test]
+    async fn auth_configure_rejects_invalid_base_url_without_mutating_config() {
         let mut config = CoreConfig::default();
         let response = handle_auth(
             "test-1",
@@ -935,7 +936,8 @@ mod tests {
                 }
             }),
             &mut config,
-        );
+        )
+        .await;
 
         let OutputMessage::RegistryResponse { success, error, .. } = response else {
             panic!("unexpected response: {response:?}");
@@ -946,8 +948,8 @@ mod tests {
         assert!(config.user_ai.providers.is_empty());
     }
 
-    #[test]
-    fn auth_configure_rejects_system_provider_overwrite() {
+    #[tokio::test]
+    async fn auth_configure_rejects_system_provider_overwrite() {
         let mut config = CoreConfig::default();
         config.ai.providers.insert(
             "system-provider".to_string(),
@@ -973,7 +975,8 @@ mod tests {
                 }
             }),
             &mut config,
-        );
+        )
+        .await;
 
         let OutputMessage::RegistryResponse { success, error, .. } = response else {
             panic!("unexpected response: {response:?}");
@@ -983,8 +986,8 @@ mod tests {
         assert!(!config.user_ai.providers.contains_key("system-provider"));
     }
 
-    #[test]
-    fn auth_delete_rejects_system_provider() {
+    #[tokio::test]
+    async fn auth_delete_rejects_system_provider() {
         let mut config = CoreConfig::default();
         config.ai.providers.insert(
             "system-provider".to_string(),
@@ -1004,7 +1007,8 @@ mod tests {
             "delete",
             &serde_json::json!({ "provider_id": "system-provider" }),
             &mut config,
-        );
+        )
+        .await;
 
         let OutputMessage::RegistryResponse { success, error, .. } = response else {
             panic!("unexpected response: {response:?}");

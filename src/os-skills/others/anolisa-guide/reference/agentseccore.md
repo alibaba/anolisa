@@ -190,9 +190,7 @@ agent-sec-cli scan-prompt --mode standard --text "用户输入"
 
 预期现象：prompt scanner若检测到威胁，会识别出 Prompt 风险，但不进行拦截。若判定为良性，任务直接执行。
 
--   在 `hermes chat --tui` 模式下，识别出的风险会在 UI 上以 "\[prompt-scan\] ..." 安全提醒的形式展示给用户。
-    
--   在 `hermes` 直接进入模式下，UI 不会展示提醒，需通过日志（`[agent-sec-core] prompt-scan-user-input DENY/WARN ...`）查看检测结果。
+-   Hermes 的 prompt scanner 是 audit-only：不会改写最终回复或在 UI 中合成提醒，检测结果通过 agent-sec-core 安全事件和宿主日志查看。
     
 
 #### 防护能力
@@ -431,7 +429,7 @@ Agent 会对指定或全部 Skill 执行安全扫描并写入签名认证结果�
     
 -   **OpenClaw**：通过安全插件在 read SKILL.md 门禁路径上执行检查。pass 状态正常放行，warn 状态记录风险并继续执行；当 Block/Approval 策略开启时，none / drifted / deny / tampered 会触发审批或确认。当前说明仅覆盖已验证的 read SKILL.md 路径，不扩大表述为所有文件访问路径。
     
--   **Hermes**（V0.5.0 新增）：通过 agent-sec-core capability 在 skill\_view 场景中检查 Skill 状态。默认配置下不会直接阻断回答，但会把非 pass 状态以前置 warning 的形式展示给用户；如开启 enable\_block 并配置阻断状态，则可对指定状态直接阻断。
+-   **Hermes**（V0.5.0 新增）：通过 agent-sec-core capability 在 skill\_view 场景中检查 Skill 状态。默认 `observe`，只写日志和审计；设置 `policy = "block"` 后，summary message 非空时使用 Hermes 原生 block。Hermes 不再通过改写最终回复模拟 warning。
     
 
 Skill Ledger 的 Hook 用来控制 Agent 在读取或调用 Skill 前如何处理非 pass 状态。推荐默认先用观察模式上线，确认误报和业务影响后，再对 none / drifted / deny / tampered 开启强门禁。 **OpenClaw 场景** OpenClaw 通过 enableBlock 控制门禁策略。开启后，Agent 读取非 pass Skill 时会返回 requireApproval，用户需要在支持审批卡片的 Dashboard、WebChat 或 Control UI 中确认后继续；关闭后，状态与告警只进入日志和审计，不阻断本轮读取。
@@ -454,19 +452,16 @@ openclaw gateway restart
 ~/.hermes/plugins/agent-sec-core-hermes-plugin/config.toml
 ```
 
-重点字段是 \[capabilities.skill-ledger\] 下的 enable\_block。设为 false 时，Hermes 会继续回答，并在回复前展示 warning；设为 true 时，命中 block\_statuses 的状态会直接阻断本次 skill\_view。
+重点字段是 \[capabilities.skill-ledger\] 下的 `policy`。`observe` 时 Hermes 继续执行并只写日志；`block` 时，Skill Ledger summary message 非空会直接阻断本次 skill\_view。旧 `warn` / `ask` 配置会降级为 `observe` 并写宿主诊断。
 
 ```
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-enable_block = true
-block_statuses = ["none", "drifted", "deny", "tampered"]
-max_warnings_per_turn = 5
-max_warning_contexts = 128
+policy = "block"
 ```
 
-切回提示模式时只需改为：enable\_block = false
+切回观察模式时改为：`policy = "observe"`。
 
 修改后重启或重新打开 Hermes Agent 会话，让插件重新读取配置。
 
@@ -725,7 +720,7 @@ pii-checker 是面向 Agent 用户 Prompt 输入链路的敏感信息与凭据�
     
 -   支持脱敏输出，默认不暴露原始敏感值。
     
--   可接入 OpenClaw、Cosh、Hermes，在用户输入进入模型前进行检测。默认建议以 warning-only / audit-first 方式上线；OpenClaw 可进一步配置为对 deny 级别输入执行阻断。
+-   可接入 OpenClaw、Cosh、Hermes，在用户输入进入模型前进行检测。Hermes 默认 audit-first，不通过最终回复注入 warning；可在原生可阻断的 tool 前置边界启用 `block`。
     
 -   审计事件保留风险摘要和输入 hash，避免记录敏感原文。
     
@@ -779,7 +774,11 @@ openclaw gateway restart
 
 **Hermes 场景**
 
-在 `hermes chat --tui` 模式下，用户输入命中 PII/凭据风险时，在最终回复中会追加安全告警信息来提示用户。在 `hermes` 直接进入模式下，UI 不会展示提醒，需通过 agent-sec-core 日志查看检测结果。
+Hermes 默认使用 `observe`，PII/凭据风险只进入 agent-sec-core 安全事件和宿主日志，
+不会通过最终回复合成 UI 告警。设置 `PII_CHECKER_MODE=block` 后，deny 级 tool 参数可在
+`pre_tool_call` 使用 Hermes 原生 block；用户输入和 tool 结果等不可阻断边界仍只审计。
+模型输出通过 `post_llm_call` 执行 audit-only 扫描；Hermes 没有插件可用的 pre-stream
+output gate，因此该适配层不会修改或阻断模型输出。
 
 ### 5\. 系统安全基线
 

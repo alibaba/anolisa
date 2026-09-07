@@ -53,6 +53,38 @@ pub struct SubagentTrajectoryRef {
 // ObservationResult & Observation
 // ---------------------------------------------------------------------------
 
+/// Key under which a provider's out-of-band tool-failure flag is preserved in
+/// [`ObservationResult::extra`]. ATIF has no typed status field, and folding the
+/// flag into `content` would force consumers to re-derive failure by matching
+/// error words in free text — which misfires on successful calls whose output
+/// merely mentions "error".
+pub const EXTRA_IS_ERROR: &str = "is_error";
+
+/// Whether two identifiers name the same tool call.
+///
+/// Comparison first accepts the original identifiers case-insensitively. It
+/// collapses `_` and `-` only when exactly one side contains a separator, which
+/// covers the measured `call_cb113b8e…` → `callcb113b8e…` echo without merging
+/// distinct IDs that both use punctuation (`call_a-1` vs `call_a_1`).
+pub fn same_call_id(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+
+    let has_separator = |s: &str| s.contains(['_', '-']);
+    if has_separator(a) == has_separator(b) {
+        return false;
+    }
+
+    let normalized = |s: &str| -> String {
+        s.chars()
+            .filter(|c| *c != '_' && *c != '-')
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    normalized(a) == normalized(b)
+}
+
 /// A single observation result from a tool call or action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservationResult {
@@ -64,6 +96,17 @@ pub struct ObservationResult {
     pub subagent_trajectory_ref: Option<Vec<SubagentTrajectoryRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<HashMap<String, serde_json::Value>>,
+}
+
+impl ObservationResult {
+    /// Whether the tool call behind this result failed, as reported by the
+    /// provider.
+    ///
+    /// `None` means the provider reported nothing, which is **not** the same as
+    /// success — callers must treat it as unknown rather than passing.
+    pub fn is_error(&self) -> Option<bool> {
+        self.extra.as_ref()?.get(EXTRA_IS_ERROR)?.as_bool()
+    }
 }
 
 /// Environment feedback/results after actions.
@@ -311,6 +354,17 @@ mod tests {
             subagent_trajectories: None,
             extra: None,
         }
+    }
+
+    #[test]
+    fn call_id_matching_only_tolerates_one_sided_separator_loss() {
+        assert!(same_call_id("CALL_abc", "call_ABC"));
+        assert!(same_call_id("call_47ad96", "call47ad96"));
+        assert!(same_call_id("call47ad96", "call-47ad96"));
+
+        assert!(!same_call_id("call_a-1", "call_a_1"));
+        assert!(!same_call_id("call-a-b", "call_a_b"));
+        assert!(!same_call_id("call_abc", "call_def"));
     }
 
     #[test]

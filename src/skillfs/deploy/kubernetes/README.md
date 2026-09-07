@@ -13,7 +13,8 @@ for the complete workflow.
 - Kubernetes 1.29 or later.
 - Privileged containers and the `/dev/fuse` hostPath are allowed.
 - The target nodes provide `/dev/fuse`.
-- The SkillFS image is available to the cluster.
+- A self-built SkillFS image is available to the cluster. The repository does
+  not currently publish a dedicated sidecar image.
 
 ## Files
 
@@ -26,7 +27,7 @@ for the complete workflow.
 ## Deploy
 
 ```bash
-export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
+export IMAGE="registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)"
 export NS=skillfs-container-example
 
 kubectl apply -f 00-namespace.yaml
@@ -37,10 +38,21 @@ kubectl -n "$NS" wait \
   --timeout=300s
 ```
 
+Build and verify the image with `container/Dockerfile`, or use
+`container/Dockerfile.alinux4` for an Alibaba Cloud Linux 4 runtime. The linked
+user guide documents both variants and their runtime configuration.
+
 The workload readiness probe reads the transformed default skill and the
 virtual `skill-discover/SKILL.md`. It also opens a secondary skill through the
 path advertised by `skill-discover`. Secondary skills stay out of the directory
 listing but remain readable through their advertised paths.
+
+The SkillFS readiness probe removes the Pod from service after one failed FUSE
+read. Its liveness probe restarts the sidecar after two consecutive failures
+and gives that probe-triggered shutdown 10 seconds to finish. The workload has
+no liveness probe, so a broken FUSE view cannot restart the consumer and repeat
+the same failure. Consumers should close failed file descriptors and reopen
+files after the Pod becomes Ready again.
 
 ## Use your own skills
 
@@ -48,6 +60,7 @@ Before using the manifest for a workload:
 
 1. replace `skill-source` with a PVC;
 2. remove the example ConfigMap and `seed-example` init container;
-3. update `SKILLFS_PROBE_FILE`;
+3. update `SKILLFS_PROBE_FILE` to a stable, non-empty file that remains visible
+   for the lifetime of the mount;
 4. replace the `agent` image and command;
 5. keep the shared-volume mount propagation settings unchanged.

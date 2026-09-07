@@ -7,6 +7,7 @@
 pub mod config;
 pub mod diff;
 pub mod home;
+pub mod path_policy;
 pub mod query;
 pub mod record;
 pub mod recorder;
@@ -15,7 +16,7 @@ pub mod tokenizer;
 
 pub use record::{CompressionMode, OperationType, StatsRecord};
 
-pub use recorder::{StatsError, StatsRecorder, StatsResult, StatsSummary};
+pub use recorder::{RetrieveTotals, StatsError, StatsRecorder, StatsResult, StatsSummary};
 
 pub use query::{
     format_compare, format_compare_json, format_list, format_show, format_summary,
@@ -32,6 +33,10 @@ pub use diff::{
 };
 
 pub use home::get_home_dir;
+
+pub use path_policy::{
+    PathPolicyError, ensure_state_dir, resolve_data_dir, validate_data_dir, validate_database_path,
+};
 
 pub use sls::{SlsRecord, SlsWriter};
 

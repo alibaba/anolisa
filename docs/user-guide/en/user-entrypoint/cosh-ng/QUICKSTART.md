@@ -2,18 +2,37 @@
 
 [中文版](../../../zh/user-entrypoint/cosh-ng/QUICKSTART.md)
 
-cosh-ng adds an Agent to a normal bash or zsh session. Start `cosh`, run Shell commands as usual, and describe a larger task in natural language when you need help.
+cosh-ng starts in Enhanced Assisted mode, where bash or zsh remains interactive
+and Cosh may route natural-language requests to an Agent. Native integration is
+an explicit startup choice for sessions that must load no Cosh hooks.
 
 ## 1. Install
 
-Install the ANOLISA CLI and cosh-ng:
+On Alibaba Cloud Linux 4, install the ANOLISA CLI, then install cosh-ng from
+the RPM backend in system scope:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
-sudo anolisa --install-mode system install cosh-ng
+export PATH="$HOME/.local/bin:$PATH"
+sudo "$HOME/.local/bin/anolisa" --install-mode system install cosh-ng --backend rpm
 ```
 
-Alibaba Cloud Linux users can install the RPM instead:
+The public installer can combine the CLI and component installation. It prompts
+for `sudo` only when running the component action:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+On macOS arm64, use user scope instead:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Alibaba Cloud Linux 4 users can also install the RPM directly:
 
 ```bash
 sudo yum install cosh-ng
@@ -28,7 +47,12 @@ cosh-cli --version
 
 Package and service changes normally need root privileges. Workspace checkpoint commands also need a running `ws-ckpt` daemon.
 
-These packaged paths target Linux. Source builds are for contributors; follow the [developer setup](../../../../developer-guide/en/cosh-ng/getting-started.md) after the packaged options above.
+The published Linux raw contract is not currently portable across all routed
+distributions, so it is not the recommended Linux installation path. The raw
+package supports macOS arm64, where Linux-only package and service operations
+remain unavailable. Source builds are for contributors; follow the
+[developer setup](../../../../developer-guide/en/cosh-ng/getting-started.md)
+after the packaged options above.
 
 ## 2. Start the terminal
 
@@ -39,17 +63,30 @@ cd your-project
 cosh
 ```
 
-Run commands in the same session, and describe a larger task as ordinary input:
+The default Enhanced Assisted mode uses `◇ ` to show that submitted input may
+be classified and routed before Shell execution:
 
 ```text
-$ git status
+◇ user@host:~/project$ git status
+◇ user@host:~/project$ investigate the last failed deployment
 ```
 
-For example, ask the Agent to investigate the last failed deployment and inspect it without making changes.
+At an empty prompt, `Shift+Tab` switches to Enhanced Shell-only. The prefix
+becomes `◌ `, ordinary input stays with the Shell, and post-command insights
+remain available. Press `Shift+Tab` again to return to Assisted.
+
+Start Native when the session must have no Cosh hooks, observation, or insight:
+
+```bash
+COSH_SHELL_INTEGRATION=native cosh
+```
+
+Native and Enhanced integration are selected at startup; restart `cosh` to
+change between them. The Assisted and Shell-only substates switch in place.
 
 When an operation needs consent, cosh shows an approval or question card before it proceeds.
 
-Useful first commands:
+Useful first commands in Enhanced Assisted mode:
 
 ```text
 /auth

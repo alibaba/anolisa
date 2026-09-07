@@ -46,6 +46,9 @@ pub struct AgentHealthStatus {
     pub agent_name: String,
     pub category: String,
     pub exe_path: String,
+    /// Process working directory, used as the default protection scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     /// Detected listening TCP ports
     pub ports: Vec<u16>,
     pub status: AgentHealthState,
@@ -179,6 +182,7 @@ mod tests {
             agent_name: format!("agent-{pid}"),
             category: "test".to_string(),
             exe_path: "/usr/bin/test".to_string(),
+            workspace_path: None,
             ports: vec![],
             status,
             last_check_time: now_ms(),

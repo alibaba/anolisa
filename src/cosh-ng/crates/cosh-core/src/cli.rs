@@ -1,5 +1,30 @@
 use clap::{Parser, Subcommand};
 
+use crate::config::ApprovalMode;
+
+/// Runtime execution boundary selected before loading workspace-owned state.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ExecutionProfile {
+    /// Existing direct Core/Shell behavior and private control protocol v1.
+    #[default]
+    Legacy,
+    /// Gateway owns every hosted side effect through private protocol v3.
+    GatewayBrokeredV1,
+}
+
+impl ExecutionProfile {
+    pub(crate) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::GatewayBrokeredV1 => "gateway_brokered_v1",
+        }
+    }
+
+    pub(crate) const fn is_brokered(self) -> bool {
+        matches!(self, Self::GatewayBrokeredV1)
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Manage configured MCP servers.
@@ -64,13 +89,20 @@ pub struct CliArgs {
     #[arg(long)]
     pub headless: bool,
 
+    /// Select the trusted runtime execution boundary.
+    ///
+    /// Gateway is the only supported caller of the brokered profile. Keeping
+    /// this hidden prevents it from being mistaken for a user approval mode.
+    #[arg(long, value_enum, default_value_t, hide = true)]
+    pub execution_profile: ExecutionProfile,
+
     /// Override the active model from config.toml
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Override approval mode (trust|auto|balanced|strict)
+    /// Override approval mode (recommend|auto|trust)
     #[arg(long, value_name = "MODE")]
-    pub approval_mode: Option<String>,
+    pub approval_mode: Option<ApprovalMode>,
 
     /// Comma-separated list of auto-approved tools
     #[arg(long, value_name = "TOOLS")]
@@ -311,6 +343,23 @@ mod tests {
 
         assert_eq!(default_args.tools.as_deref(), Some("default"));
         assert_eq!(empty_args.tools.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn approval_mode_cli_uses_canonical_type() {
+        for (value, expected) in [
+            ("recommend", ApprovalMode::Recommend),
+            ("balanced", ApprovalMode::Recommend),
+            ("strict", ApprovalMode::Recommend),
+            ("suggest", ApprovalMode::Recommend),
+            ("auto", ApprovalMode::Auto),
+            ("trust", ApprovalMode::Trust),
+        ] {
+            let args = CliArgs::try_parse_from(["cosh-core", "--approval-mode", value])
+                .expect("parse approval mode");
+            assert_eq!(args.approval_mode, Some(expected));
+        }
+        assert!(CliArgs::try_parse_from(["cosh-core", "--approval-mode", "invalid"]).is_err());
     }
 
     #[test]

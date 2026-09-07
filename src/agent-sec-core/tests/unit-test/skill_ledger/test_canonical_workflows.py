@@ -68,6 +68,16 @@ def _backend(
     return backend
 
 
+def _set_system_root(
+    system_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "agent_sec_cli.skill_ledger.config.DEFAULT_SYSTEM_SKILL_ROOTS",
+        (system_root,),
+    )
+
+
 def test_nested_same_basename_skills_keep_canonical_identity_and_live_io(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -189,6 +199,296 @@ def test_batch_error_exposes_only_canonical_path(
     assert result[0]["canonicalSkillDir"] == str(canonical)
     assert str(canonical / "secret.txt") in result[0]["error"]
     assert str(live) not in json.dumps(result)
+
+
+def test_readonly_host_system_skill_is_skipped_without_skill_directory_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_root = tmp_path / "system-skills"
+    skill = _make_skill(system_root, "weather", "weather")
+    root = ResolvedSkillRoot(skill, skill, "host")
+    backend = _backend(tmp_path, monkeypatch)
+    _set_system_root(system_root, monkeypatch)
+    scanner_called = False
+    remember_called = False
+
+    def fail_scanner(
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[certifier_core.ScanEntry]:
+        nonlocal scanner_called
+        scanner_called = True
+        return []
+
+    def record_remember(_skill_dir: str) -> None:
+        nonlocal remember_called
+        remember_called = True
+
+    monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core,
+        "ledger_update_access",
+        lambda _root: (False, "read-only"),
+    )
+    monkeypatch.setattr(certifier_core, "_auto_invoke_scanners", fail_scanner)
+    monkeypatch.setattr(
+        certifier_core,
+        "_remember_skill_dir_best_effort",
+        record_remember,
+    )
+
+    result = scan_batch([skill], backend)
+
+    assert result == [
+        {
+            "canonicalSkillDir": str(skill),
+            "skillName": "weather",
+            "status": "skipped",
+            "reasonCode": "readonly_system_skill",
+            "persisted": False,
+        }
+    ]
+    assert not scanner_called
+    assert not remember_called
+    assert not (skill / ".skill-meta").exists()
+
+
+def test_explicit_readonly_host_system_scan_stays_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_root = tmp_path / "system-skills"
+    skill = _make_skill(system_root, "weather", "weather")
+    root = ResolvedSkillRoot(skill, skill, "host")
+    backend = _backend(tmp_path, monkeypatch)
+    _set_system_root(system_root, monkeypatch)
+    monkeypatch.setattr(
+        certifier_core,
+        "ledger_update_access",
+        lambda _root: (False, "read-only"),
+    )
+
+    with pytest.raises(SkillLedgerError, match="skill-ledger analyze"):
+        scan_skill(root, backend)
+
+    assert not (skill / ".skill-meta").exists()
+    assert not (
+        tmp_path / "config" / "agent-sec" / "skill-ledger" / "config.json"
+    ).exists()
+
+
+def test_writable_host_system_skill_is_scanned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_root = tmp_path / "system-skills"
+    skill = _make_skill(system_root, "weather", "weather")
+    root = ResolvedSkillRoot(skill, skill, "host")
+    backend = _backend(tmp_path, monkeypatch)
+    _set_system_root(system_root, monkeypatch)
+    monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core,
+        "ledger_update_access",
+        lambda _root: (True, "writable"),
+    )
+    monkeypatch.setattr(
+        certifier_core,
+        "_auto_invoke_scanners",
+        lambda *_args, **_kwargs: [
+            certifier_core.ScanEntry(scanner="code-scanner", status="pass")
+        ],
+    )
+
+    result = scan_batch([skill], backend, scanner_names=["code-scanner"])
+
+    assert result[0]["status"] == "scanned"
+    assert result[0]["scanStatus"] == "pass"
+    assert (skill / ".skill-meta" / "latest.json").is_file()
+
+
+def test_writable_skillfs_backing_under_system_path_is_scanned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_root = tmp_path / "system-skills"
+    canonical = system_root / "weather"
+    live = _make_skill(tmp_path / "backing", "weather", "weather")
+    root = ResolvedSkillRoot(canonical, live, "skillfs")
+    backend = _backend(tmp_path, monkeypatch)
+    _set_system_root(system_root, monkeypatch)
+    monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core,
+        "_auto_invoke_scanners",
+        lambda *_args, **_kwargs: [
+            certifier_core.ScanEntry(scanner="code-scanner", status="pass")
+        ],
+    )
+
+    result = scan_batch([canonical], backend, scanner_names=["code-scanner"])
+
+    assert result[0]["status"] == "scanned"
+    assert (live / ".skill-meta" / "latest.json").is_file()
+    assert not canonical.exists()
+
+
+def test_readonly_skillfs_backing_is_not_downgraded_to_system_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_root = tmp_path / "system-skills"
+    canonical = system_root / "weather"
+    live = _make_skill(tmp_path / "backing", "weather", "weather")
+    root = ResolvedSkillRoot(canonical, live, "skillfs")
+    backend = _backend(tmp_path, monkeypatch)
+    _set_system_root(system_root, monkeypatch)
+    monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core,
+        "_auto_invoke_scanners",
+        lambda *_args, **_kwargs: [
+            certifier_core.ScanEntry(scanner="code-scanner", status="pass")
+        ],
+    )
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("backing ledger is read-only")
+
+    monkeypatch.setattr(
+        certifier_core,
+        "_persist_manifest_update",
+        fail_persist,
+    )
+
+    result = scan_batch([canonical], backend, scanner_names=["code-scanner"])
+
+    assert result[0]["status"] == "error"
+    assert "backing ledger is read-only" in result[0]["error"]
+
+
+def test_readonly_user_skill_is_not_downgraded_to_system_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill = _make_skill(tmp_path / "user-skills", "weather", "weather")
+    root = ResolvedSkillRoot(skill, skill, "host")
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(certifier_core, "resolve_skill_root", lambda _path: root)
+    monkeypatch.setattr(
+        certifier_core,
+        "_auto_invoke_scanners",
+        lambda *_args, **_kwargs: [
+            certifier_core.ScanEntry(scanner="code-scanner", status="pass")
+        ],
+    )
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("user ledger is read-only")
+
+    monkeypatch.setattr(certifier_core, "_persist_manifest_update", fail_persist)
+
+    result = scan_batch([skill], backend, scanner_names=["code-scanner"])
+
+    assert result[0]["status"] == "error"
+    assert "user ledger is read-only" in result[0]["error"]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "SkillFS resolver timed out",
+        "SkillFS resolver authentication failed",
+        "successful response must contain result",
+    ],
+)
+def test_resolver_failure_is_not_downgraded_to_system_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    system_root = tmp_path / "system-skills"
+    canonical = system_root / "weather"
+    backend = _backend(tmp_path, monkeypatch)
+    _set_system_root(system_root, monkeypatch)
+
+    def fail_resolve(_path: str | Path) -> ResolvedSkillRoot:
+        raise SkillLedgerError(reason)
+
+    monkeypatch.setattr(certifier_core, "resolve_skill_root", fail_resolve)
+
+    result = scan_batch([canonical], backend)
+
+    assert result[0]["status"] == "error"
+    assert reason in result[0]["error"]
+
+
+def test_failed_scan_does_not_auto_remember_skill_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill = _make_skill(tmp_path / "user-skills", "weather", "weather")
+    root = ResolvedSkillRoot(skill, skill, "host")
+    backend = _backend(tmp_path, monkeypatch)
+    remembered: list[str] = []
+    monkeypatch.setattr(
+        certifier_core,
+        "_auto_invoke_scanners",
+        lambda *_args, **_kwargs: [
+            certifier_core.ScanEntry(scanner="code-scanner", status="pass")
+        ],
+    )
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("ledger is read-only")
+
+    monkeypatch.setattr(
+        certifier_core,
+        "_persist_manifest_update",
+        fail_persist,
+    )
+    monkeypatch.setattr(
+        certifier_core,
+        "_remember_skill_dir_best_effort",
+        remembered.append,
+    )
+
+    with pytest.raises(PermissionError, match="ledger is read-only"):
+        scan_skill(root, backend, scanner_names=["code-scanner"])
+
+    assert remembered == []
+    assert not (
+        tmp_path / "config" / "agent-sec" / "skill-ledger" / "config.json"
+    ).exists()
+
+
+def test_noop_scan_remembers_skill_dir_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill = _make_skill(tmp_path / "user-skills", "weather", "weather")
+    root = ResolvedSkillRoot(skill, skill, "host")
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        certifier_core,
+        "_auto_invoke_scanners",
+        lambda *_args, **_kwargs: [
+            certifier_core.ScanEntry(scanner="code-scanner", status="pass")
+        ],
+    )
+    scan_skill(root, backend, scanner_names=["code-scanner"])
+    remembered: list[str] = []
+    monkeypatch.setattr(
+        certifier_core,
+        "_remember_skill_dir_best_effort",
+        remembered.append,
+    )
+
+    result = scan_skill(root, backend, scanner_names=["code-scanner"])
+
+    assert result["status"] == "noop"
+    assert remembered == [str(skill)]
 
 
 def test_scanner_error_paths_are_canonicalized_before_manifest_signing(

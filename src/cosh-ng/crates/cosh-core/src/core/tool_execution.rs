@@ -411,7 +411,9 @@ impl CoshCore {
         self.audit
             .record_tool_execution_started(scope, &call.name, &tool_data)?;
         let tool_start = Instant::now();
-        let result = self.handle_ask_user(&params, reader, writer).await;
+        let result = self
+            .handle_ask_user(&params, Some(&call.id), reader, writer)
+            .await;
         let duration_ms = tool_start.elapsed().as_millis() as u64;
         self.audit.record_tool_terminal(
             scope,
@@ -531,6 +533,7 @@ impl CoshCore {
     pub(super) async fn handle_ask_user<W, R>(
         &self,
         params: &AskUserQuestionParams,
+        tool_use_id: Option<&str>,
         reader: &mut tokio::io::Lines<R>,
         writer: &mut W,
     ) -> ToolResult
@@ -555,6 +558,11 @@ impl CoshCore {
             &OutputMessage::ControlRequest {
                 request_id: request_id.clone(),
                 request: crate::protocol::CoreControlRequest::AskUser {
+                    tool_use_id: if self.execution_profile.is_brokered() {
+                        tool_use_id.map(str::to_owned)
+                    } else {
+                        None
+                    },
                     question: params.question.clone(),
                     options,
                     allow_free_text: params.allow_free_text,

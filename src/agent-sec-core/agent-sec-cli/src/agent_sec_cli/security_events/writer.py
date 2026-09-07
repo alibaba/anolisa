@@ -3,8 +3,10 @@
 import fcntl
 import json
 import logging
+import os
 import re
 import shutil
+import stat
 import threading
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -44,6 +46,11 @@ DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 # Default number of rotated files to keep
 DEFAULT_BACKUP_COUNT = 10
 
+# Local security-event, observability, and diagnostic streams can contain
+# request/result evidence. Keep both data files and their advisory lock files
+# owner-only, independently of the caller's umask.
+_PRIVATE_FILE_MODE = 0o600
+
 # Matches the timestamp suffix produced by _rotate():
 #   YYYYMMDD-HHMMSS.fff          (normal)
 #   YYYYMMDD-HHMMSS.fff.N        (collision-guard counter)
@@ -81,6 +88,7 @@ class JsonlEventWriter:
         self._on_error = on_error
         self._lock = threading.Lock()
         self._dir_created = False
+        self._retained_backups_secured = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -101,13 +109,70 @@ class JsonlEventWriter:
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._dir_created = True
 
-    def _needs_rotation(self, additional_bytes: int = 0) -> bool:
-        """Check if the current log file would exceed the size limit after adding additional_bytes."""
+    @staticmethod
+    def _open_private_append_fd(path: Path) -> int:
+        """Open a file for append and enforce mode ``0o600``.
+
+        The creation mode prevents a new file from starting with broader
+        permissions. ``fchmod`` tightens files created by older releases and
+        restores owner access when the process umask is unusually restrictive.
+        """
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            _PRIVATE_FILE_MODE,
+        )
         try:
-            st = self._path.stat()
-            return st.st_size + additional_bytes >= self._max_bytes
-        except OSError:
-            return False
+            metadata = os.fstat(fd)
+            if stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE:
+                os.fchmod(fd, _PRIVATE_FILE_MODE)
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _needs_rotation(self, fd: int, additional_bytes: int = 0) -> bool:
+        """Return whether appending to the opened log would cross its size limit."""
+        return os.fstat(fd).st_size + additional_bytes >= self._max_bytes
+
+    def _tighten_retained_backup(self, path: Path) -> None:
+        """Best-effort tighten one recognized retained backup without following links."""
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                return
+
+            fd = os.open(
+                path,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            )
+            try:
+                metadata = os.fstat(fd)
+                if not stat.S_ISREG(metadata.st_mode):
+                    return
+                if stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE:
+                    os.fchmod(fd, _PRIVATE_FILE_MODE)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            self._notify_error(exc)
+
+    def _secure_retained_backups_once(self) -> None:
+        """Tighten backups left by older releases on this writer's first write."""
+        if self._retained_backups_secured:
+            return
+
+        try:
+            prefix = f"{self._path.name}."
+            for entry in self._path.parent.iterdir():
+                if not entry.name.startswith(prefix):
+                    continue
+                suffix = entry.name[len(prefix) :]
+                if _BACKUP_SUFFIX_RE.match(suffix):
+                    self._tighten_retained_backup(entry)
+        except OSError as exc:
+            self._notify_error(exc)
+        finally:
+            self._retained_backups_secured = True
 
     def _rotate(self) -> None:
         """Rotate the log file by renaming it with a timestamp suffix.
@@ -153,11 +218,11 @@ class JsonlEventWriter:
         and destroyed within a single lock acquisition.
         """
         lock_path = self._path.parent / (self._path.name + ".lock")
-        lock_fd = None
+        lock_fd: int | None = None
         lock_acquired = False
         try:
             self._ensure_parent_dir()
-            lock_fd = lock_path.open("w")
+            lock_fd = self._open_private_append_fd(lock_path)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             lock_acquired = True
         except OSError:
@@ -166,28 +231,38 @@ class JsonlEventWriter:
             # Best-effort: still write, accept small race.
             if lock_fd is not None:
                 try:
-                    lock_fd.close()
+                    os.close(lock_fd)
                 except OSError:
                     pass
                 lock_fd = None
 
         try:
-            # Check rotation under the lock
-            if self._needs_rotation(line_bytes):
-                self._rotate()
+            self._secure_retained_backups_once()
+            event_fd: int | None = self._open_private_append_fd(self._path)
+            try:
+                # Tighten an existing file before checking rotation so the
+                # resulting backup cannot retain a legacy group/world-readable
+                # mode. Reopen by path after rotation to avoid stale inodes.
+                if self._needs_rotation(event_fd, line_bytes):
+                    os.close(event_fd)
+                    event_fd = None
+                    self._rotate()
+                    event_fd = self._open_private_append_fd(self._path)
 
-            # Open the file fresh by path, write, and close.
-            # This is the key to avoiding inode-reuse: we never hold a
-            # persistent fd across lock boundaries.
-            with self._path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-                fh.flush()
+                fh = os.fdopen(event_fd, "a", encoding="utf-8")
+                event_fd = None
+                with fh:
+                    fh.write(line)
+                    fh.flush()
+            finally:
+                if event_fd is not None:
+                    os.close(event_fd)
         finally:
             if lock_fd is not None:
                 try:
                     if lock_acquired:
                         fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                    lock_fd.close()
+                    os.close(lock_fd)
                 except OSError:
                     pass
 

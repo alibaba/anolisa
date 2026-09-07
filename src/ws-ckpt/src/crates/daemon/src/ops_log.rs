@@ -31,7 +31,7 @@ struct OpsRecord<'a> {
 
 pub fn ops_name_from_request(req: &Request) -> Option<&'static str> {
     match req {
-        Request::Checkpoint { .. } => Some("ckpt"),
+        Request::Checkpoint { .. } | Request::GuardedCheckpointV2 { .. } => Some("ckpt"),
         Request::Rollback { .. } => Some("roll"),
         Request::Diff { .. } => Some("diff"),
         Request::List { .. } => Some("list"),
@@ -72,7 +72,9 @@ pub fn log_operation(ops_name: &'static str, agent_name: &str, response: &Respon
     }
 
     let err_reason = match response {
-        Response::Error { message, .. } => message.as_str(),
+        Response::Error { message, .. } | Response::GuardedCheckpointV2Rejected { message, .. } => {
+            message.as_str()
+        }
         _ => "none",
     };
 
@@ -162,6 +164,30 @@ mod tests {
         assert_eq!(ops_name_from_request(&init), None);
 
         assert_eq!(ops_name_from_request(&Request::HealthAdvisory), None);
+
+        let guarded = Request::GuardedCheckpointV2 {
+            ws_id: "ws-abcdef".into(),
+            expected_generation: ws_ckpt_common::WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+            checkpoint_id: "checkpoint-1".into(),
+            operation_digest: [2; 32],
+            message: None,
+            metadata: None,
+            pin: false,
+        };
+        assert_eq!(ops_name_from_request(&guarded), Some("ckpt"));
+
+        let identity = Request::WorkspaceIdentityV2 {
+            registration_path: "/workspace".into(),
+        };
+        assert_eq!(ops_name_from_request(&identity), None);
+
+        let evidence = Request::CheckpointEvidenceV2 {
+            ws_id: "ws-abcdef".into(),
+            expected_generation: ws_ckpt_common::WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+            checkpoint_id: "checkpoint-1".into(),
+            operation_digest: [2; 32],
+        };
+        assert_eq!(ops_name_from_request(&evidence), None);
     }
 
     #[test]

@@ -45,15 +45,27 @@ _RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().
 _DEFAULT_SCAN_MODE = _RAW_SCAN_MODE
 if _DEFAULT_SCAN_MODE not in {"fast", "standard", "strict"}:
     _DEFAULT_SCAN_MODE = "standard"
-print(
-    f"[prompt-scanner] scan mode configured: raw={_RAW_SCAN_MODE!r}, "
-    f"effective={_DEFAULT_SCAN_MODE!r}",
-    file=sys.stderr,
-)
 _DEFAULT_SOURCE = "user_input"
 
 
 # -- output helpers --------------------------------------------------------
+
+
+def _warn_invalid_scan_mode() -> None:
+    """Report a PROMPT_SCANNER_SCAN_MODE value that silently fell back.
+
+    Mirrors the pii-checker and skill-ledger hooks: only the misconfiguration
+    is surfaced, so a correctly configured hook stays silent.
+    """
+    if (
+        "PROMPT_SCANNER_SCAN_MODE" in os.environ
+        and _RAW_SCAN_MODE != _DEFAULT_SCAN_MODE
+    ):
+        print(
+            f"[prompt-scanner] invalid PROMPT_SCANNER_SCAN_MODE {_RAW_SCAN_MODE!r}; "
+            f"using {_DEFAULT_SCAN_MODE!r}",
+            file=sys.stderr,
+        )
 
 
 def _block(scan_result: dict) -> None:
@@ -84,6 +96,8 @@ def _block(scan_result: dict) -> None:
 def main() -> None:
     if not _HOOK_ENABLED:
         return
+
+    _warn_invalid_scan_mode()
 
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
     try:

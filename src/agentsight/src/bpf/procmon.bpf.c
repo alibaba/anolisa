@@ -55,7 +55,9 @@ int trace_execve_exit(struct syscall_trace_exit *ctx)
     // Fill event
     event->source = EVENT_SOURCE_PROCMON;
     event->timestamp_ns = ts;
-    event->pid = get_task_ns_pid(task);
+    // Report the pid as user-space's /proc will show it, not the target's
+    // innermost-namespace pid; user-space resolves cmdline/exe from this.
+    event->pid = current_observer_pid();
     event->tid = tid;
     event->ppid = ppid;
     event->uid = uid;

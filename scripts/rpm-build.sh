@@ -395,14 +395,19 @@ build_agentsight() {
     (
         cd "$SIGHT_DIR"
         # Build frontend (embed into Rust binary via include_dir!)
-        if [ -d "dashboard" ] && command -v npm &>/dev/null; then
+        if [ -d "${SIGHT_DIR}/dashboard" ] && command -v npm &>/dev/null; then
             log "Building frontend..."
-            cd dashboard
+            cd "${SIGHT_DIR}/dashboard"
             npm install
             npm run build:embed
             cd "$SIGHT_DIR"
         else
-            warn "Skipping frontend build (dashboard/ not found or npm unavailable)"
+            local reason=""
+            [ -d "${SIGHT_DIR}/dashboard" ] || reason="${reason}dashboard/ not found at ${SIGHT_DIR}/dashboard; "
+            command -v npm &>/dev/null || reason="${reason}npm not available in PATH; "
+            err "Cannot build agentsight frontend: ${reason}"
+            err "Frontend embedding is required for WebUI/serve tests. Aborting build."
+            exit 1
         fi
         cargo build --release --bin agentsight
         ./scripts/build-enforcer.sh
@@ -416,23 +421,7 @@ build_agentsight() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"
-
-    # Copy relevant files
-    cp -p "${SIGHT_DIR}/target/release/agentsight" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/target/release/agentsight-enforcer" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/scripts/agentsight.service" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/scripts/agentsight-enforcer.service" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/scripts/agentsight-start.sh" "$pkg_dir/agentsight-start"
-    [ -f "${SIGHT_DIR}/README.md" ] && cp "${SIGHT_DIR}/README.md" "$pkg_dir/"
-    [ -f "${SIGHT_DIR}/README_zh.md" ] && cp "${SIGHT_DIR}/README_zh.md" "$pkg_dir/"
-    [ -f "${SIGHT_DIR}/LICENSE" ] && cp "${SIGHT_DIR}/LICENSE" "$pkg_dir/"
-
-    # component.toml — spec %install installs it to %{_datadir}/anolisa/components/agentsight/
-    [ -f "${SIGHT_DIR}/component.toml" ] && cp "${SIGHT_DIR}/component.toml" "$pkg_dir/"
-
-    # agentsight.json — spec %install installs it to %{_sysconfdir}/agentsight/config.json
-    [ -f "${SIGHT_DIR}/agentsight.json" ] && cp "${SIGHT_DIR}/agentsight.json" "$pkg_dir/"
+    "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
@@ -520,6 +509,8 @@ build_tokenless() {
         --exclude='adapters/tokenless/claude-code/.claude-plugin/plugin.json' \
         --exclude='adapters/tokenless/codex/.codex-plugin/plugin.json' \
         --exclude='adapters/tokenless/qwencode/qwen-extension.json' \
+        --exclude='adapters/tokenless/qwenpaw/plugin.json' \
+        --exclude='adapters/tokenless/qwenpaw/requirements.txt' \
         . | tar -xf - -C "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
@@ -841,6 +832,13 @@ build_cosh_ng() {
     if ! grep -Fq "install -m 0644 component.toml %{buildroot}${manifest_path}" "$spec_in" \
         || ! grep -Fqx "$manifest_path" "$spec_in"; then
         err "cosh-ng spec must install and own ${manifest_path}"
+        return 1
+    fi
+    local gateway_unit="%{_unitdir}/cosh-gateway@.service"
+    if ! grep -Fq "packaging/systemd/cosh-gateway@.service.in" "$spec_in" \
+        || ! grep -Fq "%{buildroot}${gateway_unit}" "$spec_in" \
+        || ! grep -Fqx "$gateway_unit" "$spec_in"; then
+        err "cosh-ng spec must render, install, and own ${gateway_unit}"
         return 1
     fi
     local tarball_name="${pkg_name}-${version}.tar.gz"

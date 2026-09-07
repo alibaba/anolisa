@@ -120,7 +120,13 @@ fn resolve_policy_binding(
         || source_policy.policy_id != request.policy_id
         || source_policy.revision.to_string() != request.policy_revision
         || source_policy.taint_label != "CREDENTIAL"
-        || source_policy.source_patterns.as_slice() != [compiled.source_path.as_str()]
+        || source_policy.source_patterns
+            != compiled
+                .source_paths
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .as_slice()
         || source_policy.trusted_endpoints != compiled.trusted_endpoints
     {
         return None;
@@ -128,7 +134,7 @@ fn resolve_policy_binding(
     Some(ResolvedPolicy {
         detail,
         binding,
-        source_path: compiled.source_path,
+        source_path: compiled.source_paths.first().cloned().unwrap_or_default(),
         source_policy_snapshot,
     })
 }
@@ -219,7 +225,7 @@ pub(super) fn acknowledgement_matches(binding: &Binding, expected: &ApplyCredent
         return false;
     }
     parse_compiled_policy(&request.policy_dsl, CompiledMode::Enforce).is_some_and(|compiled| {
-        compiled.source_path == *expected_source
+        compiled.source_paths.contains(&expected_source.to_string())
             && compiled.trusted_endpoints == expected.policy.trusted_endpoints
     })
 }
@@ -297,27 +303,50 @@ enum CompiledMode {
 }
 
 struct CompiledPolicy {
-    source_path: String,
+    source_paths: Vec<String>,
     trusted_endpoints: Vec<String>,
 }
 
 fn parse_compiled_policy(dsl: &str, mode: CompiledMode) -> Option<CompiledPolicy> {
     let body = dsl.strip_suffix('\n')?;
     let lines: Vec<_> = body.split('\n').collect();
-    if lines.len() != 5 || lines[0] != AGENT_SOURCE || lines[2] != RULE || lines[4] != REASON {
+    // Minimum structure: AGENT_SOURCE, at least one source, RULE, action, REASON.
+    if lines.len() < 5 || lines[0] != AGENT_SOURCE {
         return None;
     }
-    let source_path = lines[1]
-        .strip_prefix(CREDENTIAL_SOURCE)?
-        .strip_suffix('"')?;
-    if !valid_source_path(source_path) {
+    // Collect source lines (all lines between AGENT_SOURCE and RULE).
+    let mut source_paths = Vec::new();
+    let mut rule_idx = None;
+    for (index, line) in lines.iter().enumerate().skip(1) {
+        if *line == RULE {
+            rule_idx = Some(index);
+            break;
+        }
+        let path = line.strip_prefix(CREDENTIAL_SOURCE)?.strip_suffix('"')?;
+        if !valid_source_path(path) {
+            return None;
+        }
+        source_paths.push(path.to_string());
+    }
+    let rule_idx = rule_idx?;
+    if source_paths.is_empty() {
+        return None;
+    }
+    // After RULE: action line, then REASON.
+    let action_idx = rule_idx + 1;
+    let reason_idx = action_idx + 1;
+    if reason_idx >= lines.len() || lines[reason_idx] != REASON {
         return None;
     }
     let action = match mode {
         CompiledMode::Audit => "  notify",
         CompiledMode::Enforce => "  block",
     };
-    let suffix = lines[3].strip_prefix(action)?.strip_prefix(SINK)?;
+    let mut suffix = lines[action_idx].strip_prefix(action)?.strip_prefix(SINK)?;
+    // Strip optional ` expires Ns` tail (from legacy enforce bindings).
+    if let Some(pos) = suffix.find(" expires ") {
+        suffix = &suffix[..pos];
+    }
     let trusted_endpoints = if suffix.is_empty() {
         Vec::new()
     } else {
@@ -328,7 +357,7 @@ fn parse_compiled_policy(dsl: &str, mode: CompiledMode) -> Option<CompiledPolicy
         vec![endpoint.to_string()]
     };
     Some(CompiledPolicy {
-        source_path: source_path.to_string(),
+        source_paths,
         trusted_endpoints,
     })
 }

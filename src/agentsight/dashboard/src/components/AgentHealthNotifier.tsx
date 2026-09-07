@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchAgentHealth } from '../utils/apiClient';
+import { fetchAgentProcessHealth } from '../utils/apiClient';
+import { useI18n } from '../i18n';
 
 interface Toast {
   id: number;
@@ -14,6 +15,7 @@ interface Toast {
  * keeps the cross-page alerting behavior of the former sidebar.
  */
 export const AgentHealthNotifier: React.FC = () => {
+  const { t } = useI18n();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastIdRef = useRef(0);
   // Track which PIDs we've already notified about (negative PID = hung notice)
@@ -27,18 +29,18 @@ export const AgentHealthNotifier: React.FC = () => {
 
   const poll = useCallback(async () => {
     try {
-      const data = await fetchAgentHealth({ includeClients: true });
+      const data = await fetchAgentProcessHealth({ includeClients: true });
       const agents = Array.isArray(data?.agents) ? data.agents : [];
 
       // 检测新增异常退出（仅 has_crash=true 的才通知）和卡顿 agent
       agents.forEach(a => {
         if (a.status === 'offline' && a.has_crash && !notifiedRef.current.has(a.pid)) {
           notifiedRef.current.add(a.pid);
-          addToast(`⚠️ Agent "${a.agent_name}" (PID ${a.pid}) 异常退出，影响了进行中的对话`);
+          addToast(t('comp.agentHealth.crashToast', { name: a.agent_name, pid: a.pid }));
         }
         if (a.status === 'hung' && !notifiedRef.current.has(-a.pid)) {
           notifiedRef.current.add(-a.pid);
-          addToast(`⏳ Agent "${a.agent_name}" (PID ${a.pid}) 响应超时，可能卡顿`);
+          addToast(t('comp.agentHealth.hungToast', { name: a.agent_name, pid: a.pid }));
         }
       });
       // 清理不再存在的 PID
@@ -53,7 +55,7 @@ export const AgentHealthNotifier: React.FC = () => {
     } catch {
       // 通知是尽力而为的能力，接口失败时静默跳过本轮
     }
-  }, [addToast]);
+  }, [addToast, t]);
 
   useEffect(() => {
     void poll();

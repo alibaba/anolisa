@@ -196,6 +196,12 @@ pub struct EnforcementCapabilities {
     pub alternate_pid_retarget: bool,
     /// Whether this backend is an explicit test or development implementation.
     pub test_development: bool,
+    /// Whether the loaded profile can block file delete/write (unlink) operations
+    /// for a labelled process (LSM-only file-guard). Derived at runtime from the
+    /// actually loaded ActPlane profile, so callers can gate APPLY_READY on real
+    /// enforcement coverage instead of a static assumption.
+    #[serde(default)]
+    pub file_delete_guard: bool,
 }
 
 impl EnforcementCapabilities {
@@ -209,6 +215,7 @@ impl EnforcementCapabilities {
             policy_handoff: false,
             alternate_pid_retarget: false,
             test_development: false,
+            file_delete_guard: false,
         }
     }
 
@@ -222,6 +229,7 @@ impl EnforcementCapabilities {
             policy_handoff: false,
             alternate_pid_retarget: false,
             test_development: false,
+            file_delete_guard: false,
         }
     }
 
@@ -235,6 +243,7 @@ impl EnforcementCapabilities {
             policy_handoff: true,
             alternate_pid_retarget: true,
             test_development: true,
+            file_delete_guard: true,
         }
     }
 }

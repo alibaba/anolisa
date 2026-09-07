@@ -8,7 +8,6 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -18,13 +17,14 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::daemon_server::DaemonServer;
-use anolisa_core::system_helper::{HelperRequest, HelperResponse};
+use anolisa_platform::command::CommandRunner;
 use anolisa_platform::fs_layout::FsLayout;
-use anolisa_platform::ipc::{self, SYSTEM_HELPER_SOCKET};
+use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
 use anolisa_platform::privilege;
-use anolisa_platform::systemd::{self, SystemdError};
+use anolisa_platform::systemd::{Systemd, SystemdError};
 
 use crate::context::CliContext;
+use crate::helper_client::{HandshakeResult, HelperClient, HelperClientError, HelperStatus};
 use crate::response::{self, CliError};
 
 #[derive(Parser)]
@@ -130,11 +130,10 @@ fn handle_setup(
         None => layout.libexec_dir.join("anolisa-system-helper"),
     };
     let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
+    let systemd = Systemd::system();
 
     // 2. Stop the service if it's running (avoids "Text file busy" on binary overwrite)
-    let _ = Command::new("systemctl")
-        .args(["stop", SERVICE_NAME])
-        .output();
+    stop_service_before_setup(&systemd);
 
     // 3. Copy current exe to helper_path
     let current_exe = std::env::current_exe().map_err(|e| CliError::Runtime {
@@ -188,7 +187,7 @@ fn handle_setup(
     deploy_sandbox_config(cmd, &layout)?;
 
     // 10. systemctl daemon-reload + enable + start/restart
-    reload_and_start_service(cmd, upgrade)?;
+    reload_and_start_service(cmd, upgrade, &systemd)?;
 
     // 11. Verify socket
     verify_socket(cmd)?;
@@ -355,36 +354,54 @@ fn write_unit_file(cmd: &str, helper_path: &Path, unit_path: &Path) -> Result<()
     Ok(())
 }
 
-fn reload_and_start_service(cmd: &str, upgrade: bool) -> Result<(), CliError> {
-    run_systemctl(cmd, &["daemon-reload"])?;
-    run_systemctl(cmd, &["enable", SERVICE_NAME])?;
+fn reload_and_start_service<R: CommandRunner>(
+    cmd: &str,
+    upgrade: bool,
+    systemd: &Systemd<R>,
+) -> Result<(), CliError> {
+    systemd
+        .daemon_reload()
+        .map_err(|error| systemd_cli_error(cmd, &["daemon-reload"], error))?;
+    systemd
+        .enable_unit_file(SERVICE_NAME)
+        .map_err(|error| systemd_cli_error(cmd, &["enable", SERVICE_NAME], error))?;
 
     if upgrade {
-        run_systemctl(cmd, &["restart", SERVICE_NAME])?;
+        systemd
+            .restart_unit(SERVICE_NAME)
+            .map_err(|error| systemd_cli_error(cmd, &["restart", SERVICE_NAME], error))?;
     } else {
-        run_systemctl(cmd, &["start", SERVICE_NAME])?;
+        systemd
+            .start_unit(SERVICE_NAME)
+            .map_err(|error| systemd_cli_error(cmd, &["start", SERVICE_NAME], error))?;
     }
     eprintln!("[setup] service {SERVICE_NAME} active");
     Ok(())
 }
 
-fn run_systemctl(cmd: &str, args: &[&str]) -> Result<(), CliError> {
-    let output = Command::new("systemctl")
-        .args(args)
-        .output()
-        .map_err(|e| CliError::Runtime {
-            command: cmd.to_string(),
-            reason: format!("failed to run systemctl {}: {e}", args.join(" ")),
-        })?;
+fn stop_service_before_setup<R: CommandRunner>(systemd: &Systemd<R>) {
+    let _ = systemd.stop_unit(SERVICE_NAME);
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CliError::Runtime {
-            command: cmd.to_string(),
-            reason: format!("systemctl {} failed: {stderr}", args.join(" ")),
-        });
+fn systemd_cli_error(cmd: &str, args: &[&str], error: SystemdError) -> CliError {
+    let reason = match error {
+        SystemdError::Spawn { source, .. } => {
+            format!("failed to run systemctl {}: {source}", args.join(" "))
+        }
+        SystemdError::NonZeroExit(failure) => {
+            format!("systemctl {} failed: {}", args.join(" "), failure.stderr)
+        }
+        SystemdError::NotFound(unit) => {
+            format!(
+                "systemctl {} failed: service not found: {unit}",
+                args.join(" ")
+            )
+        }
+    };
+    CliError::Runtime {
+        command: cmd.to_string(),
+        reason,
     }
-    Ok(())
 }
 
 fn verify_socket(cmd: &str) -> Result<(), CliError> {
@@ -403,41 +420,46 @@ fn verify_socket(cmd: &str) -> Result<(), CliError> {
         });
     }
 
-    // Try a handshake to validate the daemon is responding.
-    let mut stream =
-        std::os::unix::net::UnixStream::connect(SYSTEM_HELPER_SOCKET).map_err(|e| {
-            CliError::Runtime {
-                command: cmd.to_string(),
-                reason: format!("failed to connect to {SYSTEM_HELPER_SOCKET}: {e}"),
-            }
+    verify_helper_connection(cmd, || HelperClient::connect(socket_path))
+}
+
+fn verify_helper_connection<F>(cmd: &str, connect: F) -> Result<(), CliError>
+where
+    F: FnOnce() -> Result<HelperClient, HelperClientError>,
+{
+    let mut client = connect().map_err(|error| CliError::Runtime {
+        command: cmd.to_string(),
+        reason: verify_connection_error(error),
+    })?;
+    let handshake = client
+        .handshake(env!("CARGO_PKG_VERSION"))
+        .map_err(|error| CliError::Runtime {
+            command: cmd.to_string(),
+            reason: verify_connection_error(error),
         })?;
-
-    let handshake = HelperRequest::Handshake {
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    ipc::send_message(&mut stream, &handshake).map_err(|e| CliError::Runtime {
-        command: cmd.to_string(),
-        reason: format!("handshake send failed: {e}"),
-    })?;
-
-    let resp: HelperResponse = ipc::recv_message(&mut stream).map_err(|e| CliError::Runtime {
-        command: cmd.to_string(),
-        reason: format!("handshake recv failed: {e}"),
-    })?;
-
-    match resp {
-        HelperResponse::HandshakeOk { compatible, .. } if compatible => {
-            eprintln!("[setup] handshake verified — helper is operational");
-            Ok(())
-        }
-        HelperResponse::HandshakeOk { compatible, .. } if !compatible => Err(CliError::Runtime {
+    if !handshake.compatible {
+        return Err(CliError::Runtime {
             command: cmd.to_string(),
             reason: "handshake succeeded but version is incompatible".to_string(),
-        }),
-        other => Err(CliError::Runtime {
-            command: cmd.to_string(),
-            reason: format!("unexpected handshake response: {other:?}"),
-        }),
+        });
+    }
+    eprintln!("[setup] handshake verified — helper is operational");
+    Ok(())
+}
+
+fn verify_connection_error(error: HelperClientError) -> String {
+    match error {
+        HelperClientError::Connect { path, source } => {
+            format!("failed to connect to {}: {source}", path.display())
+        }
+        HelperClientError::Send { source, .. } => format!("handshake send failed: {source}"),
+        HelperClientError::Receive { source, .. } => format!("handshake recv failed: {source}"),
+        HelperClientError::Remote { code, message, .. } => format!(
+            "unexpected handshake response: Error {{ code: {code:?}, message: {message:?} }}"
+        ),
+        HelperClientError::UnexpectedResponse { response, .. } => {
+            format!("unexpected handshake response: {response:?}")
+        }
     }
 }
 
@@ -456,27 +478,10 @@ fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     let helper_path = layout.libexec_dir.join("anolisa-system-helper");
     let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
     let mut warnings: Vec<String> = Vec::new();
+    let systemd = Systemd::system();
 
-    // 2. Stop service (ignore "not loaded" errors)
-    if let Err(e) = run_systemctl(cmd, &["stop", SERVICE_NAME]) {
-        let msg = format!("{e}");
-        if msg.contains("not loaded") || msg.contains("not found") {
-            warnings.push(format!(
-                "service {SERVICE_NAME} was not loaded (already stopped)"
-            ));
-        } else {
-            warnings.push(format!("failed to stop {SERVICE_NAME}: {msg}"));
-        }
-    } else {
-        eprintln!("[teardown] stopped {SERVICE_NAME}");
-    }
-
-    // 3. Disable service (ignore errors)
-    if let Err(e) = run_systemctl(cmd, &["disable", SERVICE_NAME]) {
-        warnings.push(format!("failed to disable {SERVICE_NAME}: {e}"));
-    } else {
-        eprintln!("[teardown] disabled {SERVICE_NAME}");
-    }
+    // 2-3. Stop and disable service while retaining failures as warnings.
+    stop_and_disable_service(cmd, &systemd, &mut warnings);
 
     // 4. Delete unit file
     if unit_path.exists() {
@@ -493,11 +498,7 @@ fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     }
 
     // 5. Reload systemd
-    if let Err(e) = run_systemctl(cmd, &["daemon-reload"]) {
-        warnings.push(format!("daemon-reload failed: {e}"));
-    } else {
-        eprintln!("[teardown] systemd daemon-reload complete");
-    }
+    reload_systemd_after_teardown(cmd, &systemd, &mut warnings);
 
     // 6. Delete helper binary
     if helper_path.exists() {
@@ -547,6 +548,59 @@ fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     Ok(())
 }
 
+fn stop_and_disable_service<R: CommandRunner>(
+    cmd: &str,
+    systemd: &Systemd<R>,
+    warnings: &mut Vec<String>,
+) {
+    match systemd.stop_unit(SERVICE_NAME) {
+        Ok(()) => eprintln!("[teardown] stopped {SERVICE_NAME}"),
+        Err(SystemdError::NotFound(_)) => {
+            warnings.push(format!(
+                "service {SERVICE_NAME} was not loaded (already stopped)"
+            ));
+        }
+        Err(error @ SystemdError::NonZeroExit(_)) => {
+            if matches!(
+                systemd.unit_status(SERVICE_NAME),
+                Err(SystemdError::NotFound(_))
+            ) {
+                warnings.push(format!(
+                    "service {SERVICE_NAME} was not loaded (already stopped)"
+                ));
+            } else {
+                let error = systemd_cli_error(cmd, &["stop", SERVICE_NAME], error);
+                warnings.push(format!("failed to stop {SERVICE_NAME}: {error}"));
+            }
+        }
+        Err(error) => {
+            let error = systemd_cli_error(cmd, &["stop", SERVICE_NAME], error);
+            warnings.push(format!("failed to stop {SERVICE_NAME}: {error}"));
+        }
+    }
+
+    match systemd.disable_unit_file(SERVICE_NAME) {
+        Ok(()) => eprintln!("[teardown] disabled {SERVICE_NAME}"),
+        Err(error) => {
+            let error = systemd_cli_error(cmd, &["disable", SERVICE_NAME], error);
+            warnings.push(format!("failed to disable {SERVICE_NAME}: {error}"));
+        }
+    }
+}
+
+fn reload_systemd_after_teardown<R: CommandRunner>(
+    cmd: &str,
+    systemd: &Systemd<R>,
+    warnings: &mut Vec<String>,
+) {
+    if let Err(error) = systemd.daemon_reload() {
+        let error = systemd_cli_error(cmd, &["daemon-reload"], error);
+        warnings.push(format!("daemon-reload failed: {error}"));
+    } else {
+        eprintln!("[teardown] systemd daemon-reload complete");
+    }
+}
+
 // ─── Status command ─────────────────────────────────────────────────────────────────
 
 const STATUS_SERVICE_UNIT: &str = "anolisa-system-helper.service";
@@ -575,27 +629,37 @@ fn handle_status(json: bool, ctx: &CliContext) -> Result<(), CliError> {
     let socket_exists = Path::new(SYSTEM_HELPER_SOCKET).exists();
 
     // 3. Try connect + handshake + SystemStatus.
-    let (socket_connectable, handshake_info, status_info) = if socket_exists {
+    let connection = if socket_exists {
         try_status_connection(&cli_version)
     } else {
-        (false, None, None)
+        HelperConnectionStatus::disconnected()
     };
 
     // Derive fields.
-    let helper_version = handshake_info.as_ref().map(|(v, _)| v.clone());
-    let version_compatible = handshake_info
+    let helper_version = connection
+        .handshake
         .as_ref()
-        .map(|(_, compat)| *compat)
+        .map(|handshake| handshake.helper_version.clone());
+    let version_compatible = connection
+        .handshake
+        .as_ref()
+        .map(|handshake| handshake.compatible)
         .unwrap_or(false);
 
-    let uptime_secs = status_info.as_ref().map(|s| s.0);
-    let last_operation = status_info.as_ref().and_then(|s| s.1.clone());
-    let last_operation_time = status_info.as_ref().and_then(|s| s.2.clone());
+    let uptime_secs = connection.status.as_ref().map(|status| status.uptime_secs);
+    let last_operation = connection
+        .status
+        .as_ref()
+        .and_then(|status| status.last_operation.clone());
+    let last_operation_time = connection
+        .status
+        .as_ref()
+        .and_then(|status| status.last_operation_time.clone());
 
     let report = StatusReport {
         service_active: service_state == StatusServiceState::Active,
         socket_exists,
-        socket_connectable,
+        socket_connectable: connection.connectable,
         helper_version: helper_version.clone(),
         cli_version: cli_version.clone(),
         version_compatible,
@@ -612,7 +676,7 @@ fn handle_status(json: bool, ctx: &CliContext) -> Result<(), CliError> {
     print_status_human(
         &service_state,
         socket_exists,
-        socket_connectable,
+        connection.connectable,
         helper_version.as_deref(),
         &cli_version,
         version_compatible,
@@ -648,73 +712,76 @@ impl StatusServiceState {
 }
 
 fn check_service_state() -> StatusServiceState {
-    match systemd::unit_status(STATUS_SERVICE_UNIT) {
+    match Systemd::system().unit_status(STATUS_SERVICE_UNIT) {
         Ok(status) => {
-            if status.active {
+            if status.failed {
+                StatusServiceState::Failed
+            } else if status.active {
                 StatusServiceState::Active
             } else {
                 StatusServiceState::Inactive
             }
         }
         Err(SystemdError::NotFound(_)) => StatusServiceState::NotInstalled,
-        Err(SystemdError::CommandFailed(ref msg)) if msg.to_lowercase().contains("failed") => {
-            StatusServiceState::Failed
-        }
         Err(_) => StatusServiceState::Unknown,
     }
 }
 
-/// Handshake result: (helper_version, compatible)
-type HandshakeInfo = (String, bool);
-/// Status info: (uptime_secs, last_operation, last_operation_time)
-type StatusInfo = (u64, Option<String>, Option<String>);
+#[derive(Debug)]
+struct HelperConnectionStatus {
+    connectable: bool,
+    handshake: Option<HandshakeResult>,
+    status: Option<HelperStatus>,
+}
+
+impl HelperConnectionStatus {
+    fn disconnected() -> Self {
+        Self {
+            connectable: false,
+            handshake: None,
+            status: None,
+        }
+    }
+}
 
 /// Attempt to connect to the helper socket, perform handshake, and query
-/// system status. Returns (connectable, handshake_info, status_info).
-fn try_status_connection(cli_version: &str) -> (bool, Option<HandshakeInfo>, Option<StatusInfo>) {
-    let mut stream = match UnixStream::connect(SYSTEM_HELPER_SOCKET) {
-        Ok(s) => s,
-        Err(_) => return (false, None, None),
+/// system status while retaining partial typed evidence.
+fn try_status_connection(cli_version: &str) -> HelperConnectionStatus {
+    try_status_connection_with(cli_version, || {
+        HelperClient::connect(Path::new(SYSTEM_HELPER_SOCKET))
+    })
+}
+
+fn try_status_connection_with<F>(cli_version: &str, connect: F) -> HelperConnectionStatus
+where
+    F: FnOnce() -> Result<HelperClient, HelperClientError>,
+{
+    let mut client = match connect() {
+        Ok(client) => client,
+        Err(_) => return HelperConnectionStatus::disconnected(),
     };
 
-    // Handshake.
-    let handshake_req = HelperRequest::Handshake {
-        cli_version: cli_version.to_string(),
+    let handshake = match client.handshake(cli_version) {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            return HelperConnectionStatus {
+                connectable: true,
+                handshake: None,
+                status: None,
+            };
+        }
     };
-    if ipc::send_message(&mut stream, &handshake_req).is_err() {
-        return (true, None, None);
+
+    let status = if handshake.compatible {
+        client.system_status().ok()
+    } else {
+        None
+    };
+    HelperConnectionStatus {
+        connectable: true,
+        handshake: Some(handshake),
+        status,
     }
-    let handshake_resp: HelperResponse = match ipc::recv_message(&mut stream) {
-        Ok(r) => r,
-        Err(_) => return (true, None, None),
-    };
-    let handshake_info = match &handshake_resp {
-        HelperResponse::HandshakeOk {
-            helper_version,
-            compatible,
-        } => Some((helper_version.clone(), *compatible)),
-        _ => None,
-    };
-
-    // SystemStatus query.
-    if ipc::send_message(&mut stream, &HelperRequest::SystemStatus).is_err() {
-        return (true, handshake_info, None);
-    }
-    let status_resp: HelperResponse = match ipc::recv_message(&mut stream) {
-        Ok(r) => r,
-        Err(_) => return (true, handshake_info, None),
-    };
-    let status_info = match status_resp {
-        HelperResponse::Status {
-            uptime_secs,
-            last_operation,
-            last_operation_time,
-            ..
-        } => Some((uptime_secs, last_operation, last_operation_time)),
-        _ => None,
-    };
-
-    (true, handshake_info, status_info)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -778,5 +845,441 @@ fn format_status_uptime(secs: u64) -> String {
         format!("{hours}h {mins:02}m")
     } else {
         format!("{mins}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::rc::Rc;
+
+    use anolisa_core::system_helper::HelperResponse;
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
+
+    use super::*;
+    use crate::helper_client::ScriptedTransport;
+
+    enum FakeOutcome {
+        Output(CommandOutput),
+        Spawn(io::ErrorKind),
+    }
+
+    type FakeCalls = Rc<RefCell<VecDeque<(Vec<String>, FakeOutcome)>>>;
+
+    struct FakeSystemdRunner {
+        calls: FakeCalls,
+    }
+
+    impl CommandRunner for FakeSystemdRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            assert_eq!(program, "systemctl");
+            let (expected, outcome) = self
+                .calls
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected systemctl call");
+            assert_eq!(args, expected);
+            match outcome {
+                FakeOutcome::Output(output) => Ok(output),
+                FakeOutcome::Spawn(kind) => {
+                    Err(io::Error::new(kind, "fake systemctl spawn failure"))
+                }
+            }
+        }
+    }
+
+    fn fake_systemd(
+        calls: Vec<(Vec<&str>, FakeOutcome)>,
+    ) -> (Systemd<FakeSystemdRunner>, FakeCalls) {
+        let calls = Rc::new(RefCell::new(
+            calls
+                .into_iter()
+                .map(|(args, outcome)| (args.into_iter().map(str::to_string).collect(), outcome))
+                .collect(),
+        ));
+        let runner = FakeSystemdRunner {
+            calls: Rc::clone(&calls),
+        };
+        (Systemd::with_runner(runner), calls)
+    }
+
+    fn success() -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
+    fn non_zero(code: i32, stderr: &str) -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        })
+    }
+
+    fn loaded_status() -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(0),
+            stdout: "LoadState=loaded\nActiveState=inactive\nUnitFileState=enabled\nDescription=ANOLISA\n"
+                .to_string(),
+            stderr: String::new(),
+        })
+    }
+
+    fn missing_status() -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(0),
+            stdout:
+                "LoadState=not-found\nActiveState=inactive\nUnitFileState=\nDescription=missing\n"
+                    .to_string(),
+            stderr: String::new(),
+        })
+    }
+
+    fn assert_systemd_finished(calls: &FakeCalls) {
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn setup_service_lifecycle_preserves_non_upgrade_order() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["daemon-reload"], success()),
+            (vec!["enable", SERVICE_NAME], success()),
+            (vec!["start", SERVICE_NAME], success()),
+        ]);
+
+        reload_and_start_service("system setup", false, &systemd)
+            .expect("setup lifecycle should succeed");
+
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn setup_best_effort_stop_never_probes_status() {
+        let cases = [
+            success(),
+            non_zero(5, "missing\n"),
+            FakeOutcome::Spawn(io::ErrorKind::NotFound),
+        ];
+
+        for outcome in cases {
+            let (systemd, calls) = fake_systemd(vec![(vec!["stop", SERVICE_NAME], outcome)]);
+
+            stop_service_before_setup(&systemd);
+
+            assert_systemd_finished(&calls);
+        }
+    }
+
+    #[test]
+    fn setup_service_lifecycle_restarts_during_upgrade() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["daemon-reload"], success()),
+            (vec!["enable", SERVICE_NAME], success()),
+            (vec!["restart", SERVICE_NAME], success()),
+        ]);
+
+        reload_and_start_service("system setup", true, &systemd)
+            .expect("upgrade lifecycle should succeed");
+
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn setup_service_lifecycle_preserves_spawn_failure_message() {
+        let (systemd, calls) = fake_systemd(vec![(
+            vec!["daemon-reload"],
+            FakeOutcome::Spawn(io::ErrorKind::PermissionDenied),
+        )]);
+
+        let error = reload_and_start_service("system setup", false, &systemd)
+            .expect_err("spawn should fail setup");
+
+        assert_eq!(
+            error.reason(),
+            "failed to run systemctl daemon-reload: fake systemctl spawn failure"
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn setup_service_lifecycle_preserves_non_zero_exit_message() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["daemon-reload"], success()),
+            (
+                vec!["enable", SERVICE_NAME],
+                non_zero(1, "enable refused\n"),
+            ),
+        ]);
+
+        let error = reload_and_start_service("system setup", false, &systemd)
+            .expect_err("enable should fail setup");
+
+        assert_eq!(
+            error.reason(),
+            format!("systemctl enable {SERVICE_NAME} failed: enable refused\n")
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_missing_unit_uses_typed_status_and_continues() {
+        let (systemd, calls) = fake_systemd(vec![
+            (
+                vec!["stop", SERVICE_NAME],
+                non_zero(5, "translated missing-unit diagnostic\n"),
+            ),
+            (
+                vec![
+                    "show",
+                    SERVICE_NAME,
+                    "--no-pager",
+                    "--property=LoadState,ActiveState,UnitFileState,Description",
+                ],
+                missing_status(),
+            ),
+            (vec!["disable", SERVICE_NAME], success()),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "service {SERVICE_NAME} was not loaded (already stopped)"
+            )]
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_preserves_stop_disable_reload_order() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["stop", SERVICE_NAME], success()),
+            (vec!["disable", SERVICE_NAME], success()),
+            (vec!["daemon-reload"], success()),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+        reload_systemd_after_teardown("system teardown", &systemd, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_preserves_disable_and_reload_failure_warnings() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["stop", SERVICE_NAME], success()),
+            (
+                vec!["disable", SERVICE_NAME],
+                non_zero(1, "disable refused\n"),
+            ),
+            (vec!["daemon-reload"], non_zero(1, "reload refused\n")),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+        reload_systemd_after_teardown("system teardown", &systemd, &mut warnings);
+
+        assert_eq!(
+            warnings,
+            vec![
+                format!(
+                    "failed to disable {SERVICE_NAME}: execution failed: systemctl disable \
+                     {SERVICE_NAME} failed: disable refused\n"
+                ),
+                "daemon-reload failed: execution failed: systemctl daemon-reload failed: \
+                 reload refused\n"
+                    .to_string(),
+            ]
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_non_missing_stop_failure_warns_and_disables() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["stop", SERVICE_NAME], non_zero(1, "access denied\n")),
+            (
+                vec![
+                    "show",
+                    SERVICE_NAME,
+                    "--no-pager",
+                    "--property=LoadState,ActiveState,UnitFileState,Description",
+                ],
+                loaded_status(),
+            ),
+            (vec!["disable", SERVICE_NAME], success()),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "failed to stop {SERVICE_NAME}: execution failed: systemctl stop {SERVICE_NAME} failed: access denied\n"
+            )]
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    fn client_with_responses(responses: Vec<HelperResponse>) -> HelperClient {
+        let (transport, _) =
+            ScriptedTransport::new(Vec::new(), responses.into_iter().map(Ok).collect());
+        HelperClient::with_transport(transport)
+    }
+
+    fn connect_error() -> HelperClientError {
+        HelperClientError::Connect {
+            path: PathBuf::from(SYSTEM_HELPER_SOCKET),
+            source: io::Error::new(io::ErrorKind::ConnectionRefused, "not listening"),
+        }
+    }
+
+    #[test]
+    fn setup_verification_uses_typed_handshake_result() {
+        let compatible = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: env!("CARGO_PKG_VERSION").to_string(),
+            compatible: true,
+        }]);
+        verify_helper_connection("system setup", || Ok(compatible)).expect("compatible helper");
+
+        let incompatible = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: "0.0.1".to_string(),
+            compatible: false,
+        }]);
+        let error = verify_helper_connection("system setup", || Ok(incompatible))
+            .expect_err("incompatible helper");
+        match error {
+            CliError::Runtime { reason, .. } => {
+                assert_eq!(reason, "handshake succeeded but version is incompatible");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_verification_preserves_unexpected_response_messages() {
+        let cases = [
+            (
+                HelperResponse::Error {
+                    code: "DENIED".to_string(),
+                    message: "no access".to_string(),
+                },
+                "unexpected handshake response: Error { code: \"DENIED\", message: \"no access\" }",
+            ),
+            (
+                HelperResponse::Success {
+                    message: "wrong response".to_string(),
+                    exit_code: 0,
+                },
+                "unexpected handshake response: Success { message: \"wrong response\", exit_code: 0 }",
+            ),
+        ];
+
+        for (response, expected) in cases {
+            let client = client_with_responses(vec![response]);
+            let error = verify_helper_connection("system setup", || Ok(client))
+                .expect_err("unexpected response");
+
+            match error {
+                CliError::Runtime { reason, .. } => assert_eq!(reason, expected),
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn status_marks_connection_failure_as_not_connectable() {
+        let result = try_status_connection_with("0.3.2", || Err(connect_error()));
+
+        assert!(!result.connectable);
+        assert!(result.handshake.is_none());
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_retains_connectability_when_handshake_fails() {
+        let (transport, _) = ScriptedTransport::new(
+            vec![Err(io::Error::new(io::ErrorKind::BrokenPipe, "send"))],
+            Vec::new(),
+        );
+        let client = HelperClient::with_transport(transport);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        assert!(result.handshake.is_none());
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_skips_query_for_incompatible_helper() {
+        let client = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: "0.0.1".to_string(),
+            compatible: false,
+        }]);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        let handshake = result.handshake.expect("handshake evidence");
+        assert_eq!(handshake.helper_version, "0.0.1");
+        assert!(!handshake.compatible);
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_retains_handshake_when_status_query_fails() {
+        let client = client_with_responses(vec![
+            HelperResponse::HandshakeOk {
+                helper_version: "0.3.2".to_string(),
+                compatible: true,
+            },
+            HelperResponse::Error {
+                code: "UNAVAILABLE".to_string(),
+                message: "status unavailable".to_string(),
+            },
+        ]);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        assert!(result.handshake.expect("handshake evidence").compatible);
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_returns_complete_typed_evidence() {
+        let client = client_with_responses(vec![
+            HelperResponse::HandshakeOk {
+                helper_version: "0.3.2".to_string(),
+                compatible: true,
+            },
+            HelperResponse::Status {
+                running: true,
+                version: "0.3.2".to_string(),
+                uptime_secs: 75,
+                last_operation: Some("install".to_string()),
+                last_operation_time: Some("now".to_string()),
+            },
+        ]);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        assert!(result.handshake.expect("handshake evidence").compatible);
+        let status = result.status.expect("status evidence");
+        assert_eq!(status.uptime_secs, 75);
+        assert_eq!(status.last_operation.as_deref(), Some("install"));
+        assert_eq!(status.last_operation_time.as_deref(), Some("now"));
     }
 }

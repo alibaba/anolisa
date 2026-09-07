@@ -2,21 +2,59 @@
 
 [English](CHANGELOG.md)
 
+## 0.4.5
+
+### Added
+
+- 新增中英双语的 sidecar 部署指南 (#2965)
+
+### Fixed
+
+- 修复所有 loop 设备被占用时的间歇性 bootstrap 失败 (#2965)
+- sidecar preStop 的 loop 清理改为仅处理 ws-ckpt 自身的设备 (#2965)
+
+## 0.4.4
+
+### Added
+
+- 新增受保护的 checkpoint 协议，快照创建按存储身份围栏，崩溃后状态仍可校验
+
+### Fixed
+
+- 修复回滚被中断后重启丢失状态，无法判定的候选文件予以保留而非删除
+- 修复 `config --global` 校验 daemon 是否实际加载所写配置 (#2813)
+- 修复 sidecar 部署指南遗漏全局配置所需的 `/etc/ws-ckpt` 共享卷 (#2813)
+- 修复错误提示覆盖容器化部署与 daemon 挂载命名空间场景 (#2807, #2814)
+
+## 0.4.3
+
+### Added
+
+- 新增 k8s sidecar 容器化部署支持 (#2034)
+
+### Fixed
+
+- 修复 daemon 在持续 checkpoint 负载下内存无限增长，最终导致 OOM (#2554)
+- 修复 loop device 后端在并发 IO 下 checkpoint 延迟，至多降低至原来的 1/5 (#2523)
+- 修复 bootstrap 失败后遗留孤儿镜像和 loop device，并在启动失败时输出明确的错误信息而非静默退出 (#1956)
+- 修复 workspace 路径已被挂载时 init 返回 EBUSY 无提示，改为拒绝并给出清晰的错误信息 (#1798)
+- 补充 RPM 组件身份声明，使 anolisa-cli 可自动发现 ws-ckpt 适配器 (#2568)
+
 ## 0.4.2
 
-### 新功能
+### Added
 - 新增 ops 日志写入的遥测门控 (#1509)
 
-### 缺陷修复
+### Fixed
 - 修复中断 init 后遗留的 `.pre-init-bak` 自动恢复 (#1601)
 
 ## 0.4.1
 
-### 新功能
+### Added
 
 - 新增 rollback 后跳过自动 checkpoint (#1263)
 
-### 缺陷修复
+### Fixed
 
 - 修复 config 更新后的工作区同步 (#1263)
 - 修复 crontab 条目中 ws-ckpt 的绝对路径处理 (#1263)
@@ -24,11 +62,11 @@
 
 ## 0.4.0
 
-### 不兼容变更
+### Changed
 
 - **不兼容** checkpoint `-i`/`--id` 参数更名为 `-s`/`--snapshot` 作为主参数；`-i` 保留为隐藏别名，未来版本可能移除 (#1064)
 
-### 新功能
+### Added
 
 - 新增插件安装/卸载子命令 (#1005)
 - 新增 component.toml 用于 anolisa-cli 适配器发现 (#1005)
@@ -40,7 +78,7 @@
 - 新增按祖先数量 rollback 和快照 DAG 追踪 (#877)
 - 新增基于 cron 的定时 checkpoint 快照 (#819)
 
-### 缺陷修复
+### Fixed
 
 - 修复 --snapshot/-s 作为主参数的处理及插件参数对齐 (#1103, #1064)
 - 修复 SKILL.md 与实际 CLI/插件实现的同步 (#847)
@@ -49,13 +87,13 @@
 
 ## 0.3.3
 
-### 新功能
+### Added
 
 - 新增每工作区策略覆盖，支持 hermes/openclaw 插件 (#721)
 - 新增 `/proc` cwd 占用者检测，用于 init 和 rollback (#684)
 - 新增 Hermes 适配器运行脚本 (#617)
 
-### 缺陷修复
+### Fixed
 
 - 修复 rollback 中的写锁竞争和 cwd 检测死锁 (#721, #684)
 - 修复非 UTF-8 路径和路径穿越快照 ID 的输入验证 (#695, #678)

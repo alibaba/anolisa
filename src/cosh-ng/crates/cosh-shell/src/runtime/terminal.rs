@@ -1,8 +1,10 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use nix::libc;
 
 static mut ORIGINAL_TERMIOS: Option<libc::termios> = None;
+static ORIGINAL_FILE_STATUS_FLAGS: AtomicI32 = AtomicI32::new(-1);
 
 pub(crate) struct CrLfWriter<'a, W: Write> {
     inner: &'a mut W,
@@ -17,7 +19,12 @@ pub(crate) fn install_terminal_recovery() {
     if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
         return;
     }
+    let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if original_flags < 0 {
+        return;
+    }
     unsafe { ORIGINAL_TERMIOS = Some(original) };
+    ORIGINAL_FILE_STATUS_FLAGS.store(original_flags, Ordering::Release);
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -26,6 +33,10 @@ pub(crate) fn install_terminal_recovery() {
     }));
 
     unsafe {
+        libc::signal(
+            libc::SIGINT,
+            restore_and_exit as *const () as libc::sighandler_t,
+        );
         libc::signal(
             libc::SIGTERM,
             restore_and_exit as *const () as libc::sighandler_t,
@@ -43,8 +54,23 @@ pub(crate) fn install_terminal_recovery() {
 
 fn restore_terminal() {
     unsafe {
+        let original_flags = ORIGINAL_FILE_STATUS_FLAGS.load(Ordering::Acquire);
+        if original_flags >= 0 {
+            // RawModeGuard temporarily forces blocking I/O for its cleanup so
+            // the withdrawal cannot be lost to EAGAIN, then restores the
+            // exact inherited flags after the terminal state is safe.
+            libc::fcntl(
+                libc::STDIN_FILENO,
+                libc::F_SETFL,
+                original_flags & !libc::O_NONBLOCK,
+            );
+        }
+        crate::shell_host::restore_raw_mode_signal_state();
         if let Some(ref original) = ORIGINAL_TERMIOS {
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original);
+        }
+        if original_flags >= 0 {
+            libc::fcntl(libc::STDIN_FILENO, libc::F_SETFL, original_flags);
         }
     }
 }

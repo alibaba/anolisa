@@ -12,6 +12,7 @@ use crate::raw_input::{
 use crate::types::{ImplicitPagerPolicy, ShellHandoffRequest};
 
 use super::super::osc::OscParser;
+use super::super::prompt_presentation::PromptPresentation;
 use super::super::prompt_replay::{prompt_replay_bytes, PromptReplayTracker};
 use super::terminal_recovery::{PendingTerminalRecovery, TerminalRecoveryOwner};
 use super::{mark_pending_prompt_replayed, write_pending_display, write_prompt_ghost};
@@ -129,9 +130,11 @@ pub(super) fn resolve_pty_emit<W: Write>(
     action: RawObserverAction,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
     pending_terminal_restore: &mut PendingTerminalRecovery,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
+    bounded_bash_handoff: bool,
 ) -> io::Result<RawObserverAction> {
     // #2142 R4: a command-less prompt boundary expired an unclaimed handoff
     // (the runtime closes it as untracked at the same boundary). Remove the
@@ -151,9 +154,11 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 request,
                 display_start,
                 prompt_replay,
+                prompt_presentation,
                 pending_terminal_restore,
                 handoff_request_file,
                 false,
+                bounded_bash_handoff,
             )?;
             Ok(RawObserverAction::RawPassthrough)
         }
@@ -166,9 +171,11 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 request,
                 display_start,
                 prompt_replay,
+                prompt_presentation,
                 pending_terminal_restore,
                 handoff_request_file,
                 true,
+                bounded_bash_handoff,
             )?;
             Ok(RawObserverAction::RawPassthrough)
         }
@@ -200,11 +207,17 @@ pub(super) fn resolve_pty_emit<W: Write>(
                     ghost_route,
                 });
             }
-            if parser.display.len() > *display_start {
-                write_pending_display(parser, output, display_start, prompt_replay)?;
+            if parser.display_position() > *display_start {
+                write_pending_display(
+                    parser,
+                    output,
+                    display_start,
+                    prompt_replay,
+                    prompt_presentation,
+                )?;
             } else {
-                output.write_all(prompt)?;
-                mark_pending_prompt_replayed(parser, raw_prompt, display_start);
+                prompt_presentation.write_replayed_prompt(output, prompt)?;
+                mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
                 prompt_replay.arm_for_replay(raw_prompt);
             }
             if let Some(text) = &ghost_text {
@@ -236,28 +249,65 @@ fn emit_to_pty<W: Write>(
     request: ShellHandoffRequest,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
     pending_terminal_restore: &mut PendingTerminalRecovery,
     handoff_request_file: &Path,
     restore_prompt: bool,
+    bounded_bash_handoff: bool,
 ) -> io::Result<()> {
     output.flush()?;
     if restore_prompt {
-        restore_prompt_display_before_handoff(parser, output, display_start, prompt_replay)?;
+        restore_prompt_display_before_handoff(
+            parser,
+            output,
+            display_start,
+            prompt_replay,
+            prompt_presentation,
+        )?;
     }
-    let bytes = request.pty_bytes().map_err(|message| {
+    let bytes = if bounded_bash_handoff {
+        request.bounded_handoff_pty_bytes()
+    } else {
+        request.pty_bytes()
+    }
+    .map_err(|message| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("blocked shell handoff: {message}"),
         )
     })?;
     pending_terminal_restore.record_intervention_start(terminal_fd);
-    parser.register_pending_handoff_origin(&request);
     // Must land before the shell sees the command: the marker reads both files
     // from the preexec hook that fires between the newline and the command
     // running.
     stage_handoff_files(handoff_request_file, &request)?;
+    if bounded_bash_handoff {
+        // Keep the transport wrapper executable by Bash while presenting only
+        // the approved command on the user's prompt line.
+        let echoed_command = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        // Validation excludes escapes and all controls except a safe tab or
+        // quoted line feed, so replacement cannot alter terminal state.
+        if let Err(err) =
+            parser.arm_pending_handoff_echo(echoed_command, request.command.as_bytes())
+        {
+            clear_handoff_files(handoff_request_file);
+            return Err(err);
+        }
+    }
+    parser.register_pending_handoff_origin(&request);
     if let Err(err) = write_all_pty(master, &bytes) {
         clear_handoff_files(handoff_request_file);
+        parser.clear_pending_handoff_origin();
+        if bounded_bash_handoff {
+            if let Err(flush_err) = parser.flush_pending_handoff_echo() {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "{err}; failed to release pending handoff echo after PTY write error: {flush_err}"
+                    ),
+                ));
+            }
+        }
         return Err(err);
     }
     Ok(())
@@ -268,9 +318,16 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     output: &mut W,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
 ) -> io::Result<()> {
-    if parser.display.len() > *display_start {
-        write_pending_display(parser, output, display_start, prompt_replay)?;
+    if parser.display_position() > *display_start {
+        write_pending_display(
+            parser,
+            output,
+            display_start,
+            prompt_replay,
+            prompt_presentation,
+        )?;
         output.flush()?;
         return Ok(());
     }
@@ -280,9 +337,9 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     if prompt.is_empty() {
         return Ok(());
     }
-    output.write_all(prompt)?;
+    prompt_presentation.write_replayed_prompt(output, prompt)?;
     output.flush()?;
-    mark_pending_prompt_replayed(parser, raw_prompt, display_start);
+    mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
     prompt_replay.arm_for_replay(raw_prompt);
     Ok(())
 }

@@ -6,6 +6,7 @@ import os
 
 _HOOK_POLICIES = frozenset({"observe", "warn", "ask", "block"})
 _HOOK_POLICY_ALIASES = {"debug": "observe", "deny": "block"}
+_HERMES_NATIVE_POLICIES = frozenset({"observe", "block"})
 
 
 def env_flag_enabled(name: str, default: bool = True) -> bool:
@@ -28,6 +29,12 @@ def normalize_hook_policy(value: object, default: str) -> str:
     normalized = value.strip().lower()
     normalized = _HOOK_POLICY_ALIASES.get(normalized, normalized)
     return normalized if normalized in _HOOK_POLICIES else default
+
+
+def normalize_hermes_native_policy(value: object, default: str = "observe") -> str:
+    """Normalize a policy to actions Hermes can express without rewriting output."""
+    normalized = normalize_hook_policy(value, "")
+    return normalized if normalized in _HERMES_NATIVE_POLICIES else default
 
 
 def env_hook_policy(name: str, default: str) -> str:

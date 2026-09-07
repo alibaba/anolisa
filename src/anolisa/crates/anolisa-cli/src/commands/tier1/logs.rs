@@ -44,25 +44,28 @@ pub struct LogsArgs {
     #[arg(long, value_name = "COMP")]
     pub component: Option<String>,
     /// Minimum severity: `debug` | `info` | `warn` | `error`.
-    #[arg(long, value_name = "LEVEL")]
+    // Aliased rather than duplicated: log CLIs commonly name this filter
+    // "level", and one field keeps both spellings on the same validation and
+    // filtering path. Visible so clap advertises `[aliases: --level]` itself.
+    #[arg(long, visible_alias = "level", value_name = "LEVEL")]
     pub severity: Option<String>,
     /// Lexicographic ISO8601 lower bound on `started_at`.
     #[arg(long, value_name = "ISO")]
     pub since: Option<String>,
-    /// Cap returned records (default 50, max 1000; 0 returns none).
+    /// Cap returned records to the most recent N (default 50, max 1000; 0 returns none).
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
 }
 
 pub fn handle(mut args: LogsArgs, ctx: &CliContext) -> Result<(), CliError> {
-    // Resolve component alias (e.g., "copilot-shell" → "cosh") before
+    // Resolve the component identity (e.g., "copilot-shell" → "cosh") before
     // filtering — log records store the canonical component name.
     if let Some(component) = args.component.take() {
         let installed = common::load_state_store(ctx, COMMAND)
             .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
         args.component = Some(common::lookup_component_name_in_store(
             &component, &installed, ctx, COMMAND,
-        ));
+        )?);
     }
     let filter = build_filter(&args)?;
     let layout = common::resolve_layout(ctx);
@@ -155,7 +158,9 @@ fn parse_severity(raw: &str) -> Result<Severity, CliError> {
         "error" => Ok(Severity::Error),
         other => Err(CliError::InvalidArgument {
             command: COMMAND.to_string(),
-            reason: format!("--severity expects one of debug|info|warn|error, got '{other}'"),
+            reason: format!(
+                "--severity/--level expects one of debug|info|warn|error, got '{other}'"
+            ),
         }),
     }
 }
@@ -246,6 +251,7 @@ fn truncate(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use anolisa_core::{CentralLog, LogFilter};
+    use clap::CommandFactory;
 
     fn default_args() -> LogsArgs {
         LogsArgs {
@@ -311,6 +317,40 @@ mod tests {
     }
 
     #[test]
+    fn level_alias_parses_like_severity() {
+        let severity = LogsArgs::try_parse_from(["logs", "--severity", "warn"]).expect("parse");
+        let level = LogsArgs::try_parse_from(["logs", "--level", "warn"]).expect("parse");
+
+        assert_eq!(severity.severity.as_deref(), Some("warn"));
+        assert_eq!(level.severity.as_deref(), Some("warn"));
+        assert_eq!(
+            build_filter(&severity).expect("filter").severity_at_least,
+            build_filter(&level).expect("filter").severity_at_least
+        );
+    }
+
+    #[test]
+    fn level_alias_rejects_unknown_severity() {
+        let args = LogsArgs::try_parse_from(["logs", "--level", "loud"]).expect("parse");
+
+        let err = build_filter(&args).expect_err("unknown severity should fail");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        // Names both spellings so the message stays actionable for whichever
+        // one the user typed.
+        assert!(err.reason().contains("--severity/--level"));
+    }
+
+    #[test]
+    fn help_advertises_level_alias() {
+        let mut cmd = LogsArgs::command();
+        let help = cmd.render_help().to_string();
+        assert!(
+            help.contains("--severity <LEVEL>") && help.contains("--level"),
+            "help must relate --level to --severity, got:\n{help}"
+        );
+    }
+
+    #[test]
     fn parse_kind_accepts_known_values() {
         assert_eq!(parse_kind("operation").unwrap(), LogKind::Operation);
         assert_eq!(parse_kind("component").unwrap(), LogKind::Component);
@@ -369,7 +409,10 @@ mod tests {
             .expect("query");
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].kind, LogKind::Component);
-        assert_eq!(one[0].severity, Severity::Warn);
+        // Two component rows are at-or-above warn (warn then error); limit 1
+        // must keep the later error, not the earlier warn.
+        assert_eq!(one[0].severity, Severity::Error);
+        assert_eq!(one[0].started_at, "2026-06-01T10:00:03Z");
 
         args.limit = Some(0);
         let zero = log

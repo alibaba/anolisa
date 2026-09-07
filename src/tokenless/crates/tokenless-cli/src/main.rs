@@ -1,21 +1,28 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
 mod env_check;
-mod mcp;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
-use std::io::{self, IsTerminal as _, Read};
+use std::io::{self, IsTerminal as _, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
-use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_ccr::{SqliteStore, StashStore};
+use tokenless_protocol::{Disposition, Request, RequestEnvelope, Response};
+use tokenless_runtime::{
+    CompressOptions, CompressResult, EntryOptions, MAX_INPUT_BYTES, MIN_TOON_CHARS,
+    compress_response_with_store, compress_toon, dispatch_with_store, record_compression,
+    retrieve_recorded,
+};
+use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
     CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
+    estimate_tokens,
 };
-use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 use tokenless_stats::{
-    format_compare, format_compare_json, format_diff_report, format_list, format_show,
-    format_summary, record_report, session_report, tool_use_report,
+    ensure_state_dir, format_compare, format_compare_json, format_diff_report, format_list,
+    format_show, format_summary, record_report, resolve_data_dir, session_report, tool_use_report,
+    validate_database_path,
 };
 
 #[derive(Parser)]
@@ -31,6 +38,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run one Protocol v2 lifecycle operation from a JSON request.
+    Compress {
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Override the stash database path. Defaults to
+        /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
+        /// Must remain under the real home or selected data directory.
+        #[arg(long)]
+        stash_db: Option<String>,
+    },
     /// Compress OpenAI Function Calling tool schemas
     CompressSchema {
         #[arg(short, long)]
@@ -54,7 +71,7 @@ enum Commands {
         no_stash: bool,
         /// Override the stash database path. Defaults to
         /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
-        /// Resolved under the trusted home directory; rejected if outside.
+        /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
     },
@@ -74,20 +91,27 @@ enum Commands {
         /// Max string length before truncation
         #[arg(long)]
         truncate_strings_at: Option<usize>,
-        /// Max array length before truncation
+        /// Array length that triggers truncation; the first n items are
+        /// kept plus a tail window (see --array-tail-preserve). Arrays of
+        /// at least 33 JSON objects use record reduction instead.
         #[arg(long)]
         truncate_arrays_at: Option<usize>,
+        /// Items preserved from the tail of truncated arrays (default: 8).
+        /// Does not apply to record reduction.
+        #[arg(long)]
+        array_tail_preserve: Option<usize>,
         /// Max nesting depth before truncation
         #[arg(long)]
         max_depth: Option<usize>,
-        /// Disable reversible stash. By default, dropped array items are
-        /// stashed so they can be retrieved via `tokenless retrieve`; this
-        /// flag makes truncation lossy (the pre-stash behavior).
+        /// Disable reversible stash. By default, dropped array items and
+        /// the complete arrays behind record reduction are stashed so they
+        /// can be retrieved via `tokenless retrieve`; this flag makes
+        /// truncation lossy and skips record reduction.
         #[arg(long)]
         no_stash: bool,
         /// Override the stash database path. Defaults to
         /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
-        /// Resolved under the trusted home directory; rejected if outside.
+        /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
     },
@@ -105,7 +129,14 @@ enum Commands {
     /// View and export statistics
     #[command(subcommand)]
     Stats(StatsCommands),
-    /// Encode JSON to TOON format
+    /// Encode JSON to TOON format. Payloads shorter than the minimum
+    /// length (500 characters by default, matching the adapter hooks) pass
+    /// through unchanged because TOON savings on small JSON are near-zero.
+    /// Passthrough and no-savings runs write the original payload to stdout
+    /// byte-for-byte (no trailing newline is added or stripped) and exit 0;
+    /// the stderr note is informational only, so automation should detect
+    /// encoding by comparing stdout with the input payload, not by parsing
+    /// stderr. Encoded runs emit the TOON text without a trailing newline.
     CompressToon {
         #[arg(short, long)]
         file: Option<String>,
@@ -118,6 +149,11 @@ enum Commands {
         /// Tool use ID
         #[arg(long)]
         tool_use_id: Option<String>,
+        /// Minimum payload length (in characters) for TOON encoding.
+        /// Shorter payloads pass through unchanged; set to 0 to encode any
+        /// payload that yields token savings.
+        #[arg(long, value_name = "CHARS", default_value_t = MIN_TOON_CHARS)]
+        min_toon_chars: usize,
     },
     /// Decode TOON format back to JSON
     DecompressToon {
@@ -142,16 +178,6 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Start the tokenless MCP stdio server (exposes `tokenless_retrieve` so
-    /// an MCP-connected agent can recover stashed payloads on demand).
-    #[command(subcommand)]
-    Mcp(McpCommands),
-}
-
-#[derive(Subcommand)]
-enum McpCommands {
-    /// Start the MCP stdio server.
-    Serve,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -175,7 +201,7 @@ impl From<DiffSortArg> for DiffSort {
 enum StatsCommands {
     /// Show summary statistics with breakdown by operation
     Summary {
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_usize)]
         limit: Option<usize>,
         /// Output machine-readable JSON
         #[arg(long)]
@@ -245,9 +271,6 @@ enum StatsCommands {
     Disable,
 }
 
-/// Maximum input size (64 MiB) to prevent OOM on accidental large-file stdin.
-const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
-
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
         .parse::<usize>()
@@ -274,10 +297,10 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
         Some(path) => {
             let mut content = String::new();
             fs::File::open(path)
-                .map_err(|e| format!("Failed to open file '{}': {}", path, e))?
+                .map_err(|e| format!("Failed to open file '{path}': {e}"))?
                 .take(limit)
                 .read_to_string(&mut content)
-                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+                .map_err(|e| format!("Failed to read file '{path}': {e}"))?;
             if content.len() > MAX_INPUT_BYTES {
                 return Err(too_large());
             }
@@ -293,7 +316,7 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
                 .lock()
                 .take(limit)
                 .read_to_string(&mut buf)
-                .map_err(|e| format!("Failed to read stdin: {}", e))?;
+                .map_err(|e| format!("Failed to read stdin: {e}"))?;
             if buf.len() > MAX_INPUT_BYTES {
                 return Err(too_large());
             }
@@ -314,75 +337,33 @@ pub fn get_home_dir() -> String {
     tokenless_stats::get_home_dir()
 }
 
-/// Validate a custom tokenless data directory against the user's home.
-///
-/// Unlike database file overrides, the directory may not exist yet. The
-/// nearest existing ancestor is canonicalized so a symlink cannot redirect
-/// the eventual directory outside the trusted home. Validation and later
-/// directory creation are separate filesystem operations, so callers must
-/// not treat this check as protection from concurrent path replacement.
-fn validate_data_dir_path(env_path: &str, home: &str) -> Result<String, String> {
-    if home.is_empty() {
-        return Err("no trusted home directory available".to_string());
-    }
-
-    let canonical_home = std::path::Path::new(home)
-        .canonicalize()
-        .map_err(|e| format!("home directory '{}' cannot be resolved: {}", home, e))?;
-    let candidate = std::path::Path::new(env_path);
-    if !candidate.is_absolute() {
-        return Err(format!("path '{}' is not absolute", env_path));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(format!("path '{}' contains parent traversal", env_path));
-    }
-    if candidate.exists() && !candidate.is_dir() {
-        return Err(format!("path '{}' is not a directory", env_path));
-    }
-
-    let mut existing_ancestor = candidate;
-    while !existing_ancestor.exists() {
-        existing_ancestor = existing_ancestor
-            .parent()
-            .ok_or_else(|| format!("path '{}' has no existing ancestor to validate", env_path))?;
-    }
-    let resolved_ancestor = existing_ancestor
-        .canonicalize()
-        .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
-    if !resolved_ancestor.starts_with(&canonical_home) {
-        return Err(format!(
-            "path '{}' is outside home directory '{}'",
-            env_path, home
-        ));
-    }
-
-    Ok(env_path.to_string())
+/// Read a state override, including its DSH-managed shell alias.
+fn state_path_override(primary: &str, dsh_managed: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            if std::env::var("DSH_SHELL").as_deref() == Ok("1") {
+                std::env::var(dsh_managed)
+                    .ok()
+                    .filter(|path| !path.is_empty())
+            } else {
+                None
+            }
+        })
 }
 
 /// Resolve the directory containing tokenless SQLite databases.
 ///
-/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only. Invalid
-/// overrides are ignored in favor of the existing `~/.tokenless` default.
-/// Returns an error when no trusted home anchor exists.
-fn get_data_dir(home: &str) -> Result<String, String> {
-    if home.is_empty() {
-        return Err("no trusted home directory available".to_string());
-    }
-
-    let data_dir = match std::env::var("TOKENLESS_DATA_DIR") {
-        Ok(env_path) if !env_path.is_empty() => match validate_data_dir_path(&env_path, home) {
-            Ok(path) => path,
-            Err(reason) => {
-                eprintln!("[tokenless] ignoring TOKENLESS_DATA_DIR: {}", reason);
-                format!("{}/.tokenless", home)
-            }
-        },
-        _ => format!("{}/.tokenless", home),
-    };
-    Ok(data_dir)
+/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only and may be an
+/// absolute directory outside the real home. DSH's managed shell supplies the
+/// same path through `DSH_TOKENLESS_DATA_DIR` because it removes inherited
+/// `TOKENLESS_*` variables. An invalid explicit override is returned as an
+/// error so state never silently moves back to the default.
+fn get_data_dir(home: &str) -> Result<PathBuf, String> {
+    let override_path = state_path_override("TOKENLESS_DATA_DIR", "DSH_TOKENLESS_DATA_DIR");
+    let home = (!home.is_empty()).then(|| Path::new(home));
+    resolve_data_dir(home, override_path.as_deref()).map_err(|error| error.to_string())
 }
 
 // Lazily snapshot path inputs for one command so stats and stash share the
@@ -390,7 +371,7 @@ fn get_data_dir(home: &str) -> Result<String, String> {
 #[derive(Default)]
 struct DatabasePathResolver {
     home: std::sync::OnceLock<String>,
-    data_dir: std::sync::OnceLock<Result<String, String>>,
+    data_dir: std::sync::OnceLock<Result<PathBuf, String>>,
 }
 
 impl DatabasePathResolver {
@@ -398,102 +379,49 @@ impl DatabasePathResolver {
         self.home.get_or_init(get_home_dir)
     }
 
-    fn data_dir(&self) -> Result<&str, &str> {
+    fn data_dir(&self) -> Result<&Path, &str> {
         self.data_dir
             .get_or_init(|| get_data_dir(self.home()))
             .as_ref()
-            .map(String::as_str)
+            .map(PathBuf::as_path)
             .map_err(String::as_str)
     }
 }
 
 /// Resolve the database path. When `TOKENLESS_STATS_DB` is set, the path
-/// is validated to ensure it resides under the user's home directory;
+/// is validated against the user's home and selected data directory;
 /// otherwise `TOKENLESS_DATA_DIR` and then the default data directory are
-/// used. This prevents an attacker from redirecting the database to a
-/// system-critical location (e.g. `/etc/evil.db`).
-fn get_db_path_with(paths: &DatabasePathResolver) -> String {
+/// used.
+fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
     let home = paths.home();
-    // When no trusted home is available (empty string from passwd lookup
-    // failure), return a path that will safely fail on open/create rather
-    // than silently writing to / or CWD.
-    if home.is_empty() {
-        eprintln!("[tokenless] no home directory available — stats DB writes disabled");
-        return "/dev/null/.tokenless/stats.db".to_string();
-    }
-    match std::env::var("TOKENLESS_STATS_DB") {
-        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, home) {
-            Ok(path) => return path,
-            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
-        },
-        _ => {}
-    }
-    let data_dir = match paths.data_dir() {
-        Ok(path) => path,
-        Err(reason) => {
-            eprintln!("[tokenless] {} — stats DB writes disabled", reason);
-            return "/dev/null/.tokenless/stats.db".to_string();
+    let data_dir = paths.data_dir();
+    if let Some(env_path) = state_path_override("TOKENLESS_STATS_DB", "DSH_TOKENLESS_STATS_DB") {
+        match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
+            Ok(path) => return Ok(path),
+            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"),
         }
-    };
-    std::path::Path::new(&data_dir)
-        .join("stats.db")
-        .to_string_lossy()
-        .into_owned()
+    }
+    let data_dir = data_dir.map_err(str::to_string)?;
+    let path = data_dir.join("stats.db");
+    validate_db_path(&path, home, Some(data_dir))
 }
 
-/// Validate a TOKENLESS_STATS_DB candidate against the user's home directory.
-/// Returns the original path on success, or a human-readable rejection reason.
-///
-/// Extracted from `get_db_path` so unit tests can exercise the bypass paths
-/// (ParentDir traversal, nonexistent parents, missing home anchor) without
-/// mutating process-wide env vars.
-fn validate_db_path(env_path: &str, home: &str) -> Result<String, String> {
-    // Reject when we have no trusted home anchor:
-    // Path::starts_with("") returns true for every path, which would
-    // let an attacker point the database at any system location.
-    if home.is_empty() {
-        return Err("no trusted home directory available".to_string());
+/// Validate a file-level override against the real home and selected data dir.
+fn validate_db_path(path: &Path, home: &str, data_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let mut roots = Vec::with_capacity(2);
+    if !home.is_empty() {
+        roots.push(Path::new(home));
     }
-    // Canonicalize the home anchor as well as the candidate path. Passwd
-    // entries can name a directory that traverses a symlink (e.g. macOS
-    // /Users/u where /Users is a symlink to /home, or distros that put
-    // /home/u behind /export/home/u). If we compare a canonicalized
-    // env_path against a raw home, the prefix check rejects legitimate
-    // paths AND, conversely, a `home == "/"` slip-through (rejected at
-    // the passwd layer in tokenless-stats::home but defended in depth
-    // here) would match every absolute path under `starts_with`.
-    let canonical_home = std::path::Path::new(home)
-        .canonicalize()
-        .map_err(|e| format!("home directory '{}' cannot be resolved: {}", home, e))?;
-    let p = std::path::Path::new(env_path);
-    // Accept only paths under the user's real home directory.
-    // For not-yet-created DB files, the parent directory MUST itself
-    // canonicalize — falling back to an unresolved parent would let
-    // `~/x/../../etc/evil.db` slip past the starts_with(&home) check,
-    // since Path::starts_with matches components literally and an
-    // unresolved path still begins with the home prefix.
-    let resolved = p
-        .canonicalize()
-        .or_else(|_| {
-            p.parent()
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-                .and_then(|parent| parent.canonicalize())
-        })
-        .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
-    if resolved.starts_with(&canonical_home) {
-        Ok(env_path.to_string())
-    } else {
-        Err(format!(
-            "path '{}' is outside home directory '{}'",
-            env_path, home
-        ))
+    if let Some(data_dir) = data_dir {
+        roots.push(data_dir);
     }
+    validate_database_path(path, &roots).map_err(|error| error.to_string())
 }
 
-fn ensure_db_dir(db_path: &str) -> Result<(), (String, i32)> {
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| (format!("Failed to create database directory: {}", e), 1))?;
+fn ensure_db_dir(db_path: &Path) -> Result<(), (String, i32)> {
+    if let Some(parent) = db_path.parent() {
+        ensure_state_dir(parent)
+            .map_err(|e| (format!("Failed to create database directory: {e}"), 1))?;
     }
     Ok(())
 }
@@ -503,64 +431,47 @@ fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
 }
 
 fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (String, i32)> {
-    let db_path = get_db_path_with(paths);
+    let db_path = get_db_path_with(paths)
+        .map_err(|error| (format!("Stats database unavailable: {error}"), 1))?;
     ensure_db_dir(&db_path)?;
-    StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {}", e), 1))
+    StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {e}"), 1))
 }
 
-/// Resolve the stash database path under the trusted home directory.
+/// Resolve the stash database path under a trusted state root.
 ///
-/// Mirrors `get_db_path`'s trust model (passwd-rooted home, validated env
-/// override) so an attacker cannot redirect the stash to a system-critical
-/// location by setting `TOKENLESS_STASH_DB` or passing `--stash-db`. Returns
-/// `None` when no trusted home anchor exists or an override is rejected —
-/// callers fail open (no stash, lossy truncation) rather than writing state
-/// to an untrusted location.
+/// File-level overrides may reside beneath the passwd-backed home or the
+/// selected data directory. Callers fail open when no valid data directory is
+/// available rather than writing state to an unintended fallback location.
 fn get_stash_db_path_with(
     paths: &DatabasePathResolver,
     override_path: Option<&str>,
-) -> Option<String> {
+) -> Result<PathBuf, String> {
     let home = paths.home();
-    if home.is_empty() {
-        eprintln!("[tokenless] no home directory available — stash disabled");
-        return None;
-    }
+    let data_dir = paths.data_dir();
     // An explicit --stash-db override is validated the same way as the
     // TOKENLESS_STASH_DB env var: on rejection we warn AND fall back to the
-    // default under the trusted home (rather than silently disabling the
-    // stash), so a typo doesn't quietly drop reversibility.
+    // selected data directory, so a bad file override does not silently drop
+    // recoverability. An invalid data-directory override still fails closed.
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
-        match validate_db_path(p, home) {
-            Ok(valid) => return Some(valid),
-            Err(reason) => eprintln!("[tokenless] rejecting --stash-db {}: {}", p, reason),
+        match validate_db_path(Path::new(p), home, data_dir.ok()) {
+            Ok(valid) => return Ok(valid),
+            Err(reason) => eprintln!("[tokenless] rejecting --stash-db {p}: {reason}"),
         }
     }
-    if let Ok(env_path) = std::env::var("TOKENLESS_STASH_DB")
-        && !env_path.is_empty()
-    {
-        match validate_db_path(&env_path, home) {
-            Ok(path) => return Some(path),
-            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {}", reason),
+    if let Some(env_path) = state_path_override("TOKENLESS_STASH_DB", "DSH_TOKENLESS_STASH_DB") {
+        match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
+            Ok(path) => return Ok(path),
+            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {reason}"),
         }
     }
-    let data_dir = match paths.data_dir() {
-        Ok(path) => path,
-        Err(reason) => {
-            eprintln!("[tokenless] {} — stash disabled", reason);
-            return None;
-        }
-    };
-    Some(
-        std::path::Path::new(&data_dir)
-            .join("stash.db")
-            .to_string_lossy()
-            .into_owned(),
-    )
+    let data_dir = data_dir.map_err(str::to_string)?;
+    let path = data_dir.join("stash.db");
+    validate_db_path(&path, home, Some(data_dir))
 }
 
 /// Open a stash store, returning the specific failure cause. Used by
 /// user-initiated paths (`retrieve`) where a generic "unavailable" message
-/// would hide the real reason (no home, path rejected, corrupt DB, …).
+/// would hide the real reason (invalid data dir, path rejected, corrupt DB, …).
 fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashStore>, String> {
     open_stash_store_or_err_with(&DatabasePathResolver::default(), override_path)
 }
@@ -569,24 +480,16 @@ fn open_stash_store_or_err_with(
     paths: &DatabasePathResolver,
     override_path: Option<&str>,
 ) -> Result<Arc<dyn StashStore>, String> {
-    let path = get_stash_db_path_with(paths, override_path)
-        .ok_or_else(|| "no trusted home directory available for stash db".to_string())?;
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create stash directory {}: {}", parent.display(), e))?;
-    }
+    let path = get_stash_db_path_with(paths, override_path)?;
+    ensure_db_dir(&path).map_err(|(message, _)| message)?;
     SqliteStore::new(&path)
-        .map_err(|e| format!("cannot open stash db at {}: {}", path, e))
+        .map_err(|e| format!("cannot open stash db at {}: {}", path.display(), e))
         .map(|s| Arc::new(s) as Arc<dyn StashStore>)
 }
 
 /// Open a stash store, failing open to `None` on any error. Compression
-/// proceeds without stash (lossy truncation) when the home anchor is missing,
-/// the parent directory cannot be created, or the database cannot be opened.
-fn open_stash_store(override_path: Option<&str>) -> Option<Arc<dyn StashStore>> {
-    open_stash_store_with(&DatabasePathResolver::default(), override_path)
-}
-
+/// proceeds without stash (lossy truncation) when no valid data directory is
+/// available, the parent cannot be created, or the database cannot be opened.
 fn open_stash_store_with(
     paths: &DatabasePathResolver,
     override_path: Option<&str>,
@@ -594,7 +497,7 @@ fn open_stash_store_with(
     match open_stash_store_or_err_with(paths, override_path) {
         Ok(store) => Some(store),
         Err(e) => {
-            eprintln!("[tokenless] stash disabled: {}", e);
+            eprintln!("[tokenless] stash disabled: {e}");
             None
         }
     }
@@ -607,6 +510,82 @@ fn run() -> Result<(), (String, i32)> {
 
 fn run_command(command: Commands) -> Result<(), (String, i32)> {
     match command {
+        Commands::Compress { file, stash_db } => {
+            let input = read_input(&file).map_err(|e| (e, 2))?;
+            // Undecodable or version-mismatched requests carry no content to
+            // echo, so no fail-open response can be built: exit 2.
+            let request = RequestEnvelope::from_json(&input).map_err(|e| (e.to_string(), 2))?;
+
+            // PostTool dry-runs still open the configured store to verify that
+            // recovery is available. The pipeline substitutes an in-memory
+            // store for candidate generation, so the persistent store receives
+            // no Stash entries while the original result is emitted.
+            let config = TokenlessConfig::load();
+            let database_paths = DatabasePathResolver::default();
+            let compression_on = config.is_compression_enabled();
+            let needs_stash = match &request.request {
+                Request::BeforeModel(value) => {
+                    compression_on
+                        && matches!(
+                            value.capabilities.recovery,
+                            tokenless_protocol::RecoveryMethod::Tool { .. }
+                        )
+                }
+                Request::PostTool(value) => value.capabilities.recovery.is_available(),
+                Request::Retrieve(_) => true,
+                Request::PreTool(_) => false,
+            };
+            let stash = needs_stash
+                .then(|| open_stash_store_or_err_with(&database_paths, stash_db.as_deref()))
+                .transpose()
+                .map_err(|error| (error, 1))?;
+            let recorder = if config.is_stats_enabled() {
+                open_recorder_with(&database_paths).ok()
+            } else {
+                None
+            };
+            let rtk_path = matches!(&request.request, Request::PreTool(_))
+                .then(env_check::resolve_rtk_path)
+                .flatten()
+                .map(PathBuf::from);
+            let rtk_data_dir = if matches!(&request.request, Request::PreTool(_)) {
+                Some(
+                    database_paths
+                        .data_dir()
+                        .map_err(|error| (error.to_owned(), 1))?
+                        .to_path_buf(),
+                )
+            } else {
+                None
+            };
+            let outcome = dispatch_with_store(
+                &request,
+                &EntryOptions {
+                    compression_enabled: compression_on,
+                    stash_enabled: true,
+                    rtk_path,
+                    rtk_data_dir,
+                },
+                stash.as_ref(),
+                recorder.as_ref(),
+            )
+            .map_err(|error| (error.to_string(), 1))?;
+            if let Response::PostTool(response) = &outcome.response.response
+                && response.disposition == Disposition::NoSavings
+            {
+                eprintln!("tokenless: compression did not reduce size, outputting original");
+            }
+
+            let response_json = outcome.response.to_json().map_err(|e| (e.to_string(), 1))?;
+            println!("{response_json}");
+
+            record_compression(
+                &request.attribution,
+                &outcome,
+                recorder.as_ref(),
+                config.is_sls_enabled(),
+            );
+        }
         Commands::CompressSchema {
             file,
             batch,
@@ -617,8 +596,8 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             stash_db,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&input).map_err(|e| (format!("JSON parse error: {e}"), 2))?;
 
             // Load config before deciding on the stash so we can skip it
             // entirely when compression is disabled (dry-run). Attaching the
@@ -654,18 +633,26 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let after_tokens = estimate_tokens(&after_compact);
             let output_text = if after_tokens >= before_tokens {
                 eprintln!(
-                    "tokenless: schema compression did not reduce size ({} -> {} est. tokens), outputting original",
-                    before_tokens, after_tokens
+                    "tokenless: schema compression did not reduce size ({before_tokens} -> {after_tokens} est. tokens), outputting original"
                 );
-                // No-savings discard edge: if a stash was attached and a
-                // description was truncated, those writes orphan (markers
-                // live in `after_compact`, which is discarded). Truncation
-                // almost always yields savings, so this is rare; orphaned
-                // entries are TTL-cleaned.
+                // Discarded compressed output never reaches the LLM, so roll
+                // back stash keys created during this compress — otherwise
+                // markers live only in `after_compact` and orphan stash rows.
+                compressor.rollback_stash_writes();
                 input.clone()
             } else {
                 after_compact.clone()
             };
+
+            let stash_writes = stash.as_ref().map(|_| compressor.stash_writes());
+            let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
+            let stash_size = stash.as_ref().map(|s| s.len());
+            if matches!(stash_errors, Some(e) if e > 0) {
+                eprintln!(
+                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
+                    stash_errors.expect("checked Some above")
+                );
+            }
 
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {
@@ -673,7 +660,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 input.clone()
             };
-            println!("{}", emit_text);
+            println!("{emit_text}");
 
             record_compression_stats(
                 &config,
@@ -685,9 +672,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 input,
                 output_text,
                 mode,
-                None,
-                None,
-                None,
+                stash_writes,
+                stash_errors,
+                stash_size,
             );
         }
         Commands::CompressResponse {
@@ -697,24 +684,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             tool_use_id,
             truncate_strings_at,
             truncate_arrays_at,
+            array_tail_preserve,
             max_depth,
             no_stash,
             stash_db,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
-
-            let mut compressor = ResponseCompressor::new();
-            if let Some(v) = truncate_strings_at {
-                compressor = compressor.with_truncate_strings_at(v);
-            }
-            if let Some(v) = truncate_arrays_at {
-                compressor = compressor.with_truncate_arrays_at(v);
-            }
-            if let Some(v) = max_depth {
-                compressor = compressor.with_max_depth(v);
-            }
             // Load config before deciding on the stash so we can skip it
             // entirely when compression is disabled (dry-run). Attaching the
             // stash in dry-run would write entries whose `<<tokenless:KEY>>`
@@ -728,55 +703,55 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 open_stash_store_with(&database_paths, stash_db.as_deref())
             };
-            if let Some(ref store) = stash {
-                compressor = compressor.with_stash_store(store.clone());
-            }
-            let result = compressor.compress(&value);
-            // Stash observability: capture write/error counts + live entry
-            // count for stats. All three are None when no stash store is
-            // attached (vs Some(0) when a stash is attached but nothing was
-            // truncated) so stats queries can distinguish "no stash" runs
-            // from "stash, zero writes" runs. Counts are read AFTER compress
-            // so they reflect this call; stash_size reflects entries added.
-            let stash_writes = stash.as_ref().map(|_| compressor.stash_writes());
-            let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
-            let stash_size = stash.as_ref().map(|s| s.len());
+            let result = compress_response_with_store(
+                &input,
+                &CompressOptions {
+                    truncate_strings_at,
+                    truncate_arrays_at,
+                    array_tail_preserve,
+                    max_depth,
+                    stash_enabled: !no_stash,
+                    // Preserve the existing CLI contract: stash failure is
+                    // visible but does not block lossy compression. Embedded
+                    // frontends can require reversible output instead.
+                    require_reversible: false,
+                },
+                compression_on,
+                stash.as_ref(),
+            )
+            .map_err(|error| {
+                let code = if matches!(
+                    error,
+                    tokenless_runtime::RuntimeError::InvalidJson(_)
+                        | tokenless_runtime::RuntimeError::InputTooLarge { .. }
+                ) {
+                    2
+                } else {
+                    1
+                };
+                (error.to_string(), code)
+            })?;
             // Surface persistent stash backend failures (disk full, locked DB,
-            // I/O) so they aren't invisible — compression degrades to the
-            // lossy marker per entry, but a non-zero count means the stash
-            // path is broken and retrievals will miss.
-            if matches!(stash_errors, Some(e) if e > 0) {
+            // I/O, rollback delete) so they aren't invisible. `stash_errors`
+            // counts both compress-time stash writes and no-savings rollback
+            // deletes; a non-zero count means the stash path is broken and
+            // retrievals will miss.
+            if matches!(result.stash_errors, Some(errors) if errors > 0) {
                 eprintln!(
-                    "[tokenless] stash: {} write(s) failed during compression; truncated entries are not retrievable (check stash db health)",
-                    stash_errors.expect("checked Some above")
+                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
+                    result.stash_errors.expect("checked Some above")
                 );
             }
-            let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
-
-            let before_tokens = estimate_tokens(&input);
-            let after_tokens = estimate_tokens(&after_compact);
-            let output_text = if after_tokens >= before_tokens {
+            if result.disposition == Disposition::NoSavings {
                 eprintln!(
                     "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
-                    before_tokens, after_tokens
+                    result.before_tokens, result.after_tokens
                 );
-                // No-savings discard edge: if a stash was attached and an
-                // array was truncated, those writes orphan (markers live in
-                // `after_compact`, which is discarded). Truncation almost
-                // always yields savings, so this is rare; orphaned entries
-                // are TTL-cleaned.
-                input.clone()
-            } else {
-                after_compact.clone()
-            };
+            }
 
-            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
-            let emit_text = if compression_on {
-                output_text.clone()
-            } else {
-                input.clone()
-            };
-            println!("{}", emit_text);
+            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
+            let output_text = stats_after_text(&result, &input);
+            println!("{}", result.output);
 
             record_compression_stats(
                 &config,
@@ -788,66 +763,59 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 input,
                 output_text,
                 mode,
-                stash_writes,
-                stash_errors,
-                stash_size,
+                result.stash_writes,
+                result.stash_errors,
+                result.stash_size,
             );
         }
         Commands::Retrieve { hash, stash_db } => {
             let store = match open_stash_store_or_err(stash_db.as_deref()) {
                 Ok(s) => s,
                 Err(e) => {
-                    return Err((format!("stash unavailable: {}", e), 1));
+                    return Err((format!("stash unavailable: {e}"), 1));
                 }
             };
-            // Accept either a bare 24-hex hash or text containing a marker;
-            // extract_hash validates the embedded hash. When no marker is
-            // found, validate the bare hash format before the DB round-trip
-            // so a mistaken non-hash argument (e.g. a file path) gets a clear
-            // format error instead of a misleading "no stashed payload".
-            let key = match extract_hash(&hash) {
-                Some(h) => h.to_string(),
-                None if is_valid_hash(&hash) => hash.to_string(),
-                None => {
-                    return Err((
-                        format!(
-                            "invalid stash hash: {:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)",
-                            hash
-                        ),
-                        1,
-                    ));
-                }
+            // Retrieve events are attribution, never a gate: a recorder that
+            // fails to open degrades to unrecorded retrieval.
+            let recorder = if TokenlessConfig::load().is_stats_enabled() {
+                open_recorder_with(&DatabasePathResolver::default()).ok()
+            } else {
+                None
             };
-            match store.retrieve(&key) {
-                Ok(Some(payload)) => {
-                    println!("{}", payload);
-                }
-                Ok(None) => {
-                    return Err((format!("no stashed payload for hash: {}", key), 1));
-                }
-                Err(e) => {
-                    return Err((format!("stash retrieve failed: {}", e), 1));
-                }
-            }
+            let payload = retrieve_recorded(store.as_ref(), &hash, recorder.as_ref(), "cli")
+                .map_err(|error| (error.to_string(), 1))?;
+            // Byte-exact restore: do not append a trailing newline.
+            let mut out = io::stdout().lock();
+            out.write_all(payload.as_bytes())
+                .map_err(|e| (format!("failed to write retrieved payload: {e}"), 1))?;
+            out.flush()
+                .map_err(|e| (format!("failed to flush retrieved payload: {e}"), 1))?;
         }
         Commands::Stats(stats_cmd) => {
-            let recorder = open_recorder()?;
-
             match stats_cmd {
                 StatsCommands::Summary {
                     limit,
                     json,
                     compare,
                 } => {
+                    let recorder = open_recorder()?;
                     if let Some(sessions) = compare {
                         let baseline_sid = sessions[0].as_str();
                         let tokenless_sid = sessions[1].as_str();
                         let baseline = recorder
                             .records_by_session(baseline_sid, limit)
-                            .map_err(|e| (format!("Failed to query baseline: {}", e), 1))?;
+                            .map_err(|e| (format!("Failed to query baseline: {e}"), 1))?;
                         let tokenless = recorder
                             .records_by_session(tokenless_sid, limit)
-                            .map_err(|e| (format!("Failed to query tokenless: {}", e), 1))?;
+                            .map_err(|e| (format!("Failed to query tokenless: {e}"), 1))?;
+                        if let Some(message) = missing_compare_sessions(
+                            baseline_sid,
+                            tokenless_sid,
+                            &baseline,
+                            &tokenless,
+                        ) {
+                            return Err((message, 1));
+                        }
                         // Warn if a session's records do not match the expected mode,
                         // i.e. the baseline run was not recorded as dry-run.
                         warn_mode_mismatch("baseline", &baseline, CompressionMode::DryRun);
@@ -861,27 +829,40 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                     let records = recorder
                         .all_records(limit)
-                        .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
+                        .map_err(|e| (format!("Failed to query records: {e}"), 1))?;
+                    let retrieve = recorder
+                        .retrieve_totals()
+                        .map_err(|e| (format!("Failed to query retrieve events: {e}"), 1))?;
                     if json {
-                        println!("{}", tokenless_stats::format_summary_json(&records, None));
+                        println!(
+                            "{}",
+                            tokenless_stats::format_summary_json(&records, None, Some(&retrieve))
+                        );
                     } else {
                         println!(
                             "{}",
-                            format_summary(&records, Some("Tokenless Statistics Summary"), None)
+                            format_summary(
+                                &records,
+                                Some("Tokenless Statistics Summary"),
+                                None,
+                                Some(&retrieve)
+                            )
                         );
                     }
                 }
                 StatsCommands::List { limit } => {
+                    let recorder = open_recorder()?;
                     let records = recorder
                         .all_records(Some(limit))
-                        .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
+                        .map_err(|e| (format!("Failed to query records: {e}"), 1))?;
                     println!("{}", format_list(&records, limit));
                 }
                 StatsCommands::Show { id } => {
+                    let recorder = open_recorder()?;
                     let record = recorder
                         .record_by_id(id)
-                        .map_err(|e| (format!("Failed to query record: {}", e), 1))?
-                        .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
+                        .map_err(|e| (format!("Failed to query record: {e}"), 1))?
+                        .ok_or_else(|| (format!("Record not found: {id}"), 1))?;
                     println!("{}", format_show(&record));
                 }
                 StatsCommands::Diff {
@@ -894,24 +875,25 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     no_color,
                     json,
                 } => {
+                    let recorder = open_recorder()?;
                     let report = match (id, session) {
                         (Some(id), None) => {
                             let record = recorder
                                 .record_by_id(id)
-                                .map_err(|e| (format!("Failed to query record: {}", e), 1))?
-                                .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
+                                .map_err(|e| (format!("Failed to query record: {e}"), 1))?
+                                .ok_or_else(|| (format!("Record not found: {id}"), 1))?;
                             record_report(&record, context)
                         }
                         (None, Some(session_id)) => {
                             let records = recorder
                                 .records_for_diff(&session_id, tool_use_id.as_deref())
-                                .map_err(|e| (format!("Failed to query diff records: {}", e), 1))?;
+                                .map_err(|e| (format!("Failed to query diff records: {e}"), 1))?;
                             if records.is_empty() {
                                 let scope = tool_use_id.as_deref().map_or_else(
                                     || format!("session {session_id:?}"),
                                     |tool| format!("tool use {tool:?} in session {session_id:?}"),
                                 );
-                                return Err((format!("No records found for {}", scope), 1));
+                                return Err((format!("No records found for {scope}"), 1));
                             }
                             if let Some(tool_use_id) = tool_use_id {
                                 tool_use_report(&records, &session_id, &tool_use_id, context)
@@ -933,8 +915,8 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     };
                     if json {
                         let output = serde_json::to_string_pretty(&report)
-                            .map_err(|e| (format!("Failed to serialize diff report: {}", e), 1))?;
-                        println!("{}", output);
+                            .map_err(|e| (format!("Failed to serialize diff report: {e}"), 1))?;
+                        println!("{output}");
                     } else {
                         let color = !no_color
                             && std::env::var_os("NO_COLOR").is_none()
@@ -943,9 +925,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                 }
                 StatsCommands::Clear { yes } => {
+                    let recorder = open_recorder()?;
                     if !yes {
                         print!("Are you sure you want to clear all statistics? [y/N] ");
-                        use std::io::Write;
                         let _ = io::stdout().flush();
                         let mut input = String::new();
                         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
@@ -959,7 +941,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                     recorder
                         .clear()
-                        .map_err(|e| (format!("Failed to clear: {}", e), 1))?;
+                        .map_err(|e| (format!("Failed to clear: {e}"), 1))?;
                     println!("Statistics cleared.");
                 }
                 StatsCommands::Status => {
@@ -984,7 +966,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     } else {
                         "default"
                     };
-                    println!("Stats recording: {} (via {})", stats_state, stats_source);
+                    println!("Stats recording: {stats_state} (via {stats_source})");
 
                     let sls_state = if config.is_sls_enabled() {
                         "ENABLED"
@@ -998,22 +980,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     } else {
                         "default"
                     };
-                    println!("SLS recording:   {} (via {})", sls_state, sls_source);
+                    println!("SLS recording:   {sls_state} (via {sls_source})");
                 }
                 StatsCommands::Enable => {
-                    let mut config = TokenlessConfig::load();
-                    config.stats_enabled = true;
-                    config
-                        .save()
-                        .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
+                    persist_stats_enabled(true)?;
                     println!("Stats recording enabled.");
                 }
                 StatsCommands::Disable => {
-                    let mut config = TokenlessConfig::load();
-                    config.stats_enabled = false;
-                    config
-                        .save()
-                        .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
+                    persist_stats_enabled(false)?;
                     println!("Stats recording disabled.");
                 }
             }
@@ -1023,41 +997,65 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             agent_id,
             session_id,
             tool_use_id,
+            min_toon_chars,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
-            let output = toon_format::encode_default(&value)
-                .map_err(|e| (format!("toon encode failed: {}", e), 2))?;
-            let output = output.trim_end().to_string();
-
-            // If no token savings, output original instead of TOON result
-            let before_tokens = estimate_tokens_from_bytes(input.len());
-            let after_tokens = estimate_tokens_from_bytes(output.len());
-            let no_savings = output.is_empty() || after_tokens >= before_tokens;
-            if no_savings {
-                eprintln!(
-                    "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
-                    before_tokens, after_tokens
-                );
-            }
-
             let config = TokenlessConfig::load();
             let compression_on = config.is_compression_enabled();
-            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
-            // Active: emit the TOON result (or original if no savings).
-            // Dry-run: emit the original so context stays uncompressed, but
-            // still record the TOON result as the predicted savings below.
-            let emit_text = if compression_on && !no_savings {
-                output.clone()
-            } else {
-                input.clone()
-            };
-            println!("{}", emit_text);
+            // Share runtime scoring so CLI dry-run predictions match
+            // `stats summary` and the Python/SDK compress_toon path. The
+            // previous bytes/4 heuristic under-counted CJK. The shared
+            // minimum-length gate keeps the CLI aligned with the adapter
+            // hooks, which skip payloads under the same threshold.
+            let result =
+                compress_toon(&input, compression_on, min_toon_chars).map_err(|error| {
+                    // JSON parse, oversized input, and TOON encode keep the
+                    // documented compress-command exit code 2.
+                    let code = if matches!(
+                        error,
+                        tokenless_runtime::RuntimeError::InvalidJson(_)
+                            | tokenless_runtime::RuntimeError::InputTooLarge { .. }
+                            | tokenless_runtime::RuntimeError::ToonEncode(_)
+                    ) {
+                        2
+                    } else {
+                        1
+                    };
+                    (error.to_string(), code)
+                })?;
+            match result.disposition {
+                Disposition::Passthrough => {
+                    eprintln!(
+                        "tokenless: payload under the {min_toon_chars}-character TOON minimum ({} chars), skipping encoding and outputting original JSON",
+                        input.chars().count()
+                    );
+                }
+                Disposition::NoSavings => {
+                    eprintln!(
+                        "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
+                        result.before_tokens, result.after_tokens
+                    );
+                }
+                _ => {}
+            }
+
+            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
+            // Byte-exact stdout: the documented detection contract compares
+            // stdout with the input payload, so passthrough and no-savings
+            // runs must reproduce the input verbatim. `println!` would append
+            // a LF (added for inputs without one, doubled for inputs with
+            // one) and break that comparison.
+            {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(result.output.as_bytes())
+                    .and_then(|()| stdout.flush())
+                    .map_err(|e| (format!("Failed to write output: {e}"), 1))?;
+            }
 
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
-            let record_after = if no_savings { input.clone() } else { output };
+            let record_after = stats_after_text(&result, &input);
             let database_paths = DatabasePathResolver::default();
             record_compression_stats(
                 &config,
@@ -1077,12 +1075,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         Commands::DecompressToon { file } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = toon_format::decode_default(&input)
-                .map_err(|e| (format!("toon decode failed: {}", e), 2))?;
+                .map_err(|e| (format!("toon decode failed: {e}"), 2))?;
             let output = serde_json::to_string_pretty(&value)
-                .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+                .map_err(|e| (format!("Serialization error: {e}"), 2))?;
             let output = output.trim_end().to_string();
             if !output.is_empty() {
-                println!("{}", output);
+                println!("{output}");
             }
         }
         Commands::EnvCheck {
@@ -1094,12 +1092,24 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
         }
-        Commands::Mcp(McpCommands::Serve) => {
-            mcp::serve()?;
-        }
     }
 
     Ok(())
+}
+
+/// Text recorded as the statistics "after" side for one compression result.
+///
+/// Only `Applied` and `DryRun` measure the candidate. Every other
+/// disposition (no-savings, timeout, passthrough, recoverability, tool error)
+/// emitted the original, so recording the discarded candidate would book
+/// savings that never reached the model. Mirrors the Runtime's
+/// `record_stats` selection; `record_compression_stats` then skips records
+/// whose after side is not smaller.
+fn stats_after_text(result: &CompressResult, input: &str) -> String {
+    match result.disposition {
+        Disposition::Applied | Disposition::DryRun => result.compressed_output.clone(),
+        _ => input.to_string(),
+    }
 }
 
 /// Resolve the recording mode from the compression toggle.
@@ -1117,11 +1127,31 @@ fn resolve_mode(
         CompressionMode::Active
     } else {
         eprintln!(
-            "tokenless: dry-run mode (compression disabled) — emitted original, predicted {} -> {} est. tokens",
-            before_tokens, after_tokens
+            "tokenless: dry-run mode (compression disabled) — emitted original, predicted {before_tokens} -> {after_tokens} est. tokens"
         );
         CompressionMode::DryRun
     }
+}
+
+/// Error text when a `--compare` side has no recorded stats.
+///
+/// An empty side used to format as a successful 0% report, which hid typos
+/// and made A/B scripts look like "no savings". Fail closed like
+/// `stats diff --session` and the Python `TokenlessStats.compare` client.
+fn missing_compare_sessions(
+    baseline_sid: &str,
+    tokenless_sid: &str,
+    baseline: &[StatsRecord],
+    tokenless: &[StatsRecord],
+) -> Option<String> {
+    let mut missing = Vec::new();
+    if baseline.is_empty() {
+        missing.push(format!("baseline session {baseline_sid:?}"));
+    }
+    if tokenless.is_empty() {
+        missing.push(format!("tokenless session {tokenless_sid:?}"));
+    }
+    (!missing.is_empty()).then(|| format!("No records found for {}", missing.join(" and ")))
 }
 
 /// Warn (to stderr) when a session's records were not recorded in the expected
@@ -1140,6 +1170,30 @@ fn warn_mode_mismatch(label: &str, records: &[StatsRecord], expected: Compressio
             expected.as_str()
         );
     }
+}
+
+/// Persist only the stats recording toggle to `config.json`.
+///
+/// Starts from the on-disk file rather than [`TokenlessConfig::load`], so a
+/// session `TOKENLESS_COMPRESSION_ENABLED` / `TOKENLESS_SLS_ENABLED` override
+/// is not copied into durable config. Runtime `stats status` still uses
+/// [`TokenlessConfig::load`] and therefore still honors those env vars.
+fn persist_stats_enabled(enabled: bool) -> Result<(), (String, i32)> {
+    let config = stats_persist_snapshot(TokenlessConfig::load_from_file(), enabled);
+    config
+        .save()
+        .map_err(|e| (format!("Failed to save config: {e}"), 1))?;
+    Ok(())
+}
+
+/// Snapshot written by `stats enable` / `stats disable`.
+///
+/// `file_config` is the on-disk document with no process-env merge. Only
+/// `stats_enabled` changes; compression and SLS stay as stored.
+fn stats_persist_snapshot(file_config: TokenlessConfig, enabled: bool) -> TokenlessConfig {
+    let mut config = file_config;
+    config.stats_enabled = enabled;
+    config
 }
 
 /// Record compression stats — fail-silent so compression output
@@ -1171,8 +1225,8 @@ fn record_compression_stats(
     let after_bytes = after_text.len();
 
     // Skip recording if there was no actual token savings
-    let before_tokens = estimate_tokens_from_bytes(before_bytes);
-    let after_tokens = estimate_tokens_from_bytes(after_bytes);
+    let before_tokens = estimate_tokens(&before_text);
+    let after_tokens = estimate_tokens(&after_text);
     if after_tokens >= before_tokens {
         return;
     }
@@ -1219,7 +1273,7 @@ fn record_compression_stats(
 
 fn main() {
     if let Err((msg, code)) = run() {
-        eprintln!("Error: {}", msg);
+        eprintln!("Error: {msg}");
         process::exit(code);
     }
 }

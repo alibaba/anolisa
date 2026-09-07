@@ -9,6 +9,152 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.0] - 2026-09-06
+
+### 新增
+
+- 大型 JSON 记录数组现在可以按 32 条记录的基础预算保留代表性记录、错误、异常结构和数值离群点，并通过 Stash 恢复完整集合。若紧凑 JSON 或 TOON 候选可节省至少 15%，则优先采用，避免进一步缩减记录 ([#3047](https://github.com/alibaba/anolisa/pull/3047))。
+- 现在可以压缩识别出的 Cargo、pytest、npm/Jest、Go、Make/C 和通用构建/测试日志，省略重复的常规进度，同时保留诊断、摘要、阶段信息和堆栈。支持的构建/测试命令会保留原生日志供此路径压缩，具备恢复能力时可取回省略的区间 ([#3067](https://github.com/alibaba/anolisa/pull/3067))。
+- Cosh-NG、Claude Code、Qoder CLI、OpenCode、Hermes 和 DeepSeek Harness 现在可以通过已有 Shell 工具恢复省略内容。成功执行的独立 `tokenless retrieve HASH` 命令结果不会再次压缩；恢复要求 CLI 可用，且宿主能够替换当前工具结果，其中 Claude Code 要求 2.1.121 或更新版本 ([#3052](https://github.com/alibaba/anolisa/pull/3052))。
+- 新增 QwenPaw 插件，在进程内提供 Schema 压缩、RTK 命令改写、响应/TOON 压缩和静态 `tokenless_retrieve` 工具。安装时选择匹配版本的 SDK Wheel，支持的内置工具表之外的工具保持原样 ([#3075](https://github.com/alibaba/anolisa/pull/3075))。
+
+### 变更
+
+- **不兼容变更：** `tokenless compress` 现在仅接受 Protocol v2 的 `before_model`、`pre_tool`、`post_tool` 和 `retrieve` 请求，移除 Protocol v1 和 `tokenless mcp serve`。Core、适配器和自定义调用方必须同步升级，并提供必需的显式恢复能力声明 ([#2978](https://github.com/alibaba/anolisa/pull/2978), [#3068](https://github.com/alibaba/anolisa/pull/3068))。
+- **不兼容变更：** Rust 调用方现在使用 Runtime 生命周期方法替代 `TokenlessRuntime::compress`。直接调用响应压缩的代码需要从已移除的 `tokenless-pipeline` Crate 和 `tokenless_schema::ResponseCompressor` 迁移至 Runtime 或 `tokenless-compressors` API ([#2974](https://github.com/alibaba/anolisa/pull/2974), [#2978](https://github.com/alibaba/anolisa/pull/2978))。
+- **不兼容变更：** Python SDK 现在通过类型化生命周期请求调用 `before_model`、`pre_tool`、`post_tool` 和 `retrieve`，移除旧的 `ModelRequest`、`ToolCall`、`ToolResult` 和 `ToolResponseCompressor` API。AgentScope 集成要求为自定义工具提供 `ToolContract` 元数据，并暴露一个静态恢复工具 ([#2986](https://github.com/alibaba/anolisa/pull/2986), [#3029](https://github.com/alibaba/anolisa/pull/3029))。
+- 恢复提示现在直接给出可用的 Shell 命令或配置的静态工具名，并使用裸 Hash，便于 Agent 选择正确的恢复动作。历史 `<<tokenless:HASH>>` 标记仍可读取；自定义 `retrieve_tool_name` 必须符合工具名规则 ([#3068](https://github.com/alibaba/anolisa/pull/3068))。
+- 生命周期 Schema 压缩现在要求提供授权静态恢复工具，并具备可用的 Stash。缺少该能力的 Common BeforeModel Hook 会保留原始 Schema ([#2978](https://github.com/alibaba/anolisa/pull/2978), [#2995](https://github.com/alibaba/anolisa/pull/2995), [#3029](https://github.com/alibaba/anolisa/pull/3029))。
+- 生命周期压缩现在保留声明为文件内容的结果，以及已经由 RTK 优化的结果。Common Hook 会传递每次调用的优化状态，缺少稳定工具调用 ID 时保持命令参数不变 ([#2974](https://github.com/alibaba/anolisa/pull/2974), [#2978](https://github.com/alibaba/anolisa/pull/2978), [#2995](https://github.com/alibaba/anolisa/pull/2995))。
+- **不兼容变更：** OpenClaw 现在使用 `post_tool_enabled` 控制 PostTool 优化，移除原有的响应、TOON、跳过工具和 Shell 工具策略配置。DeepSeek Harness 也改用共享压缩策略，替代适配器专用阈值和工具列表。OpenClaw 仍仅支持持久化记录的无损更新，不支持当前轮结果替换或恢复 ([#3009](https://github.com/alibaba/anolisa/pull/3009), [#3036](https://github.com/alibaba/anolisa/pull/3036))。
+- Hermes 现在将 PreTool 改写和 PostTool 结果处理交给 Core，使用共享响应与 TOON 策略替代适配器本地决策；旧版 Hermes 仍保留阻止原命令并建议改写命令的兼容方式 ([#3018](https://github.com/alibaba/anolisa/pull/3018))。
+- 压缩统计现在通过 `content_origin`、`applied_operations` 和 `recoverability` 替代 `seam` 与 `compressor_chain`；授权恢复事件也会记录 Agent、Session 和工具调用归属 ([#2978](https://github.com/alibaba/anolisa/pull/2978))。
+
+### 修复
+
+- OpenClaw 现在读取插件自身配置，即使全局配置存在冲突值，显式启用和禁用设置也能生效 ([#3009](https://github.com/alibaba/anolisa/pull/3009))。
+- npm 包现在将共享 Hook 分发脚本作为可执行普通文件打包，避免 `npm pack` 忽略源码符号链接后，已安装插件无法调用 Tokenless ([#3068](https://github.com/alibaba/anolisa/pull/3068))。
+
+## [0.7.14] - 2026-08-26
+
+### 新增
+
+- 协议 v1 的 `tokenless compress` 命令与 `TokenlessRuntime::compress` 现在为 Schema、Response 和 TOON 压缩提供统一入口，使 Adapter 最多调用一次子进程、只执行一次最终大小判定，并且只记录胜出的操作（[#2844](https://github.com/alibaba/anolisa/pull/2844)）。
+- `tokenless stats summary` 现在会从活跃汇总中排除 Dry-run Row 并报告排除数量，同时新增总节省、Retrieve Token、净节省、Retrieve 命中/未命中/错误计数和不可恢复截断归因；JSON 输出使用 Schema 版本 1.1，Python `TokenlessStats` API 也开放相同的类型化字段（[#2885](https://github.com/alibaba/anolisa/pull/2885)）。
+
+### 变更
+
+- 截断 Marker 现在包含可直接运行的 `tokenless retrieve` 命令，通过 CLI、MCP 和内嵌 Runtime 执行的 Retrieve 都会计入归因，并且 MCP Retrieve 与 CLI 一样接受大写 Hash（[#2885](https://github.com/alibaba/anolisa/pull/2885)）。
+
+### 修复
+
+- Codex 集成不再在 Tool 使用后追加第二份压缩副本；它会保留环境诊断与 RTK 源头压缩能力，同时避免增加 Model 可见 Prompt（[#2866](https://github.com/alibaba/anolisa/pull/2866)）。
+- `tokenless compress-toon` 与 Runtime/Python SDK 现在会一致地保持少于 500 字符的有效 Payload 不变，同时可用 `--min-toon-chars 0` 强制编码；格式错误的 JSON 仍会失败，CLI 输出也会精确保留输入末尾换行符的原有形式（[#2869](https://github.com/alibaba/anolisa/pull/2869)）。
+
+## [0.7.13] - 2026-08-25
+
+### 新增
+
+- Rust 调用方现在可以使用 `tokenless-protocol` 与 `tokenless-pipeline` Crate，获得带版本的压缩 Request/Response、受限成本的内容探测、Registry 路由、分阶段执行和 fail-open 仲裁能力（[#2783](https://github.com/alibaba/anolisa/pull/2783)、[#2788](https://github.com/alibaba/anolisa/pull/2788)、[#2799](https://github.com/alibaba/anolisa/pull/2799)）。
+
+### 变更
+
+- CLI `compress-response` 命令、`TokenlessRuntime::compress_response` 与 Python Binding 现在通过共享 Pipeline 处理 Record 结构的 JSON；标量 JSON 根节点会保持原样透传，超时或被拒绝的候选结果会返回原始内容并回滚其 Stash 写入（[#2816](https://github.com/alibaba/anolisa/pull/2816)）。
+- Runtime 与 Python 的 `disposition` 值现在使用协议定义的 snake_case 形式（如 `dry_run` 和 `no_savings`），并可能返回 `passthrough`、`timeout` 或 `error`；当未发生截断时，纯清理节省现在无需 Stash 也可在 `require_reversible` 下生效（[#2816](https://github.com/alibaba/anolisa/pull/2816)）。
+
+## [0.7.12] - 2026-08-22
+
+### 变更
+
+- Response 压缩现在会在保留数组头部后继续保留可配置的尾部窗口（默认 8 项，可通过 `--array-tail-preserve` 和 Runtime API 控制），使最终状态与错误细节继续内联，而 Stash 只存储被省略的中间段（[#2433](https://github.com/alibaba/anolisa/pull/2433)）。
+- 当 `BeforeModel` Payload 格式错误或未携带工具声明时，Schema Hook 现在会每个 Session 警告一次，使 Hook 被跳过与正常执行但未产生节省可以区分；显式空工具数组仍会静默透传（[#2606](https://github.com/alibaba/anolisa/pull/2606)）。
+- L2 Benchmark 的 JSON、Markdown 与 Semantic Gate Finding 现在会列出保真失败时缺失的 Ground Truth 项，不再只报告计数（[#2433](https://github.com/alibaba/anolisa/pull/2433)）。
+
+### 修复
+
+- `tokenless stats enable` 与 `stats disable` 现在只基于磁盘配置持久化 Stats 开关，因此临时的压缩与 SLS 环境变量覆盖不会被写入 `config.json`（[#2592](https://github.com/alibaba/anolisa/pull/2592)）。
+- 当任一 Session 没有记录时，`tokenless stats summary --compare` 现在会失败，并且 `--limit 0` 会被拒绝，避免拼写错误或空样本显示为成功的 0% 对比（[#2674](https://github.com/alibaba/anolisa/pull/2674)）。
+- Schema 压缩现在支持包含顶层 `tools` 数组的完整请求对象，在保留非 Function 工具与数组外字段的同时压缩 Function Calling 条目（[#2758](https://github.com/alibaba/anolisa/pull/2758)）。
+- 无 Stash 的数组截断 Marker 现在可以完整通过 TOON 往返，极大的尾部保留值也会保留完整数组而不再溢出（[#2433](https://github.com/alibaba/anolisa/pull/2433)）。
+
+## [0.7.11] - 2026-08-20
+
+### 修复
+
+- `tokenless compress-toon` 现在用与 `stats summary` 以及 Python/SDK 路径相同的 CJK 感知字符估算器计算 TOON 节省，因此 dry-run 的 stderr 预测计数与记录的 `before_tokens`/`after_tokens` 一致。JSON 解析、超限输入和 TOON 编码失败仍以退出码 2 结束（[#2681](https://github.com/alibaba/anolisa/pull/2681)）。
+
+## [0.7.10] - 2026-08-19
+
+### 新增
+
+- Gemini 原生 `functionDeclarations` 工具 Schema 现在可在 copilot-shell 等 `BeforeModel` 集成中压缩，包括使用 `parametersJsonSchema` 的声明，同时保留无关的 Gemini Tool 字段（[#2663](https://github.com/alibaba/anolisa/pull/2663)）。
+- `anolisa-tokenless` Python SDK 现在通过 `TokenlessStats` 开放类型化的只读 Status、Summary、List、Show、Diff 和 Comparison 查询，复用同一个 Runtime 数据目录，并且只在显式 Show 和 Diff 调用中返回已存储的 Tool 内容（[#2666](https://github.com/alibaba/anolisa/pull/2666)）。
+
+### 变更
+
+- Raw、RPM、npm 和源码安装不再构建或提供未使用的独立 `toon` 可执行文件；TOON 编码仍可通过 `tokenless compress-toon` 与 `tokenless decompress-toon` 使用，升级时只清理 Tokenless 所属的旧版残留文件（[#2657](https://github.com/alibaba/anolisa/pull/2657)）。
+
+### 修复
+
+- AgentScope 集成 Wheel 现在声明 `tqdm` 依赖，因此使用受支持 AgentScope 1.x 范围的全新安装在搭配 OpenAI 3.3.0 及更高版本时可以直接导入，无需手动补装依赖（[#2665](https://github.com/alibaba/anolisa/pull/2665)）。
+
+## [0.7.9] - 2026-08-18
+
+### 新增
+
+- `anolisa-tokenless` Python Wheel 现在开放框架无关的 `before_model`、`before_tool_call`、`after_tool_call` 和 `retrieve` 生命周期，内置 RTK，并提供原生 Schema 与 Response 压缩、TOON、受 Marker 授权的 Retrieve 和逐调用归属（[#2627](https://github.com/alibaba/anolisa/pull/2627)）。
+
+### 变更
+
+- AgentScope 1.0.11 至 1.x 以及 AgentScope 2.0.x 集成现在挂载相同的完整 SDK 契约，在已有 Response 压缩与 Retrieve 支持上增加 Schema 压缩、命令改写、TOON、环境错误提示和逐调用归属（[#2627](https://github.com/alibaba/anolisa/pull/2627)）。
+
+### 修复
+
+- Cosh-NG Extension 的 RTK 重写 Hook 现在直接匹配小写 `shell` 工具名，因此无需依赖宿主侧工具名别名也能重写 Shell 命令（[#2611](https://github.com/alibaba/anolisa/pull/2611)）。
+
+## [0.7.8] - 2026-08-18
+
+### 变更
+
+- 当载荷少于 500 字符时跳过 TOON 编码；低于该阈值时 token 节省几乎为零，而每次事件的编码开销保持不变（[#2613](https://github.com/alibaba/anolisa/pull/2613)）。
+
+### 修复
+
+- npm 平台包（`@anolisa/tokenless-*`）不再声明 `tokenless`/`rtk`/`toon` bin 入口。与根包的同名冲突会导致 npm 在安装时删除所有冲突的 `.bin` 链接，使安装后没有可用的 `tokenless` 可执行文件（[#2613](https://github.com/alibaba/anolisa/pull/2613)）。
+
+## [0.7.7] - 2026-08-17
+
+### 新增
+
+- 现在可从源码构建 `anolisa-tokenless` ABI3 Wheel，为 CPython 3.11+ 提供有状态的进程内 JSON Response 压缩和基于 Marker 的 Stash Retrieve，且无需启动 CLI 子进程（[#2501](https://github.com/alibaba/anolisa/pull/2501)）。
+- AgentScope 1.0.11 至 1.x 以及 AgentScope 2.0.x 应用现在可以安装独立的同版本集成 Wheel，压缩成功的最终 Tool Response，并且只允许 Retrieve 当前 Agent 可见 Marker 对应的内容（[#2507](https://github.com/alibaba/anolisa/pull/2507)、[#2528](https://github.com/alibaba/anolisa/pull/2528)、[#2553](https://github.com/alibaba/anolisa/pull/2553)）。
+- DeepSeek Harness Profile 现在可以启用随包提供的原生 Plugin，在保持环境错误归因与 fail-open 行为的同时，压缩成功的单 Block JSON Tool Result（[#2581](https://github.com/alibaba/anolisa/pull/2581)）。
+
+### 变更
+
+- Claude Code Adapter 探测现在会重试首次运行时暂时性的二进制文件与 Plugin Registry 初始化失败，减少预置完成后立即出现的错误未就绪结果（[#2519](https://github.com/alibaba/anolisa/pull/2519)）。
+- Tokenless RPM 现在提供虚拟能力 `anolisa-component(tokenless)`，使 ANOLISA 在仓库组件索引不可用时仍可解析该 Package（[#2576](https://github.com/alibaba/anolisa/pull/2576)）。
+
+### 修复
+
+- Cosh-NG Extension 执行现在会把硬关闭的 Tool Ready Hook 所返回的空结果视为成功 no-op，而不再 fail closed（[#2506](https://github.com/alibaba/anolisa/pull/2506)）。
+- 无节省的 Response 压缩现在只删除已丢弃候选结果所创建的 Stash Row，既避免孤立数据，也不会删除被其他进程刷新过的条目（[#2480](https://github.com/alibaba/anolisa/pull/2480)）。
+
+## [0.7.6] - 2026-08-13
+
+### 变更
+
+- `TOKENLESS_DATA_DIR` 现在接受真实用户 home 之外的绝对非根目录；显式目录无效时会停用 SQLite 状态，不再静默回退到 home（[#2434](https://github.com/alibaba/anolisa/pull/2434)）。
+- 所有 Adapter 的 Tool Ready 调用前检查、修复和阻断现已硬关闭，避免错误的就绪结果阻止有效工作；工具执行后的失败归因和其他 Tokenless 功能保持启用（[#2487](https://github.com/alibaba/anolisa/pull/2487)）。
+
+### 修复
+
+- 直接 JSON Schema 的 Description 现在只会 Stash 一次，因此一次 Retrieve 即可返回不含嵌套 Marker 的原始内容（[#2399](https://github.com/alibaba/anolisa/pull/2399)）。
+- 通过环境变量设置 Stats 与 SLS 开关时，`config.json` 中的 Dry-run 压缩配置现在仍会生效（[#2380](https://github.com/alibaba/anolisa/pull/2380)）。
+- `tokenless retrieve` 现在会逐字节写出已存储的 Payload，不再追加换行符（[#2396](https://github.com/alibaba/anolisa/pull/2396)）。
+- Stash Retrieve 现在会跳过格式错误的 Marker 以查找后续有效 Key，并在对抗性输入下保持线性扫描（[#2386](https://github.com/alibaba/anolisa/pull/2386)）。
+- RPM 安装现在包含 Codex Adapter 安装脚本所需的共享生命周期 Helper（[#2425](https://github.com/alibaba/anolisa/pull/2425)）。
+
 ## [0.7.5] - 2026-08-10
 
 ### 新增
@@ -233,7 +379,7 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 - 将 Tokenless 引入 ANOLISA（#199）
 
-[未发布]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.5...HEAD
+[0.7.6]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.5...tokenless/v0.7.6
 [0.7.5]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.4...tokenless/v0.7.5
 [0.7.4]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...tokenless/v0.7.4
 [0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3

@@ -1,5 +1,6 @@
 # Token-Less Unified Build System
-# Builds tokenless (schema/response compression), rtk (command rewriting), and toon (JSON encoding)
+# Builds tokenless (schema/response compression, TOON encoding via the
+# toon-format library) and rtk (command rewriting)
 
 INSTALL_PROFILE ?= user
 DESTDIR ?=
@@ -20,29 +21,39 @@ BIN_DIR ?= $(BINDIR)
 LIB_DIR ?= $(LIBEXECDIR)
 ADAPTER_SRC_DIR := adapters/tokenless
 OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
+DSH_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/dsh
 ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/manifest.json \
     $(ADAPTER_SRC_DIR)/openclaw/package.json \
     $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json \
+    $(ADAPTER_SRC_DIR)/dsh/package.json \
     $(ADAPTER_SRC_DIR)/hermes/plugin.yaml \
     $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json \
-    $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json
+    $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json \
+    $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json \
+    $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt
 # Canonical RPM/raw component contract — kept separate from the adapter
 # payload tree and stamped from the workspace version before packaging.
 # Shipped to %{_datadir}/anolisa/components/tokenless/component.toml and
 # embedded in raw archives as .anolisa/component.toml.
 COMPONENT_CONTRACT := .anolisa/component.toml
-TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 NATIVE_NPM_TARGET := $(shell node -p 'process.platform + "-" + process.arch')
 NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
+PYTHON_RUNTIME_DIR := python/tokenless
+AGENTSCOPE_PACKAGE_DIR := python/agentscope
+PYTHON_WHEEL_DIR := $(CURDIR)/target/wheels
+PYTHON_RTK_PACKAGE_DIR := $(CURDIR)/$(PYTHON_RUNTIME_DIR)/python/anolisa_tokenless/_bin
+PYTHON_RTK_BINARY ?= $(CURDIR)/third_party/rtk/target/release/rtk
+MATURIN ?= uvx --from 'maturin>=1.9,<2.0' maturin
+PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 
-.PHONY: build build-tokenless build-toon build-openclaw-plugin \
-        stamp-adapter-templates generate-component-contract \
+.PHONY: build build-tokenless build-openclaw-plugin build-dsh-plugin \
+        stamp-adapter-templates stamp-python-packages generate-component-contract \
         install uninstall test lint clean package-raw stage-raw \
-        test-raw-package test-npm-package \
+        test-raw-package test-npm-package test-toon-cleanup \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
         cosh-extension-install cosh-extension-uninstall \
@@ -53,15 +64,18 @@ NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
         codex-install codex-uninstall \
         opencode-install opencode-uninstall \
         qwencode-install qwencode-uninstall \
+        qwenpaw-install qwenpaw-uninstall \
         setup help \
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
-        test-hooks
+        python-wheel test-python-runtime agentscope-wheel \
+        test-agentscope-integration test-hooks test-claude-code-detect \
+        test-hook-parity
 
 # Default target
 all: build
 
 # Build both projects
-build: build-tokenless build-toon build-openclaw-plugin
+build: build-tokenless build-openclaw-plugin build-dsh-plugin
 
 build-tokenless:
 	@echo "==> Building tokenless + rtk..."
@@ -69,12 +83,10 @@ build-tokenless:
 	cargo build --release
 	cargo build --release --manifest-path third_party/rtk/Cargo.toml
 
-build-toon:
-	@echo "==> Installing toon binary (v$(TOON_VER))..."
-	cargo install toon-format --version $(TOON_VER) --locked
-
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
+
+stamp-python-packages: $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
 
 generate-component-contract: $(COMPONENT_CONTRACT)
 
@@ -93,6 +105,10 @@ $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.js
 
 $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json: $(ADAPTER_SRC_DIR)/openclaw/openclaw.plugin.json.in Cargo.toml
 	@echo "==> Generating openclaw/openclaw.plugin.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/dsh/package.json: $(ADAPTER_SRC_DIR)/dsh/package.json.in Cargo.toml
+	@echo "==> Generating dsh/package.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
 $(ADAPTER_SRC_DIR)/hermes/plugin.yaml: $(ADAPTER_SRC_DIR)/hermes/plugin.yaml.in Cargo.toml
@@ -117,6 +133,19 @@ $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json: \
 	@echo "==> Generating qwencode/qwen-extension.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
+$(ADAPTER_SRC_DIR)/qwenpaw/plugin.json: $(ADAPTER_SRC_DIR)/qwenpaw/plugin.json.in Cargo.toml
+	@echo "==> Generating qwenpaw/plugin.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt: $(ADAPTER_SRC_DIR)/qwenpaw/requirements.txt.in Cargo.toml
+	@echo "==> Generating qwenpaw/requirements.txt (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml: \
+    $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml.in Cargo.toml
+	@echo "==> Generating agentscope/pyproject.toml (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
 # Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
 # Produces $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js, which install-adapter-resources
 # then copies into $(SHARE_DIR)/openclaw/dist/index.js. This file is referenced by
@@ -124,10 +153,23 @@ $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json: \
 # for `openclaw plugins install` to succeed.
 build-openclaw-plugin: stamp-adapter-templates
 	@echo "==> Building tokenless OpenClaw plugin..."
-	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund --package-lock=false
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
 	@test -f $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
 	    || { echo "ERROR: $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js was not produced"; exit 1; }
+
+# The dsh entry is deliberately plain ESM and has no build-time dependency on
+# the dsh SDK.  Keep this target as an explicit bundle validation seam so raw,
+# RPM, and npm packaging all fail before shipping an incomplete native plugin.
+build-dsh-plugin: stamp-adapter-templates
+	@echo "==> Validating native dsh plugin bundle..."
+	@test -f $(DSH_PLUGIN_SRC_DIR)/package.json \
+	    || { echo "ERROR: $(DSH_PLUGIN_SRC_DIR)/package.json is missing"; exit 1; }
+	@test -f $(DSH_PLUGIN_SRC_DIR)/cordis.patch.yml \
+	    || { echo "ERROR: $(DSH_PLUGIN_SRC_DIR)/cordis.patch.yml is missing"; exit 1; }
+	@test -f $(DSH_PLUGIN_SRC_DIR)/dist/index.js \
+	    || { echo "ERROR: $(DSH_PLUGIN_SRC_DIR)/dist/index.js is missing"; exit 1; }
+	@cd $(DSH_PLUGIN_SRC_DIR) && node --input-type=module -e "import('./dist/index.js').then((plugin) => { if (typeof plugin.apply !== 'function' || plugin.name !== 'anolisa-tokenless') process.exit(1) })"
 
 # Install binaries + adapter resources per FHS spec.
 install: build install-binaries install-helpers install-adapter-resources install-cosh-extension
@@ -137,26 +179,48 @@ install-binaries:
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -p -m 0755 target/release/tokenless $(DESTDIR)$(BINDIR)/
 
+# Cleanup for the standalone toon binary shipped by older releases (TOON is
+# now linked into tokenless via the toon-format library). $(LIBEXECDIR) is a
+# Tokenless-owned directory, so its toon helper is always removed; the
+# $(BINDIR)/toon entry is removed only when it is a symlink pointing into a
+# Tokenless helper layout, so an unrelated user-installed `toon` executable
+# is preserved.
+define clean-stale-toon
+rm -f $(DESTDIR)$(LIBEXECDIR)/toon
+if [ -L "$(DESTDIR)$(BINDIR)/toon" ]; then \
+    case "$$(readlink "$(DESTDIR)$(BINDIR)/toon")" in \
+        */anolisa/tokenless/toon|*/anolisa/libexec/tokenless/toon) \
+            rm -f "$(DESTDIR)$(BINDIR)/toon" ;; \
+    esac; \
+fi
+endef
+
 install-helpers:
 	@echo "==> Installing helpers to $(DESTDIR)$(LIBEXECDIR)..."
 	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
 	install -p -m 0755 third_party/rtk/target/release/rtk $(DESTDIR)$(LIBEXECDIR)/
-	install -p -m 0755 $(HOME)/.cargo/bin/toon $(DESTDIR)$(LIBEXECDIR)/
 	ln -sf $(LIBEXECDIR)/rtk $(DESTDIR)$(BINDIR)/rtk
-	ln -sf $(LIBEXECDIR)/toon $(DESTDIR)$(BINDIR)/toon
+	$(clean-stale-toon)
 
-install-adapter-resources: build-openclaw-plugin
+install-adapter-resources: build-openclaw-plugin build-dsh-plugin
 	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
 	rm -rf $(DESTDIR)$(SHARE_DIR)
 	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
 	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
 	# Strip build-only artifacts from the installed plugin tree.
+	rm -rf $(DESTDIR)$(SHARE_DIR)/agentscope
 	rm -rf $(DESTDIR)$(SHARE_DIR)/openclaw/node_modules
 	rm -f  $(DESTDIR)$(SHARE_DIR)/openclaw/package-lock.json
 	find $(DESTDIR)$(SHARE_DIR) -name '*.in' -delete
 	find $(DESTDIR)$(SHARE_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
 	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
 	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js missing after install-adapter-resources"; exit 1; }
+	@test -f $(DESTDIR)$(SHARE_DIR)/dsh/package.json \
+	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/dsh/package.json missing after install-adapter-resources"; exit 1; }
+	@test -f $(DESTDIR)$(SHARE_DIR)/dsh/cordis.patch.yml \
+	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/dsh/cordis.patch.yml missing after install-adapter-resources"; exit 1; }
+	@test -f $(DESTDIR)$(SHARE_DIR)/dsh/dist/index.js \
+	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/dsh/dist/index.js missing after install-adapter-resources"; exit 1; }
 
 install-cosh-extension:
 	@echo "==> Installing tokenless cosh extension to $(DESTDIR)$(COSH_EXTENSION_DIR)..."
@@ -170,13 +234,14 @@ install-cosh-extension:
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/tokenless
 	rm -f $(DESTDIR)$(LIBEXECDIR)/rtk
-	rm -f $(DESTDIR)$(LIBEXECDIR)/toon
+	$(clean-stale-toon)
 	rm -rf $(DESTDIR)$(SHARE_DIR)
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks test-integration test-adapters \
-      test-raw-package test-npm-package
+test: test-tokenless test-hooks test-integration test-hook-parity \
+      test-adapters test-claude-code-detect test-raw-package \
+      test-npm-package test-toon-cleanup
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -188,33 +253,93 @@ test-hooks:
 	bash tests/test-tool-ready-readable-fixer.sh
 	bash tests/run-all-tests.sh
 
+test-claude-code-detect:
+	@echo "==> Testing claude-code detect.sh first-run retry..."
+	bash tests/test-claude-code-detect-retry.sh
+
 test-integration:
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
+	python3 tests/test_codex_response_diagnostics.py
+	python3 tests/test_hermes_lifecycle.py
 	python3 tests/test_compress_schema_hook.py
+	python3 tests/test_hook_contract.py
 	python3 tests/test_hermes_plugin_import.py
+	python3 tests/test_agentscope_middleware.py
+	python3 tests/test_agentscope_v1.py
 	python3 tests/test_rewrite_hook.py
+	python3 tests/test_cosh_extension_matcher.py
 	python3 tests/test_resolve_agent_id.py
+	python3 tests/test_release_regression_probe.py
+	python3 tests/test_qwenpaw_plugin.py
 
-test-adapters: build-openclaw-plugin
-	@echo "==> Testing openclaw RTK context propagation..."
-	node --test tests/test-openclaw-rtk-context.mjs
+# Protocol v2 Common Hook parity: replay the contract corpus through the
+# current hooks and real debug binary, then compare with the v2 goldens.
+test-hook-parity:
+	@echo "==> Testing hook golden parity (real binary)..."
+	cargo build -p tokenless-cli
+	python3 tests/test_hook_parity.py
+
+test-adapters: build-openclaw-plugin build-dsh-plugin
+	@echo "==> Testing openclaw Protocol v2 lifecycle..."
+	node --test tests/test-openclaw-lifecycle-v2.mjs
+	@echo "==> Testing native dsh adapter bundle..."
+	bash tests/test-dsh-adapter.sh
 	@echo "==> Testing qoder adapter installer..."
 	bash tests/test-qoder-adapter-install.sh
 	@echo "==> Testing OpenCode adapter..."
 	bash tests/test-opencode-adapter-install.sh
 	node tests/test-opencode-plugin.mjs
+	@echo "==> Testing QwenPaw adapter installer..."
+	bash tests/test-qwenpaw-adapter-install.sh
 
-# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk,toon} files
+# Build the abi3 extension with unwind semantics so a Rust panic cannot abort
+# the embedding Python interpreter. The wheel remains platform-specific, but
+# one build supports CPython 3.11 and later on that platform.
+python-wheel:
+	@echo "==> Building Tokenless Python wheel..."
+	@if [ "$(PYTHON_RTK_BINARY)" = "$(CURDIR)/third_party/rtk/target/release/rtk" ]; then \
+		just setup-rtk; \
+		cargo build --release --manifest-path third_party/rtk/Cargo.toml; \
+	fi
+	@test -x "$(PYTHON_RTK_BINARY)" || { \
+		echo "RTK binary is missing or not executable: $(PYTHON_RTK_BINARY)" >&2; \
+		exit 1; \
+	}
+	install -d -m 0755 $(PYTHON_WHEEL_DIR)
+	rm -f $(PYTHON_WHEEL_DIR)/anolisa_tokenless-*.whl
+	@set -e; \
+		install -d -m 0755 $(PYTHON_RTK_PACKAGE_DIR); \
+		install -p -m 0755 $(PYTHON_RTK_BINARY) $(PYTHON_RTK_PACKAGE_DIR)/rtk; \
+		trap 'rm -f $(PYTHON_RTK_PACKAGE_DIR)/rtk' EXIT; \
+		cd $(PYTHON_RUNTIME_DIR); \
+		$(MATURIN) build --profile python-release --interpreter python3 \
+			--compatibility pypi --auditwheel check \
+			--out $(PYTHON_WHEEL_DIR)
+
+test-python-runtime: python-wheel
+	@bash tests/test-python-runtime.sh
+
+agentscope-wheel: stamp-python-packages
+	@echo "==> Building Tokenless AgentScope integration wheel..."
+	install -d -m 0755 $(PYTHON_WHEEL_DIR)
+	rm -f $(PYTHON_WHEEL_DIR)/anolisa_tokenless_agentscope-*.whl
+	$(PYPROJECT_BUILD) --wheel --outdir $(PYTHON_WHEEL_DIR) \
+		$(AGENTSCOPE_PACKAGE_DIR)
+
+test-agentscope-integration: python-wheel agentscope-wheel
+	@bash tests/test-agentscope-integration.sh
+
+# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk} files
 # into the portable raw-package contract maintained by this component.
 package-raw:
 	@$(MAKE) -B stamp-adapter-templates
-	@$(MAKE) build-openclaw-plugin
+	@$(MAKE) build-openclaw-plugin build-dsh-plugin
 	@./packaging/raw/package.sh package
 
 stage-raw:
 	@$(MAKE) -B stamp-adapter-templates
-	@$(MAKE) build-openclaw-plugin
+	@$(MAKE) build-openclaw-plugin build-dsh-plugin
 	@./packaging/raw/package.sh stage
 
 test-raw-package:
@@ -222,6 +347,9 @@ test-raw-package:
 
 test-npm-package:
 	@bash tests/test-package-npm-prebuilt.sh
+
+test-toon-cleanup:
+	@bash tests/test-toon-cleanup.sh
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
@@ -239,8 +367,9 @@ clean:
 	cargo clean
 	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
-	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
+	rm -rf $(ADAPTER_SRC_DIR)/agentscope
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
+	rm -f  $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
 
 # Create source tarball (excludes build artifacts).
 # `clean` must finish before the generated contract and adapter manifests
@@ -274,9 +403,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install opencode-install qwencode-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install opencode-install qwencode-install qwenpaw-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall qwenpaw-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -346,7 +475,9 @@ claude-code-install:
 	@echo "==> Installing Claude Code plugin..."
 	@# detect.sh exits 1 (installable) or 2 (missing prereq); we tolerate both
 	@# and let install.sh make the final call (it gracefully no-ops without claude CLI).
-	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
+	@# This pre-install probe runs on a steady-state machine and its output is
+	@# informational only, so skip detect.sh's first-run settling retries.
+	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code TOKENLESS_DETECT_RETRIES=0 bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
 	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/install.sh
 
 claude-code-uninstall:
@@ -389,6 +520,18 @@ qwencode-uninstall:
 	@echo "==> Uninstalling Qwen Code plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=qwencode bash $(QWENCODE_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- QwenPaw ---
+QWENPAW_ADAPTER_DIR = $(SHARE_DIR)/qwenpaw
+
+qwenpaw-install:
+	@echo "==> Installing QwenPaw plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/install.sh
+
+qwenpaw-uninstall:
+	@echo "==> Uninstalling QwenPaw plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=qwenpaw bash $(QWENPAW_ADAPTER_DIR)/scripts/uninstall.sh
+
 # One-step setup: build + install + all adapters
 setup: install adapter-install
 	@echo ""
@@ -398,29 +541,26 @@ setup: install adapter-install
 	@echo "  Binaries (FHS):"
 	@echo "    tokenless -> $(BIN_DIR)/tokenless"
 	@echo "    rtk       -> $(LIB_DIR)/rtk"
-	@echo "    toon      -> $(LIB_DIR)/toon"
 	@echo "  Extension (cosh):"
 	@echo "    $(COSH_EXTENSION_DIR)/"
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode"
+	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode, qwenpaw"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
 	@echo "  rtk --version"
-	@echo "  toon --version"
 	@echo "  make adapter-scan"
 
 # --- npm Packaging ---
 # Preserve the convenient native entry point while keeping package-npm.js a
 # pure validator/assembler.
-prepare-npm-native-binaries: build-tokenless build-toon
+prepare-npm-native-binaries: build-tokenless
 	@install -d -m 0755 "$(NATIVE_NPM_INPUT_DIR)"
 	@install -p -m 0755 \
 		target/release/tokenless \
 		third_party/rtk/target/release/rtk \
-		"$(HOME)/.cargo/bin/toon" \
 		"$(NATIVE_NPM_INPUT_DIR)/"
 
 # Build and package the current host.
@@ -466,9 +606,8 @@ help:
 	@echo "Token-Less Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build             Build tokenless + rtk + toon + openclaw plugin"
+	@echo "  build             Build tokenless + rtk + openclaw plugin"
 	@echo "  build-tokenless   Build tokenless + rtk (via justfile)"
-	@echo "  build-toon        Install toon binary via cargo install toon-format"
 	@echo "  build-openclaw-plugin  Compile OpenClaw plugin TS -> dist/index.js"
 	@echo "  install           Install binaries + adapter to FHS paths"
 	@echo "  uninstall         Remove installed files"
@@ -476,8 +615,11 @@ help:
 	@echo "  lint              Run clippy checks"
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
+	@echo "  python-wheel      Build the native anolisa-tokenless wheel"
+	@echo "  agentscope-wheel  Build the AgentScope integration wheel"
+	@echo "  test-agentscope-integration  Test the integration with supported AgentScope versions"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+opencode+qwencode)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+opencode+qwencode+qwenpaw)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -495,6 +637,8 @@ help:
 	@echo "  opencode-uninstall Unregister OpenCode local plugin"
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
+	@echo "  qwenpaw-install   Install QwenPaw plugin via qwenpaw CLI"
+	@echo "  qwenpaw-uninstall Uninstall QwenPaw plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
 	@echo "  npm-package       Build and package the current host"
 	@echo "  npm-package-all   Package target/npm-prebuilt target directories"
@@ -511,7 +655,7 @@ help:
 	@echo "  LIBEXECDIR       Helper binary install path"
 	@echo "  SHARE_DIR        Adapter resources path"
 	@echo "  COSH_EXTENSION_DIR  Cosh extension path"
-	@echo "  BIN_DIR          Directory containing prebuilt tokenless, rtk, and toon"
+	@echo "  BIN_DIR          Directory containing prebuilt tokenless and rtk"
 	@echo "  TARGET_OS        Raw target OS: linux or macos"
 	@echo "  TARGET_ARCH      Raw target arch: x86_64 or aarch64"
 	@echo "  OUTPUT_DIR       Raw artifact output directory (default: target/raw)"

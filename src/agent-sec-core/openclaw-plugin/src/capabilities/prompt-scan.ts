@@ -18,7 +18,8 @@ import { buildTraceContext, callAgentSecCli, envFlagEnabled } from "../utils.js"
  *   - fast: lightweight heuristics, lower latency.
  *   - standard: balanced detection (default).
  *   - strict: not implemented yet; currently behaves the same as standard.
- * CLI: agent-sec-cli scan-prompt --text <prompt> --mode <fast|standard|strict> --format json --source user_input
+ * CLI: agent-sec-cli scan-prompt --mode <fast|standard|strict> --format json --source user_input
+ *      (prompt text is piped via stdin to avoid /proc/cmdline leak & ARG_MAX)
  */
 export const promptScan: SecurityCapability = {
   id: "prompt-scan",
@@ -41,9 +42,11 @@ export const promptScan: SecurityCapability = {
         api.logger.info(
           `[prompt-scan] scan mode configured: raw=${JSON.stringify(rawScanMode)}, effective=${JSON.stringify(validScanMode)}`,
         );
+        // Pipe prompt via stdin (not --text argv) to avoid /proc/<pid>/cmdline
+        // exposure and ARG_MAX limits — mirrors codex/hermes/qoder/qwen.
         const result = await callAgentSecCli(
-          ["scan-prompt", "--text", text, "--mode", validScanMode, "--format", "json", "--source", "user_input"],
-          { timeout: 10000, traceContext: buildTraceContext(event, ctx) },
+          ["scan-prompt", "--mode", validScanMode, "--format", "json", "--source", "user_input"],
+          { timeout: 10000, stdin: text, traceContext: buildTraceContext(event, ctx) },
         );
 
         if (result.exitCode !== 0) {

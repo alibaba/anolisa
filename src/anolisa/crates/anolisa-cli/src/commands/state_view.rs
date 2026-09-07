@@ -176,6 +176,34 @@ impl StateView {
         self.exact_component_root(component).is_some()
     }
 
+    /// Whether any visible root records an object of any kind under `name`,
+    /// active or quarantined.
+    ///
+    /// Lifecycle target resolution pins such names literally: a non-component
+    /// record (e.g. a legacy capability) is exact local state, and the
+    /// owning command's migration guidance must win over an identity
+    /// rejection for a name local state demonstrably knows.
+    pub(crate) fn has_exact_object(&self, name: &str) -> bool {
+        self.visible_roots.iter().any(|root| {
+            root.state
+                .installations
+                .iter()
+                .any(|installation| installation.name == name)
+                || root
+                    .state
+                    .quarantined
+                    .iter()
+                    .any(|entry| entry.record.name == name)
+                // Dropped legacy capability names still get their dedicated
+                // migration guidance from the owning command.
+                || root
+                    .state
+                    .dropped_capabilities
+                    .iter()
+                    .any(|dropped| dropped == name)
+        })
+    }
+
     pub(crate) fn resolve_mutation_component_identity(
         &self,
         command: &str,

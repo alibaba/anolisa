@@ -96,7 +96,7 @@ mod tests {
             "must not read $HOME as a fallback",
         );
         if !h.is_empty() {
-            assert!(h.starts_with('/'), "passwd home must be absolute: {}", h);
+            assert!(h.starts_with('/'), "passwd home must be absolute: {h}");
         }
         // Restore previous HOME (or unset it) so we don't pollute sibling tests.
         unsafe {

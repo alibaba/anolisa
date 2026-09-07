@@ -1,9 +1,7 @@
-use std::fs::File;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use super::temp_output::TempOutput;
 use super::{is_sensitive_target, strip_ansi};
 
 const DEFAULT_STAGE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -87,33 +85,38 @@ fn run_plan(
     config: &ReadonlyPipelineConfig,
 ) -> Result<ReadonlyPipelineOutput, ReadonlyPipelineError> {
     let deadline = Instant::now() + config.total_timeout;
-    let mut cleanup = Vec::new();
-    let mut input_path: Option<PathBuf> = None;
+    let mut input: Option<TempOutput> = None;
     let mut final_exit_code = None;
     let mut final_stderr = String::new();
 
-    for (index, stage) in plan.stages.iter().enumerate() {
+    for stage in &plan.stages {
         if Instant::now() >= deadline {
-            cleanup_paths(&cleanup);
             return Err(error("pipeline-timeout", "readonly pipeline timed out"));
         }
 
-        let stdout_path = temp_path("stdout", index);
-        let stderr_path = temp_path("stderr", index);
-        cleanup.push(stdout_path.clone());
-        cleanup.push(stderr_path.clone());
-
-        let stdout = File::create(&stdout_path)
+        let stdout = TempOutput::new()
             .map_err(|err| error("executor-io", format!("create stdout: {err}")))?;
-        let stderr = File::create(&stderr_path)
+        let mut stderr = TempOutput::new()
             .map_err(|err| error("executor-io", format!("create stderr: {err}")))?;
+        let stdin = match input.as_mut() {
+            Some(previous) => previous
+                .rewind()
+                .and_then(|()| previous.try_clone())
+                .map(Stdio::from)
+                .map_err(|err| error("executor-io", format!("open stdin: {err}")))?,
+            None => Stdio::null(),
+        };
 
         let mut command = Command::new(&stage.argv[0]);
         command
             .args(&stage.argv[1..])
-            .stdin(stdin_for_stage(input_path.as_deref())?)
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+            .stdin(stdin)
+            .stdout(Stdio::from(stdout.try_clone().map_err(|err| {
+                error("executor-io", format!("create stdout: {err}"))
+            })?))
+            .stderr(Stdio::from(stderr.try_clone().map_err(|err| {
+                error("executor-io", format!("create stderr: {err}"))
+            })?));
 
         let mut child = command
             .spawn()
@@ -122,42 +125,29 @@ fn run_plan(
             + config
                 .stage_timeout
                 .min(deadline.saturating_duration_since(Instant::now()));
-        match wait_child_with_deadline(&mut child, stage_deadline, stage.argv.join(" ")) {
-            Ok(code) => final_exit_code = code,
-            Err(err) => {
-                cleanup_paths(&cleanup);
-                return Err(err);
-            }
-        }
+        final_exit_code =
+            wait_child_with_deadline(&mut child, stage_deadline, stage.argv.join(" "))?;
 
         final_stderr = read_limited_clean(
-            &stderr_path,
+            &mut stderr,
             config.output_limit_bytes,
             config.output_limit_lines,
         )?;
-        input_path = Some(stdout_path);
+        input = Some(stdout);
     }
 
-    let stdout = input_path
-        .as_deref()
-        .map(|path| read_limited_clean(path, config.output_limit_bytes, config.output_limit_lines))
+    let stdout = input
+        .as_mut()
+        .map(|output| {
+            read_limited_clean(output, config.output_limit_bytes, config.output_limit_lines)
+        })
         .transpose()?
         .unwrap_or_default();
-    cleanup_paths(&cleanup);
     Ok(ReadonlyPipelineOutput {
         exit_code: final_exit_code,
         stdout,
         stderr: final_stderr,
     })
-}
-
-fn stdin_for_stage(path: Option<&Path>) -> Result<Stdio, ReadonlyPipelineError> {
-    match path {
-        Some(path) => File::open(path)
-            .map(Stdio::from)
-            .map_err(|err| error("executor-io", format!("open stdin: {err}"))),
-        None => Ok(Stdio::null()),
-    }
 }
 
 fn parse_pipeline(command: &str) -> Result<Vec<Vec<String>>, ReadonlyPipelineError> {
@@ -277,8 +267,7 @@ fn push_token(tokens: &mut Vec<String>, token: &mut String) {
 }
 
 /// Waits for a spawned child, killing it once `stage_deadline` passes.
-/// Shared by the readonly pipeline and compound executors; the caller
-/// owns any temp-file cleanup on the error path.
+/// Shared by the readonly pipeline and compound executors.
 pub(crate) fn wait_child_with_deadline(
     child: &mut std::process::Child,
     stage_deadline: Instant,
@@ -315,30 +304,14 @@ fn exit_code_with_signal(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or_default()
 }
 
-// Process-wide sequence keeping temp paths unique across concurrent
-// runs: wall-clock nanos can repeat between parallel callers (test
-// threads, sibling compounds), and a collided path lets one run's
-// cleanup delete a file another run is about to read.
-static TEMP_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn temp_path(kind: &str, stage: usize) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let sequence = TEMP_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "cosh-readonly-pipeline-{}-{nanos}-{sequence}-{stage}-{kind}",
-        std::process::id()
-    ))
-}
-
-pub(crate) fn read_limited_clean(
-    path: &Path,
+fn read_limited_clean(
+    output: &mut TempOutput,
     byte_limit: usize,
     line_limit: usize,
 ) -> Result<String, ReadonlyPipelineError> {
-    let bytes = std::fs::read(path).map_err(|err| error("executor-io", err.to_string()))?;
+    let bytes = output
+        .read_all()
+        .map_err(|err| error("executor-io", err.to_string()))?;
     Ok(limit_clean_text(&bytes, false, byte_limit, line_limit))
 }
 
@@ -364,12 +337,6 @@ pub(crate) fn limit_clean_text(
         text.push_str("\n<truncated>");
     }
     text
-}
-
-pub(crate) fn cleanup_paths(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 pub(crate) fn error(reason: &'static str, detail: impl Into<String>) -> ReadonlyPipelineError {
@@ -436,5 +403,68 @@ mod tests {
         .expect("pipeline output");
         assert!(output.stdout.lines().count() <= 2, "{}", output.stdout);
         assert!(output.stdout.contains("<truncated>"), "{}", output.stdout);
+    }
+
+    // Pipeline stage temp output must never appear at a predictable path
+    // in the shared temp dir, and attacker-controlled bytes must never be
+    // read back as pipeline output. The attacker polls the temp dir for
+    // this process's historical `cosh-readonly-pipeline-<pid>-*` files;
+    // on sighting one it swaps the file for a symlink to a sentinel
+    // victim, which a path-based read-back would follow.
+    #[test]
+    fn readonly_pipeline_temp_output_is_not_observable_or_swappable() {
+        use super::super::temp_output::test_support::SwapAttacker;
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+
+        let temp_dir = std::env::temp_dir();
+        // Zero sightings only proves something when the temp dir is
+        // actually enumerable.
+        std::fs::read_dir(&temp_dir).expect("temp dir must be enumerable");
+        // NamedTempFile deletes the victim on drop, even when an assertion
+        // panics mid-test.
+        let mut victim_file = tempfile::NamedTempFile::new().expect("victim file");
+        victim_file
+            .write_all(b"READONLY_PIPELINE_INJECTED")
+            .expect("write victim");
+        victim_file.flush().expect("flush victim");
+
+        let attacker = SwapAttacker::for_process(
+            "cosh-readonly-pipeline",
+            &temp_dir,
+            victim_file.path().to_path_buf(),
+        );
+
+        let mut injected = false;
+        for _ in 0..10 {
+            let output = run_readonly_pipeline(
+                "df -h | wc -l",
+                &ReadonlyPipelineConfig {
+                    output_limit_bytes: 4096,
+                    ..ReadonlyPipelineConfig::default()
+                },
+            )
+            .expect("pipeline run");
+            if output.stdout.contains("READONLY_PIPELINE_INJECTED")
+                || output.stderr.contains("READONLY_PIPELINE_INJECTED")
+            {
+                injected = true;
+            }
+        }
+        let enum_errors = attacker.enum_errors.load(Ordering::Relaxed);
+        let sightings = attacker.sightings.load(Ordering::Relaxed);
+        let swaps = attacker.swaps.load(Ordering::Relaxed);
+        attacker.finish();
+
+        assert_eq!(enum_errors, 0, "temp dir enumeration must not fail");
+        assert!(
+            !injected,
+            "attacker-controlled content was read back as pipeline output"
+        );
+        assert_eq!(
+            sightings, 0,
+            "pipeline temp files must never appear at predictable paths \
+             (symlink swaps succeeded: {swaps})"
+        );
     }
 }

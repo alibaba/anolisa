@@ -231,7 +231,21 @@ impl LlmClient {
             trimmed
         };
 
-        // Find outermost { ... } or [ ... ]
+        // Array-rooted responses (e.g. semantic search ranking): the outer
+        // bracket pair is the JSON document itself. The object path below
+        // would otherwise drop the brackets and produce an unparseable
+        // comma-separated list of objects.
+        if stripped.starts_with('[') {
+            if let Some(end) = stripped.rfind(']') {
+                if end > 0 {
+                    return stripped[..=end].to_string();
+                }
+            }
+            return stripped.to_string();
+        }
+
+        // Object-rooted responses (or free text containing an object): use
+        // the outermost { ... } span.
         if let Some(start) = stripped.find('{') {
             if let Some(end) = stripped.rfind('}') {
                 if end > start {
@@ -239,6 +253,8 @@ impl LlmClient {
                 }
             }
         }
+
+        // Embedded array in otherwise text-only content (e.g. "text [1,2]").
         if let Some(start) = stripped.find('[') {
             if let Some(end) = stripped.rfind(']') {
                 if end > start {
@@ -246,7 +262,6 @@ impl LlmClient {
                 }
             }
         }
-
         stripped.to_string()
     }
 
@@ -491,6 +506,10 @@ mod tests {
             "{\"a\":1}"
         );
         assert_eq!(LlmClient::extract_json("text [1,2] tail"), "[1,2]");
+        assert_eq!(
+            LlmClient::extract_json("[{\"session_id\":\"a\"},{\"session_id\":\"b\"}]"),
+            "[{\"session_id\":\"a\"},{\"session_id\":\"b\"}]"
+        );
         assert_eq!(LlmClient::extract_json(" no json "), "no json");
     }
 

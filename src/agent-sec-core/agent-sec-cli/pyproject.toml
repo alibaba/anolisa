@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "agent-sec-cli"
-version = "0.10.0"
+version = "0.12.0"
 description = "Agent Security Core CLI - System hardening, sandbox isolation, and asset integrity verification for AI Agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -27,20 +27,14 @@ classifiers = [
 ]
 
 dependencies = [
-    "cryptography>=42.0",
-    "modelscope>=1.10",
+    "cryptography>=50.0.1",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "regex>=2026.4.4",
     "sqlalchemy>=2.0",
     "textual>=0.80",
-    "torch>=2.0",
-    "transformers>=4.40",
     "typer>=0.9.0",
 ]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
 
 [project.optional-dependencies]
 pgpy = ["pgpy>=0.5"]
@@ -74,7 +68,6 @@ include = [
     "src/agent_sec_cli/asset_verify/config.conf",
     "src/agent_sec_cli/asset_verify/trusted-keys/*.asc",
     "src/agent_sec_cli/code_scanner/rules/**/*.yaml",
-    "src/agent_sec_cli/prompt_scanner/rules/*.yaml",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/NOTICE",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/rules/*.yaml",
     "src/agent_sec_cli/skill_ledger/analyze.schema.json",
@@ -163,11 +156,6 @@ profile = "black"
 line_length = 80
 known_first_party = ["agent_sec_cli"]
 extend_skip_glob = ["dev-tools/backend-skill/templates/*"]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"

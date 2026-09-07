@@ -4,10 +4,13 @@ mod capture_bridge;
 mod card_capture;
 mod draft_editor;
 mod event_parser;
+mod event_sender;
 
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
 mod mode;
+mod path_prompt_candidate;
+mod prompt_epoch;
 mod pty;
 mod relay;
 mod relay_action;
@@ -18,42 +21,23 @@ pub(crate) use event_parser::redact_extension_setting_value;
 pub(crate) use generation::UserPtyInputGeneration;
 pub(crate) use mode::{update_input_mode, update_locked_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
+pub(crate) use prompt_epoch::PromptEpochExchange;
 pub(crate) use pty::{
     foreground_process_group_for_fds, process_group_exists, set_pty_winsize,
     signal_foreground_process_group, signal_process_group, signal_process_group_id, write_all_pty,
 };
 pub use relay_action::RawRelayAction;
-pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
+pub(crate) use spawn::{
+    spawn_raw_action_relay, spawn_raw_action_relay_with_wake, spawn_raw_input_relay,
+    spawn_raw_input_relay_with_wake, RawInputShellRoute, ZshPathPromptBuffering,
+};
 
 pub(super) const CTRL_C: u8 = 0x03;
 pub(super) const CTRL_U: u8 = 0x15;
 pub(super) const ESC: u8 = 0x1b;
 
-/// Shared "bash is sitting at its primary prompt" gate (#1721 D16).
-///
-/// Set by the output side when the shell marker emits `prompt_ready` (PS1
-/// only); cleared whenever user bytes carrying a line submit reach the PTY
-/// or a command starts. Explicit slash/`??` candidates may only open while
-/// the gate is up, so PS2 continuations, heredocs, and running commands keep
-/// byte passthrough (fail-closed: a lost signal disables capture).
-///
-/// Ordering: `Relaxed` is sufficient because the gate is a standalone
-/// boolean latch — readers only branch on the flag and never rely on it to
-/// order access to other shared state; a stale read degrades to the
-/// fail-closed passthrough behavior.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct MainPromptGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
-
-impl MainPromptGate {
-    pub(crate) fn set_at_prompt(&self, at_prompt: bool) {
-        self.0
-            .store(at_prompt, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(crate) fn is_at_prompt(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
+mod main_prompt_gate;
+pub(crate) use main_prompt_gate::MainPromptGate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
@@ -61,8 +45,8 @@ pub(crate) enum RawInputEvent {
         empty: bool,
     },
     /// User bytes the relay wrote to the PTY: the write generation plus how
-    /// many line submissions (accept-line CR/LF) the write carried. Anchors
-    /// prompt replay state so real user input expires stale replays.
+    /// many recognized line submissions the write carried. Anchors prompt
+    /// replay state so real user input expires stale replays.
     PtyUserWrite {
         generation: u64,
         line_submits: usize,
@@ -82,12 +66,34 @@ pub(crate) enum RawInputEvent {
         text: String,
     },
     PromptGhostDismissed,
+    /// Shift+Tab changed whether the Enhanced session may route input to AI.
+    AssistanceToggled,
     PromptGhostIntercept {
         input: String,
         suggestion_id: Option<String>,
     },
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
+    UserInterceptWithRouting {
+        input: String,
+        reason: InterceptReason,
+        cwd: String,
+        sensitive: bool,
+    },
+    /// A missing-path prompt withheld from shell execution, so the runtime
+    /// must acknowledge it on a stable UI surface.
+    NativePathPromptIntercept {
+        input: String,
+        cwd: String,
+        sensitive: bool,
+    },
+    /// Delivers a queued control only after all preceding shell submissions
+    /// in the same input batch reach their primary prompts.
+    UserInterceptAtPrompt {
+        input: String,
+        reason: InterceptReason,
+        pending_submits: usize,
+    },
     /// A whitelisted soft-newline shortcut was observed on a passthrough
     /// path (candidate buffer inactive). Observe-only: the bytes were still
     /// relayed to the shell unchanged; downstream may surface a one-time
@@ -190,8 +196,7 @@ pub(crate) enum RawInputEvent {
 mod tests {
     use super::event_parser::{
         candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
-        redact_extension_setting_value, starts_native_intercept_candidate, CandidateLineBuffer,
-        CandidateLineStatus, NativeLineState,
+        redact_extension_setting_value, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
     };
     use super::relay::ExplicitExitTracker;
     use super::soft_newline::render_soft_newline_markers;
@@ -540,6 +545,39 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_prefix_hint_lists_all_matching_candidates() {
+        assert_eq!(
+            candidate_inline_hint("/sta"),
+            Some("/status · /stats".to_string())
+        );
+        assert_eq!(
+            candidate_inline_hint("/st"),
+            Some("/status · /stats".to_string())
+        );
+        assert_eq!(
+            candidate_inline_hint("/s"),
+            Some("/status · /stats · /session · /skills".to_string())
+        );
+        assert_eq!(
+            candidate_inline_hint("/h"),
+            Some("/health · /hooks".to_string())
+        );
+        // `/mode` has two specs but deduplicates to one candidate name.
+        assert_eq!(
+            candidate_inline_hint("/m"),
+            Some("/mode · /mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_command_token_excludes_itself_from_hint() {
+        // `/stats` is complete: no other visible command shares the prefix.
+        assert_eq!(candidate_inline_hint("/stats"), None);
+        // `/status` is complete and no sibling extends it either.
+        assert_eq!(candidate_inline_hint("/status"), None);
+    }
+
+    #[test]
     fn extension_setting_values_are_redacted_from_candidate_echo() {
         let command = b"/extensions settings set fixture token secret-value --scope user";
         let redacted = redact_extension_setting_value(command);
@@ -565,21 +603,6 @@ mod tests {
     fn other_slash_values_are_not_redacted() {
         let command = b"/extensions settings get fixture token";
         assert_eq!(redact_extension_setting_value(command), command);
-    }
-
-    #[test]
-    fn native_slash_candidate_only_starts_at_line_start() {
-        let mut state = NativeLineState::default();
-
-        assert!(starts_native_intercept_candidate(b"/", &state));
-        assert!(starts_native_intercept_candidate(b"?? hello", &state));
-
-        state.observe_shell_bytes(b"vim .");
-        assert!(!starts_native_intercept_candidate(b"/", &state));
-        assert!(!starts_native_intercept_candidate(b"?? hello", &state));
-
-        state.observe_shell_bytes(b"\n");
-        assert!(starts_native_intercept_candidate(b"/mode", &state));
     }
 
     #[test]

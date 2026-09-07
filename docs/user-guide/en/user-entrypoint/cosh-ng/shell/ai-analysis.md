@@ -2,11 +2,16 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/ai-analysis.md)
 
-cosh can review command failures and useful diagnostic output, then suggest a next step or start an Agent analysis. The analysis mode controls proactive help; an explicit Agent request is still available in every mode.
+Enhanced integration can review command failures and useful diagnostic output,
+then suggest a next step or start an Agent analysis. Both Assisted (`◇ `) and
+Shell-only (`◌ `) can provide post-command insights. Only Assisted performs
+pre-command natural-language routing. Native has no command events, insights,
+or Agent request routing.
 
 ## Choose a mode
 
-Set the mode at runtime with `/mode analysis <mode>` or in `shell.analysis_mode`.
+Enhanced is the default integration. Set the analysis mode at runtime with
+`/mode analysis <mode>` or persist it in `shell.analysis_mode`.
 
 | Mode | Behavior |
 |------|----------|

@@ -97,7 +97,9 @@ function buildNode(doc: AtifDocument, path: string[], depth: number): TrajNode {
       path: [...path, ref.session_id],
       key: encodeNodePath([...path, ref.session_id]),
       label: shortLabel(ref.session_id),
-      detail: `外部轨迹 ${ref.session_id}`,
+      // Data only — the display layer localizes external-node tooltips
+      // via `externalSessionId`.
+      detail: ref.session_id,
       depth: depth + 1,
       doc: null,
       stepCount: 0,

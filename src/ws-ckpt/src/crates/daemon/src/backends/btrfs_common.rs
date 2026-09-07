@@ -206,7 +206,8 @@ pub async fn ensure_btrfs_support() -> Result<()> {
         "Kernel does not support btrfs (no entry in /proc/filesystems and \
          `modprobe btrfs` did not register the module). Install the matching \
          kernel-modules-extra package or rebuild the kernel with CONFIG_BTRFS_FS, \
-         then run `systemctl restart ws-ckpt`."
+         then restart the systemd service (`systemctl restart ws-ckpt`) or the \
+         ws-ckpt daemon container."
     );
 }
 

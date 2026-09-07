@@ -35,10 +35,16 @@ pub use token_consumption::{
 pub use http::HttpStore;
 
 // Re-export GenAI SQLite storage
-pub use genai::{GenAISqliteStore, PendingCallInfo, PendingOrigin, SseEnrichment};
+pub use genai::{
+    GenAISqliteStore, PendingCallInfo, PendingOrigin, ResourceSample, SessionPhase,
+    SessionResourceTimeline, SseEnrichment,
+};
 
 // Re-export Interruption SQLite storage
-pub use interruption::{InterruptionRecord, InterruptionStore, InterruptionTypeStat};
+pub use interruption::{
+    InterruptionRecord, InterruptionStore, InterruptionTypeStat, UNASSIGNED_CONVERSATION_ID,
+    UNASSIGNED_SESSION_ID,
+};
 
 // Re-export connection utilities
 pub use connection::{create_connection, default_base_path, sibling_db_path};

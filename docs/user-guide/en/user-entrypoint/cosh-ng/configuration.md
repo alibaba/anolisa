@@ -35,7 +35,7 @@ api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen3.7-plus"
 
 [agent]
-approval_mode = "balanced"
+approval_mode = "recommend"
 max_turns = 50
 max_tool_calls_per_turn = 10
 
@@ -55,6 +55,7 @@ log_level = "warn"
 
 [shell]
 default = "auto"
+integration = "enhanced"
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
@@ -71,10 +72,12 @@ Core approval modes apply to direct integrations:
 |---|---|---|---|
 | `trust` | Run | Run | Run |
 | `auto` | Run | Run | Ask |
-| `balanced`, `suggest`, `strict` | Run | Ask | Ask |
+| `recommend` | Run | Ask | Ask |
 
-The shell exposes `recommend`, `auto`, and `trust`; `recommend` uses strict
-Core behavior. `agent.max_turns` limits one Agent request (default `50`), while
+Core and the shell use the same canonical names: `recommend`, `auto`, and
+`trust`. Existing `balanced`, `suggest`, and `strict` values are read as
+`recommend`; invalid configuration values also fall back to `recommend`.
+`agent.max_turns` limits one Agent request (default `50`), while
 `max_tool_calls_per_turn` defaults to `10`. A new prompt starts a fresh turn
 budget.
 
@@ -125,6 +128,15 @@ name = "nginx"
 expected = "active"
 ```
 
+`integration` accepts `native` or `enhanced`. Enhanced is the default and starts
+in Assisted mode (`◇ `), with marker-based Agent routing and command events.
+At an empty prompt, `Shift+Tab` switches between Assisted and Shell-only
+(`◌ `); Shell-only keeps command events and post-command insights but sends
+ordinary input to bash or zsh. Native leaves input, Shell options, traps, and
+startup files under bash or zsh ownership and provides no Cosh observation or
+insights. The integration value is read when `cosh` starts, so changing it
+requires a new session. Invalid values reject startup with a visible error.
+
 `analysis_mode` accepts `smart`, `auto`, or `manual`; shell approval accepts
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or
 `inactive`.
@@ -145,6 +157,33 @@ max_disk_bytes = 1073741824
 root is `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`; set
 `COSH_AUDIT_DIR` to an absolute path to override it.
 
+## Telemetry opt-out
+
+cosh-ng collects anonymous operational metrics to improve service quality.
+This includes tool call counts, token usage, approval statistics, OS
+type/architecture, and a persistent installation UUID for cross-session
+correlation. **No user prompts, code content, or conversation content is
+collected.**
+
+Telemetry is enabled by default. To disable it for the current user, create
+the per-user sentinel file:
+
+```bash
+mkdir -p ~/.copilot-shell
+touch ~/.copilot-shell/telemetry_disabled
+```
+
+A system administrator can disable telemetry for all users on the machine by
+creating the system-level sentinel file:
+
+```bash
+sudo mkdir -p /etc/anolisa
+sudo touch /etc/anolisa/.telemetry_disabled
+```
+
+Either sentinel takes effect immediately for running processes; no restart is
+required.
+
 ## Environment overrides
 
 | Variables | Effect |
@@ -154,6 +193,7 @@ root is `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`; set
 | `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible credentials and URL fallbacks |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET`, `ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun credential fallbacks |
 | `COSH_SHELL_DEFAULT_SHELL`, `COSH_SHELL_ADAPTER`, `COSH_SHELL_ANALYSIS_MODE`, `COSH_SHELL_APPROVAL_MODE` | Interactive shell choices |
+| `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |

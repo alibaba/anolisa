@@ -65,8 +65,6 @@ def test_daemon_health_over_unix_socket(
         assert response.get("error") is None
         assert response["data"]["status"] == "ok"
         assert response["data"]["socket"] == str(socket_path)
-        assert response["data"]["prompt_scan"]["status"] == "pending"
-        assert response["data"]["prompt_scan"]["loaded"] is False
         jobs = {job["name"]: job for job in response["data"]["jobs"]}
         assert jobs["skill-ledger-activation"]["state"] == "running"
         assert "inflight" in response["data"]["queues"]
@@ -228,41 +226,6 @@ def test_daemon_unknown_method_returns_structured_error(
         "unknown.method",
     )
     assert _has_request_log(tmp_path, response["request_id"], "unknown.method")
-
-
-def test_daemon_scan_prompt_degrades_to_fast_when_model_not_ready(
-    daemon_command: list[str], tmp_path: Path
-) -> None:
-    socket_path = tmp_path / "runtime" / "daemon.sock"
-    process = _start_daemon(daemon_command, socket_path, tmp_path)
-
-    try:
-        response = _call_daemon(
-            socket_path,
-            {
-                "id": "e2e-scan-prompt-degrade",
-                "method": "scan-prompt",
-                "params": {
-                    "text": "hello",
-                    "mode": "standard",
-                    "source": "e2e",
-                },
-            },
-        )
-    finally:
-        output = _stop_daemon(process)
-
-    assert response["request_id"] != "e2e-scan-prompt-not-ready"
-    _assert_uuid(response["request_id"])
-    # Handler degrades to FAST mode instead of returning an error.
-    assert response["ok"] is True
-    assert response["exit_code"] == 0
-    assert response["data"]["degraded"] is True
-    # The exact status depends on whether the preload job has started; only
-    # assert that a status is reported rather than pinning it to "pending".
-    assert "status=" in response["data"]["degraded_reason"]
-    assert output.returncode == 0
-    assert _has_request_log(tmp_path, response["request_id"], "scan-prompt")
 
 
 def test_daemon_returns_busy_when_connection_limit_is_exhausted(
@@ -528,7 +491,6 @@ def _start_daemon(
     env = os.environ.copy()
     env.pop("AGENT_SEC_DAEMON_SOCKET", None)
     env["AGENT_SEC_DATA_DIR"] = str(tmp_path / "data")
-    env["AGENT_SEC_DAEMON_PROMPT_PRELOAD"] = "0"
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg_config")
     env["XDG_DATA_HOME"] = str(tmp_path / "xdg_data")
     env["PYTHONUNBUFFERED"] = "1"

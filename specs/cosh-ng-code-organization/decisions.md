@@ -148,3 +148,32 @@ message IDs) stays declarative and the copy lives in `i18n/`.
 Removal condition: if a second in-stream card appears in `shell_host`,
 extract a shared presentation helper (e.g. `types/` card model +
 byte-emitting formatter) and move both emitters onto it.
+
+## D19: slash-bearing prompt routing crosses input owners
+
+Registered: 2026-08-27, slash-bearing natural-language routing.
+
+Decision: `input/path_prompt.rs` owns the conservative submit decision for a
+Han prompt whose literal first token contains a provably missing path.
+`raw_input/relay/path_prompt_submit.rs` owns Readline-mirror trust, batching,
+and the pre-PTY handoff. `shell_host` remains the source of the trusted
+primary-prompt cwd and the consumer of the resulting intercept event. This
+split keeps the execution veto outside Bash and Zsh hooks while leaving OSC
+markers observation-only.
+
+Reasons:
+
+- Bash does not invoke `command_not_found_handle` for slash-bearing command
+  words, so the decision must happen before the submit reaches the PTY.
+- The input relay already owns slash controls and exact user-byte state; it
+  can fail closed for edited, pasted, batched, or non-primary-prompt input.
+- The marker parser already reports the child Shell cwd at primary prompts.
+  Sharing that trusted snapshot avoids Linux-only process inspection and
+  ensures classification and the Agent request use the same workspace.
+- Sensitive-input detection remains in `evidence`; the route carries only its
+  boolean result into `shell_host` so durable redaction policy is not copied.
+
+Revisit trigger: if a second natural-language pre-submit route is introduced,
+extract a dedicated routing-policy owner and inject its decision into
+`raw_input`; do not grow `input/` into a general natural-language parser or
+move execution vetoes back into Shell tracing hooks.

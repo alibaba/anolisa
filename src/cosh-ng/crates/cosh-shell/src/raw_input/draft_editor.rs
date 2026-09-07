@@ -95,6 +95,31 @@ impl PromptDraftEditor {
         }
     }
 
+    pub(crate) fn replace_current_token(&mut self, replacement: &str) -> bool {
+        if replacement.chars().any(|ch| ch == '\n' || ch == '\r') {
+            return false;
+        }
+        let chars = self.lines[self.row].chars().collect::<Vec<_>>();
+        let start_col = chars[..self.col]
+            .iter()
+            .rposition(|ch| ch.is_whitespace())
+            .map_or(0, |index| index + 1);
+        let end_col = chars[self.col..]
+            .iter()
+            .position(|ch| ch.is_whitespace())
+            .map_or(chars.len(), |index| self.col + index);
+        let start: usize = chars[..start_col].iter().map(|ch| ch.len_utf8()).sum();
+        let end: usize = chars[..end_col].iter().map(|ch| ch.len_utf8()).sum();
+        let new_len = self.byte_len() - (end - start) + replacement.len();
+        if new_len > DRAFT_MAX_BYTES {
+            return false;
+        }
+        self.lines[self.row].replace_range(start..end, replacement);
+        self.col = start_col + replacement.chars().count();
+        self.desired_col = None;
+        true
+    }
+
     pub(crate) fn insert_newline(&mut self) {
         if self.byte_len() + 1 > DRAFT_MAX_BYTES {
             return;
@@ -329,5 +354,17 @@ mod tests {
         assert!(editor("").is_blank());
         assert!(editor(" \n\u{3000}").is_blank());
         assert!(!editor("正文").is_blank());
+    }
+
+    #[test]
+    fn completion_replaces_the_token_at_the_cursor() {
+        let mut editor = editor("review @sr now");
+        editor.move_line_start();
+        for _ in 0..10 {
+            editor.move_right();
+        }
+        assert!(editor.replace_current_token("@src/"));
+        assert_eq!(editor.text(), "review @src/ now");
+        assert_eq!(editor.viewport().cursor, (0, 12));
     }
 }

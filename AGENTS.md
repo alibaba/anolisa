@@ -29,7 +29,7 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 # Unified build (recommended — handles deps, build, and user install)
 ./scripts/build-all.sh                                        # integrated default components
 ./scripts/build-all.sh --no-install                           # build only, skip install
-./scripts/build-all.sh --ignore-deps                          # skip dep installation
+./scripts/build-all.sh --ignore-deps                          # skip dependency setup and runtime verification
 ./scripts/build-all.sh --component cosh --component sec-core  # selected components
 
 # Partial convenience test runner (five components; may skip unavailable suites)
@@ -73,7 +73,7 @@ cd src/os-skills   # Skill definitions are static assets, no compilation needed
 
 # tokenless (per-component)
 cd src/tokenless
-make build       # tokenless + RTK + TOON + OpenClaw plugin
+make build       # tokenless + RTK + OpenClaw plugin
 make lint
 make test        # Rust + hooks + integration + adapters
 

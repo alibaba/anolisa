@@ -1,9 +1,10 @@
 //! Unit tests for the `/auth` slash-command state machine.
 
 use super::{
-    apply_aliyun_prepare, begin_sysom_shortcut, clear_ecs_auth_source_for_manual_aliyun_edit,
-    clear_observed_model_after_provider_change, clear_observed_model_after_provider_delete,
-    ecs_ram_role_prepare, handle_auth_answer, management_entry, render_auth_card_actions,
+    apply_aliyun_prepare, auth_validation_body, begin_sysom_shortcut,
+    clear_ecs_auth_source_for_manual_aliyun_edit, clear_observed_model_after_provider_change,
+    clear_observed_model_after_provider_delete, ecs_ram_role_prepare, handle_auth_answer,
+    management_entry, render_auth_card_actions, restore_after_configure_failure,
     should_apply_aliyun_prepare_after_field, should_apply_aliyun_prepare_for_edit,
     should_apply_aliyun_prepare_on_provider_selection, AuthBackend, AuthFieldInfo,
     AuthManagementEntry, AuthPhase, AuthProviderInfo, CoreAuthPrepare, DeleteConfirmationOutcome,
@@ -17,6 +18,37 @@ use std::collections::HashMap;
 /// service a second time turns into a visible error instead of a silent probe.
 fn adapter_without_registry() -> AdapterInstance {
     AdapterInstance::Fake(FakeAgentAdapter)
+}
+
+#[test]
+fn validation_notice_explains_work_and_openai_fallback_cost() {
+    let ordinary = auth_validation_body("deepseek", None);
+    assert!(ordinary[0].contains("endpoint, credentials, and model"));
+    assert_eq!(ordinary.len(), 1);
+
+    let compatible = auth_validation_body("openai_compat", None);
+    assert!(compatible
+        .iter()
+        .any(|line| line.contains("very small charge")));
+    assert!(compatible.iter().any(|line| line.contains("max_tokens=1")));
+
+    let dashscope = auth_validation_body("dashscope", None);
+    assert!(dashscope
+        .iter()
+        .any(|line| line.contains("very small charge")));
+
+    for plan in ["coding_plan", "token_plan"] {
+        let notice = auth_validation_body(plan, None);
+        assert!(notice.iter().any(|line| line.contains("amount of quota")));
+        assert!(notice.iter().any(|line| line.contains("max_tokens=1")));
+    }
+
+    let manual_aliyun = auth_validation_body("aliyun", None);
+    assert!(manual_aliyun
+        .iter()
+        .any(|line| line.contains("very small charge")));
+    let ecs_aliyun = auth_validation_body("aliyun", Some("ecs_ram_role"));
+    assert_eq!(ecs_aliyun.len(), 1);
 }
 
 fn template(id: &str) -> AuthProviderInfo {
@@ -143,6 +175,19 @@ fn prefetched_challenge_is_applied_without_probing_ecs_again() {
         auth.collected_values.get("provider_id").map(String::as_str),
         Some("sysom-trial")
     );
+}
+
+#[test]
+fn unavailable_ecs_credentials_keep_the_authorization_challenge() {
+    let mut auth = slash_auth_state(&["aliyun"], SysomMenu::on_ecs(ecs_prepare()));
+    auth.phase = AuthPhase::AliyunEcsChallenge {
+        instance_id: "i-test-1".to_string(),
+        console_url: "https://example.invalid/guide".to_string(),
+    };
+
+    restore_after_configure_failure(&mut auth, Some("credential_source_unavailable"), None);
+
+    assert!(matches!(auth.phase, AuthPhase::AliyunEcsChallenge { .. }));
 }
 
 /// Slash-auth state on an ECS host with one saved DashScope provider.

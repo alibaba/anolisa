@@ -1,7 +1,7 @@
-// Owner: shell_host. Bash/zsh marker scripts live in per-shell owner files
-// (marker/bash.rs, marker/zsh.rs) under the registered split plan; this hub
-// keeps the single shell_host::marker module path so marker and
-// attempt-generation changes remain atomic.
+// Owner: shell_host. Bash/zsh marker scripts live in per-shell owner files;
+// Bash uses a thin Rust loader plus marker/bash.sh so shell syntax does not
+// grow the Rust module. This hub keeps the single shell_host::marker module
+// path so marker and attempt-generation changes remain atomic.
 mod bash;
 mod zsh;
 
@@ -11,9 +11,19 @@ pub(super) use zsh::zsh_marker_script;
 #[cfg(test)]
 mod tests {
     use super::{bash_marker_script, zsh_marker_script};
-    use crate::types::NON_INTERACTIVE_PAGER_PREFIX;
+    use crate::types::{BOUNDED_HANDOFF_COMMAND, NON_INTERACTIVE_PAGER_PREFIX};
 
     const BYPASS_ASSIGNMENT: &str = "_COSH_HANDOFF_PREFIX='COSH_SHELL_HANDOFF_BYPASS=1 '\n";
+
+    #[test]
+    fn bash_marker_matches_the_bounded_handoff_transport_command() {
+        let assignment = format!("_COSH_BOUNDED_HANDOFF_COMMAND='{BOUNDED_HANDOFF_COMMAND}'\n");
+
+        assert!(
+            bash_marker_script().contains(&assignment),
+            "the Bash marker and Rust transport must match byte-for-byte"
+        );
+    }
 
     /// The Rust transport defines the prefixes and the marker scripts strip them
     /// back off. Drift in either direction leaks transport environment into

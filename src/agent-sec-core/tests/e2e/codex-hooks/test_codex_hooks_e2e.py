@@ -177,8 +177,9 @@ class TestPIICheckerE2E:
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
         assert set(output) == {"systemMessage"}
-        assert "phone_cn" in output["systemMessage"]
-        assert "执行将继续" in output["systemMessage"]
+        assert "1 项一般风险敏感信息" in output["systemMessage"]
+        assert "本次仅提醒，未触发确认或阻断。" in output["systemMessage"]
+        assert "phone_cn" not in output["systemMessage"]
 
     def test_phone_in_prompt_passes_observe(self):
         output = _run_hook(
@@ -201,8 +202,8 @@ class TestPIICheckerE2E:
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
         assert set(output) == {"systemMessage"}
-        assert "email" in output["systemMessage"]
-        assert "PostToolUse" in output["systemMessage"]
+        assert "1 项一般风险敏感信息" in output["systemMessage"]
+        assert "email" not in output["systemMessage"]
 
     def test_email_in_tool_output_passes_observe(self):
         output = _run_hook(
@@ -238,8 +239,8 @@ class TestPIICheckerE2E:
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
         assert set(output) == {"systemMessage"}
-        assert "phone_cn" in output["systemMessage"]
-        assert "PreToolUse" in output["systemMessage"]
+        assert "1 项一般风险敏感信息" in output["systemMessage"]
+        assert "phone_cn" not in output["systemMessage"]
 
     def test_api_key_in_prompt_blocks_deny(self):
         output = _run_hook(
@@ -251,7 +252,9 @@ class TestPIICheckerE2E:
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
         assert output.get("decision") == "block"
-        assert "api_key" in output.get("reason", "")
+        assert "1 项高风险敏感信息" in output.get("reason", "")
+        assert "当前策略已阻断本次请求。" in output.get("reason", "")
+        assert "api_key" not in output.get("reason", "")
 
     def test_phone_in_tool_input_passes_observe(self):
         output = _run_hook(

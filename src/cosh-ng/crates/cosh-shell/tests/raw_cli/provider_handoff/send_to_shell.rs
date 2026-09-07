@@ -473,6 +473,8 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 #[test]
 fn raw_cli_approved_shell_handoff_wrapper_does_not_leak() {
     let home = temp_shell_home("cosh-core-handoff-wrapper-leak");
+    let inputrc_path = home.join(".inputrc");
+    fs::write(&inputrc_path, "set enable-bracketed-paste on\n").unwrap();
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let cosh_core_path = bin_dir.join("cosh-core");
@@ -510,11 +512,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
+    let inputrc_path_str = inputrc_path.to_string_lossy().to_string();
     let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
+        &[
+            ("HOME", &home_str),
+            ("INPUTRC", &inputrc_path_str),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
+        ],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
@@ -534,7 +542,26 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         output.contains("HANDOFF WRAPPER LEAK HOSTEXEC RECEIVED"),
         "{output}"
     );
+    let visible = strip_ansi_escape(&output).replace('\r', "");
+    assert_eq!(
+        count_occurrences(&visible, "\nprintf wrapper-visible\n"),
+        1,
+        "{output}"
+    );
+    assert!(!output.contains("_COSH_HANDOFF"), "{output}");
+    assert!(!output.contains("_cosh_prepare_staged_handoff"), "{output}");
     assert!(!output.contains("COSH_SHELL_HANDOFF_BYPASS"), "{output}");
+    let command_echo = output
+        .rfind("printf wrapper-visible")
+        .expect("approved command echo");
+    let after_command_echo = &output[command_echo + "printf wrapper-visible".len()..];
+    let command_output = after_command_echo
+        .find("wrapper-visible")
+        .expect("approved command output");
+    assert!(
+        after_command_echo[..command_output].contains("\u{1b}[?2004l"),
+        "bracketed-paste disable did not reach the outer terminal between the approved command echo and its output\n{output:?}"
+    );
     assert!(
         !output.contains("missing wrapper-leak host_executed_shell result"),
         "{output}"

@@ -201,8 +201,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                         dup_consumed += 1;
                         has_dash = true;
                     }
-                    // Keep the workspace Rust 1.74 MSRV; `Option::is_none_or`
-                    // is newer.
+                    // Keep the boundary check explicit next to the parsed span.
                     #[allow(clippy::unnecessary_map_or)]
                     let boundary_ok = dup_lookahead.peek().map_or(true, |next| {
                         // Word boundary = whitespace or a POSIX operator

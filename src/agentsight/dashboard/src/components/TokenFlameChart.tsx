@@ -1,20 +1,22 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import type { CostStats, LLMCall, WasteItem, WasteReport } from '../types/optimization';
 import { copyText } from './CopyButton';
+import { useI18n } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 type DimState = 'idle' | 'loading' | 'done' | 'error';
 
 // ── 类别定义（与后端 LlmCall 字段一一对应）────────────────────────────────────
 // 上柱：Context Window 组成（5 类，静态区域合并为一类）
-type Cat = { key: string; label: string; color: string; get: (c: LLMCall) => number };
+type Cat = { key: string; labelKey: MessageKey; color: string; get: (c: LLMCall) => number };
 
 // 配色：agentsight 亮色主题（Tailwind 系）——冷（人类输入/静态）在下，暖（重放历史）在上。
 const CONTEXT_CATS: Cat[] = [
-  { key: 'static', label: '静态区域', color: '#6b7280', get: c => c.system_prompt + c.skill_definitions + c.tool_definitions }, // gray-500 · 恒定基岩
-  { key: 'user', label: '用户提示词', color: '#3b82f6', get: c => c.user_messages },        // primary 蓝 · 人类输入
-  { key: 'assistant', label: '助手输出', color: '#f59e0b', get: c => c.assistant_messages }, // amber-500 · O(n) 累积
-  { key: 'tool', label: '工具输出', color: '#10b981', get: c => c.tool_results },            // emerald-500 · 沉积大头
-  { key: 'others', label: '其它', color: '#8b5cf6', get: c => c.injected_context },          // violet-500 · 注入
+  { key: 'static', labelKey: 'flame.ctx.static', color: '#6b7280', get: c => c.system_prompt + c.skill_definitions + c.tool_definitions }, // gray-500 · 恒定基岩
+  { key: 'user', labelKey: 'flame.ctx.user', color: '#3b82f6', get: c => c.user_messages },        // primary 蓝 · 人类输入
+  { key: 'assistant', labelKey: 'flame.ctx.assistant', color: '#f59e0b', get: c => c.assistant_messages }, // amber-500 · O(n) 累积
+  { key: 'tool', labelKey: 'flame.ctx.tool', color: '#10b981', get: c => c.tool_results },            // emerald-500 · 沉积大头
+  { key: 'others', labelKey: 'flame.ctx.others', color: '#8b5cf6', get: c => c.injected_context },          // violet-500 · 注入
 ];
 
 const OUTPUT_COLOR = '#ef4444'; // 输出曲线（danger 红）
@@ -57,6 +59,7 @@ const Spinner: React.FC<{ size?: number }> = ({ size = 18 }) => (
 export default function TokenFlameChart({ cost, waste, wasteState }: { cost: CostStats; waste?: WasteReport | null; wasteState?: DimState }) {
   const calls = cost.calls ?? [];
   const [selected, setSelected] = useState<number>(() => Math.max(0, calls.length - 1));
+  const { t } = useI18n();
 
   // 派生聚合（全部 hooks 必须在早退之前调用）
   const derived = useMemo(() => {
@@ -102,10 +105,8 @@ export default function TokenFlameChart({ cost, waste, wasteState }: { cost: Cos
   if (calls.length === 0) {
     return (
       <div className="bg-white rounded-lg shadow border border-gray-200 p-5 mb-4">
-        <h3 className="text-sm font-semibold text-gray-700">Token 火焰图</h3>
-        <p className="text-gray-400 font-mono text-[13px] mt-2">
-          该会话无逐步（per-step）成本数据 —— 可能是旧会话或轨迹解析失败。重新分析即可生成火焰图。
-        </p>
+        <h3 className="text-sm font-semibold text-gray-700">{t('flame.title')}</h3>
+        <p className="text-gray-400 font-mono text-[13px] mt-2">{t('flame.empty.noPerStepData')}</p>
       </div>
     );
   }
@@ -131,14 +132,14 @@ export default function TokenFlameChart({ cost, waste, wasteState }: { cost: Cos
       {/* 1 · Summary Cards（「LLM 判定可省」卡已删：汇总数字为伪精度，加载/失败状态由下方浪费诊断表承担） */}
       <div className="grid grid-cols-2 gap-3 mb-4">
         <Card
-          label="Total Tokens"
+          label={t('flame.summary.totalTokens')}
           value={fmtK(derived.inputTokens + derived.outputTokens)}
-          sub={<>in {fmtK(derived.inputTokens)} · out {fmtK(derived.outputTokens)}</>}
+          sub={t('flame.summary.totalTokensSub', { input: fmtK(derived.inputTokens), output: fmtK(derived.outputTokens) })}
         />
         <Card
-          label="Peak Context"
+          label={t('flame.summary.peakContext')}
           value={fmtK(derived.peakVal)}
-          sub={`step ${derived.peakIdx} · ${calls[derived.peakIdx].time} · 点击定位`}
+          sub={t('flame.summary.peakContextSub', { step: derived.peakIdx, time: calls[derived.peakIdx].time })}
           accent="#3b82f6"
           onClick={() => setSelected(derived.peakIdx)}
         />
@@ -149,17 +150,17 @@ export default function TokenFlameChart({ cost, waste, wasteState }: { cost: Cos
         <div className="bg-white rounded-lg shadow border border-gray-200 p-3.5 overflow-hidden">
           <div className="flex justify-between items-baseline mb-2 flex-wrap gap-2">
             <h3 className="text-sm font-semibold text-gray-700 m-0">
-              Context Window 组成 · 逐步重放 <span className="font-normal text-gray-400">· 点击柱体查看该步</span>
+              {t('flame.chart.title')} <span className="font-normal text-gray-400">· {t('flame.chart.subtitle')}</span>
             </h3>
             {/* 图例 */}
             <div className="flex gap-3 flex-wrap">
               {visCtx.map(cat => (
                 <span key={cat.key} className="inline-flex items-center gap-1.5 text-[11px] text-gray-500">
-                  <i className="w-[9px] h-[9px] rounded-sm" style={{ background: cat.color }} />{cat.label}
+                  <i className="w-[9px] h-[9px] rounded-sm" style={{ background: cat.color }} />{t(cat.labelKey)}
                 </span>
               ))}
               <span className="inline-flex items-center gap-1.5 text-[11px]" style={{ color: OUTPUT_COLOR }}>
-                <i className="w-3.5 h-[2.5px] rounded-sm" style={{ background: OUTPUT_COLOR }} />输出 token
+                <i className="w-3.5 h-[2.5px] rounded-sm" style={{ background: OUTPUT_COLOR }} />{t('flame.legend.outputTokens')}
               </span>
             </div>
           </div>
@@ -168,7 +169,7 @@ export default function TokenFlameChart({ cost, waste, wasteState }: { cost: Cos
             {/* 固定左栏：标注上区语义（不随横向滚动移动） */}
             <div className="relative w-[22px] flex-shrink-0" style={{ height: svgH }}>
               <div className="absolute left-0 w-[22px] flex items-center justify-center" style={{ top: H_TOP, height: H_UP }}>
-                <span className="font-mono text-[10px] tracking-widest text-gray-500 whitespace-nowrap" style={{ writingMode: 'vertical-rl' }}>已发送 · context</span>
+                <span className="font-mono text-[10px] tracking-widest text-gray-500 whitespace-nowrap" style={{ writingMode: 'vertical-rl' }}>{t('flame.axis.contextLabel')}</span>
               </div>
             </div>
             {/* 固定 y 轴刻度（不随横向滚动移动，否则向右滚时刻度不可见） */}
@@ -257,67 +258,68 @@ export default function TokenFlameChart({ cost, waste, wasteState }: { cost: Cos
 // ── 浪费诊断表 ──────────────────────────────────────────────────────────────────
 function wasteColor(optimization: string): string {
   const o = optimization;
-  if (o.includes('缓存') || o.includes('Cache')) return '#6366f1';
-  if (o.includes('历史') || o.includes('History')) return '#14b8a6';
-  if (o.includes('工具输出') || o.includes('Trim')) return '#eab308';
-  if (o.includes('注入') || o.includes('Context')) return '#fb923c';
-  if (o.includes('提示词压缩') || o.includes('Compression')) return '#3b82f6';
-  if (o.includes('经验')) return '#8b5cf6';   // 试错型 · violet-500
-  if (o.includes('规范')) return '#0ea5e9';   // 返工型 · sky-500
+  if (o.includes('\u7f13\u5b58') || o.includes('Cache')) return '#6366f1';
+  if (o.includes('\u5386\u53f2') || o.includes('History')) return '#14b8a6';
+  if (o.includes('\u5de5\u5177\u8f93\u51fa') || o.includes('Trim')) return '#eab308';
+  if (o.includes('\u6ce8\u5165') || o.includes('Context')) return '#fb923c';
+  if (o.includes('\u63d0\u793a\u8bcd\u538b\u7f29') || o.includes('Compression')) return '#3b82f6';
+  if (o.includes('\u7ecf\u9a8c')) return '#8b5cf6';   // 试错型 · violet-500
+  if (o.includes('\u89c4\u8303')) return '#0ea5e9';   // 返工型 · sky-500
   return ROSE;
 }
 
 // 置信度 badge 配色（与准确性 IssueTable 一致）
 const CONF_CLS: Record<string, string> = {
-  高: 'bg-green-100 text-green-700',
-  中: 'bg-yellow-100 text-yellow-700',
-  低: 'bg-gray-100 text-gray-500',
+  '\u9ad8': 'bg-green-100 text-green-700',
+  '\u4e2d': 'bg-yellow-100 text-yellow-700',
+  '\u4f4e': 'bg-gray-100 text-gray-500',
 };
 
 /** 经验条目的可复制文本 —— 直接贴进 Skill / 规范文件。 */
-function experienceText(it: WasteItem): string {
+function experienceText(t: (key: MessageKey, params?: Record<string, string | number>) => string, it: WasteItem): string {
   const e = it.experience;
   if (!e) return '';
   const lines: string[] = [];
-  if (e.applicability) lines.push(`适用场景：${e.applicability}`);
-  if (e.pitfall) lines.push(`错误做法：${e.pitfall}`);
-  if (e.effective_path) lines.push(`正确做法：${e.effective_path}`);
-  if (e.rule) lines.push(`约定：${e.rule}`);
-  if (e.bad_example) lines.push(`反例：${e.bad_example}`);
-  if (e.good_example) lines.push(`正例：${e.good_example}`);
-  if (e.scope) lines.push(`适用范围：${e.scope}`);
+  if (e.applicability) lines.push(`${t('flame.exp.applicability')}${e.applicability}`);
+  if (e.pitfall) lines.push(`${t('flame.exp.pitfall')}${e.pitfall}`);
+  if (e.effective_path) lines.push(`${t('flame.exp.effectivePath')}${e.effective_path}`);
+  if (e.rule) lines.push(`${t('flame.exp.rule')}${e.rule}`);
+  if (e.bad_example) lines.push(`${t('flame.exp.badExample')}${e.bad_example}`);
+  if (e.good_example) lines.push(`${t('flame.exp.goodExample')}${e.good_example}`);
+  if (e.scope) lines.push(`${t('flame.exp.scope')}${e.scope}`);
   return lines.join('\n');
 }
 
 /** 优化提示词 —— 有经验用经验全文；token 浪费类无 experience 字段，由现象/手段/证据合成。 */
-function promptText(it: WasteItem): string {
-  const exp = experienceText(it);
+function promptText(t: (key: MessageKey, params?: Record<string, string | number>) => string, it: WasteItem): string {
+  const exp = experienceText(t, it);
   if (exp) return exp;
-  const lines = [`现象：${it.symptom}`, `优化手段：${it.optimization}`];
-  if (it.evidence) lines.push(`证据：${it.evidence}`);
+  const lines = [`${t('flame.exp.symptom')}${it.symptom}`, `${t('flame.exp.optimization')}${it.optimization}`];
+  if (it.evidence) lines.push(`${t('flame.exp.evidence')}${it.evidence}`);
   return lines.join('\n');
 }
 
 /** 展开详情行：完整证据 + 可沉淀经验（结构与准确性表的展开区一致）。 */
 function WasteDetailRow({ it }: { it: WasteItem }) {
-  const text = experienceText(it);
+  const { t } = useI18n();
+  const text = experienceText(t, it);
 
   return (
     <tr className="bg-gray-50">
       <td colSpan={5} className="px-4 py-3">
         <dl className="text-sm space-y-2">
           <div>
-            <dt className="text-xs font-semibold text-gray-500 uppercase tracking-wide">证据</dt>
+            <dt className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{t('flame.detail.evidence')}</dt>
             <dd className="mt-1 font-mono text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">{it.evidence}</dd>
           </div>
           {text && (
             <div>
-              <dt className="text-xs font-semibold text-gray-500 uppercase tracking-wide">经验 · 可直接贴进 Skill / 规范</dt>
+              <dt className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{t('flame.detail.experience')}</dt>
               <dd className="mt-1">
                 <div className="font-mono text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">{text}</div>
                 {it.steps && it.steps.length > 0 && (
                   <div className="font-mono text-[10px] text-gray-400 mt-1.5">
-                    共 {it.steps.length} 轮 · 单条轨迹证据，跨会话复现后可提升置信度
+                    {t('flame.detail.stepsNote', { steps: it.steps.length })}
                   </div>
                 )}
               </dd>
@@ -332,6 +334,7 @@ function WasteDetailRow({ it }: { it: WasteItem }) {
 // 优化提示词复制按钮（与准确性表同款）
 function ExpCopyBtn({ text }: { text: string }) {
   const [done, setDone] = useState(false);
+  const { t } = useI18n();
   // HTTP 非安全上下文无 navigator.clipboard，copyText 内部自动降级
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -348,29 +351,30 @@ function ExpCopyBtn({ text }: { text: string }) {
           ? 'bg-green-100 text-green-600'
           : 'bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-gray-700'
       }`}
-      title={done ? '已复制' : '复制优化提示词'}
+      title={done ? t('common.copied') : t('flame.copyPromptTitle')}
     >
-      {done ? '✓ 已复制' : '⧉ 复制'}
+      {done ? t('common.copied') : `⧉ ${t('common.copy')}`}
     </button>
   );
 }
 
 function WasteTable({ waste, wasteState }: { waste?: WasteReport | null; wasteState?: DimState }) {
   const [open, setOpen] = useState<number | null>(0);
+  const { t } = useI18n();
   // 加载中 / 失败 / 未分析态
   if (wasteState !== 'done' || !waste) {
     return (
       <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
-        <h3 className="text-sm font-semibold text-gray-700">浪费剖析</h3>
+        <h3 className="text-sm font-semibold text-gray-700">{t('flame.waste.title')}</h3>
         {wasteState === 'error' ? (
-          <p className="text-red-500 font-mono text-[13px] mt-2">识别失败 —— LLM 调用出错，可稍后重试。</p>
+          <p className="text-red-500 font-mono text-[13px] mt-2">{t('flame.waste.error')}</p>
         ) : wasteState === 'loading' ? (
           <div className="flex items-center gap-3 py-2 mt-1">
             <Spinner />
-            <span className="text-gray-500 font-mono text-[13px]">LLM 正在逐条判定候选是否值得优化…</span>
+            <span className="text-gray-500 font-mono text-[13px]">{t('flame.waste.loading')}</span>
           </div>
         ) : (
-          <p className="text-gray-400 font-mono text-[13px] mt-2">尚未分析 —— 点击「重新分析」运行 LLM 浪费判定。</p>
+          <p className="text-gray-400 font-mono text-[13px] mt-2">{t('flame.waste.notAnalyzed')}</p>
         )}
       </div>
     );
@@ -379,14 +383,12 @@ function WasteTable({ waste, wasteState }: { waste?: WasteReport | null; wasteSt
   if (waste.items.length === 0) {
     return (
       <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
-        <h3 className="text-sm font-semibold text-gray-700">浪费剖析</h3>
+        <h3 className="text-sm font-semibold text-gray-700">{t('flame.waste.title')}</h3>
         {waste.considered === 0 ? (
-          <p className="text-gray-500 font-mono text-[13px] mt-2">
-            无可评估的浪费候选 —— 轨迹过短或采集内容不足，未做判定（见上方提示）。
-          </p>
+          <p className="text-gray-500 font-mono text-[13px] mt-2">{t('flame.waste.noCandidates')}</p>
         ) : (
           <p className="font-mono text-[13px] mt-2" style={{ color: SAVE }}>
-            ✓ LLM 评估了 {waste.considered} 项候选，未发现值得优化的浪费。
+            {t('flame.waste.noWasteFound', { count: waste.considered })}
           </p>
         )}
       </div>
@@ -395,22 +397,22 @@ function WasteTable({ waste, wasteState }: { waste?: WasteReport | null; wasteSt
 
   return (
     <div className="bg-white rounded-lg shadow border border-gray-200 p-5">
-      <h3 className="text-sm font-semibold text-gray-700 m-0">浪费剖析</h3>
+      <h3 className="text-sm font-semibold text-gray-700 m-0">{t('flame.waste.title')}</h3>
       <div className="overflow-x-auto mt-3.5">
         <table className="w-full min-w-[720px] text-sm">
           <thead>
             <tr className="border-b border-gray-200">
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600">现象</th>
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600 whitespace-nowrap">浪费类型</th>
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600 whitespace-nowrap">优化手段</th>
-              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600 whitespace-nowrap">置信度</th>
-              <th className="text-left pb-2 text-xs font-semibold text-gray-600 whitespace-nowrap">优化提示词</th>
+              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600">{t('flame.waste.col.symptom')}</th>
+              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600 whitespace-nowrap">{t('flame.waste.col.type')}</th>
+              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600 whitespace-nowrap">{t('flame.waste.col.optimization')}</th>
+              <th className="text-left pb-2 pr-3 text-xs font-semibold text-gray-600 whitespace-nowrap">{t('flame.waste.col.confidence')}</th>
+              <th className="text-left pb-2 text-xs font-semibold text-gray-600 whitespace-nowrap">{t('flame.waste.col.prompt')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {waste.items.map((it, i) => {
               const isOpen = open === i;
-              const expText = promptText(it);
+              const expText = promptText(t, it);
               return (
                 <React.Fragment key={i}>
                   <tr
@@ -429,9 +431,24 @@ function WasteTable({ waste, wasteState }: { waste?: WasteReport | null; wasteSt
                     </td>
                     <td className="py-2.5 pr-3 text-xs text-gray-700">{it.optimization}</td>
                     <td className="py-2.5 pr-3 whitespace-nowrap">
-                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${CONF_CLS[it.confidence] ?? CONF_CLS['低']}`}>
-                        {it.confidence}
-                      </span>
+                      {(() => {
+                        const raw = it.confidence;
+                        const key =
+                          raw === '\u9ad8'
+                            ? 'flame.confidence.high'
+                            : raw === '\u4e2d'
+                            ? 'flame.confidence.medium'
+                            : raw === '\u4f4e'
+                            ? 'flame.confidence.low'
+                            : null;
+                        const label = key ? t(key as MessageKey) : raw;
+                        const cls = CONF_CLS[raw] ?? CONF_CLS['\u4f4e'];
+                        return (
+                          <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${cls}`}>
+                            {label}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="py-2.5 whitespace-nowrap">
                       <ExpCopyBtn text={expText} />
@@ -452,12 +469,13 @@ function WasteTable({ waste, wasteState }: { waste?: WasteReport | null; wasteSt
 function DetailPanel({ c, visCtx }: {
   c: LLMCall; visCtx: Cat[];
 }) {
+  const { t } = useI18n();
   const total = ctxTotal(c);
 
   return (
     <div className="bg-white rounded-lg shadow border border-gray-200 p-4 h-full flex flex-col">
       <div className="flex justify-between items-baseline">
-        <h3 className="text-sm font-semibold text-gray-900 m-0">Step #{c.step_id}</h3>
+        <h3 className="text-sm font-semibold text-gray-900 m-0">{t('flame.detail.stepTitle', { id: c.step_id })}</h3>
         <span className="font-mono text-[11px] text-gray-500">{c.time} · {c.label}</span>
       </div>
 
@@ -469,14 +487,14 @@ function DetailPanel({ c, visCtx }: {
           return (
             <div key={cat.key} className="grid items-center gap-2 text-xs" style={{ gridTemplateColumns: '10px 1fr auto' }}>
               <i className="w-[9px] h-[9px] rounded-sm" style={{ background: cat.color }} />
-              <span className="text-gray-700">{cat.label}</span>
+              <span className="text-gray-700">{t(cat.labelKey)}</span>
               <span className="font-mono text-[11px] text-gray-500">{fmtK(v)} · {pct.toFixed(0)}%</span>
             </div>
           );
         })}
         <div className="grid items-center gap-2 text-xs border-t border-gray-200 pt-2.5 mt-1" style={{ gridTemplateColumns: '10px 1fr auto' }}>
           <i className="w-[9px] h-[9px] rounded-sm" style={{ background: OUTPUT_COLOR }} />
-          <span className="text-gray-700">本轮输出</span>
+          <span className="text-gray-700">{t('flame.detail.currentOutput')}</span>
           <span className="font-mono text-[11px]" style={{ color: OUTPUT_COLOR }}>↑{fmtK(c.output_tokens)}</span>
         </div>
       </div>

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import socket
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
@@ -19,6 +20,21 @@ from agent_sec_cli.skill_ledger.errors import (
 from agent_sec_cli.skill_ledger.path_identity import (
     normalize_canonical_skill_dir,
     validate_canonical_skill_dir,
+)
+from agent_sec_cli.skill_ledger.skillfs_peer_auth import (
+    AUTH_FRAME_LIMIT,
+    AUTH_HANDSHAKE_TIMEOUT_SECONDS,
+    CONTROL_CLIENT_DOMAIN,
+    CONTROL_SERVER_DOMAIN,
+    AuthenticatedSession,
+    SharedSecret,
+    SkillFsPeerAuthError,
+    build_auth_init_frame,
+    build_auth_proof_frame,
+    configured_control_key_path,
+    configured_control_socket_path,
+    parse_auth_challenge_frame,
+    verify_auth_proof_frame,
 )
 
 CONTROL_SCHEMA_VERSION = "1"
@@ -44,6 +60,40 @@ class _ResolverSocketMissing(Exception):
 
 class _ResolverProtocolError(Exception):
     """SkillFS returned a response that violates the resolver contract."""
+
+
+class _SocketFrameReader:
+    """Read bounded newline-terminated frames without discarding buffered bytes."""
+
+    def __init__(self, connection: socket.socket) -> None:
+        self._connection = connection
+        self._buffer = bytearray()
+
+    def read_frame(self, limit: int, deadline: float) -> bytes:
+        """Read one frame's content under an absolute monotonic deadline."""
+        while True:
+            newline_index = self._buffer.find(b"\n")
+            if newline_index >= 0:
+                if newline_index > limit:
+                    raise SkillFsPeerAuthError(
+                        f"authenticated frame exceeds {limit} byte limit"
+                    )
+                frame = bytes(self._buffer[:newline_index])
+                del self._buffer[: newline_index + 1]
+                return frame
+            if len(self._buffer) > limit:
+                raise SkillFsPeerAuthError(
+                    f"authenticated frame exceeds {limit} byte limit"
+                )
+
+            self._connection.settimeout(_remaining_seconds(deadline))
+            try:
+                chunk = self._connection.recv(4096)
+            except socket.timeout as exc:
+                raise TimeoutError("authenticated frame read timed out") from exc
+            if not chunk:
+                raise SkillFsPeerAuthError("authenticated frame ended before newline")
+            self._buffer.extend(chunk)
 
 
 @dataclass(frozen=True)
@@ -147,27 +197,71 @@ class SkillFsResolverClient:
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("resolver timeout must be positive")
+        self._explicit_socket_path = (
+            Path(socket_path) if socket_path is not None else None
+        )
         self.socket_path = (
-            Path(socket_path)
-            if socket_path is not None
+            self._explicit_socket_path
+            if self._explicit_socket_path is not None
             else default_skillfs_control_socket()
         )
         self.timeout_seconds = timeout_seconds
+        self._control_secret: SharedSecret | None = None
+        self._configuration_error: SkillFsPeerAuthError | None = None
+        self._configuration_loaded = False
 
     def resolve(self, canonical_dir: Path) -> Path | None:
         """Return SkillFS's live directory, or ``None`` when it is not managed."""
+        self._load_configuration()
+        if self.socket_path is None:
+            raise _ResolverProtocolError("SkillFS resolver socket is not configured")
+
         request = {
             "schemaVersion": CONTROL_SCHEMA_VERSION,
             "method": RESOLVE_LIVE_SOURCE_METHOD,
             "canonicalSkillDir": str(canonical_dir),
         }
-        payload = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+        payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
+
+        if self._control_secret is not None:
+            response_payload = self._resolve_authenticated(payload)
+            return self._parse_response(canonical_dir, response_payload)
+
+        response_line = self._resolve_legacy(payload)
+        return self._parse_response(canonical_dir, response_line)
+
+    def _load_configuration(self) -> None:
+        if self._configuration_loaded:
+            if self._configuration_error is not None:
+                raise self._configuration_error
+            return
+
+        try:
+            socket_path = self._explicit_socket_path
+            if socket_path is None:
+                socket_path = configured_control_socket_path()
+            if socket_path is None:
+                socket_path = default_skillfs_control_socket()
+
+            key_path = configured_control_key_path()
+            secret = SharedSecret.load(key_path) if key_path is not None else None
+            self.socket_path = socket_path
+            self._control_secret = secret
+        except SkillFsPeerAuthError as exc:
+            self._configuration_error = exc
+            raise
+        finally:
+            self._configuration_loaded = True
+
+    def _resolve_legacy(self, payload: bytes) -> bytes:
+        if self.socket_path is None:
+            raise _ResolverProtocolError("SkillFS resolver socket is not configured")
 
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self.timeout_seconds)
                 connection.connect(str(self.socket_path))
-                connection.sendall(payload)
+                connection.sendall(payload + b"\n")
                 with connection.makefile("rb") as response_stream:
                     response_line = response_stream.readline(
                         MAX_CONTROL_RESPONSE_BYTES + 1
@@ -179,6 +273,72 @@ class SkillFsResolverClient:
             raise _ResolverProtocolError("empty response")
         if len(response_line) > MAX_CONTROL_RESPONSE_BYTES:
             raise _ResolverProtocolError("response exceeds size limit")
+        return response_line
+
+    def _resolve_authenticated(self, payload: bytes) -> bytes:
+        if self.socket_path is None or self._control_secret is None:
+            raise _ResolverProtocolError(
+                "authenticated SkillFS resolver is not configured"
+            )
+
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(self.timeout_seconds)
+                connection.connect(str(self.socket_path))
+                reader = _SocketFrameReader(connection)
+                handshake_deadline = time.monotonic() + min(
+                    self.timeout_seconds, AUTH_HANDSHAKE_TIMEOUT_SECONDS
+                )
+
+                _send_before_deadline(
+                    connection, build_auth_init_frame(), handshake_deadline
+                )
+                challenge = reader.read_frame(AUTH_FRAME_LIMIT, handshake_deadline)
+                nonce = parse_auth_challenge_frame(challenge + b"\n")
+                proof = build_auth_proof_frame(
+                    "auth.proof",
+                    self._control_secret,
+                    CONTROL_CLIENT_DOMAIN,
+                    nonce,
+                )
+                _send_before_deadline(connection, proof, handshake_deadline)
+                ok = reader.read_frame(AUTH_FRAME_LIMIT, handshake_deadline)
+                verify_auth_proof_frame(
+                    ok + b"\n",
+                    expected_kind="auth.ok",
+                    secret=self._control_secret,
+                    domain=CONTROL_SERVER_DOMAIN,
+                    nonce=nonce,
+                )
+
+                session = AuthenticatedSession(
+                    self._control_secret,
+                    nonce,
+                    CONTROL_CLIENT_DOMAIN,
+                    CONTROL_SERVER_DOMAIN,
+                )
+                business_deadline = time.monotonic() + self.timeout_seconds
+                _send_before_deadline(
+                    connection,
+                    session.protect_payload(payload, "client"),
+                    business_deadline,
+                )
+                response_payload = reader.read_frame(
+                    MAX_CONTROL_RESPONSE_BYTES, business_deadline
+                )
+                response_tag = reader.read_frame(AUTH_FRAME_LIMIT, business_deadline)
+                session.verify_payload(response_payload, response_tag + b"\n", "server")
+                return response_payload
+        except FileNotFoundError as exc:
+            raise SkillFsPeerAuthError(
+                "authenticated SkillFS resolver socket is unavailable"
+            ) from exc
+
+    def _parse_response(
+        self,
+        canonical_dir: Path,
+        response_line: bytes,
+    ) -> Path | None:
 
         try:
             response = json.loads(response_line.decode("utf-8"))
@@ -346,6 +506,27 @@ def _public_resolver_failure_reason(exc: Exception) -> str:
         return "SkillFS resolver access was denied"
     if isinstance(exc, ConnectionRefusedError):
         return "SkillFS resolver refused the connection"
+    if isinstance(exc, SkillFsPeerAuthError):
+        return "SkillFS resolver authentication failed"
     if isinstance(exc, _ResolverProtocolError):
         return str(exc)
     return "SkillFS resolver request failed"
+
+
+def _remaining_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("authenticated operation timed out")
+    return remaining
+
+
+def _send_before_deadline(
+    connection: socket.socket,
+    payload: bytes,
+    deadline: float,
+) -> None:
+    connection.settimeout(_remaining_seconds(deadline))
+    try:
+        connection.sendall(payload)
+    except socket.timeout as exc:
+        raise TimeoutError("authenticated frame write timed out") from exc

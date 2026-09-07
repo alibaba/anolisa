@@ -18,7 +18,7 @@ pub mod state;
 pub mod variables;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,9 @@ pub const USER_EXTENSIONS_DIR: &str = "extensions";
 
 /// System-wide extensions directory installed by the host package manager.
 pub const SYSTEM_EXTENSIONS_DIR: &str = "/usr/share/anolisa/extensions";
+
+/// System-wide extensions directory used by raw installations.
+pub(crate) const LOCAL_SYSTEM_EXTENSIONS_DIR: &str = "/usr/local/share/anolisa/extensions";
 
 /// Canonical extension manifest file name.
 pub const EXTENSION_CONFIG_FILENAME: &str = "cosh-extension.json";
@@ -202,7 +205,74 @@ pub fn user_extensions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(COPILOT_CONFIG_DIR).join(USER_EXTENSIONS_DIR))
 }
 
-/// Returns the read-only system extension directory.
-pub fn system_extensions_dir() -> PathBuf {
-    PathBuf::from(SYSTEM_EXTENSIONS_DIR)
+/// Returns system extension directories for the running installation.
+///
+/// Installed binaries derive both raw and package-managed roots from their
+/// FHS libexec location. Development binaries fall back to the host defaults.
+pub(crate) fn system_extensions_dirs() -> Vec<PathBuf> {
+    system_extensions_dirs_for_executable(std::env::current_exe().ok().as_deref())
+}
+
+fn system_extensions_dirs_for_executable(executable: Option<&Path>) -> Vec<PathBuf> {
+    let Some(prefix) = executable.and_then(anolisa_prefix_from_executable) else {
+        return vec![
+            PathBuf::from(LOCAL_SYSTEM_EXTENSIONS_DIR),
+            PathBuf::from(SYSTEM_EXTENSIONS_DIR),
+        ];
+    };
+    vec![
+        prefix.join("usr/local/share/anolisa/extensions"),
+        prefix.join("usr/share/anolisa/extensions"),
+    ]
+}
+
+fn anolisa_prefix_from_executable(executable: &Path) -> Option<&Path> {
+    let cosh_ng_dir = executable.parent()?;
+    let anolisa_dir = cosh_ng_dir.parent()?;
+    let libexec_dir = anolisa_dir.parent()?;
+    if executable.file_name()? != "cosh-core"
+        || cosh_ng_dir.file_name()? != "cosh-ng"
+        || anolisa_dir.file_name()? != "anolisa"
+        || libexec_dir.file_name()? != "libexec"
+    {
+        return None;
+    }
+
+    let fhs_tree = libexec_dir.parent()?;
+    if fhs_tree.ends_with("usr/local") {
+        fhs_tree.parent()?.parent()
+    } else if fhs_tree.ends_with("usr") {
+        fhs_tree.parent()
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_extension_roots_prefer_raw_installations() {
+        assert_eq!(
+            system_extensions_dirs_for_executable(None),
+            vec![
+                PathBuf::from("/usr/local/share/anolisa/extensions"),
+                PathBuf::from("/usr/share/anolisa/extensions"),
+            ]
+        );
+    }
+
+    #[test]
+    fn system_extension_roots_follow_custom_prefix() {
+        let executable = Path::new("/opt/anolisa/usr/local/libexec/anolisa/cosh-ng/cosh-core");
+
+        assert_eq!(
+            system_extensions_dirs_for_executable(Some(executable)),
+            vec![
+                PathBuf::from("/opt/anolisa/usr/local/share/anolisa/extensions"),
+                PathBuf::from("/opt/anolisa/usr/share/anolisa/extensions"),
+            ]
+        );
+    }
 }

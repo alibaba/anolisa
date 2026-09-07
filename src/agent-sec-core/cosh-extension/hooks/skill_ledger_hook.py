@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Cosh hook script for skill-ledger.
 
-Reads a cosh PreToolUse JSON from stdin, resolves the skill directory
-from the skill context or skill name, invokes ``agent-sec-cli skill-ledger show`` via
-subprocess, and writes a cosh HookOutput JSON to stdout.
+Reads a cosh PreToolUse JSON from stdin, normalizes the legacy Cosh or
+Cosh-NG skill invocation, resolves the skill directory from the skill context or
+skill name, invokes ``agent-sec-cli skill-ledger show`` via subprocess, and
+writes a cosh HookOutput JSON to stdout.
 
 Hook point: **PreToolUse** — matcher: ``skill``
 
@@ -17,6 +18,10 @@ Input schema::
         "cwd": "/path/to/project"
     }
 
+Legacy Cosh uses ``tool_input.skill``.  Cosh-NG uses
+``tool_input.action``/``tool_input.name``; a missing or non-string action means
+``invoke`` and ``action: "list"`` does not identify or execute a skill.
+
 Output mapping:
 
     summary.message is null → { "decision": "allow" }
@@ -25,7 +30,7 @@ Output mapping:
     policy "warn"            → summary.message allows with visible reason
     policy "block"           → summary.message blocks execution
 
-Optional copilot-shell settings.json configuration::
+Optional Cosh settings.json configuration::
 
     {
       "hooks": {
@@ -64,6 +69,7 @@ _INIT_TIMEOUT = 3  # seconds for key initialization
 
 _DEFAULT_POLICY = "ask"
 _HOOK_ENABLED = env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
+_MISSING = object()
 
 # -- helpers -----------------------------------------------------------------
 
@@ -99,6 +105,21 @@ def _allow_or_warn(reason: str, _policy: str) -> str:
     return _allow()
 
 
+def _format_contract_error(detail: str, policy: str) -> str:
+    """Map an invalid Host invocation contract to the configured policy."""
+    reason = "\u26a0\ufe0f Skill check cannot bind the invoked identity: {}".format(
+        detail
+    )
+    if policy == "observe":
+        _debug(reason)
+        return _allow()
+    if policy == "warn":
+        return _allow_with_reason(reason)
+    if policy == "block":
+        return _block_with_reason(reason)
+    return _ask_with_reason(reason)
+
+
 def _read_policy() -> str:
     """Return the configured Skill Ledger mode."""
     raw = os.environ.get("SKILL_LEDGER_MODE")
@@ -106,6 +127,87 @@ def _read_policy() -> str:
     if "SKILL_LEDGER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
         _debug("invalid SKILL_LEDGER_MODE; using ask")
     return policy
+
+
+def _validate_identity(value: Any, field_name: str) -> tuple[str | None, str | None]:
+    """Return an exact identity value or a Host contract error."""
+    if value is _MISSING:
+        return None, "{} is empty or missing".format(field_name)
+    if not isinstance(value, str):
+        return None, "{} must be a string".format(field_name)
+    if not value.strip():
+        return None, "{} is empty or missing".format(field_name)
+    return value, None
+
+
+def _normalize_skill_call(
+    tool_input: Any,
+) -> tuple[str | None, str | None, bool]:
+    """Normalize Host input into ``(identity, error, skip)``.
+
+    The presence of ``action`` or ``name`` selects the Cosh-NG profile.  The
+    identity remains byte-for-byte equivalent to the Host value; whitespace is
+    inspected only to reject empty values.
+    """
+    if not isinstance(tool_input, dict):
+        return None, "tool_input must be an object", False
+
+    is_cosh_ng = "action" in tool_input or "name" in tool_input
+    if not is_cosh_ng:
+        skill_name, error = _validate_identity(
+            tool_input.get("skill", _MISSING), "skill"
+        )
+        return skill_name, error, False
+
+    action = tool_input.get("action")
+    if isinstance(action, str):
+        if action == "list":
+            return None, None, True
+        if action != "invoke":
+            return None, "unsupported Cosh-NG action {!r}".format(action), False
+
+    skill_name, error = _validate_identity(tool_input.get("name", _MISSING), "name")
+    if error is not None:
+        return None, error, False
+
+    if "skill" in tool_input:
+        legacy_name, legacy_error = _validate_identity(tool_input.get("skill"), "skill")
+        if legacy_error is not None:
+            return None, legacy_error, False
+        if legacy_name != skill_name:
+            return (
+                None,
+                "Cosh-NG name and legacy skill identities conflict",
+                False,
+            )
+
+    return skill_name, None, False
+
+
+def _validate_skill_context(input_data: dict[str, Any], skill_name: str) -> str | None:
+    """Validate a present context without letting it override Host identity."""
+    if "skill_context" not in input_data:
+        return None
+
+    skill_context = input_data.get("skill_context")
+    if not isinstance(skill_context, dict):
+        return "skill_context must be an object"
+
+    context_name, error = _validate_identity(
+        skill_context.get("skill_name", _MISSING), "skill_context.skill_name"
+    )
+    if error is not None:
+        return error
+
+    _file_path, error = _validate_identity(
+        skill_context.get("file_path", _MISSING), "skill_context.file_path"
+    )
+    if error is not None:
+        return error
+
+    if context_name != skill_name:
+        return "skill_context.skill_name conflicts with the invoked identity"
+    return None
 
 
 def _supported_skill_bases(cwd: str) -> list[Path]:
@@ -144,11 +246,12 @@ def _resolve_skill_dir_from_context(
 ) -> tuple[str | None, bool]:
     """Resolve the skill dir from ``skill_context.file_path`` when available.
 
+    The caller validates a present context before invoking this function.
     Returns ``(skill_dir, handled)``.  ``handled`` is True whenever a
     well-formed ``skill_context.file_path`` was present, even if the path is
     outside the supported project/user/system scope.  In that case the caller
     should fail open without falling back to name-based lookup, because the
-    context identifies the actual skill that copilot-shell resolved.
+    context identifies the actual skill that Cosh resolved.
     """
     skill_context = input_data.get("skill_context")
     if not isinstance(skill_context, dict):
@@ -292,35 +395,34 @@ def main() -> None:
         print(_allow())
         return
 
+    if not isinstance(input_data, dict):
+        print(_allow())
+        return
+
     # 2. Verify this is a skill tool call
     tool_name = input_data.get("tool_name", "")
     if tool_name != _TOOL_NAME:
         print(_allow())
         return
 
-    policy = _read_policy()
-
     tool_input = input_data.get("tool_input", {})
-    skill_name = tool_input.get("skill", "")
-    if not isinstance(skill_name, str):
-        print(
-            _allow_or_warn(
-                "\u26a0\ufe0f Skill check skipped: skill name must be a string",
-                policy,
-            )
-        )
-        return
-    skill_name = skill_name.strip()
-    if not skill_name:
-        print(
-            _allow_or_warn(
-                "\u26a0\ufe0f Skill check skipped: skill name is empty or missing",
-                policy,
-            )
-        )
+    skill_name, contract_error, skip = _normalize_skill_call(tool_input)
+    if skip:
+        print(_allow())
         return
 
-    # 3. Resolve skill directory.  Prefer copilot-shell's resolved file path
+    policy = _read_policy()
+    if contract_error is not None or skill_name is None:
+        detail = contract_error or "skill identity is empty or missing"
+        print(_format_contract_error(detail, policy))
+        return
+
+    context_error = _validate_skill_context(input_data, skill_name)
+    if context_error is not None:
+        print(_format_contract_error(context_error, policy))
+        return
+
+    # 3. Resolve skill directory.  Prefer Cosh's resolved file path
     # when present so SKILL.md names may differ from directory names, but only
     # within the current project/user/system scope.
     cwd = input_data.get("cwd", os.environ.get("COPILOT_SHELL_PROJECT_DIR", "."))

@@ -4,11 +4,14 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
+mod capabilities;
+mod causal;
 mod containment;
 mod enforcement;
 mod handlers;
 pub mod optimize;
 mod secret;
+pub mod semantic_search;
 mod system_audit;
 mod token_savings;
 
@@ -99,7 +102,7 @@ impl AppState {
         }
 
         // Check if DB exists
-        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        let db_path = storage_data_dir(&self.storage_path).join("trajectories.db");
         if !db_path.exists() {
             return None;
         }
@@ -214,16 +217,19 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
             web::scope("/api")
                 .service(handlers::list_sessions)
                 .service(handlers::list_traces_by_session)
+                .service(handlers::get_session_resources)
                 .service(handlers::get_trace_detail)
                 .service(handlers::get_conversation_events)
                 .service(handlers::evaluate_grader)
                 .service(handlers::latest_grader)
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
+                .service(handlers::get_latency_metrics)
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
                 .service(handlers::get_agent_health)
+                .service(handlers::get_agent_process_health)
                 .service(
                     web::resource("/agent-health/{pid}")
                         .route(web::delete().to(handlers::delete_agent_health)),
@@ -266,6 +272,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(enforcement::apply_binding)
                 .service(enforcement::apply_file_binding)
                 .service(enforcement::apply_credential_binding)
+                .service(enforcement::preview_agent_protection)
                 .service(enforcement::list_bindings)
                 .service(enforcement::detach_binding)
                 .service(enforcement::list_violations)
@@ -282,10 +289,15 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(optimize::list_optimization_history)
                 .service(optimize::get_optimize_config)
                 .service(optimize::update_optimize_config)
+                .service(optimize::semantic_search_sessions)
+                // Causal attribution API routes
+                .service(causal::run_causal_attribution)
                 // Trajectory collection API routes (filters before the dynamic segment)
                 .service(handlers::list_trajectories)
                 .service(handlers::trajectory_filters)
                 .service(handlers::get_trajectory_detail)
+                // API self-documentation
+                .service(web::resource("/docs").route(web::get().to(api_docs)))
                 .default_service(web::route().to(api_not_found)),
         )
         // Health scope with not-found fallback
@@ -295,19 +307,324 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .service(serve_frontend);
 }
 
+/// Route inventory served by `GET /api/docs`.
+///
+/// Keep in sync with `configure_routes` above — the doc test in this module
+/// spot-checks a few entries but cannot detect every drift.
+const API_ROUTES: &[(&str, &str, &str)] = &[
+    ("GET", "/health", "Liveness probe (localhost only)"),
+    ("GET", "/metrics", "Prometheus metrics (localhost only)"),
+    (
+        "GET",
+        "/api/auth/status",
+        "Whether dashboard auth is enabled",
+    ),
+    ("GET", "/api/auth/verify", "Verify a dashboard token"),
+    (
+        "POST",
+        "/api/auth/login",
+        "Exchange token for a session cookie",
+    ),
+    ("GET", "/api/docs", "This route list"),
+    ("GET", "/api/sessions", "List observed agent sessions"),
+    (
+        "POST",
+        "/api/sessions/search",
+        "Semantic session search via the configured LLM",
+    ),
+    (
+        "GET",
+        "/api/sessions/{session_id}/traces",
+        "Traces of a session",
+    ),
+    (
+        "GET",
+        "/api/sessions/{session_id}/resources",
+        "Process resource timeline of a session",
+    ),
+    ("GET", "/api/traces/{trace_id}", "Trace detail"),
+    (
+        "GET",
+        "/api/conversations/{conversation_id}",
+        "Conversation events",
+    ),
+    ("GET", "/api/agent-names", "Distinct agent names"),
+    ("GET", "/api/timeseries", "Token/call time series"),
+    ("GET", "/api/metrics/latency", "LLM latency metrics"),
+    ("POST", "/api/grader/evaluate", "Run grader on a session"),
+    ("GET", "/api/grader/latest", "Latest grader result"),
+    (
+        "GET",
+        "/api/export/atif/trace/{trace_id}",
+        "Export trace as ATIF",
+    ),
+    (
+        "GET",
+        "/api/export/atif/session/{session_id}",
+        "Export session as ATIF",
+    ),
+    (
+        "GET",
+        "/api/export/atif/conversation/{conversation_id}",
+        "Export conversation as ATIF",
+    ),
+    (
+        "GET",
+        "/api/agent-health",
+        "Historical Agent activity from SQLite",
+    ),
+    (
+        "GET",
+        "/api/agent-process-health",
+        "Live Agent process health (see filtered_count)",
+    ),
+    (
+        "DELETE",
+        "/api/agent-health/{pid}",
+        "Acknowledge an offline agent",
+    ),
+    (
+        "POST",
+        "/api/agent-health/{pid}/restart",
+        "Restart a hung agent",
+    ),
+    ("GET", "/api/interruptions", "List interruption events"),
+    ("GET", "/api/interruptions/count", "Interruption count"),
+    ("GET", "/api/interruptions/stats", "Interruption statistics"),
+    (
+        "GET",
+        "/api/interruptions/session-counts",
+        "Counts per session",
+    ),
+    (
+        "GET",
+        "/api/interruptions/conversation-counts",
+        "Counts per conversation",
+    ),
+    (
+        "GET",
+        "/api/interruptions/{interruption_id}",
+        "Interruption detail",
+    ),
+    (
+        "POST",
+        "/api/interruptions/{interruption_id}/resolve",
+        "Mark an interruption resolved",
+    ),
+    (
+        "GET",
+        "/api/sessions/{session_id}/interruptions",
+        "Interruptions of a session",
+    ),
+    (
+        "GET",
+        "/api/conversations/{conversation_id}/interruptions",
+        "Interruptions of a conversation",
+    ),
+    ("GET", "/api/token-savings", "Token savings summary"),
+    (
+        "GET",
+        "/api/token-savings/session/{session_id}",
+        "Token savings of a session",
+    ),
+    ("GET", "/api/security/status", "Security module status"),
+    ("GET", "/api/security/summary", "Security event summary"),
+    (
+        "GET",
+        "/api/security/events/count-by",
+        "Security event counts",
+    ),
+    ("GET", "/api/security/events", "Security event list"),
+    (
+        "GET",
+        "/api/security/events/{event_id}",
+        "Security event detail",
+    ),
+    (
+        "GET",
+        "/api/security/observability/sessions",
+        "Security sessions",
+    ),
+    (
+        "GET",
+        "/api/security/observability/sessions/{session_id}/runs",
+        "Security session runs",
+    ),
+    (
+        "GET",
+        "/api/security/observability/timeline",
+        "Security timeline",
+    ),
+    ("GET", "/api/audit/summary", "System audit summary"),
+    ("GET", "/api/audit/events", "System audit events"),
+    ("GET", "/api/audit/sessions", "System audit sessions"),
+    ("GET", "/api/audit/cases", "System audit cases"),
+    ("GET", "/api/audit/cases/{case_id}", "Audit case detail"),
+    (
+        "POST",
+        "/api/audit/cases/{case_id}/review",
+        "Review an audit case",
+    ),
+    (
+        "GET",
+        "/api/audit/cases/{case_id}/containment-plan",
+        "Containment plan for a case",
+    ),
+    (
+        "POST",
+        "/api/audit/cases/{case_id}/contain",
+        "Contain an audit case",
+    ),
+    ("GET", "/api/enforcement/health", "Enforcer health"),
+    (
+        "POST",
+        "/api/enforcement/bindings",
+        "Apply enforcement binding (token required)",
+    ),
+    (
+        "POST",
+        "/api/enforcement/file-bindings",
+        "Apply file binding (token required)",
+    ),
+    (
+        "POST",
+        "/api/enforcement/credential-bindings",
+        "Apply credential binding (token required)",
+    ),
+    (
+        "GET",
+        "/api/enforcement/bindings",
+        "List enforcement bindings",
+    ),
+    (
+        "DELETE",
+        "/api/enforcement/bindings/{binding_id}",
+        "Detach a binding (token required)",
+    ),
+    (
+        "GET",
+        "/api/enforcement/violations",
+        "List enforcement violations",
+    ),
+    ("GET", "/api/skill-metrics", "All skill metrics"),
+    (
+        "GET",
+        "/api/skill-metrics/downloads",
+        "Skill download counts",
+    ),
+    ("GET", "/api/skill-metrics/loads", "Skill load counts"),
+    ("GET", "/api/skill-metrics/usage-ratio", "Skill usage ratio"),
+    (
+        "GET",
+        "/api/skill-metrics/distribution",
+        "Skill usage distribution",
+    ),
+    ("GET", "/api/skill-metrics/hotness", "Skill hotness ranking"),
+    (
+        "POST",
+        "/api/optimize/sessions/{session_id}/{dimension}",
+        "Run optimization analysis",
+    ),
+    (
+        "GET",
+        "/api/optimize/sessions/{session_id}/results",
+        "Optimization results of a session",
+    ),
+    (
+        "GET",
+        "/api/optimize/results",
+        "Latest optimization results",
+    ),
+    ("GET", "/api/optimize/config", "Optimization config"),
+    ("POST", "/api/optimize/config", "Update optimization config"),
+    ("POST", "/api/causal-attribution", "Run causal attribution"),
+    ("GET", "/api/trajectories", "List collected trajectories"),
+    (
+        "GET",
+        "/api/trajectories/filters",
+        "Trajectory filter values",
+    ),
+    ("GET", "/api/trajectories/{session_id}", "Trajectory detail"),
+];
+
+/// GET /api/docs — machine-readable route inventory for integrators, so
+/// endpoints are discoverable without reverse-engineering the frontend bundle.
+async fn api_docs() -> impl Responder {
+    let routes: Vec<serde_json::Value> = API_ROUTES
+        .iter()
+        .map(|(method, path, description)| {
+            serde_json::json!({
+                "method": method,
+                "path": path,
+                "description": description,
+            })
+        })
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "service": "agentsight",
+        "routes": routes,
+    }))
+}
+
 async fn api_not_found() -> impl Responder {
-    HttpResponse::NotFound()
-        .json(serde_json::json!({"error": "not_found", "message": "No matching API endpoint"}))
+    HttpResponse::NotFound().json(serde_json::json!({
+        "error": "not_found",
+        "message": "No matching API endpoint; see GET /api/docs for the route list"
+    }))
+}
+
+/// Builds the JSON body extractor config registered on the server `App`.
+///
+/// Actix's default rejection is a `text/plain` raw serde message; API
+/// consumers expect the structured `{"error":{...}}` envelope, so every
+/// `web::Json` failure is rewritten here. Kept as a shared constructor so
+/// tests exercise the exact handler used in production.
+fn json_extractor_config() -> web::JsonConfig {
+    // Generic prefix keeps Rust type names out of the leading text while
+    // preserving the serde detail (field/variant names are public API states).
+    web::JsonConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid request body: {error}")))
+}
+
+/// Builds the typed path extractor config registered on the server `App`.
+///
+/// Also turns typed-path failures (e.g. a non-UUID `{binding_id}`) into 400
+/// instead of actix's default 404, matching handlers that parse ids manually.
+fn path_extractor_config() -> web::PathConfig {
+    web::PathConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid path parameter: {error}")))
+}
+
+/// Wraps an extractor failure into a 400 response with the shared envelope.
+fn extractor_error(message: String) -> actix_web::Error {
+    let response = system_audit::error_response(
+        actix_web::http::StatusCode::BAD_REQUEST,
+        "bad_request",
+        &message,
+        false,
+    );
+    actix_web::error::InternalError::from_response(message, response).into()
 }
 
 // ─── Server entry point ───────────────────────────────────────────────────────
 
 fn private_state_dir(storage_path: &Path) -> PathBuf {
-    storage_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("/var/log/sysak/.agentsight"))
-        .join(".agentsight-private")
+    storage_data_dir(storage_path).join(".agentsight-private")
+}
+
+/// Directory holding the sibling databases of `storage_path`.
+///
+/// `serve --db` points at one database file; every other store must follow it
+/// into the same directory, otherwise browsing an archived copy mixes its
+/// sessions with the live host's interruptions. A bare relative `--db name.db`
+/// has an empty parent, which means the current directory (`.`) — resolving it
+/// to the system default would reintroduce the mixed-data behaviour.
+fn storage_data_dir(storage_path: &Path) -> &Path {
+    match storage_path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => Path::new("/var/log/sysak/.agentsight"),
+    }
 }
 
 /// Start the API server
@@ -335,10 +652,7 @@ pub async fn run_server(
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
 
-    let enforcement_socket = std::env::var_os("AGENTSIGHT_ENFORCER_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/run/agentsight/enforcer.sock"));
-    let enforcement_client = EnforcementClient::new(enforcement_socket);
+    let enforcement_client = EnforcementClient::new(capabilities::enforcer_socket_path());
     let enforcement = Arc::new(EnforcementCoordinator::new(
         enforcement_client.clone(),
         EnforcementStore::open_private(&state_dir)
@@ -387,11 +701,13 @@ pub async fn run_server(
         }
     }
 
-    // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls)
+    // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls).
+    // Open the same database `--db` selected so the checker reads pending calls and
+    // writes agent_crash events into one consistent dataset.
     let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
-        match crate::storage::sqlite::GenAISqliteStore::new() {
+        match crate::storage::sqlite::GenAISqliteStore::new_with_path(&storage_path) {
             Ok(store) => {
-                log::info!("GenAI SQLite store initialized for HealthChecker");
+                log::info!("GenAI SQLite store initialized for HealthChecker at {storage_path:?}");
                 Some(Arc::new(store))
             }
             Err(e) => {
@@ -402,7 +718,7 @@ pub async fn run_server(
 
     // Initialize interruption store
     let interruption_store: Option<Arc<InterruptionStore>> = {
-        let db_path = crate::storage::sqlite::sibling_db_path("interruption_events.db");
+        let db_path = storage_data_dir(&storage_path).join("interruption_events.db");
         match InterruptionStore::new_with_path(&db_path) {
             Ok(store) => {
                 log::info!("Interruption store initialized at {db_path:?}");
@@ -427,13 +743,13 @@ pub async fn run_server(
     checker.start();
 
     // Initialize read-only trajectory store (collector writes it in `trace` mode;
-    // serve only consumes). Path is derived via the shared sibling_db_path helper
-    // so reader and writer always resolve the same file. A missing DB simply
+    // serve only consumes). Path follows `--db` through storage_data_dir so
+    // reader and writer always resolve the same file. A missing DB simply
     // yields an empty table → empty API results (graceful degradation).
     // Only open when the file already exists to avoid creating an empty DB as a
     // persistent side-effect in serve mode when collection was never enabled.
     let trajectory_store: Option<Arc<TrajectoryStore>> = {
-        let db_path = crate::storage::sqlite::sibling_db_path("trajectories.db");
+        let db_path = storage_data_dir(&storage_path).join("trajectories.db");
         if !db_path.exists() {
             log::debug!("Trajectory store not found at {db_path:?}; endpoints degrade to empty");
             None
@@ -492,6 +808,8 @@ pub async fn run_server(
             .wrap(cors)
             .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
+            .app_data(json_extractor_config())
+            .app_data(path_extractor_config())
             .configure(configure_routes)
     })
     .bind((host, port))
@@ -588,10 +906,40 @@ mod tests {
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
 
+    #[test]
+    fn storage_data_dir_default_matches_legacy_layout() {
+        // Without `--db`, serve opens the default GenAI DB; every sibling store
+        // must resolve to the historical directory so this change is a no-op
+        // for existing deployments.
+        let default_db = crate::storage::sqlite::GenAISqliteStore::default_path();
+        assert_eq!(
+            super::storage_data_dir(&default_db),
+            std::path::Path::new("/var/log/sysak/.agentsight"),
+        );
+    }
+
+    #[test]
+    fn storage_data_dir_follows_absolute_db() {
+        let db = PathBuf::from("/backup/2026/genai_events.db");
+        assert_eq!(
+            super::storage_data_dir(&db),
+            std::path::Path::new("/backup/2026"),
+        );
+    }
+
+    #[test]
+    fn storage_data_dir_keeps_relative_db_in_cwd() {
+        // A bare relative `--db archived.db` must keep its siblings next to it
+        // (current directory), not fall back to the system directory.
+        let db = PathBuf::from("archived.db");
+        assert_eq!(super::storage_data_dir(&db), std::path::Path::new("."));
+    }
+
     use super::auth::DashboardAuth;
     use super::{
         AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes,
-        private_state_dir, serve_frontend, serve_frontend_root,
+        json_extractor_config, path_extractor_config, private_state_dir, serve_frontend,
+        serve_frontend_root,
     };
     use crate::config::ServerAuthConfig;
 
@@ -648,6 +996,53 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn api_docs_lists_routes_and_not_found_points_to_it() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/api/docs").to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&awtest::read_body(response).await).unwrap();
+        let routes = body["routes"].as_array().unwrap();
+        assert!(routes.len() >= 50, "route inventory should be complete");
+        let paths: Vec<&str> = routes.iter().filter_map(|r| r["path"].as_str()).collect();
+        for expected in [
+            "/api/sessions",
+            "/api/token-savings",
+            "/api/agent-health",
+            "/api/security/summary",
+            "/api/docs",
+        ] {
+            assert!(paths.contains(&expected), "missing {expected} in /api/docs");
+        }
+
+        // The /api fallback must point integrators to the route list.
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/v1/metrics")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value =
+            serde_json::from_slice(&awtest::read_body(response).await).unwrap();
+        assert!(
+            body["message"].as_str().unwrap().contains("/api/docs"),
+            "404 fallback should reference /api/docs"
+        );
+    }
+
+    #[actix_web::test]
     async fn configure_routes_registers_enforcement_routes() {
         let app = awtest::init_service(
             App::new()
@@ -672,6 +1067,103 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Asserts the response is a 400 carrying the structured error envelope
+    /// produced by the extractor error handlers (issues #2372/#2392).
+    async fn assert_bad_request_envelope<B>(
+        response: actix_web::dev::ServiceResponse<B>,
+        message_fragment: &str,
+    ) where
+        B: actix_web::body::MessageBody,
+    {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CONTENT_TYPE)
+                .expect("content-type header"),
+            "application/json"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "bad_request");
+        assert_eq!(body["error"]["retryable"], false);
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(message_fragment),
+            "message {message:?} does not contain {message_fragment:?}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn review_json_extractor_errors_return_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        let uri = "/api/audit/cases/00000000-0000-0000-0000-000000000000/review";
+
+        let missing_field = awtest::TestRequest::post()
+            .uri(uri)
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{}")
+            .to_request();
+        let response = awtest::call_service(&app, missing_field).await;
+        assert_bad_request_envelope(response, "missing field").await;
+
+        let invalid_variant = awtest::TestRequest::post()
+            .uri(uri)
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"status":"bogus"}"#)
+            .to_request();
+        let response = awtest::call_service(&app, invalid_variant).await;
+        assert_bad_request_envelope(response, "unknown variant").await;
+    }
+
+    #[actix_web::test]
+    async fn enforcement_json_extractor_error_returns_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{}")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid request body").await;
+    }
+
+    #[actix_web::test]
+    async fn enforcement_path_extractor_error_returns_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        // Without the PathConfig handler actix answers 404 here; 400 matches
+        // handlers that parse path ids manually (e.g. audit case_detail).
+        let request = awtest::TestRequest::delete()
+            .uri("/api/enforcement/bindings/not-a-uuid")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid path parameter").await;
     }
 
     #[actix_web::test]

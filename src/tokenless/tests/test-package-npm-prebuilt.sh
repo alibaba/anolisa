@@ -7,11 +7,17 @@ TMP="$(mktemp -d /tmp/tokenless-npm-package-test.XXXXXX)"
 PREBUILT="$ROOT/target/npm-prebuilt"
 BACKUP="$TMP/npm-prebuilt.backup"
 TEST_TOOLS="$TMP/tools"
+LEGACY_AGENTSCOPE="$ROOT/adapters/tokenless/agentscope"
+LEGACY_AGENTSCOPE_BACKUP="$TMP/legacy-agentscope.backup"
 
 cleanup() {
     rm -rf "$PREBUILT"
+    rm -rf "$LEGACY_AGENTSCOPE"
     if [[ -e "$BACKUP" ]]; then
         mv "$BACKUP" "$PREBUILT"
+    fi
+    if [[ -e "$LEGACY_AGENTSCOPE_BACKUP" ]]; then
+        mv "$LEGACY_AGENTSCOPE_BACKUP" "$LEGACY_AGENTSCOPE"
     fi
     rm -rf "$TMP"
 }
@@ -20,6 +26,19 @@ trap cleanup EXIT
 if [[ -e "$PREBUILT" ]]; then
     mv "$PREBUILT" "$BACKUP"
 fi
+if [[ -e "$LEGACY_AGENTSCOPE" ]]; then
+    mv "$LEGACY_AGENTSCOPE" "$LEGACY_AGENTSCOPE_BACKUP"
+fi
+
+mkdir -p \
+    "$LEGACY_AGENTSCOPE/build/lib/tokenless_agentscope" \
+    "$LEGACY_AGENTSCOPE/src/anolisa_tokenless_agentscope.egg-info"
+printf '[build-system]\nrequires = ["setuptools"]\n' \
+    > "$LEGACY_AGENTSCOPE/pyproject.toml"
+printf 'legacy build output\n' \
+    > "$LEGACY_AGENTSCOPE/build/lib/tokenless_agentscope/middleware.py"
+printf 'Name: anolisa-tokenless-agentscope\n' \
+    > "$LEGACY_AGENTSCOPE/src/anolisa_tokenless_agentscope.egg-info/PKG-INFO"
 
 mkdir -p "$TEST_TOOLS"
 cat >"$TEST_TOOLS/readelf" <<'SH'
@@ -54,10 +73,10 @@ if target.startswith("linux-"):
 else:
     cpu = {"darwin-x64": 0x01000007, "darwin-arm64": 0x0100000C}[target]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("tokenless", "rtk", "toon"):
+for name in ("tokenless", "rtk"):
     (root / name).write_bytes(content + f"\n{name}-{target}\n".encode())
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk" "$destination/toon"
+    chmod 0755 "$destination/tokenless" "$destination/rtk"
 }
 
 for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
@@ -101,15 +120,48 @@ check_selector linux 'linux-x64, linux-arm64'
 check_selector aarch64-apple-darwin 'darwin-arm64'
 
 node "$ROOT/npm/scripts/package-npm.js" --all
+test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
+
+# Inspect the published tarball: staging can contain working symlinks that
+# npm pack silently omits, leaving an installed Agent plugin without hooks.
+mkdir -p "$TMP/npm-root"
+tar -xzpf "$ROOT/npm/dist/tokenless/"*.tgz -C "$TMP/npm-root"
+for agent in claude-code qwencode; do
+    dispatcher="$TMP/npm-root/package/adapters/tokenless/$agent/hooks/run-hook.sh"
+    test -f "$dispatcher"
+    test ! -L "$dispatcher"
+    cmp "$ROOT/adapters/tokenless/common/hooks/run-hook.sh" "$dispatcher"
+    test "$(stat -c '%a' "$dispatcher")" = 755
+    bash -n "$dispatcher"
+done
 
 for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"
     test -f "$package/package.json"
     test -f "$package"/*.tgz
-    for binary in tokenless rtk toon; do
+    for binary in tokenless rtk; do
         cmp "$PREBUILT/$target/$binary" "$package/bin/$binary"
         test "$(stat -c '%a' "$package/bin/$binary")" = 755
     done
+done
+
+# Platform packages must not declare bin entries: they would collide with
+# the root package's tokenless/rtk bins, and npm resolves such
+# collisions by removing every conflicting .bin link, leaving installs
+# without a tokenless executable. The root package's postinstall links its
+# bins to these platform binaries instead (esbuild's platform packages use
+# the same model).
+for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+    node - "$ROOT/npm/dist/tokenless-$target/package.json" <<'JS'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (manifest.bin !== undefined) {
+  throw new Error(
+    `${manifest.name} must not declare bin entries; ` +
+    'the root package owns the tokenless/rtk bin names',
+  );
+}
+JS
 done
 
 node - "$ROOT/npm/dist/tokenless/package.json" <<'JS'
@@ -125,6 +177,18 @@ for (const name of expected) {
   if (manifest.optionalDependencies?.[name] !== manifest.version) {
     throw new Error(`missing optional dependency ${name}`);
   }
+}
+JS
+
+test -f "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/package.json"
+test -f "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/cordis.patch.yml"
+test -f "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/dist/index.js"
+node - "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/package.json" <<'JS'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (manifest.name !== '@anolisa/dsh-tokenless') throw new Error('wrong dsh package name');
+if (manifest.dsh?.bundle?.patch !== './cordis.patch.yml') {
+  throw new Error('dsh bundle patch contract missing');
 }
 JS
 

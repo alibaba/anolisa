@@ -1,5 +1,6 @@
 use crate::runtime::state::PendingInteractiveShellHandoff;
 use crate::tools::display::{presentation_for_tool, ToolPresentation};
+use crate::tools::{known_provider_tool, KnownProviderTool};
 
 use crate::runtime::prelude::*;
 
@@ -321,6 +322,29 @@ pub(crate) fn record_activity_rows_with_policy(
                     Some(row)
                 }
             }
+            AgentEvent::ToolHookVerdict {
+                run_id,
+                tool_id,
+                verdict,
+            } => {
+                if verdict == "blocked" {
+                    state
+                        .control
+                        .mark_provider_hook_blocked_result(run_id, tool_id);
+                    // A block marker arriving after the staging grace converts
+                    // the provisional staged_unresolved journal entry into the
+                    // final rejection (#2156).
+                    crate::approval::requests::reconcile_staged_unresolved_entry(
+                        state,
+                        run_id,
+                        tool_id,
+                        ApprovalRequestStatus::Blocked,
+                        "cosh-core",
+                        "hook_block",
+                    );
+                }
+                None
+            }
             _ => None,
         };
         if let Some(row) = row {
@@ -568,7 +592,7 @@ fn terminal_output_misroute_detail(
 }
 
 fn terminal_output_id_from_read_tool_input(tool_name: &str, input: &str) -> Option<String> {
-    if !matches!(tool_name, "Read" | "read_file") {
+    if known_provider_tool(tool_name) != Some(KnownProviderTool::ReadFile) {
         return None;
     }
     let value = serde_json::from_str::<serde_json::Value>(input).ok()?;

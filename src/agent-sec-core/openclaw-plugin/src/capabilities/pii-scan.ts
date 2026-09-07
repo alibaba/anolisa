@@ -15,8 +15,6 @@ import {
 } from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
-const MAX_EVIDENCE_ITEMS = 3;
-const MAX_EVIDENCE_CHARS = 80;
 const BEFORE_DISPATCH_PRIORITY = 200;
 
 type PiiScanConfig = {
@@ -54,60 +52,49 @@ function readConfig(pluginConfig: Record<string, any>, api: any): PiiScanConfig 
   };
 }
 
-function shorten(value: string, limit = MAX_EVIDENCE_CHARS): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= limit) {
-    return normalized;
-  }
-  return `${normalized.slice(0, limit - 1)}…`;
-}
-
 function safeString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function findingRisk(
+  finding: Record<string, unknown>,
+  verdict: string,
+): "high" | "general" {
+  const severity = safeString(finding.severity);
+  if (severity === "deny") {
+    return "high";
+  }
+  if (severity === "warn") {
+    return "general";
+  }
+  return verdict === "deny" ? "high" : "general";
+}
+
+function riskSummary(verdict: string, findings: Record<string, unknown>[]): string {
+  const highCount = findings.filter(
+    (finding) => findingRisk(finding, verdict) === "high",
+  ).length;
+  const generalCount = findings.length - highCount;
+
+  if (highCount > 0 && generalCount > 0) {
+    return `检测到 ${findings.length} 项敏感信息（高风险 ${highCount}、一般风险 ${generalCount}）`;
+  }
+  if (highCount > 0) {
+    return `检测到 ${highCount} 项高风险敏感信息`;
+  }
+  return `检测到 ${generalCount} 项一般风险敏感信息`;
 }
 
 function formatPiiWarning(
   verdict: string,
   findings: unknown[],
-  finalMessage = "本轮请求将继续处理。",
+  finalMessage = "本次仅提醒，未触发确认或阻断。",
 ): string {
   const typedFindings = findings.filter(
     (finding): finding is Record<string, unknown> =>
       typeof finding === "object" && finding !== null && !Array.isArray(finding),
   );
-  const piiTypes = Array.from(
-    new Set(
-      typedFindings
-        .map((finding) => safeString(finding.type))
-        .filter((value) => value.length > 0),
-    ),
-  ).sort();
-  const severities = Array.from(
-    new Set(
-      typedFindings
-        .map((finding) => safeString(finding.severity))
-        .filter((value) => value.length > 0),
-    ),
-  ).sort();
-  const evidence = typedFindings
-    .map((finding) => safeString(finding.evidence_redacted))
-    .filter((value, index, arr) => value.length > 0 && arr.indexOf(value) === index)
-    .slice(0, MAX_EVIDENCE_ITEMS)
-    .map((value) => shorten(value));
-
-  const risk = verdict === "deny" ? "高风险敏感信息" : "敏感信息";
-  const parts = [
-    `[pii-checker] 检测到 ${typedFindings.length} 项${risk}`,
-    `类型：${piiTypes.length > 0 ? piiTypes.join(", ") : "unknown"}`,
-  ];
-  if (severities.length > 0) {
-    parts.push(`严重级别：${severities.join(", ")}`);
-  }
-  if (evidence.length > 0) {
-    parts.push(`脱敏示例：${evidence.join(", ")}`);
-  }
-  parts.push(finalMessage);
-  return parts.join("；");
+  return `[pii-checker] ${riskSummary(verdict, typedFindings)}；${finalMessage}`;
 }
 
 function buildScanArgs(source: string, includeLowConfidence: boolean): string[] {
@@ -197,9 +184,8 @@ function logPiiWarning(
   finalMessage?: string,
 ): string {
   const warning = formatPiiWarning(verdict, findings, finalMessage);
-  api.logger.warn(
-    `[pii-checker] ${verdict.toUpperCase()} (policy=${cfg.policy}) — ${warning}`,
-  );
+  api.logger.debug?.(`[pii-checker] verdict=${verdict} policy=${cfg.policy}`);
+  api.logger.warn(warning);
   return warning;
 }
 
@@ -251,7 +237,11 @@ export const piiScan: SecurityCapability = {
             verdict,
             findings,
             cfg,
-            verdict === "deny" && cfg.policy === "block" ? "本轮请求已被阻断。" : undefined,
+            verdict === "deny" && cfg.policy === "block"
+              ? "当前策略已阻断本次请求。"
+              : verdict === "deny" && cfg.policy === "ask"
+                ? "当前环节不支持确认/阻断，本次仅提醒，不会阻断。"
+                : undefined,
           );
           if (verdict === "deny" && cfg.policy === "block") {
             return {
@@ -288,8 +278,10 @@ export const piiScan: SecurityCapability = {
             findings,
             cfg,
             verdict === "deny" && cfg.policy === "block"
-              ? "本次工具调用已被阻断。"
-              : undefined,
+              ? "当前策略已阻断本次工具调用。"
+              : verdict === "deny" && cfg.policy === "ask"
+                ? "当前策略要求确认，请确认后继续。"
+                : undefined,
           );
           if (verdict === "deny" && cfg.policy === "ask") {
             return {
@@ -323,7 +315,19 @@ export const piiScan: SecurityCapability = {
         const { verdict, findings } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
-        if (cfg.policy !== "observe") logPiiWarning(api, verdict, findings, cfg);
+        if (cfg.policy !== "observe") {
+          const cannotEnforce =
+            verdict === "deny" && (cfg.policy === "ask" || cfg.policy === "block");
+          logPiiWarning(
+            api,
+            verdict,
+            findings,
+            cfg,
+            cannotEnforce
+              ? "工具已经执行；当前环节不支持确认/阻断，本次仅提醒，工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。"
+              : "工具已经执行；本次仅提醒，未触发确认或阻断，工具结果仍会进入模型上下文，已发生的外部副作用不会撤销。",
+          );
+        }
         return undefined;
       } catch (error) {
         api.logger.warn(
@@ -342,7 +346,15 @@ export const piiScan: SecurityCapability = {
         const { verdict, findings } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
-        if (cfg.policy !== "observe") logPiiWarning(api, verdict, findings, cfg);
+        if (cfg.policy !== "observe") {
+          logPiiWarning(
+            api,
+            verdict,
+            findings,
+            cfg,
+            "当前环节仅提醒，原始模型输出仍会交付，不会被脱敏或阻断。",
+          );
+        }
         return undefined;
       } catch (error) {
         api.logger.warn(

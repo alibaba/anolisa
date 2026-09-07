@@ -1,4 +1,4 @@
-import {mkdir, readFile, rm, writeFile} from 'node:fs/promises';
+import {copyFile, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {
   exists,
@@ -15,6 +15,12 @@ const siteUrl = process.env.SITE_URL ?? 'https://agentic-os.sh';
 const baseUrl = process.env.BASE_URL ?? '/';
 const docsOutput = path.join(generatedDir, 'docs');
 const i18nOutput = path.join(generatedDir, 'i18n', 'zh', 'docusaurus-plugin-content-docs', 'current');
+const staticOutput = path.join(generatedDir, 'static');
+const imagePrefix = 'docs/images/';
+
+// Images referenced by documentation, collected while links are rewritten and
+// copied into the generated static directory afterwards.
+const referencedImages = new Set();
 
 function normalizedTarget(relativePath) {
   const parsed = path.posix.parse(toPosix(relativePath));
@@ -83,6 +89,24 @@ async function rewriteLinks(markdown, source) {
     const rawTarget = match[3].trim();
     if (/^(?:[a-z]+:|#|\/)/i.test(rawTarget)) continue;
     const [targetWithoutHash, hash = ''] = rawTarget.split('#', 2);
+
+    // Images live outside the generated docs tree, so relative paths cannot
+    // survive the copy. Point them at the static directory with a root-relative
+    // path: Docusaurus applies `baseUrl` itself, so hard-coding it here would
+    // double the prefix on sub-path deployments (fork Pages).
+    if (match[1] === '!') {
+      const resolvedImage = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutHash));
+      if (resolvedImage.startsWith(imagePrefix) && (await exists(path.join(repoRoot, resolvedImage)))) {
+        referencedImages.add(resolvedImage);
+        replacements.push({
+          start: match.index,
+          end: match.index + match[0].length,
+          value: `![${match[2]}](/${resolvedImage.slice('docs/'.length)})`,
+        });
+      }
+      continue;
+    }
+
     if (!targetWithoutHash.endsWith('.md')) continue;
 
     let resolved = path.posix.normalize(path.posix.join(sourceDirectory, targetWithoutHash));
@@ -241,6 +265,7 @@ const categoryPathNames = {
     'user-guide/user-entrypoint/cosh-ng/shell': 'Terminal',
     'user-guide/user-entrypoint/cosh-ng/core': 'Automation and Integration',
     'user-guide/user-entrypoint/cosh-ng/cli': 'System Operations',
+    'user-guide/agent-observability/agentsight': 'AgentSight',
     'developer-guide/cosh-ng': 'cosh-ng',
   },
   zh: {
@@ -248,6 +273,7 @@ const categoryPathNames = {
     'user-guide/user-entrypoint/cosh-ng/shell': '终端',
     'user-guide/user-entrypoint/cosh-ng/core': '自动化与集成',
     'user-guide/user-entrypoint/cosh-ng/cli': '系统操作',
+    'user-guide/agent-observability/agentsight': 'AgentSight',
     'developer-guide/cosh-ng': 'cosh-ng',
   },
 };
@@ -330,8 +356,15 @@ async function prepareLocale(documents, outputRoot, locale) {
 
 await rm(docsOutput, {recursive: true, force: true});
 await rm(path.join(generatedDir, 'i18n'), {recursive: true, force: true});
+await rm(path.join(staticOutput, 'images'), {recursive: true, force: true});
 await prepareLocale(englishDocuments, docsOutput, 'en');
 await prepareLocale(chineseDocuments, i18nOutput, 'zh');
+
+for (const image of referencedImages) {
+  const destination = path.join(staticOutput, image.slice('docs/'.length));
+  await mkdir(path.dirname(destination), {recursive: true});
+  await copyFile(path.join(repoRoot, image), destination);
+}
 
 const translationRoot = path.join(generatedDir, 'i18n', 'zh');
 const docsTranslationRoot = path.join(translationRoot, 'docusaurus-plugin-content-docs');
@@ -447,4 +480,4 @@ await writeFile(
   )}\n`,
 );
 
-console.log(`Prepared ${englishDocuments.length} English and ${chineseDocuments.length} Chinese documents in ${path.relative(websiteDir, generatedDir)}.`);
+console.log(`Prepared ${englishDocuments.length} English and ${chineseDocuments.length} Chinese documents and ${referencedImages.size} images in ${path.relative(websiteDir, generatedDir)}.`);

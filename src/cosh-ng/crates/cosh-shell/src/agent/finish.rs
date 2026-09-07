@@ -90,18 +90,11 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         return Ok(());
     }
     // Drain any unconsumed pending hook notifications into deferred_events
-    // (orphan case: hook returned block, so no ToolPermissionRequest was emitted)
+    // (orphan case: hook returned block, so no ToolPermissionRequest was
+    // emitted). Route them through governance so the rendered block carries
+    // real display text instead of an empty card (#2067).
     let i18n = I18n::new(active_run.language);
-    let run_id = active_run.request.id.clone();
-    for notification in active_run.pending_hook_notifications.drain(..) {
-        active_run
-            .deferred_events
-            .push(pending_hook_notification_event(
-                &run_id,
-                &notification,
-                &i18n,
-            ));
-    }
+    drain_orphan_hook_notifications(&mut active_run);
     if !active_run.deferred_events.is_empty() {
         // Projection is throwaway and display-only: `deferred_events` itself
         // still holds every original notification for approval linking and
@@ -221,6 +214,16 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     }
 
     Ok(())
+}
+
+fn drain_orphan_hook_notifications(active_run: &mut ActiveAgentRun) {
+    let events = crate::agent::run::take_pending_hook_notification_events(active_run);
+    if events.is_empty() {
+        return;
+    }
+    let mut governed =
+        govern_agent_events_with_language(&events, &Policy::default(), active_run.language).events;
+    active_run.deferred_events.append(&mut governed);
 }
 
 fn active_run_provider_timed_out(active_run: &ActiveAgentRun) -> bool {
@@ -642,5 +645,35 @@ mod tests {
 
         assert_eq!(trim_queued_requests_after_provider_timeout(&mut state), 0);
         assert_eq!(state.agent_run.queued_requests.len(), 2);
+    }
+
+    // F2 (#2067): an orphan hook block notification must drain through
+    // governance so the deferred render carries real display text instead of
+    // an empty card.
+    #[test]
+    fn finish_drains_orphan_hook_notification_with_visible_display_text() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
+        active_run
+            .pending_hook_notifications
+            .push(crate::agent::run::PendingHookNotification {
+                tool_use_id: Some("toolu-1".to_string()),
+                hook_name: "guard".to_string(),
+                message: String::new(),
+                decision: Some("block".to_string()),
+            });
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(
+            rendered.contains("Hook: guard")
+                && rendered.contains("Message: no message provided")
+                && rendered.contains("Decision: block"),
+            "the orphan block must render visible governance text: {rendered}"
+        );
     }
 }

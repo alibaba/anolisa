@@ -52,10 +52,11 @@ releasever = "4"
 # always wins over the derived layout. The index itself stays mandatory
 # either way: it is the version list and sha256 manifest — resolution
 # and verification never run on URL guessing.
+#
+# The index is re-fetched on every run and an unreachable repository fails
+# the command; there is no index cache and no stale-index fallback.
 [backends.raw]
 base_url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/"
-cache_ttl_secs = 3600
-offline_fallback = true
 
 # rpm — resolution/install delegated to dnf against this repo.
 [backends.rpm]

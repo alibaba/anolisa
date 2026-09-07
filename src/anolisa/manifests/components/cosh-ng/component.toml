@@ -22,12 +22,6 @@ os = ["linux"]
 arch = ["x86_64"]
 
 [[component.dependencies]]
-name = "openssl1.1"
-kind = "system-package"
-probe = "test -e /usr/lib64/libssl.so.1.1 -a -e /usr/lib64/libcrypto.so.1.1"
-packages = { rpm = "openssl1.1", deb = "libssl1.1" }
-
-[[component.dependencies]]
 name = "bash"
 kind = "system-package"
 packages = { rpm = "bash", deb = "bash" }

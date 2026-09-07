@@ -1,7 +1,10 @@
 """Unit tests for the PII scanner."""
 
+import time
+
 import pytest
 from agent_sec_cli.pii_checker.detectors.base import PiiCandidate
+from agent_sec_cli.pii_checker.detectors.regex import RegexPiiDetector
 from agent_sec_cli.pii_checker.models import PiiFinding
 from agent_sec_cli.pii_checker.redactor import redact_text
 from agent_sec_cli.pii_checker.scanner import DEFAULT_MAX_BYTES, PiiScanner
@@ -75,6 +78,12 @@ def test_bearer_jwt_preserves_both_types():
     assert result["summary"]["by_type"]["bearer_token"] == 1
     assert result["summary"]["by_type"]["jwt"] == 1
     assert token not in result["redacted_text"]
+
+
+def test_jwt_like_code_identifier_is_not_detected():
+    result = _scan("Call resolved.auth_source.as_deref() before loading credentials.")
+
+    assert "jwt" not in _types(result)
 
 
 def test_chinese_secret_field_is_detected_with_high_confidence():
@@ -183,6 +192,165 @@ def test_low_confidence_hidden_by_default_and_included_on_request():
     assert hidden["findings"] == []
     assert shown["verdict"] == "warn"
     assert shown["findings"][0]["type"] == "email"
+
+
+@pytest.mark.parametrize(
+    "email",
+    (
+        "alice@example.com",
+        "alice@sub.example.net",
+        "alice@company.example",
+        "alice@company.invalid",
+        "alice@company.test",
+        "alice@company.localhost",
+    ),
+)
+def test_reserved_email_domains_are_low_confidence(email):
+    hidden = _scan(f"Contact {email}")
+    shown = _scan(f"Contact {email}", include_low_confidence=True)
+
+    assert "email" not in _types(hidden)
+    assert _types(shown) == {"email"}
+    finding = shown["findings"][0]
+    assert finding["confidence"] < 0.5
+    assert finding["metadata"]["validator"] == "email_syntax"
+    assert finding["metadata"]["context"] == "reserved_domain"
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "ssh://deploy@securecorp.cn/home/deploy",
+        "git clone git@github.com:org/repo.git",
+        "scp /tmp/a deploy@securecorp.cn:/tmp/",
+        "rsync /tmp/a deploy@securecorp.cn:/tmp/",
+        "ssh deploy@securecorp.cn",
+        "ssh -p 22 deploy@securecorp.cn",
+        "ssh -p22 deploy@securecorp.cn",
+        "ssh -vvv deploy@securecorp.cn",
+        'ssh "deploy@securecorp.cn"',
+        "ssh " + "-v " * 30 + "deploy@securecorp.cn",
+        "sftp deploy@securecorp.cn",
+        "sftp -P 22 deploy@securecorp.cn",
+    ),
+)
+def test_remote_identity_emails_are_low_confidence(text):
+    hidden = _scan(text)
+    shown = _scan(text, include_low_confidence=True)
+
+    assert "email" not in _types(hidden)
+    assert _types(shown) == {"email"}
+    finding = shown["findings"][0]
+    assert finding["confidence"] < 0.5
+    assert finding["metadata"]["context"] == "remote_identity"
+
+
+def test_mailto_and_ambiguous_email_shapes_remain_detected():
+    result = _scan(
+        "mailto:alice@securecorp.cn, literal git@github.com, and lhs@module.py"
+    )
+
+    assert result["summary"]["by_type"]["email"] == 3
+    assert all(
+        finding["metadata"]["validator"] == "email_syntax"
+        for finding in result["findings"]
+    )
+
+
+def test_colon_after_email_is_not_enough_to_mark_remote_identity():
+    result = _scan("Contact alice@company.cn:thanks for the quick response")
+
+    assert _types(result) == {"email"}
+    assert "context" not in result["findings"][0]["metadata"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "ssh failed, contact alice@securecorp.cn for help",
+        "Contact alice@securecorp.cn: https://docs.securecorp.cn/help",
+    ),
+)
+def test_remote_keywords_and_colon_prose_do_not_lower_email_confidence(text):
+    result = _scan(text)
+
+    assert _types(result) == {"email"}
+    assert result["findings"][0]["confidence"] >= 0.82
+    assert "context" not in result["findings"][0]["metadata"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "ssh -o note=alice@securecorp.cn target",
+        "ssh -oIdentityFile=alice@securecorp.cn target",
+        "ssh -P alice@securecorp.cn target",
+        "ssh -Q cipher alice@securecorp.cn",
+        "ssh -V alice@securecorp.cn",
+        "ssh -Z alice@securecorp.cn",
+        'ssh "alice@securecorp.cn',
+        'ssh alice@securecorp.cn"',
+        'ssh "alice@securecorp.cn"suffix',
+        "sftp -s alice@securecorp.cn target",
+        "sftp -D /definitely/missing alice@securecorp.cn",
+        "notssh://alice@securecorp.cn",
+        "myrsync://alice@securecorp.cn",
+        "not_ssh://alice@securecorp.cn",
+        "非ssh://alice@securecorp.cn",
+        "notssh " + "-v " * 20 + "alice@securecorp.cn",
+    ),
+)
+def test_ssh_option_values_do_not_look_like_remote_targets(text):
+    result = _scan(text)
+
+    assert _types(result) == {"email"}
+    assert result["findings"][0]["confidence"] >= 0.82
+    assert "context" not in result["findings"][0]["metadata"]
+
+
+def test_scp_style_git_repository_without_slash_is_low_confidence():
+    hidden = _scan("git clone git@github.com:repo.git")
+    shown = _scan("git clone git@github.com:repo.git", include_low_confidence=True)
+
+    assert "email" not in _types(hidden)
+    assert _types(shown) == {"email"}
+    assert shown["findings"][0]["metadata"]["context"] == "remote_identity"
+
+
+def test_many_emails_do_not_trigger_quadratic_remote_context_scans():
+    text = "alice@securecorp.cn " * 15_000
+
+    started = time.perf_counter()
+    findings = RegexPiiDetector().detect(text)
+    elapsed = time.perf_counter() - started
+
+    assert len(findings) == 15_000
+    assert elapsed < 2.0
+
+
+def test_fixture_words_do_not_lower_real_email_confidence():
+    result = _scan(
+        "example dummy test sample: contact test@example.company.cn for help"
+    )
+
+    assert _types(result) == {"email"}
+    assert result["findings"][0]["confidence"] >= 0.82
+
+
+@pytest.mark.parametrize(
+    "email",
+    (
+        ".alice@company.cn",
+        "alice.@company.cn",
+        "alice..bob@company.cn",
+        "alice@-company.cn",
+        "alice@company-.cn",
+        "alice@company..cn",
+        "alice@bad_domain.cn",
+    ),
+)
+def test_invalid_email_syntax_is_not_detected(email):
+    assert "email" not in _types(_scan(f"Contact {email}"))
 
 
 def test_raw_evidence_default_off_and_opt_in():

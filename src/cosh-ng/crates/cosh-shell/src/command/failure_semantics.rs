@@ -505,21 +505,50 @@ use failure_signatures::{
     BoundedOutput,
 };
 
-fn interactive_cancel_output(output: &str) -> bool {
-    [
+/// Shared cancel-output matcher for failure classification and the
+/// failure-analysis skip gate (`hooks::interrupt`). Needles are tiered by
+/// specificity so real failures whose output merely mentions these words
+/// stay analyzable (issue #2090). Input is normalized here (ANSI stripped,
+/// lowercased) because raw callers pass terminal output with control
+/// sequences; the pass is idempotent for pre-normalized callers.
+pub(crate) fn interactive_cancel_output(output: &str) -> bool {
+    let normalized = normalize_output(output);
+    let phrase_hit = [
         "sudo: a password is required",
         "a password is required",
         "a terminal is required",
         "operation cancelled",
         "operation canceled",
         "keyboardinterrupt",
-        "interrupted",
-        "access key id",
-        "access key secret",
-        "default region id",
     ]
     .iter()
-    .any(|needle| output.contains(needle))
+    .any(|needle| normalized.contains(needle));
+    if phrase_hit {
+        return true;
+    }
+
+    normalized.lines().any(|line| {
+        let line = line.trim();
+        // Single-word cancel markers must stand alone on their own line so
+        // failures like "transfer was interrupted by peer" stay analyzable.
+        if line == "interrupted" {
+            return true;
+        }
+        // Credential needles only signal a cancel when the line itself is the
+        // prompt label, optionally with a bracketed default, ending with ':'
+        // (e.g. "access key id []:"); error headers that merely mention the
+        // needle and end with ':' stay analyzable.
+        ["access key id", "access key secret", "default region id"]
+            .iter()
+            .any(|needle| {
+                line.strip_prefix(needle)
+                    .and_then(|rest| rest.strip_suffix(':'))
+                    .is_some_and(|middle| {
+                        let middle = middle.trim();
+                        middle.is_empty() || (middle.starts_with('[') && middle.ends_with(']'))
+                    })
+            })
+    })
 }
 
 fn push_reason_once(reasons: &mut Vec<FailureReason>, reason: FailureReason) {

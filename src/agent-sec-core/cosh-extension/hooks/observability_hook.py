@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -19,7 +20,23 @@ from hook_config import env_flag_enabled
 from pii_text import json_dumps as _json_dumps
 from pii_text import text_sha256, value_to_text
 
-_CLI_TIMEOUT_SECONDS = 3
+_DEFAULT_CLI_TIMEOUT_SECONDS = 5
+_MAX_CLI_TIMEOUT_SECONDS = 5
+
+
+def _read_cli_timeout_seconds() -> int:
+    try:
+        timeout = int(
+            os.environ.get("OBSERVABILITY_TIMEOUT", _DEFAULT_CLI_TIMEOUT_SECONDS)
+        )
+    except (TypeError, ValueError):
+        return _DEFAULT_CLI_TIMEOUT_SECONDS
+    if timeout <= 0:
+        return _DEFAULT_CLI_TIMEOUT_SECONDS
+    return min(timeout, _MAX_CLI_TIMEOUT_SECONDS)
+
+
+_CLI_TIMEOUT_SECONDS = _read_cli_timeout_seconds()
 _HOOK_ENABLED = env_flag_enabled("OBSERVABILITY_HOOK_ENABLED", True)
 # Read one extra byte below to distinguish an exact-limit payload from truncation.
 _MAX_PAYLOAD_SIZE = 1024 * 1024

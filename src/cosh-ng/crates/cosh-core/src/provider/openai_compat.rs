@@ -214,7 +214,8 @@ impl ContentGenerator for OpenAICompatProvider {
         // otherwise no usage chunk is coming and MessageEnd must not wait.
         let defer_message_end = config.include_usage && self.profile.supports_stream_usage();
         let byte_stream = response.bytes_stream();
-        let buffer = String::new();
+        let buffer = SseByteBuffer::default();
+        let sse_event = SseEventBuffer::default();
         let event_queue: Vec<GenerateEvent> = Vec::new();
         let stream_state = OpenAICompatStreamState::default();
 
@@ -222,33 +223,56 @@ impl ContentGenerator for OpenAICompatProvider {
             (
                 byte_stream,
                 buffer,
+                sse_event,
                 cancelled,
                 event_queue,
                 thinking_field,
                 stream_state,
+                false, // exhausted: terminal emitted or byte stream drained
             ),
             move |(
                 mut stream,
                 mut buf,
+                mut sse_event,
                 cancelled,
                 mut pending,
                 thinking_field,
                 mut stream_state,
+                exhausted,
             )| async move {
                 let tf = thinking_field.as_deref();
                 loop {
                     if let Some(event) = pending.pop() {
+                        // A terminal event popped from the queue seals the
+                        // stream too; otherwise a [DONE] still in flight
+                        // after e.g. a finish_reason-driven MessageEnd would
+                        // produce a second terminal event.
+                        let exhausted = exhausted
+                            || matches!(
+                                event,
+                                GenerateEvent::MessageEnd
+                                    | GenerateEvent::Error(_)
+                                    | GenerateEvent::Cancelled
+                            );
                         return Some((
                             event,
                             (
                                 stream,
                                 buf,
+                                sse_event,
                                 cancelled,
                                 pending,
                                 thinking_field,
                                 stream_state,
+                                exhausted,
                             ),
                         ));
+                    }
+
+                    // Never poll the byte stream again once a terminal event
+                    // went out or the stream already returned end-of-stream.
+                    if exhausted {
+                        return None;
                     }
 
                     if cancelled.load(Ordering::SeqCst) {
@@ -257,68 +281,153 @@ impl ContentGenerator for OpenAICompatProvider {
                             (
                                 stream,
                                 buf,
+                                sse_event,
                                 cancelled,
                                 pending,
                                 thinking_field,
                                 stream_state,
+                                true,
                             ),
                         ));
                     }
 
-                    if let Some(line_end) = buf.find('\n') {
-                        let line = buf[..line_end].to_string();
-                        buf = buf[line_end + 1..].to_string();
-
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with(':') {
-                            continue;
-                        }
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data.trim() == "[DONE]" {
+                    // Extract one complete line (LF, CRLF, or bare CR). Bytes
+                    // are buffered raw and decoded per line so a multi-byte
+                    // character split across network chunks reassembles
+                    // instead of turning into replacement characters that
+                    // corrupt the payload.
+                    if let Some(line_bytes) = buf.take_line() {
+                        let line = match std::str::from_utf8(&line_bytes) {
+                            Ok(line) => line,
+                            Err(error) => {
+                                return Some((
+                                    GenerateEvent::Error(format!(
+                                        "SSE stream carried invalid UTF-8: {error}"
+                                    )),
+                                    (
+                                        stream,
+                                        buf,
+                                        sse_event,
+                                        cancelled,
+                                        pending,
+                                        thinking_field,
+                                        stream_state,
+                                        true,
+                                    ),
+                                ));
+                            }
+                        };
+                        let data = match sse_event.push_line(line) {
+                            Ok(Some(data)) => data,
+                            Ok(None) => continue,
+                            Err(message) => {
+                                return Some((
+                                    GenerateEvent::Error(message),
+                                    (
+                                        stream,
+                                        buf,
+                                        sse_event,
+                                        cancelled,
+                                        pending,
+                                        thinking_field,
+                                        stream_state,
+                                        true,
+                                    ),
+                                ));
+                            }
+                        };
+                        match dispatch_sse_data(&data, tf, defer_message_end, &mut stream_state) {
+                            SseDispatch::Done => {
                                 return Some((
                                     GenerateEvent::MessageEnd,
                                     (
                                         stream,
                                         buf,
+                                        sse_event,
                                         cancelled,
                                         pending,
                                         thinking_field,
                                         stream_state,
+                                        true,
                                     ),
                                 ));
                             }
-                            if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                if let Some(mut events) = parse_sse_chunk_with_state(
-                                    &chunk,
-                                    tf,
-                                    defer_message_end,
-                                    &mut stream_state,
-                                ) {
-                                    if !events.is_empty() {
-                                        let first = events.remove(0);
-                                        events.reverse();
-                                        pending = events;
-                                        return Some((
-                                            first,
-                                            (
-                                                stream,
-                                                buf,
-                                                cancelled,
-                                                pending,
-                                                thinking_field,
-                                                stream_state,
-                                            ),
-                                        ));
-                                    }
+                            SseDispatch::Malformed(message) => {
+                                return Some((
+                                    GenerateEvent::Error(message),
+                                    (
+                                        stream,
+                                        buf,
+                                        sse_event,
+                                        cancelled,
+                                        pending,
+                                        thinking_field,
+                                        stream_state,
+                                        true,
+                                    ),
+                                ));
+                            }
+                            SseDispatch::Events(mut events) => {
+                                if events.is_empty() {
+                                    continue;
                                 }
+                                let first = events.remove(0);
+                                events.reverse();
+                                pending = events;
+                                // A chunk-parsed terminal (finish_reason in
+                                // non-deferred mode) seals the stream here as
+                                // well, so a trailing [DONE] cannot emit a
+                                // second MessageEnd.
+                                let exhausted = matches!(
+                                    first,
+                                    GenerateEvent::MessageEnd
+                                        | GenerateEvent::Error(_)
+                                        | GenerateEvent::Cancelled
+                                );
+                                return Some((
+                                    first,
+                                    (
+                                        stream,
+                                        buf,
+                                        sse_event,
+                                        cancelled,
+                                        pending,
+                                        thinking_field,
+                                        stream_state,
+                                        exhausted,
+                                    ),
+                                ));
                             }
                         }
-                        continue;
                     }
 
                     match stream.next().await {
                         Some(Ok(bytes)) => {
-                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                            buf.extend(&bytes);
+                            // A line is only extracted once its terminator
+                            // arrives, so an endless line must be bounded
+                            // here before it exhausts memory. Complete lines
+                            // still in the buffer drain on the next
+                            // iterations, so only a terminator-free overflow
+                            // is an error.
+                            if buf.overflowed_without_line_ending() {
+                                return Some((
+                                    GenerateEvent::Error(format!(
+                                        "SSE line exceeds the maximum size of \
+                                         {MAX_SSE_EVENT_BYTES} bytes"
+                                    )),
+                                    (
+                                        stream,
+                                        buf,
+                                        sse_event,
+                                        cancelled,
+                                        pending,
+                                        thinking_field,
+                                        stream_state,
+                                        true,
+                                    ),
+                                ));
+                            }
                         }
                         Some(Err(e)) => {
                             return Some((
@@ -326,56 +435,91 @@ impl ContentGenerator for OpenAICompatProvider {
                                 (
                                     stream,
                                     buf,
+                                    sse_event,
                                     cancelled,
                                     pending,
                                     thinking_field,
                                     stream_state,
+                                    true,
                                 ),
                             ));
                         }
                         None => {
-                            if !buf.trim().is_empty() {
-                                let line = buf.trim().to_string();
-                                buf.clear();
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    if data.trim() != "[DONE]" {
-                                        if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                            if let Some(mut events) = parse_sse_chunk_with_state(
-                                                &chunk,
-                                                tf,
-                                                defer_message_end,
-                                                &mut stream_state,
-                                            ) {
-                                                if !events.is_empty() {
-                                                    let first = events.remove(0);
-                                                    events.reverse();
-                                                    pending = events;
-                                                    return Some((
-                                                        first,
-                                                        (
-                                                            stream,
-                                                            buf,
-                                                            cancelled,
-                                                            pending,
-                                                            thinking_field,
-                                                            stream_state,
-                                                        ),
-                                                    ));
-                                                }
-                                            }
+                            // Flush a final line missing its trailing newline,
+                            // then the event buffer (streams may end without
+                            // the blank-line separator).
+                            let mut terminal: Option<GenerateEvent> = None;
+                            let mut flushed: Option<String> = None;
+                            if !buf.is_empty() {
+                                let tail = buf.take_tail();
+                                match std::str::from_utf8(&tail) {
+                                    Ok(line) => match sse_event.push_line(line) {
+                                        Ok(data) => flushed = data,
+                                        Err(message) => {
+                                            terminal = Some(GenerateEvent::Error(message));
                                         }
+                                    },
+                                    Err(error) => {
+                                        terminal = Some(GenerateEvent::Error(format!(
+                                            "SSE stream carried invalid UTF-8: {error}"
+                                        )));
                                     }
                                 }
                             }
+                            let mut queued: Vec<GenerateEvent> = Vec::new();
+                            if terminal.is_none() {
+                                if let Some(data) = flushed.or_else(|| sse_event.take_data()) {
+                                    match dispatch_sse_data(
+                                        &data,
+                                        tf,
+                                        defer_message_end,
+                                        &mut stream_state,
+                                    ) {
+                                        SseDispatch::Done => {
+                                            terminal = Some(GenerateEvent::MessageEnd);
+                                        }
+                                        SseDispatch::Malformed(message) => {
+                                            terminal = Some(GenerateEvent::Error(message));
+                                        }
+                                        SseDispatch::Events(events) => queued = events,
+                                    }
+                                }
+                            }
+                            // End-of-stream without [DONE] is complete only
+                            // when the model already signaled finish_reason;
+                            // otherwise the tail was lost in transit and the
+                            // partial output must not pass as success.
+                            let terminal = terminal.unwrap_or_else(|| {
+                                if stream_state.saw_finish_reason {
+                                    GenerateEvent::MessageEnd
+                                } else {
+                                    GenerateEvent::Error(
+                                        "SSE stream ended before completion: \
+                                         no [DONE] marker or finish_reason received"
+                                            .to_string(),
+                                    )
+                                }
+                            });
+                            let already_terminal = queued.iter().any(|event| {
+                                matches!(event, GenerateEvent::MessageEnd | GenerateEvent::Error(_))
+                            });
+                            if !already_terminal {
+                                queued.push(terminal);
+                            }
+                            let first = queued.remove(0);
+                            queued.reverse();
+                            pending = queued;
                             return Some((
-                                GenerateEvent::MessageEnd,
+                                first,
                                 (
                                     stream,
                                     buf,
+                                    sse_event,
                                     cancelled,
                                     pending,
                                     thinking_field,
                                     stream_state,
+                                    true,
                                 ),
                             ));
                         }
@@ -445,6 +589,204 @@ struct OpenAICompatStreamState {
     argument_deltas_seen: HashSet<u32>,
     started_tool_calls: HashSet<u32>,
     emitted_text: HashMap<u32, String>,
+    /// Whether any choice carried a non-null `finish_reason`. A stream that
+    /// ends without `[DONE]` is only complete when the model already signaled
+    /// completion; otherwise the transport dropped the tail and the turn must
+    /// fail loud instead of executing a partially assembled tool call.
+    saw_finish_reason: bool,
+}
+
+/// Upper bound for one assembled SSE event (and thus for one buffered line).
+///
+/// Legitimate chat-completion chunks are a few kilobytes; even a full-message
+/// snapshot stays far below this. Without a bound, an endpoint that keeps
+/// sending `data:` lines while withholding the blank-line separator (or one
+/// endless line) would grow the buffers without limit while the socket
+/// buffer stays small. Overflow is a stream error, mirroring the other
+/// fail-loud corruption paths.
+const MAX_SSE_EVENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Flat per-line charge on top of the payload bytes when accounting an
+/// event against [`MAX_SSE_EVENT_BYTES`]. Each buffered line also costs a
+/// `String` header, allocator slack, and a join separator, so a stream of
+/// empty or tiny `data:` lines must consume the budget too — otherwise the
+/// event bound could be bypassed with payload-free lines.
+const SSE_LINE_OVERHEAD_BYTES: usize = 64;
+
+/// Buffers raw stream bytes and yields complete lines per the SSE line
+/// grammar: CRLF, LF, or a bare CR all terminate a line.
+///
+/// A bare CR ends its line immediately — postponing it until the next byte
+/// would stall a stream that flushes a complete CR-framed event and then
+/// idles. When the CR is the last buffered byte, the following chunk may
+/// still open with the LF half of a CRLF; `skip_lf` swallows exactly that
+/// byte so a chunk-split CRLF does not fabricate an extra empty line (an
+/// event boundary).
+#[derive(Default)]
+struct SseByteBuffer {
+    bytes: Vec<u8>,
+    skip_lf: bool,
+}
+
+impl SseByteBuffer {
+    fn extend(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        if self.skip_lf {
+            if let Some(&first) = self.bytes.first() {
+                if first == b'\n' {
+                    self.bytes.remove(0);
+                }
+                self.skip_lf = false;
+            }
+        }
+    }
+
+    fn take_line(&mut self) -> Option<Vec<u8>> {
+        let mut i = 0;
+        while i < self.bytes.len() {
+            match self.bytes[i] {
+                b'\n' => {
+                    let mut line: Vec<u8> = self.bytes.drain(..=i).collect();
+                    line.truncate(i);
+                    return Some(line);
+                }
+                b'\r' => {
+                    let last = if i + 1 < self.bytes.len() {
+                        if self.bytes[i + 1] == b'\n' {
+                            i + 1
+                        } else {
+                            i
+                        }
+                    } else {
+                        self.skip_lf = true;
+                        i
+                    };
+                    let mut line: Vec<u8> = self.bytes.drain(..=last).collect();
+                    line.truncate(i);
+                    return Some(line);
+                }
+                _ => i += 1,
+            }
+        }
+        None
+    }
+
+    /// Drains the remaining bytes at end of stream (a final line missing
+    /// its terminator). A pending LF skip was already applied on arrival.
+    fn take_tail(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// True when the buffer grew past the bound without a single line
+    /// ending — an endless line that must fail before exhausting memory.
+    /// Complete lines still in the buffer drain on later iterations.
+    fn overflowed_without_line_ending(&self) -> bool {
+        self.bytes.len() > MAX_SSE_EVENT_BYTES
+            && !self.bytes.iter().any(|&b| b == b'\n' || b == b'\r')
+    }
+}
+
+/// Assembles Server-Sent Events from individual lines.
+///
+/// The wire format allows `data:` with or without a following space, spreads
+/// one event across multiple `data` lines, and terminates each event with a
+/// blank line. Matching only `"data: "` (as the previous decoder did) silently
+/// drops spec-compliant frames, and a dropped mid-stream `arguments` delta can
+/// still concatenate into syntactically valid JSON — a truncated shell command
+/// that then executes. Every `data` line therefore has to be captured here.
+#[derive(Default)]
+struct SseEventBuffer {
+    data_lines: Vec<String>,
+    buffered_bytes: usize,
+    first_line_seen: bool,
+}
+
+impl SseEventBuffer {
+    /// Feeds one line; returns the joined event data when the blank-line
+    /// event boundary is reached, or an error when the accumulated event
+    /// exceeds [`MAX_SSE_EVENT_BYTES`].
+    fn push_line(&mut self, line: &str) -> Result<Option<String>, String> {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        // The stream may open with exactly one BOM, which must be ignored;
+        // left in place it would hide the first line's field name.
+        let line = if self.first_line_seen {
+            line
+        } else {
+            self.first_line_seen = true;
+            line.strip_prefix('\u{feff}').unwrap_or(line)
+        };
+        if line.is_empty() {
+            return Ok(self.take_data());
+        }
+        if line.starts_with(':') {
+            return Ok(None); // comment line
+        }
+        let value = if let Some(value) = line.strip_prefix("data:") {
+            // The space after the colon is optional in the SSE format.
+            value.strip_prefix(' ').unwrap_or(value)
+        } else if line == "data" {
+            // A bare field name carries an empty value.
+            ""
+        } else {
+            // Other fields (event:, id:, retry:) do not affect data assembly.
+            return Ok(None);
+        };
+        // Every buffered line is charged a flat overhead on top of its
+        // payload, so empty or tiny data lines cannot bypass the bound.
+        self.buffered_bytes += SSE_LINE_OVERHEAD_BYTES + value.len();
+        if self.buffered_bytes > MAX_SSE_EVENT_BYTES {
+            self.data_lines.clear();
+            self.buffered_bytes = 0;
+            return Err(format!(
+                "SSE event exceeds the maximum size of {MAX_SSE_EVENT_BYTES} bytes"
+            ));
+        }
+        self.data_lines.push(value.to_string());
+        Ok(None)
+    }
+
+    /// Flushes buffered data lines, for the event boundary and stream end.
+    fn take_data(&mut self) -> Option<String> {
+        self.buffered_bytes = 0;
+        if self.data_lines.is_empty() {
+            return None;
+        }
+        let data = std::mem::take(&mut self.data_lines).join("\n");
+        (!data.trim().is_empty()).then_some(data)
+    }
+}
+
+/// Outcome of one assembled SSE data payload.
+enum SseDispatch {
+    /// `[DONE]` sentinel: the stream completed normally.
+    Done,
+    /// Parsed chunk events (possibly empty).
+    Events(Vec<GenerateEvent>),
+    /// Non-empty data that is not valid JSON. Skipping it would drop part of
+    /// the model output while the rest still parses, so it is a stream error.
+    Malformed(String),
+}
+
+fn dispatch_sse_data(
+    data: &str,
+    thinking_field: Option<&str>,
+    defer_message_end: bool,
+    stream_state: &mut OpenAICompatStreamState,
+) -> SseDispatch {
+    if data.trim() == "[DONE]" {
+        return SseDispatch::Done;
+    }
+    match serde_json::from_str::<Value>(data) {
+        Ok(chunk) => SseDispatch::Events(
+            parse_sse_chunk_with_state(&chunk, thinking_field, defer_message_end, stream_state)
+                .unwrap_or_default(),
+        ),
+        Err(error) => SseDispatch::Malformed(format!("malformed SSE data: {error}")),
+    }
 }
 
 #[cfg(test)]
@@ -623,6 +965,7 @@ fn parse_sse_chunk_with_state(
             }
 
             if let Some(finish) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                stream_state.saw_finish_reason = true;
                 if (finish == "stop" || finish == "tool_calls") && !defer_message_end {
                     events.push(GenerateEvent::MessageEnd);
                 }
@@ -1562,5 +1905,640 @@ mod tests {
         let last = parts.last().unwrap();
         assert!(last.is_number(), "number part should remain untouched");
         assert!(last.get("cache_control").is_none());
+    }
+
+    // ─── SSE decode-loop integrity ───
+    //
+    // These tests drive the real byte-stream decoding loop over a local TCP
+    // socket. The decoder must assemble events per the SSE wire format (no
+    // silent frame drops) and fail loud on any corrupted or truncated stream,
+    // because a dropped arguments delta can still concatenate into valid JSON
+    // — a truncated shell command that would then execute.
+
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serve `segments` once over a local TCP socket (one write + small pause
+    /// per segment, so chunk boundaries land where the test puts them) and
+    /// collect provider events up to and including the first terminal event.
+    async fn terminal_events_from_sse_segments(
+        segments: Vec<Vec<u8>>,
+        include_usage: bool,
+        profile: Box<dyn ProviderProfile>,
+    ) -> Vec<GenerateEvent> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let total: usize = segments.iter().map(Vec::len).sum();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n",
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            for segment in segments {
+                socket.write_all(&segment).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+
+        let provider =
+            OpenAICompatProvider::new(&format!("http://{address}/v1"), "test", profile, false);
+        let config = GenerateConfig {
+            include_usage,
+            ..Default::default()
+        };
+        let mut stream = provider.generate(&[], &[], &config).await.unwrap();
+        let events = tokio::time::timeout(Duration::from_secs(5), async move {
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                let terminal = matches!(
+                    event,
+                    GenerateEvent::MessageEnd | GenerateEvent::Error(_) | GenerateEvent::Cancelled
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            events
+        })
+        .await
+        .expect("SSE stream did not reach a terminal event in time");
+        server.await.unwrap();
+        events
+    }
+
+    async fn terminal_events_from_sse(
+        body: &str,
+        include_usage: bool,
+        profile: Box<dyn ProviderProfile>,
+    ) -> Vec<GenerateEvent> {
+        terminal_events_from_sse_segments(vec![body.as_bytes().to_vec()], include_usage, profile)
+            .await
+    }
+
+    fn text_chunk(content: &str, finish: Option<&str>) -> String {
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": finish,
+            }]
+        })
+        .to_string()
+    }
+
+    fn arguments_chunk(arguments: &str) -> String {
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": arguments},
+                }]},
+                "finish_reason": null,
+            }]
+        })
+        .to_string()
+    }
+
+    fn collected_arguments(events: &[GenerateEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GenerateEvent::ToolCallDelta {
+                    arguments_delta, ..
+                } => Some(arguments_delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // EOF before [DONE] and before any finish_reason is a truncated stream;
+    // it must surface an Error after the partial delta, never a silent
+    // MessageEnd.
+    #[tokio::test]
+    async fn truncated_stream_without_done_or_finish_reports_error() {
+        let body = format!("data: {}\n\n", text_chunk("partial", None));
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "partial"),
+            "partial delta must be preserved: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::Error(_))),
+            "EOF before [DONE]/finish_reason must end in Error, got: {events:?}"
+        );
+    }
+
+    // Non-empty malformed SSE data must not be silently skipped.
+    #[tokio::test]
+    async fn malformed_sse_data_reports_error() {
+        let events = terminal_events_from_sse(
+            "data: {not json}\n\n",
+            false,
+            Box::new(profile::GenericProfile),
+        )
+        .await;
+
+        assert!(
+            matches!(events.first(), Some(GenerateEvent::Error(_))),
+            "malformed SSE data must surface an Error, got: {events:?}"
+        );
+    }
+
+    // A malformed chunk mid-stream must not be masked by a later [DONE]
+    // marker turning the turn into a silent false success.
+    #[tokio::test]
+    async fn malformed_sse_data_before_done_reports_error() {
+        let events = terminal_events_from_sse(
+            "data: {not json}\n\ndata: [DONE]\n\n",
+            false,
+            Box::new(profile::GenericProfile),
+        )
+        .await;
+
+        assert!(
+            matches!(events.first(), Some(GenerateEvent::Error(_))),
+            "malformed SSE data must surface an Error even before [DONE], got: {events:?}"
+        );
+    }
+
+    // The space after `data:` is optional on the wire. A mid-stream frame
+    // without it must be decoded, not dropped — dropping it reassembles the
+    // remaining deltas into a truncated but valid-looking tool call.
+    #[tokio::test]
+    async fn data_line_without_space_is_not_dropped() {
+        let head = arguments_chunk("{\"command\": \"head");
+        let mid = arguments_chunk(" | mid");
+        let tail = arguments_chunk(" | tail\"}");
+        let finish = serde_json::json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+        })
+        .to_string();
+        let body = format!(
+            "data: {head}\n\ndata:{mid}\n\ndata: {tail}\n\ndata: {finish}\n\ndata: [DONE]\n\n"
+        );
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert_eq!(
+            collected_arguments(&events),
+            "{\"command\": \"head | mid | tail\"}",
+            "no-space data frame must not be dropped: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "stream must still complete normally: {events:?}"
+        );
+    }
+
+    // Extra whitespace after the optional space belongs to the payload; JSON
+    // parsing tolerates it.
+    #[tokio::test]
+    async fn data_line_with_two_spaces_parses_payload() {
+        let body = format!(
+            "data:  {}\n\ndata: [DONE]\n\n",
+            text_chunk("hello", Some("stop"))
+        );
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "hello"),
+            "payload after double space must parse: {events:?}"
+        );
+    }
+
+    // One event spread over several `data` lines joins with newlines per the
+    // SSE format before parsing. Split between JSON tokens so the seam
+    // newline is legal whitespace.
+    #[tokio::test]
+    async fn multi_data_lines_join_before_parse() {
+        let chunk = text_chunk("joined", Some("stop"));
+        let seam = chunk
+            .find(",\"finish_reason\"")
+            .expect("chunk contains a token boundary");
+        let (first, second) = chunk.split_at(seam);
+        let body = format!("data: {first}\ndata: {second}\n\ndata: [DONE]\n\n");
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "joined"),
+            "multi-line data must join and parse: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "stream must complete: {events:?}"
+        );
+    }
+
+    // CRLF line endings, comment lines, and non-data fields are all part of
+    // the wire format and must not disturb data assembly.
+    #[tokio::test]
+    async fn crlf_comments_and_field_lines_are_tolerated() {
+        let body = format!(
+            ": keep-alive\r\nevent: message\r\nid: 42\r\nretry: 100\r\ndata: {}\r\n\r\ndata: [DONE]\r\n\r\n",
+            text_chunk("crlf", Some("stop"))
+        );
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "crlf"),
+            "CRLF-framed data must parse: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "stream must complete: {events:?}"
+        );
+    }
+
+    // A multi-byte character split across network chunks must reassemble
+    // instead of decaying into replacement characters that corrupt the
+    // payload.
+    #[tokio::test]
+    async fn multibyte_character_split_across_chunks_reassembles() {
+        let chunk_json = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            text_chunk("键值", Some("stop"))
+        );
+        let bytes = chunk_json.into_bytes();
+        // Split inside the first multi-byte character of the payload.
+        let split_at = bytes
+            .iter()
+            .position(|&b| b >= 0x80)
+            .expect("payload contains a multi-byte character")
+            + 1;
+        let (head, tail) = bytes.split_at(split_at);
+        let events = terminal_events_from_sse_segments(
+            vec![head.to_vec(), tail.to_vec()],
+            false,
+            Box::new(profile::GenericProfile),
+        )
+        .await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "键值"),
+            "split multi-byte character must reassemble: {events:?}"
+        );
+    }
+
+    // A line that cannot be decoded as UTF-8 is corrupted transport data and
+    // must fail loud rather than degrade into replacement characters.
+    #[tokio::test]
+    async fn invalid_utf8_line_reports_error() {
+        let mut body = b"data: {\"choices\":[{\"delta\":{\"content\":\"".to_vec();
+        body.extend_from_slice(&[0xFF, 0xFE]);
+        body.extend_from_slice(b"\"},\"finish_reason\":null}]}\n\n");
+        let events =
+            terminal_events_from_sse_segments(vec![body], false, Box::new(profile::GenericProfile))
+                .await;
+
+        assert!(
+            matches!(events.first(), Some(GenerateEvent::Error(_))),
+            "invalid UTF-8 must surface an Error, got: {events:?}"
+        );
+    }
+
+    // With deferred MessageEnd (usage requested), an EOF after finish_reason
+    // but before usage/[DONE] still completes: the content is whole and a
+    // missing usage payload is not worth failing the turn.
+    #[tokio::test]
+    async fn eof_after_finish_reason_without_done_is_message_end() {
+        let body = format!("data: {}\n\n", text_chunk("done", Some("stop")));
+        let events =
+            terminal_events_from_sse(&body, true, Box::new(profile::DashScopeProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "done"),
+            "content must be delivered: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "EOF after finish_reason must complete, not error: {events:?}"
+        );
+    }
+
+    // A stream that ends without the final blank-line separator must still
+    // flush the buffered event.
+    #[tokio::test]
+    async fn final_event_without_trailing_separator_is_flushed() {
+        let body = format!("data: {}", text_chunk("tail", Some("stop")));
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "tail"),
+            "unterminated final event must be flushed: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "finish_reason=stop makes this a complete stream: {events:?}"
+        );
+    }
+
+    // An event that keeps accumulating data lines while withholding the
+    // blank-line separator must fail loud instead of growing memory without
+    // bound.
+    #[test]
+    fn oversized_event_reports_error_instead_of_accumulating() {
+        let mut buffer = SseEventBuffer::default();
+        let line = format!("data: {}", "x".repeat(1024 * 1024));
+        let mut overflowed = None;
+        for _ in 0..(MAX_SSE_EVENT_BYTES / (1024 * 1024) + 1) {
+            match buffer.push_line(&line) {
+                Ok(_) => {}
+                Err(message) => {
+                    overflowed = Some(message);
+                    break;
+                }
+            }
+        }
+        let message = overflowed.expect("accumulation past the bound must error");
+        assert!(
+            message.contains("maximum size"),
+            "error must name the bound: {message}"
+        );
+        // The buffer resets after overflow so the stream state cannot keep
+        // the oversized payload alive.
+        assert!(buffer.take_data().is_none());
+    }
+
+    // The SSE grammar permits exactly one leading BOM; it must not hide the
+    // first line's field name and silently drop the first event.
+    #[tokio::test]
+    async fn leading_bom_does_not_drop_the_first_event() {
+        let body = format!(
+            "\u{feff}data: {}\n\ndata: [DONE]\n\n",
+            text_chunk("first", Some("stop"))
+        );
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "first"),
+            "the first event after a BOM must be decoded: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "stream must complete: {events:?}"
+        );
+    }
+
+    // A BOM must be removed exactly once: a second U+FEFF is payload.
+    #[test]
+    fn only_the_first_bom_is_stripped() {
+        let mut buffer = SseEventBuffer::default();
+        assert_eq!(buffer.push_line("\u{feff}data: a"), Ok(None));
+        // Not at stream start: the BOM makes this an unknown field line.
+        assert_eq!(buffer.push_line("\u{feff}data: b"), Ok(None));
+        assert_eq!(buffer.push_line(""), Ok(Some("a".to_string())));
+    }
+
+    // Payload-free data lines must consume the event budget too; counting
+    // only payload bytes would let an endpoint retain unbounded line
+    // structures while the counter stays at zero.
+    #[test]
+    fn empty_data_lines_cannot_bypass_the_event_bound() {
+        let mut buffer = SseEventBuffer::default();
+        let within_bound = MAX_SSE_EVENT_BYTES / SSE_LINE_OVERHEAD_BYTES + 1;
+        let mut overflowed = None;
+        for _ in 0..(within_bound + 1) {
+            if let Err(message) = buffer.push_line("data:") {
+                overflowed = Some(message);
+                break;
+            }
+        }
+        let message = overflowed.expect("empty-line flood must hit the bound");
+        assert!(
+            message.contains("maximum size"),
+            "error must name the bound: {message}"
+        );
+        assert!(buffer.take_data().is_none());
+    }
+
+    // A bare CR terminates its line immediately; waiting for the next byte
+    // would stall a stream that flushes a CR-framed event and then idles.
+    #[test]
+    fn chunk_final_bare_cr_yields_the_line_without_more_bytes() {
+        let mut buffer = SseByteBuffer::default();
+        buffer.extend(b"data: x\r\r");
+        assert_eq!(buffer.take_line().as_deref(), Some(&b"data: x"[..]));
+        // The second CR is the blank-line event boundary, available now.
+        assert_eq!(buffer.take_line().as_deref(), Some(&b""[..]));
+        assert!(buffer.take_line().is_none());
+        assert!(buffer.is_empty());
+    }
+
+    // The LF half of a chunk-split CRLF must be swallowed, not turned into
+    // an extra empty line (an event boundary).
+    #[test]
+    fn chunk_split_crlf_does_not_fabricate_an_event_boundary() {
+        let mut buffer = SseByteBuffer::default();
+        buffer.extend(b"data: a\r");
+        assert_eq!(buffer.take_line().as_deref(), Some(&b"data: a"[..]));
+        buffer.extend(b"\ndata: b\n");
+        assert_eq!(buffer.take_line().as_deref(), Some(&b"data: b"[..]));
+        assert!(buffer.take_line().is_none());
+        // A bare CR followed by a normal byte keeps that byte.
+        buffer.extend(b"c\r");
+        assert_eq!(buffer.take_line().as_deref(), Some(&b"c"[..]));
+        buffer.extend(b"d\n");
+        assert_eq!(buffer.take_line().as_deref(), Some(&b"d"[..]));
+    }
+
+    // Streaming liveness: a CR-framed event flushed on an idle connection
+    // must dispatch before any further bytes (such as [DONE]) arrive.
+    #[tokio::test]
+    async fn cr_framed_event_dispatches_before_the_stream_idles() {
+        let first = format!("data: {}\r\r", text_chunk("live", None));
+        let second = "data: [DONE]\r\r".to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let total = first.len() + second.len();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n",
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(first.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            // Idle: the event above must dispatch during this window.
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            socket.write_all(second.as_bytes()).await.unwrap();
+        });
+
+        let provider = OpenAICompatProvider::new(
+            &format!("http://{address}/v1"),
+            "test",
+            Box::new(profile::GenericProfile),
+            false,
+        );
+        let config = GenerateConfig::default();
+        let mut stream = provider.generate(&[], &[], &config).await.unwrap();
+        let first_event = tokio::time::timeout(Duration::from_millis(700), stream.next())
+            .await
+            .expect("CR-framed event must dispatch while the stream idles")
+            .expect("stream must yield an event");
+        assert!(
+            matches!(&first_event, GenerateEvent::TextDelta(text) if text == "live"),
+            "expected the idle-window delta: {first_event:?}"
+        );
+        // Drain the rest so the server task completes cleanly.
+        let _ = tokio::time::timeout(Duration::from_secs(5), async move {
+            while let Some(event) = stream.next().await {
+                if matches!(
+                    event,
+                    GenerateEvent::MessageEnd | GenerateEvent::Error(_) | GenerateEvent::Cancelled
+                ) {
+                    break;
+                }
+            }
+        })
+        .await;
+        server.await.unwrap();
+    }
+
+    // WHATWG line endings include a bare CR; a valid CR-only stream must
+    // decode instead of buffering to EOF and failing as one malformed line.
+    #[tokio::test]
+    async fn bare_cr_line_endings_are_decoded() {
+        let body = format!(
+            "data: {}\r\rdata: [DONE]\r\r",
+            text_chunk("cr-only", Some("stop"))
+        );
+        let events =
+            terminal_events_from_sse(&body, false, Box::new(profile::GenericProfile)).await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "cr-only"),
+            "bare-CR framed data must parse: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(GenerateEvent::MessageEnd)),
+            "stream must complete: {events:?}"
+        );
+    }
+
+    // A CRLF split across network chunks is one line ending, not a line plus
+    // an empty line (which would be an event boundary).
+    #[tokio::test]
+    async fn crlf_split_across_chunks_is_one_line_ending() {
+        let body = format!(
+            "data: {}\r\n\r\ndata: [DONE]\r\n\r\n",
+            text_chunk("split-crlf", Some("stop"))
+        );
+        let bytes = body.into_bytes();
+        // Split right after the first CR so its LF arrives in the next chunk.
+        let split_at = bytes.iter().position(|&b| b == b'\r').unwrap() + 1;
+        let (head, tail) = bytes.split_at(split_at);
+        let events = terminal_events_from_sse_segments(
+            vec![head.to_vec(), tail.to_vec()],
+            false,
+            Box::new(profile::GenericProfile),
+        )
+        .await;
+
+        assert!(
+            matches!(&events[0], GenerateEvent::TextDelta(text) if text == "split-crlf"),
+            "a chunk-split CRLF must stay one line ending: {events:?}"
+        );
+    }
+
+    // Once a terminal event went out, the stream is sealed: a [DONE] behind
+    // a finish_reason-driven MessageEnd must not yield a second terminal.
+    #[tokio::test]
+    async fn finish_reason_then_done_yields_a_single_message_end() {
+        let body = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            text_chunk("once", Some("stop"))
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = body.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let provider = OpenAICompatProvider::new(
+            &format!("http://{address}/v1"),
+            "test",
+            Box::new(profile::GenericProfile),
+            false,
+        );
+        let config = GenerateConfig::default();
+        let mut stream = provider.generate(&[], &[], &config).await.unwrap();
+        // Consume the stream to exhaustion (past the first terminal event).
+        let events = tokio::time::timeout(Duration::from_secs(5), async move {
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event);
+            }
+            events
+        })
+        .await
+        .expect("stream must end after the terminal event");
+        server.await.unwrap();
+
+        let terminals = events
+            .iter()
+            .filter(|event| matches!(event, GenerateEvent::MessageEnd))
+            .count();
+        assert_eq!(terminals, 1, "exactly one MessageEnd expected: {events:?}");
+    }
+
+    // Non-UTF-8 error bodies must be decoded using the charset declared in the
+    // Content-Type header. Without reqwest's charset feature, the body is read
+    // as UTF-8 and corrupts Chinese, Japanese, or legacy Windows-1252 text.
+    #[tokio::test]
+    async fn error_response_with_non_utf8_charset_is_decoded() {
+        // "中文错误" encoded in GBK.
+        let body: Vec<u8> = vec![0xD6, 0xD0, 0xCE, 0xC4, 0xB4, 0xED, 0xCE, 0xF3];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let header = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=gbk\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+
+        let provider =
+            OpenAICompatProvider::new_generic(&format!("http://{address}/v1"), "sk-test");
+        let config = GenerateConfig::default();
+        let err = match provider.generate(&[], &[], &config).await {
+            Ok(_) => panic!("expected generate() to fail on non-success response"),
+            Err(e) => e,
+        };
+        server.await.unwrap();
+
+        assert!(
+            err.contains("API error 400 Bad Request: 中文错误"),
+            "GBK error body must be decoded using the declared charset: {err}"
+        );
     }
 }

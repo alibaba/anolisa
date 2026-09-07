@@ -135,6 +135,7 @@ struct Measure {
     hr_tokens_after: Option<u64>,
     retention_passed: usize,
     retention_total: usize,
+    retention_failures: Vec<String>,
 }
 
 /// `1 - after/before` guarded against an empty input.
@@ -573,6 +574,7 @@ fn measure_tokenless(record: &SampleRecord) -> Result<(Measure, String, String),
         hr_tokens_after: None,
         retention_passed: ret.passed,
         retention_total: ret.total,
+        retention_failures: ret.failures,
     };
     Ok((measure, before_wire, output.compressed))
 }
@@ -604,6 +606,7 @@ fn measure_headroom(
         hr_tokens_after: resp.hr_tokens_after,
         retention_passed: ret.passed,
         retention_total: ret.total,
+        retention_failures: ret.failures,
     };
     Ok((measure, content.to_string(), compressed))
 }
@@ -630,6 +633,7 @@ fn measure_rtk(
         hr_tokens_after: None,
         retention_passed: ret.passed,
         retention_total: ret.total,
+        retention_failures: ret.failures,
     })
 }
 
@@ -685,6 +689,11 @@ fn aggregate_side(
         .collect();
     let retention_passed: usize = obs.iter().map(|m| m.retention_passed).sum();
     let retention_total: usize = obs.iter().map(|m| m.retention_total).sum();
+    let retention_failures: Vec<String> = obs
+        .iter()
+        .flat_map(|m| m.retention_failures.clone())
+        .collect();
+    let retention_missing = SideAggregate::collect_missing(retention_failures);
 
     // Semantic score is pooled over samples (sum of per-question outcomes)
     // rather than averaged per sample, so samples with few answerable
@@ -744,6 +753,7 @@ fn aggregate_side(
         retention_passed,
         retention_total,
         retention_ci: stats::wilson_interval(retention_passed, retention_total, 1.96),
+        retention_missing,
         semantic_score,
         latency_ms: stats::latency_percentiles(&latencies_ms),
         latency_basis: series
@@ -970,6 +980,7 @@ mod tests {
             hr_tokens_after: None,
             retention_passed: 8,
             retention_total: 11,
+            retention_failures: Vec::new(),
         }
     }
 
@@ -1059,5 +1070,37 @@ mod tests {
         let gap = compression_gap(&tl, &hr).expect("both samples must still pair");
         // One pair per sample after payload-pair dedup: a (rep 1) and b.
         assert_eq!(gap.n_pairs, 2);
+    }
+
+    /// Retention failures from independent observations must be deduplicated
+    /// and surfaced in the aggregated SideAggregate as retention_missing.
+    #[test]
+    fn retention_failures_propagate_to_aggregate() {
+        let raw: Vec<String> = vec![
+            "substring not retained: \"req-8f3a91\"".to_string(),
+            "regex not matched: \"req-[0-9a-f]{6}\"".to_string(),
+            // Duplicate — same failure from a second observation.
+            "substring not retained: \"req-8f3a91\"".to_string(),
+        ];
+        let missing = SideAggregate::collect_missing(raw);
+        assert_eq!(missing.len(), 2, "duplicate must be collapsed");
+        assert!(missing[0].contains("req-8f3a91"));
+        assert!(missing[1].contains("req-[0-9a-f]"));
+    }
+
+    /// When failures exceed the cap, the list is truncated with an overflow
+    /// suffix rather than silently dropping items.
+    #[test]
+    fn retention_missing_is_capped() {
+        let raw: Vec<String> = (0..15)
+            .map(|i| format!("substring not retained: \"item-{i}\""))
+            .collect();
+        let missing = SideAggregate::collect_missing(raw);
+        assert_eq!(
+            missing.len(),
+            SideAggregate::RETENTION_MISSING_CAP + 1,
+            "cap entries + overflow suffix"
+        );
+        assert!(missing.last().unwrap().starts_with("… and"));
     }
 }

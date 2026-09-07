@@ -201,18 +201,10 @@ impl SkillFs {
             None
         };
 
-        // Compute source_base for the sync worker before moving fields.
-        let sync_source_base = if let Some(ref fd) = source_dirfd {
-            use std::os::unix::io::AsRawFd;
-            PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
-        } else {
-            source.clone()
-        };
-
         // Spawn the background sync worker.
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
         let sync_store = store.clone();
-        spawn_sync_worker(sync_rx, sync_store, sync_source_base);
+        spawn_sync_worker(sync_rx, sync_store);
 
         let fs = Self {
             mountpoint,

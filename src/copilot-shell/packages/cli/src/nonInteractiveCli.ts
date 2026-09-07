@@ -276,6 +276,13 @@ export async function runNonInteractive(
           if (abortController.signal.aborted) {
             handleCancellationError(config);
           }
+          if (event.type === GeminiEventType.UserPromptConfirmation) {
+            event.value.resolve(false);
+            adapter.finalizeAssistantMessage();
+            throw new Error(
+              `UserPromptSubmit hook requires confirmation, which is not available in non-interactive mode: ${event.value.reason}`,
+            );
+          }
           // Handle an API error BEFORE feeding it to the adapter. Passing an
           // Error event to processEvent() would emit fresh partial assistant
           // stream events (message_start / content_block_*), and the throw

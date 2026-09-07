@@ -29,7 +29,7 @@ api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen3.7-plus"
 
 [agent]
-approval_mode = "balanced"
+approval_mode = "recommend"
 max_turns = 50
 max_tool_calls_per_turn = 10
 
@@ -49,6 +49,7 @@ log_level = "warn"
 
 [shell]
 default = "auto"
+integration = "enhanced"
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
@@ -64,9 +65,12 @@ Core 审批模式适用于直接集成：
 |---|---|---|---|
 | `trust` | 执行 | 执行 | 执行 |
 | `auto` | 执行 | 执行 | 询问 |
-| `balanced`、`suggest`、`strict` | 执行 | 询问 | 询问 |
+| `recommend` | 执行 | 询问 | 询问 |
 
-Shell 提供 `recommend`、`auto` 和 `trust`；`recommend` 使用 Core 的严格行为。`agent.max_turns` 限制一次 Agent 请求（默认 `50`），`max_tool_calls_per_turn` 默认 `10`。每次新 prompt 都会重新开始轮次预算。
+Core 和 Shell 统一使用 `recommend`、`auto` 和 `trust`。已有的 `balanced`、
+`suggest` 和 `strict` 会按 `recommend` 读取；非法配置值也会回退到
+`recommend`。`agent.max_turns` 限制一次 Agent 请求（默认 `50`），
+`max_tool_calls_per_turn` 默认 `10`。每次新 prompt 都会重新开始轮次预算。
 
 ## 会话与压缩
 
@@ -110,7 +114,15 @@ name = "nginx"
 expected = "active"
 ```
 
-`analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、`auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
+`integration` 支持 `native` 和 `enhanced`。默认的 Enhanced 从 Assisted
+模式（`◇ `）启动，提供基于 marker 的 Agent 路由和命令事件。在空提示符按
+`Shift+Tab` 可在 Assisted 与 Shell-only（`◌ `）之间切换。Shell-only 保留
+命令事件和执行后洞察，但把普通输入交给 bash 或 zsh。Native 把输入、Shell
+选项、trap 和启动文件完全交给 bash 或 zsh，不进行 Cosh 观察，也不提供洞察。
+`cosh` 在启动时读取集成值，修改后需要新建会话；非法值会显示错误并拒绝启动。
+
+`analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、
+`auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
 
 ## 审计设置
 
@@ -125,6 +137,28 @@ max_disk_bytes = 1073741824
 
 `retention_days` 和 `max_disk_bytes` 必须大于零。存储根目录默认为 `$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`；设置绝对路径的 `COSH_AUDIT_DIR` 可以覆盖它。
 
+## 遥测 opt-out
+
+cosh-ng 会采集匿名的运营指标以改进服务质量，包括工具调用次数、Token
+用量、审批统计、操作系统类型/架构，以及用于跨会话关联的持久化 installation
+UUID。**不会采集用户 prompt、代码内容或对话内容。**
+
+遥测默认开启。要为当前用户关闭遥测，创建用户级哨兵文件：
+
+```bash
+mkdir -p ~/.copilot-shell
+touch ~/.copilot-shell/telemetry_disabled
+```
+
+系统管理员可以通过创建系统级哨兵文件，为整台机器上的所有用户关闭遥测：
+
+```bash
+sudo mkdir -p /etc/anolisa
+sudo touch /etc/anolisa/.telemetry_disabled
+```
+
+任一哨兵文件创建后立即对运行中的进程生效，无需重启。
+
 ## 环境变量覆盖
 
 | 变量 | 作用 |
@@ -134,6 +168,7 @@ max_disk_bytes = 1073741824
 | `DASHSCOPE_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL` | OpenAI-compatible 凭据和 URL 回退 |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun 凭据回退 |
 | `COSH_SHELL_DEFAULT_SHELL`、`COSH_SHELL_ADAPTER`、`COSH_SHELL_ANALYSIS_MODE`、`COSH_SHELL_APPROVAL_MODE` | 交互式 Shell 选择 |
+| `COSH_SHELL_INTEGRATION` | 下一次会话使用 `native` 或 `enhanced` Shell 集成 |
 | `COSH_SHELL_LANG`、`COSH_SHELL_AI`、`COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell 语言、AI 开关和输入等待超时 |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | 允许使用 Bash history 生成建议 |
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |

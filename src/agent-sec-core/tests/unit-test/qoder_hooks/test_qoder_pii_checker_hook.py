@@ -189,7 +189,12 @@ def test_warn_policy_warns_and_continues(mock_cli) -> None:
     )
 
     assert output["decision"] == "allow"
-    assert "Execution will continue" in output["systemMessage"]
+    message = output["systemMessage"]
+    assert "1 high-risk sensitive data finding" in message
+    assert "warning only" in message
+    assert "api_key=[REDACTED]" not in message
+    assert "credential" not in message
+    assert "severity" not in message
 
 
 def test_ask_policy_requests_pre_tool_approval(mock_cli) -> None:
@@ -208,7 +213,9 @@ def test_ask_policy_requests_pre_tool_approval(mock_cli) -> None:
         )
     )
 
-    assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+    hook_output = output["hookSpecificOutput"]
+    assert hook_output["permissionDecision"] == "ask"
+    assert "Confirmation is required" in hook_output["permissionDecisionReason"]
 
 
 def test_ask_policy_falls_back_to_warning_without_confirmation(mock_cli) -> None:
@@ -228,9 +235,32 @@ def test_ask_policy_falls_back_to_warning_without_confirmation(mock_cli) -> None
     )
 
     assert output["decision"] == "allow"
-    assert (
-        "Approval is unavailable here; execution continues" in output["systemMessage"]
+    assert "This stage cannot confirm or block" in output["systemMessage"]
+    assert "warning only" in output["systemMessage"]
+
+
+def test_ask_policy_post_tool_warning_reports_actual_result(mock_cli) -> None:
+    env, _capture = mock_cli(
+        output=_PII_DENY_RESULT,
+        extra={"PII_CHECKER_MODE": "ask"},
     )
+
+    output = _stdout_json(
+        _run_hook(
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_response": {"content": "password=secret"},
+            },
+            env,
+        )
+    )
+
+    assert output["decision"] == "allow"
+    message = output["systemMessage"]
+    assert "tool has already run" in message
+    assert "This stage cannot confirm or block" in message
+    assert "raw output will enter model context" in message
+    assert "external side effects were not undone" in message
 
 
 def test_hook_trace_context_contains_only_host_correlation_ids(mock_cli) -> None:
@@ -291,7 +321,9 @@ def test_user_prompt_deny_blocks_without_raw_pii(mock_cli) -> None:
 
     output = _stdout_json(proc)
     assert output["decision"] == "deny"
-    assert "api_key=[REDACTED]" in output["reason"]
+    assert "1 high-risk sensitive data finding" in output["reason"]
+    assert "blocked this request" in output["reason"]
+    assert "api_key=[REDACTED]" not in output["reason"]
     assert "sk-live-secret" not in proc.stdout
     assert "sk-live-secret" not in proc.stderr
 
@@ -313,7 +345,8 @@ def test_warn_in_deny_mode_allows_with_system_message(mock_cli) -> None:
     output = _stdout_json(proc)
     assert output["decision"] == "allow"
     assert "systemMessage" in output
-    assert "a***@example.com" in output["systemMessage"]
+    assert "1 general-risk sensitive data finding" in output["systemMessage"]
+    assert "a***@example.com" not in output["systemMessage"]
     assert "alice@example.com" not in proc.stdout
 
 
@@ -337,7 +370,9 @@ def test_pre_tool_use_deny_uses_permission_decision(mock_cli) -> None:
     hook_output = output["hookSpecificOutput"]
     assert hook_output["hookEventName"] == "PreToolUse"
     assert hook_output["permissionDecision"] == "deny"
-    assert "api_key=[REDACTED]" in hook_output["permissionDecisionReason"]
+    reason = hook_output["permissionDecisionReason"]
+    assert "blocked this tool call" in reason
+    assert "api_key=[REDACTED]" not in reason
     captured = _captured_call(capture)
     assert captured["argv"][captured["argv"].index("--source") + 1] == "tool_input"
 
@@ -378,10 +413,37 @@ def test_post_tool_use_deny_replaces_tool_output(mock_cli) -> None:
     hook_output = output["hookSpecificOutput"]
     assert hook_output["hookEventName"] == "PostToolUse"
     assert "updatedToolOutput" in hook_output
-    assert "api_key=[REDACTED]" in hook_output["updatedToolOutput"]
+    replacement = hook_output["updatedToolOutput"]
+    assert "tool has already run" in replacement
+    assert "raw output will not enter model context" in replacement
+    assert "external side effects were not undone" in replacement
+    assert "api_key=[REDACTED]" not in replacement
     assert "password=secret" not in proc.stdout
     captured = _captured_call(capture)
     assert captured["argv"][captured["argv"].index("--source") + 1] == "tool_output"
+
+
+def test_post_tool_use_warning_states_execution_and_context_result(mock_cli) -> None:
+    env, _capture = mock_cli(
+        output=_PII_WARN_RESULT,
+        extra={"PII_CHECKER_MODE": "warn"},
+    )
+
+    output = _stdout_json(
+        _run_hook(
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_response": {"content": "alice@example.com"},
+            },
+            env,
+        )
+    )
+
+    message = output["systemMessage"]
+    assert "tool has already run" in message
+    assert "raw output will enter model context" in message
+    assert "external side effects were not undone" in message
+    assert "a***@example.com" not in message
 
 
 def test_include_low_confidence_flag_is_forwarded(mock_cli) -> None:
@@ -438,4 +500,22 @@ def test_invalid_mode_reports_observe_fallback(mock_cli) -> None:
     output = _stdout_json(proc)
 
     assert output["decision"] == "allow"
-    assert "invalid PII_CHECKER_MODE" in output["systemMessage"]
+    assert "PII Checker configuration is invalid" in output["systemMessage"]
+    assert "banana" not in output["systemMessage"]
+    assert "fallback" not in output["systemMessage"].lower()
+
+
+def test_risk_summary_uses_finding_severity_and_verdict_fallback() -> None:
+    hook = load_standalone_hook("qoder_pii_checker_risk_summary_hook", _HOOK_SCRIPT)
+    findings = [
+        {"severity": "deny", "type": "credential"},
+        {"severity": "warn", "type": "email"},
+        {"severity": "custom", "type": "custom"},
+    ]
+
+    assert hook._risk_summary("deny", findings) == (
+        "Detected 3 sensitive data findings (2 high risk, 1 general risk)"
+    )
+    assert hook._risk_summary("warn", findings) == (
+        "Detected 3 sensitive data findings (1 high risk, 2 general risk)"
+    )

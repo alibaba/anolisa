@@ -2,19 +2,31 @@ use anyhow::Context;
 use std::path::Path;
 use ws_ckpt_common::{SnapshotIndex, INDEX_FILE};
 
-/// Save a SnapshotIndex to its index.json file on disk.
+/// Saves an index with file fsync and best-effort parent-directory fsync.
 pub async fn save(ws_dir: &Path, index: &SnapshotIndex) -> anyhow::Result<()> {
-    let index_path = ws_dir.join(INDEX_FILE);
-    let tmp_path = ws_dir.join(format!("{}.tmp", INDEX_FILE));
     let content =
         serde_json::to_string_pretty(index).context("Failed to serialize SnapshotIndex")?;
-    // Write to temp file first, then rename for atomicity
-    tokio::fs::write(&tmp_path, &content)
-        .await
-        .with_context(|| format!("Failed to write {:?}", tmp_path))?;
-    tokio::fs::rename(&tmp_path, &index_path)
-        .await
-        .with_context(|| format!("Failed to rename {:?} -> {:?}", tmp_path, index_path))?;
+    let ws_dir = ws_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // Every later index rewrite must preserve the file durability of any
+        // guarded evidence already acknowledged to a caller.
+        ws_ckpt_common::persist::atomic_write(&ws_dir, INDEX_FILE, content.as_bytes(), None)
+    })
+    .await
+    .context("index writer task failed")??;
+    Ok(())
+}
+
+/// Saves an index with strict file and rename durability before returning.
+pub async fn save_durable(ws_dir: &Path, index: &SnapshotIndex) -> anyhow::Result<()> {
+    let content =
+        serde_json::to_string_pretty(index).context("Failed to serialize SnapshotIndex")?;
+    let ws_dir = ws_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        ws_ckpt_common::persist::atomic_write_strict(&ws_dir, INDEX_FILE, content.as_bytes(), None)
+    })
+    .await
+    .context("durable index writer task failed")??;
     Ok(())
 }
 

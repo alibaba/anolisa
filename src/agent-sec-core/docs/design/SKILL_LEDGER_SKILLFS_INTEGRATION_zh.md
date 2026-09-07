@@ -70,15 +70,82 @@ symlink-resolved alias 下的路径投影回 canonical 空间。相对路径和�
 
 ## 3. SkillFS Resolver 合同
 
-Resolver 复用 SkillFS trusted control socket 的 JSONL 协议。M1 固定使用：
+Resolver 复用 SkillFS trusted control socket 的 JSONL 业务协议。endpoint 按以下优先级
+选择：
+
+1. embedding caller 显式传给 `SkillFsResolverClient` 的 `socket_path`；
+2. `AGENT_SEC_SKILLFS_CONTROL_SOCKET`；
+3. per-effective-UID 默认路径：
 
 ```text
 /run/user/<effective-uid>/skillfs/control.sock
 ```
 
-Ledger 通过 `os.geteuid()` 计算 endpoint，不增加 Ledger 配置项，也不通过 notify 传递
-endpoint、mount id 或 generation。SkillFS 与 Ledger daemon/CLI 必须位于同一 effective UID 和
-安全域，并且 SkillFS 必须信任实际发起请求的进程。
+最终 endpoint 必须与 SkillFS 的 `--control-socket` 一致。Ledger 不通过 notify 传递 endpoint、
+mount id 或 generation，也不增加 retry、endpoint registry 或 resolver 结果缓存。
+
+### 3.1 HMAC 配置与 key 文件合同
+
+agent-sec-core 使用以下三个环境变量承载 SkillFS 集成配置：
+
+| 环境变量 | 使用方 | 语义 |
+| --- | --- | --- |
+| `AGENT_SEC_SKILLFS_CONTROL_SOCKET` | Ledger resolver | 覆盖 control socket endpoint |
+| `AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE` | Ledger resolver | 启用 control 双向 HMAC 认证 |
+| `AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE` | agent-sec-core daemon | 启用 notify 双向 HMAC 认证 |
+
+control key 在 resolver 第一次 resolve 时加载，并缓存到该 client 生命周期结束，不做热更新。
+notify key 在 daemon bind socket 前加载；配置存在但 key 非法时 daemon 启动失败。双方使用
+相同的严格 loader：路径必须为绝对路径，以 `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` 打开，
+目标必须是当前 effective UID 所有的普通文件，不能设置任何 group/other 权限位，原始内容
+长度必须在 32–4096 bytes 之间。读取内容不做 trim。symlink、目录、FIFO、device、owner
+不匹配、权限过宽、过短或超长都属于配置错误。
+
+control 和 notify 可以使用同一个 key 文件，但完整 ACS 部署必须同时配置两个方向，且推荐
+使用方向独立的 key。key、proof、nonce 和未验证业务 payload 不得进入日志、响应、audit
+event 或提交到仓库的部署资产。
+
+### 3.2 HMAC wire contract
+
+配置 control key 后，Ledger 是 client，SkillFS 是 server。读取 resolver 业务请求前先完成
+四步 NDJSON challenge-response：
+
+```json
+{"authVersion":"1","type":"auth.init"}
+{"authVersion":"1","type":"auth.challenge","nonce":"<base64>"}
+{"authVersion":"1","type":"auth.proof","proof":"<base64>"}
+{"authVersion":"1","type":"auth.ok","proof":"<base64>"}
+```
+
+nonce 是使用带 padding 的 canonical standard Base64 编码的 32-byte 随机值。握手 proof 为：
+
+```text
+HMAC-SHA256(secret, domain || NUL || raw_nonce)
+```
+
+control 使用固定 domain：
+
+- client：`anolisa.skillfs.control.client.v1`
+- server：`anolisa.skillfs.control.server.v1`
+
+双方验证 proof 后，sender 先发送现有 raw NDJSON 业务 JSON 和 newline，再发送：
+
+```json
+{"authVersion":"1","type":"auth.frame","proof":"<base64>"}
+```
+
+业务 tag 的 HMAC 输入为：
+
+```text
+domain || NUL || "frame" || NUL || raw_nonce ||
+u64_be(payload_length) || raw_business_json
+```
+
+`payload_length` 不包含 NDJSON newline。receiver 必须保留原始 payload bytes，并在解析 JSON
+前 constant-time 验证 tag，不能重新序列化对端 JSON 后计算 MAC。所有 auth frame 上限为
+4096 bytes；业务 frame 继续使用原有协议限额。整个 resolver 握手共享一个 monotonic
+deadline `min(resolver timeout, 5s)`，不会因收到部分字节而重置。认证失败、EOF、超限或
+timeout 都关闭连接，不 retry，也不降级到明文。
 
 请求：
 
@@ -124,15 +191,18 @@ Ledger namespace 中绝对、词法规范化且可访问的 `liveSkillDir`。
 
 | Resolver 结果 | Ledger 行为 |
 | --- | --- |
-| control socket 不存在（`ENOENT`） | 进入 host 模式，`ioSkillDir = canonicalSkillDir` |
+| 未配置 control key，且 socket 不存在（`ENOENT`） | 保留 legacy 行为，进入 host 模式，`ioSkillDir = canonicalSkillDir` |
+| 已配置 control key，且 socket 不存在（`ENOENT`） | 返回 `skill_root_resolve_failed`，不得进入 host 模式 |
 | `ok=true` 且 `managed=false` | 校验 canonical echo 后进入 host 模式 |
 | `ok=true` 且 `managed=true` | 校验 canonical echo 与 `liveSkillDir`，本次 I/O 只使用 live 目录 |
 | `managed` 缺失或不是 boolean | 协议错误，返回 `skill_root_resolve_failed` |
-| `ok=false`、连接拒绝、权限错误、1 秒超时、非法响应或其他错误 | 返回 `skill_root_resolve_failed`，不降级到 host |
+| `ok=false`、连接拒绝、权限错误、timeout、认证失败、非法响应或其他错误 | 返回 `skill_root_resolve_failed`，不降级到 host |
 
-Ledger 不重试、不缓存也不持久化 resolver 结果。socket 不存在时进入 host 模式是 M1
-的已知权衡：它让无 SkillFS 环境保持原有行为，但 SkillFS 异常退出并删除 socket 时可能
-被误判为未部署。除 `ENOENT` 和成功响应中的 `managed=false` 外，其他故障均禁止静默降级。
+Ledger 不重试、不缓存也不持久化 resolver 结果。未配置 HMAC 时，socket 不存在进入 host
+模式是为无 SkillFS 部署保留的 legacy 可用性策略；显式或默认 socket 都维持该行为。配置
+control key 即表示部署要求可信 SkillFS 必须可达，因此 socket 缺失、连接失败、认证失败或
+协议错误全部 fail-closed，不能回退 host 或明文。通过认证的 `managed=false` 是 SkillFS
+明确返回的可信未覆盖结果，仍可进入 host 模式。
 
 ## 4. SkillFS Notify v2 合同
 
@@ -142,10 +212,41 @@ SkillFS 发现受管 source 变化后，调用现有 daemon method：
 skill_ledger.skillfs_notify_change
 ```
 
-通知使用 daemon Unix socket 的单连接 NDJSON request frame。SkillFS 当前会发送本地生成的
-`id`，但 daemon 不消费该字段，而是为请求生成自己的 `request_id`。daemon socket 由
+通知复用 daemon Unix socket，并保持单连接、单请求语义。daemon socket 由
 `AGENT_SEC_DAEMON_SOCKET` 指定，未指定时使用
-`$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`。
+`$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`。SkillFS 当前会发送本地生成的 `id`，但
+daemon 不消费该字段，而是为请求生成自己的 `request_id`。
+
+未配置 `AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE` 时，现有明文 notify 保持兼容，但收到
+`auth.init` 会直接关闭连接。配置 notify key 后，只有
+`skill_ledger.skillfs_notify_change` 强制使用 HMAC；同一 daemon 的 health、prompt scan 等
+其他 API 继续使用现有明文协议。此时明文 notify 在 handler 和业务 audit 前拒绝，不允许
+认证失败后重试明文。
+
+daemon 按第一帧分流连接：
+
+- 合法 `auth.init` 且已配置 notify key：进入 HMAC notify；
+- 合法 `auth.init` 但未配置 key：关闭连接；
+- 包含 `authVersion`、`nonce` 或 `proof` 等认证字段但不是合法 `auth.init`：关闭连接；
+- 其他普通请求：进入既有明文 daemon 路径，再由 method policy 拒绝不允许的明文 notify。
+
+HMAC notify 中 SkillFS 是 client，daemon 是 server，复用 3.2 节 wire contract，并使用：
+
+- client：`anolisa.skillfs.notify.client.v1`
+- server：`anolisa.skillfs.notify.server.v1`
+
+daemon 使用密码学安全的 32-byte nonce。握手总 deadline 为
+`min(request_read_timeout_ms, 5s)`；auth frame 上限为 4096 bytes，业务 frame 仍使用 daemon
+现有限额。配置 notify key 后，尚未收齐、无法安全分类的第一帧也受这个 pre-auth deadline
+约束；完整且确认不是认证帧的普通请求仍进入既有明文路径。连接级 NDJSON reader 必须保留
+一次 read 中多出的 bytes，确保 coalesced
+payload/tag 不丢失。daemon 先验证 raw request payload 后才解析、记录 audit 或 dispatch，且
+authenticated path 只允许 `skill_ledger.skillfs_notify_change`。成功响应和业务错误响应都先
+写 raw JSON，再用 notify-server domain 的 `auth.frame` 签名；SkillFS 验证后才把通知视为
+已接受。握手、proof、tag、EOF、timeout 或 frame size 校验失败都直接关闭连接，不 dispatch
+也不返回未认证的错误 payload。
+
+下面示例是握手后受 `auth.frame` 保护的原始业务 payload；业务 schema 本身不变。
 
 Hermes nested skill 请求示例：
 
@@ -252,15 +353,32 @@ Ledger 不依赖 SkillFS 的内部模块划分，只依赖以下可观测行为�
 SkillFS 的本地 protocol event log 仅是内部诊断机制，不是 notify v2，也不是 Ledger 的
 canonical 身份来源。Ledger v2 不读取该日志。
 
-## 7. 部署边界与 M1 限制
+## 7. 部署边界与限制
 
-- SkillFS 与 Skill Ledger 必须协调升级：Ledger 明确拒绝 notify v1。
+- SkillFS 与 Skill Ledger 必须协调升级：Ledger 明确拒绝 notify v1；HMAC 联动还要求双方都
+  实现相同的 auth version、domain、大小限制和 fixed vector。
+- 完整 ACS HMAC profile 必须同时配置 control 和 notify key。SkillFS 使用
+  `--trusted-peer-key-file` 与 `--notify-auth-key-file`，agent-sec-core 使用对应的
+  `AGENT_SEC_SKILLFS_CONTROL_AUTH_KEY_FILE` 与 `AGENT_SEC_SKILLFS_NOTIFY_AUTH_KEY_FILE`。
+  两个方向可以复用一个文件，但推荐使用独立 key。
+- SkillFS `--control-socket` 必须与 `AGENT_SEC_SKILLFS_CONTROL_SOCKET` 一致。未配置 control
+  key 时，默认或显式 endpoint 的 `ENOENT` 都保留 legacy host fallback；配置 key 后任何
+  socket 缺失、连接或认证故障都 fail-closed。
+- 容器化部署需要用 shared volumes 承载 daemon socket、control socket、双方对应的 key，
+  以及 daemon 可见的 source/backing path。SkillFS 与 resolver peer 仍需在相同绝对路径看到
+  physical source。应按部署拓扑尽量缩小 source、key 和私有 runtime volume 的可见范围。
+- SkillFS 与 Ledger 必须使用相同 numeric UID；key 文件必须由该 effective UID 所有，socket
+  路径及父目录也必须授权实际调用的 daemon、CLI 和 SkillFS 进程。
+- Kubernetes Secret volume 是 symlink-based projection，不能直接作为 key path。部署需要先
+  将 Secret bytes 复制到 `emptyDir` 等私有共享卷，生成 owner 正确、mode `0600` 的普通
+  non-symlink 文件，再把双方配置指向复制后的路径。
+- control key 在 resolver client 生命周期内缓存，notify key 在 daemon bind 前加载；本次不
+  支持 key 热更新。轮换 key 需要协调更新双方文件并重启对应进程。
+- 本次不处理 `.skill-meta` 视图策略、Agent 与 Ledger 的 UID/权限隔离、socket ACL/shared GID、
+  Kubernetes manifest、notify 持久化或 daemon 通用认证。尤其在 Agent 与 Ledger 同 UID、同
+  容器运行时，Agent 对 Ledger key/daemon socket 的潜在访问仍是独立的部署安全限制。
 - 既有 `managedSkillDirs` 中的 live/backing path 必须迁移为 canonical path；Ledger 不自动猜测。
-- M1 只使用默认 resolver endpoint。SkillFS 配置自定义 control socket 时，Ledger 无法跟随该
-  endpoint；若默认 socket 不存在，将按 host 模式处理。
-- M1 不引入 mount registry、mountId、generation、endpoint 传递或 canonical/live 缓存。
-- SkillFS 与 Ledger 必须使用相同 effective UID，且 resolver control socket 必须授权实际调用的
-  daemon 和 CLI 进程。
+- 本次不引入 mount registry、mountId、generation、endpoint 传递或 canonical/live 缓存。
 - canonical source 可以是 symlink；notify、resolver request 和 canonical echo 均保留绝对、词法
   规范化的 source 前缀。realpath 只用于双方各自的内部安全检查。
 - `managedSkillDirs` 中的 glob 仍依赖 daemon namespace 的目录可见性；不可见的 canonical

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Integration tests for skill verifier"""
 
+import errno
 import json
 import os
 import shutil
@@ -8,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 # Add agent-sec-cli/src to path so the full package is importable
 sys.path.insert(
@@ -20,6 +23,7 @@ sys.path.insert(
 )
 
 from agent_sec_cli.asset_verify.errors import (
+    ErrConfigInvalid,
     ErrConfigMissing,
     ErrHashMismatch,
     ErrManifestMissing,
@@ -172,6 +176,7 @@ class TestVerifySkillsDir(unittest.TestCase):
     def test_nonexistent_dir(self):
         missing_dir = os.path.join(self.tmpdir, "missing_skills")
         results = verify_skills_dir(missing_dir, [])
+        self.assertEqual(results["checked"], 0)
         self.assertEqual(results["passed"], [])
         self.assertEqual(results["failed"], [])
 
@@ -179,8 +184,63 @@ class TestVerifySkillsDir(unittest.TestCase):
         empty_dir = os.path.join(self.tmpdir, "empty_skills")
         os.makedirs(empty_dir)
         results = verify_skills_dir(empty_dir, [])
+        self.assertEqual(results["checked"], 0)
         self.assertEqual(results["passed"], [])
         self.assertEqual(results["failed"], [])
+
+    def test_root_files_and_hidden_directories_are_not_candidates(self):
+        root = os.path.join(self.tmpdir, "skills")
+        os.makedirs(os.path.join(root, ".hidden-skill"))
+        with open(os.path.join(root, "README.md"), "w") as f:
+            f.write("not a skill directory")
+
+        results = verify_skills_dir(root, [])
+
+        self.assertEqual(results["checked"], 0)
+        self.assertEqual(results["passed"], [])
+        self.assertEqual(results["failed"], [])
+
+    def test_existing_non_directory_is_an_error(self):
+        file_path = os.path.join(self.tmpdir, "not-a-directory")
+        with open(file_path, "w") as f:
+            f.write("x")
+
+        with self.assertRaises(NotADirectoryError):
+            verify_skills_dir(file_path, [])
+
+    def test_unreadable_root_is_an_error(self):
+        root = Path(self.tmpdir) / "skills"
+        root.mkdir()
+
+        with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(PermissionError, "denied"):
+                verify_skills_dir(str(root), [])
+
+    def test_visible_entry_stat_io_error_is_an_operation_error(self):
+        root = Path(self.tmpdir) / "skills"
+        (root / "candidate").mkdir(parents=True)
+
+        with patch.object(
+            Path,
+            "stat",
+            side_effect=OSError(errno.EIO, "Input/output error"),
+        ):
+            with self.assertRaisesRegex(OSError, "Input/output error"):
+                verify_skills_dir(str(root), [])
+
+    @patch(
+        "agent_sec_cli.asset_verify.verifier.verify_skill",
+        side_effect=ErrManifestMissing("bad-skill"),
+    )
+    def test_candidate_failure_counts_as_checked(self, _mock_verify_skill):
+        root = os.path.join(self.tmpdir, "skills")
+        os.makedirs(os.path.join(root, "bad-skill"))
+
+        results = verify_skills_dir(root, [])
+
+        self.assertEqual(results["checked"], 1)
+        self.assertEqual(results["passed"], [])
+        self.assertEqual(len(results["failed"]), 1)
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -191,15 +251,11 @@ class TestLoadConfig(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_missing_config(self):
-        from pathlib import Path
-
         missing_config = Path(self.tmpdir) / "missing.conf"
         with self.assertRaises(ErrConfigMissing):
             load_config(missing_config)
 
     def test_single_skills_dir(self):
-        from pathlib import Path
-
         config_path = os.path.join(self.tmpdir, "config.conf")
         with open(config_path, "w") as f:
             f.write("skills_dir = /opt/skills\n")
@@ -208,8 +264,6 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config["skills_dirs"], ["/opt/skills"])
 
     def test_list_skills_dir(self):
-        from pathlib import Path
-
         config_path = os.path.join(self.tmpdir, "config.conf")
         with open(config_path, "w") as f:
             f.write("skills_dir = [\n")
@@ -220,6 +274,50 @@ class TestLoadConfig(unittest.TestCase):
         config = load_config(Path(config_path))
         self.assertEqual(config["skills_dirs"], ["/opt/skills1", "/opt/skills2"])
 
+    def test_empty_list_is_valid(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skills_dir = []\n")
+
+        config = load_config(config_path)
+
+        self.assertEqual(config["skills_dirs"], [])
+
+    def test_unterminated_list_is_invalid(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skills_dir = [\n")
+            f.write("    /opt/skills\n")
+
+        with self.assertRaises(ErrConfigInvalid):
+            load_config(config_path)
+
+    def test_malformed_entry_is_invalid(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skills_dir /opt/skills\n")
+
+        with self.assertRaises(ErrConfigInvalid):
+            load_config(config_path)
+
+    def test_unknown_key_is_invalid(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skill_dirs = /opt/skills\n")
+
+        with self.assertRaisesRegex(
+            ErrConfigInvalid, "unknown config key 'skill_dirs' on line 1"
+        ):
+            load_config(config_path)
+
+    def test_unsupported_inline_list_is_invalid(self):
+        config_path = Path(self.tmpdir) / "config.conf"
+        with open(config_path, "w") as f:
+            f.write("skills_dir = [/opt/skills, /usr/local/skills]\n")
+
+        with self.assertRaises(ErrConfigInvalid):
+            load_config(config_path)
+
 
 class TestLoadTrustedKeys(unittest.TestCase):
     def setUp(self):
@@ -229,15 +327,11 @@ class TestLoadTrustedKeys(unittest.TestCase):
         shutil.rmtree(self.tmpdir)
 
     def test_nonexistent_dir(self):
-        from pathlib import Path
-
         missing_dir = Path(self.tmpdir) / "missing_keys"
         with self.assertRaises(ErrNoTrustedKeys):
             load_trusted_keys(missing_dir)
 
     def test_empty_keys_dir(self):
-        from pathlib import Path
-
         with self.assertRaises(ErrNoTrustedKeys):
             load_trusted_keys(Path(self.tmpdir))
 
@@ -275,6 +369,7 @@ Expire-Date: 0
             ["gpg", "--homedir", cls.gpg_home, "--batch", "--gen-key"],
             input=key_params.encode(),
             capture_output=True,
+            check=False,
         )
 
         # Export public key
@@ -290,6 +385,7 @@ Expire-Date: 0
                     "test@test.com",
                 ],
                 stdout=f,
+                check=False,
             )
 
         # Create test skill files
@@ -298,8 +394,6 @@ Expire-Date: 0
             f.write("print('hello')")
 
         # Create .skill-meta directory and manifest
-        from agent_sec_cli.asset_verify.verifier import compute_file_hash
-
         cls.meta_dir = os.path.join(cls.skill_dir, ".skill-meta")
         os.makedirs(cls.meta_dir)
 
@@ -327,6 +421,7 @@ Expire-Date: 0
                 cls.manifest_path,
             ],
             capture_output=True,
+            check=False,
         )
 
     @classmethod
@@ -338,8 +433,6 @@ Expire-Date: 0
         if not self.gpg_available:
             self.skipTest("gpg not available")
 
-        from pathlib import Path
-
         keys = load_trusted_keys(Path(self.keys_dir))
         self.assertTrue(len(keys) > 0)
 
@@ -350,8 +443,6 @@ Expire-Date: 0
     def test_batch_verification(self):
         if not self.gpg_available:
             self.skipTest("gpg not available")
-
-        from pathlib import Path
 
         keys = load_trusted_keys(Path(self.keys_dir))
 

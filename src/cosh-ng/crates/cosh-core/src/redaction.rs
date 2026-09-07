@@ -28,6 +28,13 @@ pub(crate) fn redact_text(text: &str) -> String {
     redacted
 }
 
+/// Returns whether text matches a redaction rule or private-key end marker.
+pub(crate) fn contains_sensitive_text(text: &str) -> bool {
+    text.lines()
+        .any(|line| private_key_marker_range(line, "-----END ").is_some())
+        || redact_text(text) != text
+}
+
 pub(crate) fn redact_value(value: &mut Value) {
     match value {
         Value::Object(values) => {

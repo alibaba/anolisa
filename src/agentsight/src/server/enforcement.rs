@@ -1,8 +1,7 @@
 //! HTTP boundary for local enforcement control and evidence queries.
 
-#[cfg(test)]
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use actix_web::{HttpResponse, delete, get, post, web};
@@ -10,7 +9,7 @@ use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
     DestinationScope, HealthStatus, PolicyMode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -27,6 +26,7 @@ pub(super) struct ViolationQuery {
 }
 
 const FILE_POLICY_REVISION: &str = "agentsight-file-open-v1";
+const CREDENTIAL_POLICY_ID: &str = "agentsight-credential-exfiltration";
 
 /// Product-level fields for binding a sensitive file to an agent process.
 #[derive(Debug, Deserialize)]
@@ -43,12 +43,268 @@ pub(super) struct CredentialBindingRequest {
     agent_id: String,
     session_id: Option<String>,
     root_pid: i32,
-    source_path: PathBuf,
+    source_path: Option<PathBuf>,
+    #[serde(default)]
+    source_paths: Vec<PathBuf>,
     trusted_endpoint: Option<String>,
+    #[serde(default)]
+    trusted_endpoints: Vec<String>,
     revision: u64,
     mode: PolicyMode,
     taint_ttl_secs: Option<u64>,
     destination_scope: DestinationScope,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProtectionPreviewQuery {
+    directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProtectionPreview {
+    agent_id: String,
+    root_pid: u32,
+    workspace_path: String,
+    source_paths: Vec<String>,
+    trusted_endpoints: Vec<String>,
+    mode: PolicyMode,
+    max_trusted_endpoints: usize,
+}
+
+/// Returns safe, content-free defaults for the Agent-card protection action.
+#[get("/enforcement/agent-protection/{pid}")]
+pub(super) async fn preview_agent_protection(
+    data: web::Data<AppState>,
+    pid: web::Path<u32>,
+    query: web::Query<ProtectionPreviewQuery>,
+) -> HttpResponse {
+    let pid = pid.into_inner();
+    let agent = data.health_store.read().ok().and_then(|store| {
+        store
+            .all_agents()
+            .into_iter()
+            .find(|agent| agent.pid == pid)
+    });
+    let Some(agent) = agent else {
+        return error_response(
+            actix_web::http::StatusCode::NOT_FOUND,
+            "agent_not_found",
+            "agent process was not found",
+            false,
+        );
+    };
+    if query.directory.is_none() {
+        if let Some(coordinator) = data.enforcement.clone() {
+            let active_policy = web::block(move || {
+                let binding_id = coordinator
+                    .bindings()?
+                    .into_iter()
+                    .filter(|binding| is_active_credential_binding(binding, pid))
+                    .max_by_key(|binding| {
+                        binding
+                            .request
+                            .policy_revision
+                            .parse::<u64>()
+                            .unwrap_or_default()
+                    })
+                    .map(|binding| binding.request.binding_id);
+                match binding_id {
+                    Some(binding_id) => coordinator.credential_policy_snapshot(binding_id),
+                    None => Ok(None),
+                }
+            })
+            .await;
+            match active_policy {
+                Ok(Ok(Some(snapshot))) => match snapshot.policy() {
+                    Ok(policy) => {
+                        if let Some(preview) = protection_preview_from_policy(
+                            agent.agent_name.clone(),
+                            pid,
+                            agent.workspace_path.as_deref().map(Path::new),
+                            policy,
+                        ) {
+                            return HttpResponse::Ok().json(preview);
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("ignoring invalid credential policy preview: {error}");
+                    }
+                },
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    log::warn!("could not load active Agent protection policy: {error}");
+                }
+                Err(error) => {
+                    log::warn!("could not join Agent protection policy lookup: {error}");
+                }
+            }
+        }
+    }
+    let Some(workspace) = agent.workspace_path.as_deref().map(PathBuf::from) else {
+        return error_response(
+            actix_web::http::StatusCode::CONFLICT,
+            "workspace_unavailable",
+            "agent workspace is unavailable",
+            true,
+        );
+    };
+    let root = query.directory.as_deref().unwrap_or(&workspace);
+    let root = match root.canonicalize() {
+        Ok(root) if root.is_dir() && root != Path::new("/") => root,
+        Ok(_) => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "unsafe_protection_directory",
+                "protection directory cannot be the filesystem root",
+                false,
+            );
+        }
+        _ => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "invalid_protection_directory",
+                "protection directory must be an existing directory",
+                false,
+            );
+        }
+    };
+    // Run the recursive filesystem scan on the blocking pool so a large or slow
+    // directory never ties up an async Actix worker.
+    let workspace_path = root.to_string_lossy().into_owned();
+    let scan_root = root.clone();
+    let source_paths = web::block(move || discover_sensitive_files(&scan_root, 3, 64))
+        .await
+        .unwrap_or_else(|error| {
+            log::warn!("sensitive-file scan worker failed: {error}");
+            Vec::new()
+        });
+    HttpResponse::Ok().json(ProtectionPreview {
+        agent_id: agent.agent_name,
+        root_pid: pid,
+        workspace_path,
+        source_paths,
+        trusted_endpoints: Vec::new(),
+        mode: PolicyMode::Audit,
+        max_trusted_endpoints: 1,
+    })
+}
+
+fn is_active_credential_binding(binding: &Binding, pid: u32) -> bool {
+    binding.request.root_pid == pid as i32
+        && binding.request.policy_id == CREDENTIAL_POLICY_ID
+        && matches!(
+            binding.state,
+            BindingState::Pending | BindingState::Enforced | BindingState::Degraded
+        )
+}
+
+fn protection_preview_from_policy(
+    agent_id: String,
+    root_pid: u32,
+    workspace: Option<&Path>,
+    policy: &CredentialExfiltrationPolicy,
+) -> Option<ProtectionPreview> {
+    let workspace = workspace
+        .filter(|path| path.is_absolute() && *path != Path::new("/"))
+        .map(Path::to_path_buf);
+    let source_paths = workspace
+        .as_ref()
+        .map(|root| {
+            policy
+                .source_patterns
+                .iter()
+                .filter(|path| Path::new(path).starts_with(root))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|paths| !paths.is_empty())
+        .unwrap_or_else(|| policy.source_patterns.clone());
+    let workspace_path = workspace
+        .filter(|root| {
+            source_paths
+                .iter()
+                .all(|path| Path::new(path).starts_with(root))
+        })
+        .or_else(|| common_source_directory(&source_paths))
+        .filter(|path| path.is_absolute() && path != Path::new("/"))?;
+
+    Some(ProtectionPreview {
+        agent_id,
+        root_pid,
+        workspace_path: workspace_path.to_string_lossy().into_owned(),
+        source_paths,
+        trusted_endpoints: policy.trusted_endpoints.clone(),
+        mode: policy.mode,
+        max_trusted_endpoints: 1,
+    })
+}
+
+fn common_source_directory(source_paths: &[String]) -> Option<PathBuf> {
+    let mut common = Path::new(source_paths.first()?).parent()?.to_path_buf();
+    while !source_paths
+        .iter()
+        .all(|path| Path::new(path).starts_with(&common))
+    {
+        if !common.pop() {
+            return Some(PathBuf::from("/"));
+        }
+    }
+    Some(common)
+}
+
+fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<String> {
+    fn visit(
+        root: &Path,
+        depth: usize,
+        max_depth: usize,
+        limit: usize,
+        visited: &mut usize,
+        out: &mut Vec<String>,
+    ) {
+        // Bound the total directory entries inspected so a huge or slow tree
+        // with no matches still returns promptly instead of tying up the
+        // scanning worker indefinitely.
+        const MAX_ENTRIES_VISITED: usize = 20_000;
+        if depth > max_depth || out.len() >= limit || *visited >= MAX_ENTRIES_VISITED {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= limit || *visited >= MAX_ENTRIES_VISITED {
+                break;
+            }
+            *visited += 1;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if !matches!(
+                    name.as_ref(),
+                    ".git" | "node_modules" | "target" | "dist" | "build" | ".cache"
+                ) {
+                    visit(&path, depth + 1, max_depth, limit, visited, out);
+                }
+            } else if path.is_file()
+                && (name == ".env"
+                    || name.starts_with(".env.")
+                    || name.contains("credential")
+                    || name == ".npmrc"
+                    || name == ".pypirc"
+                    || name.starts_with("id_rsa")
+                    || name.starts_with("id_ed25519"))
+            {
+                out.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    let mut visited = 0usize;
+    visit(root, 0, max_depth, limit, &mut visited, &mut files);
+    files.sort();
+    files.dedup();
+    files
 }
 
 /// Returns privileged backend readiness.
@@ -168,12 +424,16 @@ fn unix_epoch_ns() -> u64 {
 }
 
 /// Lists AgentSight's persisted desired binding states.
+///
+/// Detached bindings acknowledge successful deletion and are hidden so the
+/// list reflects the bindings an operator can still act on. Each item keeps
+/// its `state` field so failed or degraded bindings remain distinguishable.
 #[get("/enforcement/bindings")]
 pub(super) async fn list_bindings(data: web::Data<AppState>) -> HttpResponse {
     let Some(coordinator) = data.enforcement.clone() else {
         return unavailable();
     };
-    match web::block(move || coordinator.bindings()).await {
+    match web::block(move || coordinator.active_bindings()).await {
         Ok(Ok(bindings)) => HttpResponse::Ok().json(json!({
             "bindings": bindings.into_iter().map(public_binding).collect::<Vec<_>>()
         })),
@@ -224,9 +484,30 @@ pub(super) async fn list_violations(
     let Some(coordinator) = data.enforcement.clone() else {
         return unavailable();
     };
+    let audit_service = Arc::clone(&data.audit_service);
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
     match web::block(move || coordinator.violations(limit)).await {
-        Ok(Ok(violations)) => HttpResponse::Ok().json(json!({ "violations": violations })),
+        Ok(Ok(violations)) => {
+            // Use the precise risk_evidence_links table to map each violation's
+            // event_id to the exact case that generated it, instead of the coarse
+            // (agent, policy, revision) index which picks the latest case and
+            // mis-links violations from earlier bursts.
+            let event_ids: Vec<uuid::Uuid> = violations.iter().map(|v| v.event_id).collect();
+            let case_map = audit_service
+                .case_ids_for_events(&event_ids)
+                .unwrap_or_default();
+            let enriched: Vec<serde_json::Value> = violations
+                .iter()
+                .map(|v| {
+                    let mut obj = serde_json::to_value(v).unwrap_or_default();
+                    if let Some(case_id) = case_map.get(&v.event_id) {
+                        obj["case_id"] = serde_json::json!(case_id.to_string());
+                    }
+                    obj
+                })
+                .collect();
+            HttpResponse::Ok().json(json!({ "violations": enriched }))
+        }
         Ok(Err(error)) => coordinator_error(error),
         Err(error) => blocking_error(error),
     }
@@ -328,24 +609,46 @@ fn build_credential_binding(
     if agent_id.is_empty() || agent_id.len() > 128 {
         return Err("agent_id must contain 1 to 128 characters".into());
     }
-    let source_path =
-        canonical_policy_file(&request.source_path).map_err(|error| error.to_string())?;
-    let source_path = source_path
-        .to_str()
-        .ok_or_else(|| "source_path must be valid UTF-8".to_string())?
-        .to_string();
+    let mut requested_sources = request.source_paths;
+    if let Some(source_path) = request.source_path {
+        requested_sources.push(source_path);
+    }
+    if requested_sources.is_empty() {
+        return Err("at least one source path is required".into());
+    }
+    let mut source_patterns = requested_sources
+        .iter()
+        .map(|path| canonical_policy_file(path).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "source paths must be valid UTF-8".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    source_patterns.sort();
+    source_patterns.dedup();
     let process_start_time =
         read_process_start_time(request.root_pid).map_err(|error| error.to_string())?;
-    let trusted_endpoints = request
-        .trusted_endpoint
+    let mut trusted_endpoints = request.trusted_endpoints;
+    if let Some(endpoint) = request.trusted_endpoint {
+        trusted_endpoints.push(endpoint);
+    }
+    trusted_endpoints = trusted_endpoints
+        .into_iter()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .into_iter()
         .collect();
+    trusted_endpoints.sort();
+    trusted_endpoints.dedup();
+    if trusted_endpoints.len() > 1 {
+        return Err("the current runtime supports at most one trusted network target".into());
+    }
     let policy = CredentialExfiltrationPolicy {
         policy_id: "agentsight-credential-exfiltration".into(),
         revision: request.revision,
-        source_patterns: vec![source_path],
+        source_patterns,
         trusted_endpoints,
         taint_label: "CREDENTIAL".into(),
         taint_ttl_secs: request.taint_ttl_secs.unwrap_or(900),
@@ -367,6 +670,15 @@ fn build_credential_binding(
 }
 
 fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
+    log::error!("enforcement coordinator request failed: {error}");
+    let (error, persisted) = match error {
+        EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id,
+            state,
+            source,
+        } => (*source, Some((binding_id, state))),
+        error => (error, None),
+    };
     let (status, code, message, retryable) = match &error {
         EnforcementCoordinatorError::IngestionUnavailable => (
             actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -428,7 +740,11 @@ fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
             false,
         ),
     };
-    log::error!("enforcement coordinator request failed: {error}");
+    if let Some((binding_id, state)) = persisted
+        && status == actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+    {
+        return persisted_error_response(status, code, message, retryable, binding_id, state);
+    }
     error_response(status, code, message, retryable)
 }
 
@@ -462,9 +778,201 @@ fn error_response(
     }))
 }
 
+/// Marks a 503 as "the desired state was persisted anyway".
+///
+/// Callers receiving this error can look up `binding_id` in the bindings list
+/// instead of assuming the failed request left no trace.
+fn persisted_error_response(
+    status: actix_web::http::StatusCode,
+    code: &str,
+    message: &str,
+    retryable: bool,
+    binding_id: Uuid,
+    state: BindingState,
+) -> HttpResponse {
+    HttpResponse::build(status).json(json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "persisted": true,
+            "binding_id": binding_id,
+            "state": state,
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn common_source_directory_finds_shared_parent() {
+        let paths = vec![
+            "/home/agent/.ssh/id_rsa".to_string(),
+            "/home/agent/.ssh/id_ed25519".to_string(),
+        ];
+        assert_eq!(
+            common_source_directory(&paths),
+            Some(PathBuf::from("/home/agent/.ssh"))
+        );
+    }
+
+    #[test]
+    fn common_source_directory_falls_back_to_root_when_divergent() {
+        let paths = vec![
+            "/home/agent/.env".to_string(),
+            "/etc/credentials.txt".to_string(),
+        ];
+        assert_eq!(common_source_directory(&paths), Some(PathBuf::from("/")));
+    }
+
+    #[test]
+    fn common_source_directory_is_none_for_empty_input() {
+        assert_eq!(common_source_directory(&[]), None);
+    }
+
+    #[test]
+    fn discover_sensitive_files_selects_secrets_and_respects_limits() {
+        let root = std::env::temp_dir().join(format!("agentsight-scan-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("node_modules")).expect("fixture dir should exist");
+        fs::create_dir_all(root.join("nested")).expect("nested dir should exist");
+        fs::write(root.join(".env"), b"SECRET=1").expect("env fixture");
+        fs::write(root.join("id_rsa"), b"key").expect("key fixture");
+        fs::write(root.join("README.md"), b"docs").expect("plain fixture");
+        fs::write(root.join("node_modules/.env"), b"ignored").expect("ignored fixture");
+        fs::write(root.join("nested/credentials.json"), b"c").expect("nested secret");
+
+        let found = discover_sensitive_files(&root, 3, 64);
+        assert!(found.iter().any(|p| p.ends_with(".env")));
+        assert!(found.iter().any(|p| p.ends_with("id_rsa")));
+        assert!(found.iter().any(|p| p.ends_with("credentials.json")));
+        assert!(!found.iter().any(|p| p.ends_with("README.md")));
+        // node_modules must be skipped entirely.
+        assert!(!found.iter().any(|p| p.contains("node_modules")));
+
+        // max_depth=0 must not descend into nested directories.
+        let shallow = discover_sensitive_files(&root, 0, 64);
+        assert!(!shallow.iter().any(|p| p.contains("nested")));
+
+        // limit caps the number of returned entries.
+        let limited = discover_sensitive_files(&root, 3, 1);
+        assert_eq!(limited.len(), 1);
+
+        // A non-existent root exercises the read_dir error branch.
+        let missing = discover_sensitive_files(&root.join("does-not-exist"), 3, 64);
+        assert!(missing.is_empty());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[actix_web::test]
+    async fn preview_agent_protection_scans_workspace_and_reports_secrets() {
+        use actix_web::http::StatusCode;
+        use actix_web::{App, test as awtest, web};
+        use std::sync::RwLock;
+        use std::time::Instant;
+
+        use super::super::{SecurityObservabilityConfig, configure_routes};
+        use crate::config::ServerAuthConfig;
+        use crate::grader::EvaluationStore;
+        use crate::health::store::AgentRole;
+        use crate::health::{AgentHealthState, AgentHealthStatus, HealthStore};
+        use crate::server::auth::DashboardAuth;
+
+        // A real workspace directory with a secret so discovery returns a hit.
+        let workspace = std::env::temp_dir().join(format!("agentsight-preview-{}", Uuid::new_v4()));
+        fs::create_dir_all(&workspace).expect("workspace should exist");
+        fs::write(workspace.join(".env"), b"SECRET=1").expect("secret fixture");
+        let canonical = workspace
+            .canonicalize()
+            .expect("workspace should canonicalize");
+
+        let pid = std::process::id();
+        let agents_health = Arc::new(RwLock::new(HealthStore::new()));
+        agents_health.write().unwrap().update(
+            pid,
+            AgentHealthStatus {
+                pid,
+                agent_name: "Scanner".into(),
+                category: "test".into(),
+                exe_path: "/usr/bin/sleep".into(),
+                workspace_path: Some(canonical.to_string_lossy().into_owned()),
+                ports: Vec::new(),
+                status: AgentHealthState::Healthy,
+                last_check_time: 1,
+                latency_ms: None,
+                error_message: None,
+                restart_cmd: None,
+                offline_since: None,
+                role: AgentRole::Client,
+                parent_pid: None,
+                has_crash: false,
+            },
+        );
+
+        let auth_dir =
+            std::env::temp_dir().join(format!("agentsight-preview-auth-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&auth_dir).expect("auth dir should exist");
+        let state = web::Data::new(AppState {
+            storage_path: PathBuf::from(":memory:"),
+            start_time: Instant::now(),
+            health_store: Arc::clone(&agents_health),
+            interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(Path::new(":memory:"))
+                    .expect("evaluation fixture should open"),
+            ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(Arc::new(
+                agentsight_audit::AuditStore::open_in_memory().expect("audit store should open"),
+            ))),
+            security_observability: SecurityObservabilityConfig::default(),
+            auth: Arc::new(DashboardAuth::init(
+                &ServerAuthConfig { enabled: false },
+                &auth_dir,
+            )),
+            optimize: None,
+            trajectory_store: Arc::new(RwLock::new(None)),
+        });
+
+        let app =
+            awtest::init_service(App::new().app_data(state).configure(configure_routes)).await;
+
+        // Unknown pid resolves to a 404 agent_not_found.
+        let missing = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/api/enforcement/agent-protection/4294967295")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        // Known pid scans its workspace and reports the discovered secret.
+        let ok = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri(&format!("/api/enforcement/agent-protection/{pid}"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body: serde_json::Value = awtest::read_body_json(ok).await;
+        assert_eq!(body["root_pid"], pid);
+        assert_eq!(body["mode"], "audit");
+        assert!(
+            body["source_paths"]
+                .as_array()
+                .expect("source_paths should be an array")
+                .iter()
+                .any(|p| p.as_str().is_some_and(|s| s.ends_with(".env")))
+        );
+
+        fs::remove_dir_all(&workspace).ok();
+        fs::remove_dir_all(&auth_dir).ok();
+    }
 
     #[test]
     fn builds_file_binding_from_product_fields() {
@@ -515,8 +1023,10 @@ mod tests {
             agent_id: " qoder ".into(),
             session_id: Some(" session-1 ".into()),
             root_pid: child.id() as i32,
-            source_path: path.clone(),
+            source_path: Some(path.clone()),
+            source_paths: Vec::new(),
             trusted_endpoint: Some(" 10.0.0.8 ".into()),
+            trusted_endpoints: Vec::new(),
             revision: 3,
             mode: PolicyMode::Audit,
             taint_ttl_secs: None,
@@ -540,6 +1050,127 @@ mod tests {
             [path.canonicalize().unwrap().to_str().unwrap()]
         );
 
+        child.kill().expect("fixture process should stop");
+        child.wait().expect("fixture process should exit");
+        fs::remove_file(path).expect("fixture file should be removed");
+    }
+
+    #[test]
+    fn discovers_workspace_sensitive_files_without_dependency_noise() {
+        let directory =
+            std::env::temp_dir().join(format!("agentsight-protection-{}", Uuid::new_v4()));
+        let nested = directory.join("config");
+        let dependency = directory.join("node_modules/package");
+        fs::create_dir_all(&nested).expect("fixture directory should exist");
+        fs::create_dir_all(&dependency).expect("dependency directory should exist");
+        fs::write(directory.join(".env"), b"fixture").expect("env fixture should exist");
+        fs::write(nested.join("service-credential.json"), b"fixture")
+            .expect("credential fixture should exist");
+        fs::write(dependency.join("credential.json"), b"fixture")
+            .expect("dependency fixture should exist");
+        fs::write(directory.join("README.md"), b"fixture").expect("ordinary fixture should exist");
+
+        let discovered = discover_sensitive_files(&directory, 3, 64);
+
+        assert_eq!(discovered.len(), 2);
+        assert!(discovered.iter().any(|path| path.ends_with("/.env")));
+        assert!(
+            discovered
+                .iter()
+                .any(|path| path.ends_with("/config/service-credential.json"))
+        );
+        assert!(discovered.iter().all(|path| !path.contains("node_modules")));
+        fs::remove_dir_all(directory).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn restores_agent_protection_preview_from_active_policy() {
+        let policy = CredentialExfiltrationPolicy {
+            policy_id: "agentsight-credential-exfiltration".into(),
+            revision: 7,
+            source_patterns: vec![
+                "/root/agentsight-demo/.env".into(),
+                "/root/agentsight-demo/config/credential.json".into(),
+            ],
+            trusted_endpoints: vec!["10.0.0.8:443".into()],
+            taint_label: "CREDENTIAL".into(),
+            taint_ttl_secs: 900,
+            destination_scope: DestinationScope::PublicIpv4,
+            mode: PolicyMode::Audit,
+        };
+
+        let preview = protection_preview_from_policy(
+            "Hermes".into(),
+            9073,
+            Some(Path::new("/root/agentsight-demo")),
+            &policy,
+        )
+        .expect("preview should be present");
+
+        assert_eq!(preview.agent_id, "Hermes");
+        assert_eq!(preview.root_pid, 9073);
+        assert_eq!(preview.workspace_path, "/root/agentsight-demo");
+        assert_eq!(preview.source_paths, policy.source_patterns);
+        assert_eq!(preview.trusted_endpoints, ["10.0.0.8:443"]);
+        assert_eq!(preview.mode, PolicyMode::Audit);
+    }
+
+    #[test]
+    fn only_current_credential_bindings_restore_agent_protection() {
+        let request = ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "Hermes".into(),
+            session_id: None,
+            root_pid: 9073,
+            process_start_time: 1,
+            policy_id: "agentsight-credential-exfiltration".into(),
+            policy_revision: "7".into(),
+            policy_dsl: "fixture".into(),
+            policy_mode: Some(PolicyMode::Audit),
+        };
+        let active = Binding {
+            request: request.clone(),
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: Some(1),
+        };
+        let detached = Binding {
+            request,
+            state: BindingState::Detached,
+            message: None,
+            domain_id: None,
+        };
+
+        assert!(is_active_credential_binding(&active, 9073));
+        assert!(!is_active_credential_binding(&active, 9074));
+        assert!(!is_active_credential_binding(&detached, 9073));
+    }
+
+    #[test]
+    fn rejects_more_trusted_targets_than_the_runtime_supports() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("fixture process should start");
+        let path = std::env::temp_dir().join(format!("agentsight-credential-{}", Uuid::new_v4()));
+        fs::write(&path, b"fixture").expect("fixture file should exist");
+
+        let error = build_credential_binding(CredentialBindingRequest {
+            agent_id: "qoder".into(),
+            session_id: None,
+            root_pid: child.id() as i32,
+            source_path: None,
+            source_paths: vec![path.clone()],
+            trusted_endpoint: None,
+            trusted_endpoints: vec!["10.0.0.8:443".into(), "10.0.0.9:443".into()],
+            revision: 1,
+            mode: PolicyMode::Audit,
+            taint_ttl_secs: None,
+            destination_scope: DestinationScope::PublicIpv4,
+        })
+        .expect_err("multiple trusted targets must be rejected explicitly");
+
+        assert!(error.contains("at most one trusted network target"));
         child.kill().expect("fixture process should stop");
         child.wait().expect("fixture process should exit");
         fs::remove_file(path).expect("fixture file should be removed");
@@ -724,6 +1355,8 @@ mod tests {
             serde_json::Value::String("enforcement_unavailable".into())
         );
         assert_eq!(value["error"]["retryable"], serde_json::Value::Bool(true));
+        // Health failures happen before persistence and must not claim otherwise.
+        assert!(value["error"].get("persisted").is_none());
     }
 
     #[actix_web::test]
@@ -785,5 +1418,87 @@ mod tests {
             status.message.as_deref(),
             Some("enforcement backend is not ready")
         );
+    }
+
+    #[actix_web::test]
+    async fn persisted_apply_failures_expose_persisted_state_on_503() {
+        let binding_id = Uuid::new_v4();
+        let response = coordinator_error(EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id,
+            state: BindingState::Failed,
+            source: Box::new(EnforcementCoordinatorError::Client(
+                crate::enforcement::EnforcementError::Remote {
+                    code: "internal_error".into(),
+                    message: "fixture apply rejection".into(),
+                },
+            )),
+        });
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "enforcer_unavailable");
+        assert_eq!(value["error"]["persisted"], serde_json::Value::Bool(true));
+        assert_eq!(value["error"]["state"], "failed");
+        assert_eq!(
+            value["error"]["binding_id"],
+            serde_json::Value::String(binding_id.to_string())
+        );
+    }
+
+    #[actix_web::test]
+    async fn persisted_degraded_apply_failures_expose_state_on_503() {
+        let response = coordinator_error(EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id: Uuid::new_v4(),
+            state: BindingState::Degraded,
+            source: Box::new(EnforcementCoordinatorError::EnforcementUnavailable(
+                "fixture backend lost".into(),
+            )),
+        });
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "enforcement_unavailable");
+        assert_eq!(value["error"]["persisted"], serde_json::Value::Bool(true));
+        assert_eq!(value["error"]["state"], "degraded");
+    }
+
+    #[actix_web::test]
+    async fn persisted_policy_rejections_keep_actionable_status_without_state_detail() {
+        let response = coordinator_error(EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id: Uuid::new_v4(),
+            state: BindingState::Failed,
+            source: Box::new(EnforcementCoordinatorError::Client(
+                crate::enforcement::EnforcementError::Remote {
+                    code: "compile_failure".into(),
+                    message: "fixture compile rejection".into(),
+                },
+            )),
+        });
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "compile_failure");
+        assert!(value["error"].get("persisted").is_none());
     }
 }

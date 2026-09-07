@@ -44,7 +44,7 @@ pub(super) struct SettingsTransactionLock {
 
 impl Drop for SettingsTransactionLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = FileExt::unlock(&self.file);
     }
 }
 

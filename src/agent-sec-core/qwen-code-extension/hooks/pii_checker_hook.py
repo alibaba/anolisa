@@ -32,8 +32,6 @@ from trace_context import with_trace_context
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 _MAX_TIMEOUT_SECONDS = 8.0
 _MAX_PAYLOAD_SIZE = 1024 * 1024
-_MAX_EVIDENCE_ITEMS = 3
-_MAX_EVIDENCE_CHARS = 80
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _VALID_VERDICTS = {"pass", "warn", "deny", "error"}
@@ -65,7 +63,11 @@ def _policy() -> str:
     raw = os.environ.get("PII_CHECKER_MODE")
     policy = env_hook_policy("PII_CHECKER_MODE", "observe")
     if "PII_CHECKER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
-        print("[pii-checker] invalid PII_CHECKER_MODE; using observe", file=sys.stderr)
+        print(
+            "[pii-checker] PII Checker configuration is invalid; processing will "
+            "continue without confirmation or blocking.",
+            file=sys.stderr,
+        )
     return policy
 
 
@@ -160,17 +162,10 @@ def _scan_pii(
     return scan_result if isinstance(scan_result, dict) else None
 
 
-def _shorten_evidence(value: str) -> str:
-    normalized = " ".join(value.split())
-    if len(normalized) <= _MAX_EVIDENCE_CHARS:
-        return normalized
-    return normalized[: _MAX_EVIDENCE_CHARS - 3] + "..."
-
-
 def _validated_result(
     scan_result: dict[str, Any],
-) -> tuple[str, list[str]] | None:
-    """Return a supported verdict with audit-safe evidence only."""
+) -> tuple[str, list[dict[str, str]]] | None:
+    """Return a supported verdict with only fields needed for risk counts."""
     verdict = scan_result.get("verdict")
     if not isinstance(verdict, str) or verdict not in _VALID_VERDICTS:
         return None
@@ -182,30 +177,92 @@ def _validated_result(
     findings = scan_result.get("findings")
     if not isinstance(findings, list):
         return None
-    evidence: list[str] = []
+    sanitized_findings: list[dict[str, str]] = []
+    has_redacted_evidence = False
     for finding in findings:
         if not isinstance(finding, dict):
             continue
         redacted = finding.get("evidence_redacted")
-        if not isinstance(redacted, str) or not redacted.strip():
-            continue
-        shortened = _shorten_evidence(redacted)
-        if shortened not in evidence:
-            evidence.append(shortened)
-        if len(evidence) >= _MAX_EVIDENCE_ITEMS:
-            break
-    return (verdict, evidence) if evidence else None
+        if isinstance(redacted, str) and redacted.strip():
+            has_redacted_evidence = True
+        severity = finding.get("severity")
+        sanitized_findings.append(
+            {"severity": severity} if isinstance(severity, str) else {}
+        )
+    if not sanitized_findings or not has_redacted_evidence:
+        return None
+    return verdict, sanitized_findings
 
 
-def _notice(evidence: list[str], action: str) -> str:
+def _risk_summary(verdict: str, findings: list[dict[str, str]]) -> str:
+    """Summarize finding counts without exposing scanner-internal details."""
+    high_count = sum(finding.get("severity") == "deny" for finding in findings)
+    general_count = sum(finding.get("severity") == "warn" for finding in findings)
+    unknown_count = len(findings) - high_count - general_count
+    if verdict == "deny":
+        high_count += unknown_count
+    else:
+        general_count += unknown_count
+
+    total = len(findings)
+    noun = "finding" if total == 1 else "findings"
+    if high_count and general_count:
+        return (
+            f"Detected {total} sensitive data {noun} "
+            f"({high_count} high risk, {general_count} general risk)"
+        )
+    risk = "high-risk" if high_count else "general-risk"
+    return f"Detected {total} {risk} sensitive data {noun}"
+
+
+def _notice(verdict: str, findings: list[dict[str, str]], action: str) -> str:
+    return f"[pii-checker] {_risk_summary(verdict, findings)}. {action}"
+
+
+def _warning_action(event_name: str) -> str:
+    """Describe the event-specific result of a warning-only decision."""
+    if event_name == "PreToolUse":
+        return (
+            "This is a warning only; the tool call will continue without confirmation "
+            "or blocking."
+        )
+    if event_name == "PostToolUse":
+        return (
+            "The tool has already run. This is a warning only; its raw output will enter "
+            "model context, and external side effects were not undone."
+        )
+    if event_name == "Stop":
+        return "This is a warning only; the response will continue without blocking."
     return (
-        "[pii-checker] Sensitive data detected. Redacted evidence: "
-        f"{', '.join(evidence)}. {action}"
+        "This is a warning only; the request will continue without confirmation or "
+        "blocking."
+    )
+
+
+def _unsupported_confirmation_action(event_name: str) -> str:
+    """Describe a warning when the current hook cannot request confirmation."""
+    if event_name == "PostToolUse":
+        return (
+            "The tool has already run. This stage cannot confirm or block; this is a "
+            "warning only, its raw output will enter model context, and external side "
+            "effects were not undone."
+        )
+    if event_name == "Stop":
+        return (
+            "This stage cannot confirm or block; this is a warning only and the response "
+            "will continue."
+        )
+    return (
+        "This stage cannot confirm or block; this is a warning only and the request will "
+        "continue."
     )
 
 
 def _decision(
-    input_data: dict[str, Any], event_name: str, verdict: str, evidence: list[str]
+    input_data: dict[str, Any],
+    event_name: str,
+    verdict: str,
+    findings: list[dict[str, str]],
 ) -> dict[str, Any]:
     """Map one validated scanner verdict to Qwen Code HookOutput."""
     if event_name in {"PostToolUseFailure", "StopFailure"}:
@@ -218,11 +275,15 @@ def _decision(
         return _noop()
     if verdict == "warn" or policy == "warn":
         return {
-            "systemMessage": _notice(evidence, "Execution will continue."),
+            "systemMessage": _notice(verdict, findings, _warning_action(event_name)),
         }
 
     if policy == "ask" and event_name == "PreToolUse":
-        reason = _notice(evidence, "Approval is required.")
+        reason = _notice(
+            verdict,
+            findings,
+            "Confirmation is required before this tool call can continue.",
+        )
         return {
             "hookSpecificOutput": {
                 "hookEventName": event_name,
@@ -233,19 +294,29 @@ def _decision(
     if policy == "ask":
         return {
             "systemMessage": _notice(
-                evidence, "Approval is unavailable here; execution continues."
+                verdict,
+                findings,
+                _unsupported_confirmation_action(event_name),
             )
         }
 
     if event_name == "UserPromptSubmit":
-        reason = _notice(evidence, "Remove the sensitive data and submit again.")
+        reason = _notice(
+            verdict,
+            findings,
+            "The current protection settings blocked this request.",
+        )
         return {
             "decision": "block",
             "reason": reason,
             "hookSpecificOutput": {"hookEventName": event_name},
         }
     if event_name == "PreToolUse":
-        reason = _notice(evidence, "This tool call was blocked.")
+        reason = _notice(
+            verdict,
+            findings,
+            "The current protection settings blocked this tool call.",
+        )
         return {
             "hookSpecificOutput": {
                 "hookEventName": event_name,
@@ -255,8 +326,10 @@ def _decision(
         }
     if event_name == "PostToolUse":
         reason = _notice(
-            evidence,
-            "Do not use or repeat the sensitive tool output.",
+            verdict,
+            findings,
+            "The tool has already run. Its raw output will not enter model context; "
+            "external side effects were not undone.",
         )
         # Qwen Code 0.19.9 only stops PostToolUse through
         # shouldStopExecution(), which checks continue=false. Keep the
@@ -271,13 +344,17 @@ def _decision(
         if input_data.get("stop_hook_active") is True:
             return {
                 "systemMessage": _notice(
-                    evidence,
-                    "The response will not be blocked again to avoid a retry loop.",
+                    verdict,
+                    findings,
+                    "This pass is warning-only and will not block the response again, "
+                    "avoiding a retry loop.",
                 )
             }
         reason = _notice(
-            evidence,
-            "Rewrite the final response using placeholders; do not repeat the original values.",
+            verdict,
+            findings,
+            "The final response was blocked. Rewrite it without sensitive data, then try "
+            "again.",
         )
         return {"decision": "block", "reason": reason}
     return _noop()
@@ -313,11 +390,11 @@ def main() -> None:
         if validated is None:
             print(json.dumps(_noop()))
             return
-        verdict, evidence = validated
+        verdict, findings = validated
         output = (
             _noop()
             if verdict == "pass"
-            else _decision(input_data, event_name, verdict, evidence)
+            else _decision(input_data, event_name, verdict, findings)
         )
         print(json.dumps(output, ensure_ascii=False))
     except Exception:  # noqa: BLE001 - hook failures must remain silent and fail-open

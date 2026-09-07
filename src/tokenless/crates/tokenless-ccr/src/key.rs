@@ -51,9 +51,9 @@ mod tests {
     fn no_collisions_across_many_payloads() {
         let mut seen = std::collections::HashSet::new();
         for i in 0..100_000u64 {
-            let payload = format!("collision-probe-{}", i);
+            let payload = format!("collision-probe-{i}");
             let key = compute_key(payload.as_bytes());
-            assert!(seen.insert(key), "collision at i={}", i);
+            assert!(seen.insert(key), "collision at i={i}");
         }
     }
 }

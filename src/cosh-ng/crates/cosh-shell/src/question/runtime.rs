@@ -81,8 +81,9 @@ pub(crate) fn render_question_answer_actions<W: Write>(
             continue;
         }
 
-        // Skip if auth panel is active — let render_auth_card_actions handle it
-        if state.auth.state.is_some() {
+        // Skip if auth or hook-action panel is active — let the dedicated
+        // card-action handlers consume the event (#1629).
+        if state.auth.state.is_some() || state.hooks.pending_action.is_some() {
             continue;
         }
 

@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """Tokenless response compression hook for Cosh-NG, Claude Code, Qoder, and OpenCode.
 
-Reads a PostToolUse JSON from stdin, compresses the tool response
-via ``tokenless compress-response``, then optionally re-encodes to TOON
-format via ``tokenless compress-toon`` for additional token savings.
+Reads a PostToolUse JSON from stdin, forwards the model-visible tool
+response to the unified ``tokenless compress`` Protocol v2 PostTool operation
+and translates the result into the host's
+envelope. JSON detection, tool threshold selection, TOON selection, and
+final acceptance all live behind the entry point; this hook only parses the
+host object, declares capabilities, and builds envelopes (§4.5).
 
-Pipeline: Env Attribution -> Layered dispatch -> Compression -> TOON Encoding
-  1. If tool_response contains errors, classify as environment vs logic issue
-     and inject "Skip retry" guidance for LLM
-  2. 3-layer tool dispatch:
-     - Content retrieval (Read/Glob/Grep) -> skip all compression
-     - Shell/exec (Bash/Shell) -> moderate truncation (64K strings)
-     - Other tools -> zero-truncation compress-response + TOON
-  3. Strip debug fields, nulls, empty values (no truncation risk)
-  4. If the compressed result is still valid JSON, encode to TOON format
-  5. Stats are recorded automatically by tokenless CLI commands.
+One Tokenless subprocess per invocation. Environment-error attribution is
+owned by the Rust PostTool service.
 
 Hook point: **PostToolUse**
 
@@ -29,23 +24,22 @@ Output contract per agent:
   - qoder-cli: the compressed payload replaces the response via the string
     field ``hookSpecificOutput.updatedToolOutput``. Structured responses are
     serialized as compact JSON because Qoder rejects object and array values.
-    Qoder supports replacement for every tool, so compressed data is never
-    appended beside the original.
   - opencode: the adapter translates ``updatedToolOutput`` to OpenCode's
-    mutable ``tool.execute.after`` output. ``additionalContext`` remains
-    reserved for additive readiness and environment diagnostics.
+    mutable ``tool.execute.after`` output.
   - cosh-ng: the compressed payload replaces the response via
     ``hookSpecificOutput.updatedToolResponse``.  Extract only ``llmContent``
-    from wrapped responses; never include ``returnDisplay``.  Keep
-    environment/error attribution in ``additionalContext`` (additive).
-    Unsupported Cosh-NG versions fail open with compression disabled.
-  - other agents: the compressed payload is injected via
-    ``additionalContext`` per each runtime's hook contract.
+    from wrapped responses; never include ``returnDisplay``.  Unsupported
+    Cosh-NG versions fail open with compression disabled.
+  - other agents (additionalContext-only hosts): passthrough. Additive
+    injection would append the compressed copy beside the still-visible
+    original — a net token increase — so hosts without true output
+    replacement remain passthrough (roadmap §7). Environment attribution is
+    still injected: it is additive by design.
 
-The agent ID is read from the TOKENLESS_AGENT_ID environment variable
-(set by the install action script).  When running under Cosh-NG, the
-agent ID is overridden to ``cosh-ng`` for correct stats attribution.
-Fallback paths follow the ANOLISA FHS spec: /usr/bin/tokenless.
+The agent ID is resolved from the host runtime, ``--agent-id`` argument, or
+TOKENLESS_AGENT_ID environment variable. When running under Cosh-NG, runtime
+detection overrides the declared ID for correct stats attribution. Fallback
+paths follow the ANOLISA FHS spec: /usr/bin/tokenless.
 """
 
 from __future__ import annotations
@@ -61,25 +55,38 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    SHELL_TOOLS,
     SKIP_TOOLS,
-    classify_env_error,
+    build_post_tool_request,
+    consume_output_optimization,
     detect_cosh_ng_runtime,
-    get_thresholds,
     is_skill_file,
+    is_tokenless_retrieve_command,
     parse_version,
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
+    run_compress,
     secure_write_text,
     skip,
+    tokenless_retrieve_command_available,
     try_parse_json,
-    unwrap_string_json,
     warn,
 )
 
 # -- constants ---------------------------------------------------------------
 
-_MIN_RESPONSE_CHARS = 200
+# Shell tool envelopes carry the log in one dominant text field. Unwrapping
+# is worth a rebuilt envelope only when that field is large enough for the
+# build/log engine to bite (its own gates start at 30 lines / 200 chars;
+# 2000 chars keeps the rewrap machinery out of trivial outputs).
+_SHELL_TEXT_FIELDS = ("stdout", "stderr")
+_SHELL_UNWRAP_MIN_CHARS = 2_000
+
+# Below the qwen/cosh extension manifests' 10 s host wrapper so a
+# pathological input is killed here (fail-open skip) before the host kills
+# the whole hook.
+_COMPRESS_TIMEOUT = 8
 
 # Claude Code added hookSpecificOutput.updatedToolOutput (normal-path tool
 # output replacement for all tools) in v2.1.121. Older versions only support
@@ -92,23 +99,10 @@ _OPENCODE_AGENT_ID = "opencode"
 # Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
 # invalidate it. Hooks run as a fresh process per tool call and spawning the
 # node CLI every time would add noticeable latency.
-_CLAUDE_VERSION_CACHE = os.path.join(
-    os.path.expanduser("~"), ".tokenless", ".claude-version"
-)
+_CLAUDE_VERSION_CACHE = os.path.join(os.path.expanduser("~"), ".tokenless", ".claude-version")
 
 
 # -- helpers -------------------------------------------------------------------
-
-
-def _build_additional_context(
-    content: str,
-    env_attribution: str = "",
-) -> str:
-    parts = []
-    if env_attribution:
-        parts.append(env_attribution)
-    parts.append(content)
-    return "\n".join(parts)
 
 
 def _emit(output: dict) -> None:
@@ -122,15 +116,42 @@ def _emit_attribution_or_skip(env_attribution: str) -> None:
     additive and safe on every agent), otherwise a plain skip. Never returns.
     """
     if env_attribution:
-        _emit({
-            "suppressOutput": True,
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": env_attribution,
-            },
-        })
+        _emit(
+            {
+                "suppressOutput": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": env_attribution,
+                },
+            }
+        )
         sys.exit(0)
     skip()
+
+
+def _shell_text_field(tool_name: str, envelope) -> tuple | None:
+    """The dominant text field of a shell tool's envelope, or ``None``.
+
+    Shell envelopes (``{"stdout": …, "stderr": …}``) are JSON to the entry
+    point, which would compress them log-blind. Unwrapping the largest text
+    field sends the log itself through the text slot; step 13 re-injects the
+    compressed text into a same-shaped envelope, so the host's tool protocol
+    is untouched (adapters own envelope knowledge, §4.5). Only the single
+    largest field is compressed — one Tokenless subprocess per invocation
+    (§5.6) — the other field stays byte-identical.
+    """
+    if tool_name not in SHELL_TOOLS or not isinstance(envelope, dict):
+        return None
+    best = None
+    for name in _SHELL_TEXT_FIELDS:
+        value = envelope.get(name)
+        if (
+            isinstance(value, str)
+            and len(value) >= _SHELL_UNWRAP_MIN_CHARS
+            and (best is None or len(value) > len(best[1]))
+        ):
+            best = (name, value)
+    return best
 
 
 def _cached_claude_version(claude_bin: str) -> tuple | None:
@@ -152,7 +173,9 @@ def _cached_claude_version(claude_bin: str) -> tuple | None:
     try:
         proc = subprocess.run(
             [claude_bin, "--version"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except Exception as e:
         warn(f"claude --version failed: {e}")
@@ -164,9 +187,7 @@ def _cached_claude_version(claude_bin: str) -> tuple | None:
         try:
             # Same hardened write as other ~/.tokenless state files (0o600,
             # symlink-safe) so the cache stays private on shared HOMEs.
-            secure_write_text(
-                _CLAUDE_VERSION_CACHE, f"{cache_key}\n{proc.stdout.strip()}"
-            )
+            secure_write_text(_CLAUDE_VERSION_CACHE, f"{cache_key}\n{proc.stdout.strip()}")
         except OSError:
             pass
     return ver
@@ -175,8 +196,8 @@ def _cached_claude_version(claude_bin: str) -> tuple | None:
 def _claude_supports_replacement() -> bool:
     """Whether the running Claude Code supports updatedToolOutput (>= 2.1.121).
 
-    Returns False when the version cannot be determined; the caller then
-    fails open by disabling compression, so unknown versions never receive a
+    Returns False when the version cannot be determined; the hook then
+    declares no replacement capability, so unknown versions never receive a
     duplicate compressed payload through additionalContext.
     """
     claude_bin = resolve_binary("claude")
@@ -186,68 +207,7 @@ def _claude_supports_replacement() -> bool:
     return ver is not None and ver >= _CLAUDE_MIN_REPLACE_VERSION
 
 
-def _restore_dropped_schema_fields(original: dict, compressed: dict) -> dict:
-    """Restore top-level keys dropped by compression when originally empty.
-
-    compress-response drops nulls, empty values ("" / {} / []) and configured
-    debug fields. Built-in Claude Code tools expect a stable output schema
-    (e.g. Bash: stdout/stderr/interrupted/isImage), so cheap empty fields are
-    restored for updatedToolOutput; intentionally dropped non-empty debug
-    payloads stay dropped.
-    """
-    restored = dict(compressed)
-    for key, value in original.items():
-        if key in restored:
-            continue
-        if value is None or value == "" or value == {} or value == []:
-            restored[key] = value
-    return restored
-
-
-def _build_replacement_output(
-    tool_response_raw: object,
-    tool_response: str,
-    compressed: str,
-    final_output: str,
-    used_resp_compression: bool,
-) -> tuple[bool, object]:
-    """Build a schema-safe replacement for runtimes that support one."""
-    if not isinstance(tool_response_raw, (dict, list)):
-        return True, final_output
-
-    # TOON text cannot replace a structured response without changing the
-    # host tool schema, so this path requires a real JSON compression win.
-    if not used_resp_compression:
-        return False, None
-
-    compressed_parsed = try_parse_json(compressed)
-    if isinstance(tool_response_raw, dict) and isinstance(compressed_parsed, dict):
-        updated_output = _restore_dropped_schema_fields(
-            tool_response_raw, compressed_parsed
-        )
-    elif compressed_parsed is not None:
-        updated_output = compressed_parsed
-    else:
-        return False, None
-
-    # Restoring empty schema fields can cancel out a marginal win.
-    serialized = json.dumps(updated_output, separators=(",", ":"))
-    if len(serialized) >= len(tool_response):
-        return False, None
-    return True, updated_output
-
-
 # -- main --------------------------------------------------------------------
-
-
-def _warn_subprocess(label: str, proc: subprocess.CompletedProcess) -> None:
-    """Log a non-zero subprocess exit with truncated stderr."""
-    detail = (proc.stderr or "").strip()[:200]
-    warn(
-        f"{label} exited {proc.returncode}: {detail}"
-        if detail
-        else f"{label} exited {proc.returncode} with empty stderr"
-    )
 
 
 def main() -> None:
@@ -255,15 +215,29 @@ def main() -> None:
     cosh_ng_version = detect_cosh_ng_runtime()
     cosh_ng_detected = cosh_ng_version is not None
 
-    # If Cosh-NG is detected but unsupported version, fail open
+    # 2. Resolve agent ID based on runtime
+    agent_id = resolve_agent_id()
+
+    # 3. Read stdin JSON and consume any matching PreTool state.
+    try:
+        input_data = json.load(sys.stdin)
+    except (json.JSONDecodeError, EOFError, ValueError):
+        warn("failed to read PostToolUse payload. Passing through unchanged.")
+        skip()
+
+    session_id = input_data.get("session_id", "")
+    tool_use_id = resolve_tool_call_id(agent_id, input_data)
+    try:
+        output_optimization = consume_output_optimization(agent_id, session_id, tool_use_id)
+    except OSError as error:
+        warn(f"failed to consume PreTool optimization state: {error}")
+        output_optimization = "none"
+
     if cosh_ng_detected and cosh_ng_version == (0, 0, 0):
         warn("Unsupported Cosh-NG version. Response compression disabled (fail open).")
         skip()
 
-    # 2. Resolve agent ID based on runtime
-    agent_id = resolve_agent_id()
-
-    # 3. Resolve binaries
+    # 4. Resolve the single Core entry point after consuming per-call state.
     tokenless_bin = resolve_binary(
         "tokenless", _TOKENLESS_FALLBACK, _TOKENLESS_LOCAL_SHARE, _TOKENLESS_LOCAL_LIB
     )
@@ -271,22 +245,12 @@ def main() -> None:
         warn("tokenless is not installed. Response compression hook disabled.")
         skip()
 
-    # 4. Read stdin JSON
-    try:
-        input_data = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError, ValueError):
-        warn("failed to read PostToolUse payload. Passing through unchanged.")
-        skip()
-
-    # 5. Extract tool_name (skip-tools handled after attribution)
     tool_name = input_data.get("tool_name", "unknown")
-
-    # 6. Extract tool_response
     tool_response_raw = input_data.get("tool_response", "")
     if not tool_response_raw or tool_response_raw == "{}":
         skip()
 
-    # 7. For Cosh-NG, extract only llmContent from the wrapped response.
+    # 5. For Cosh-NG, extract only llmContent from the wrapped response.
     #    Never include returnDisplay in the provider-visible replacement.
     llm_content = None
     if isinstance(tool_response_raw, dict):
@@ -294,193 +258,190 @@ def main() -> None:
         if llm_content is None:
             llm_content = tool_response_raw.get("returnDisplay")
     elif isinstance(tool_response_raw, str):
-        # Try to parse as the {llmContent, returnDisplay} wrapper
         parsed_wrapper = try_parse_json(tool_response_raw)
         if isinstance(parsed_wrapper, dict) and "llmContent" in parsed_wrapper:
             llm_content = parsed_wrapper["llmContent"]
 
-    # The model-visible content we will compress
+    # The model-visible content we will send for compression
     model_visible_before = llm_content if llm_content is not None else tool_response_raw
 
-    # 8. Skip skill files (YAML frontmatter)
+    # 6. Skip skill files (YAML frontmatter). Spawn avoidance only: they are
+    # never JSON, so the entry point would pass them through anyway.
     if isinstance(model_visible_before, str) and is_skill_file(model_visible_before):
         skip()
 
-    # 9. Normalize response
-    if isinstance(model_visible_before, str):
-        unwrapped = unwrap_string_json(model_visible_before)
-        if not unwrapped:
-            skip()  # Plain text, not JSON
-        tool_response = unwrapped
+    # 7. Copy the model-visible value into the request content (§4.5). A
+    # shell envelope's dominant text field goes through the text slot
+    # instead of log-blind JSON; ensure_ascii=False matches the entry
+    # point's normalization, so size gates measure Unicode characters on
+    # both sides.
+    shell_field = _shell_text_field(tool_name, model_visible_before)
+    if shell_field is not None:
+        content = shell_field[1]
+    elif isinstance(model_visible_before, str):
+        content = model_visible_before
     elif isinstance(model_visible_before, (dict, list)):
-        tool_response = json.dumps(model_visible_before, separators=(",", ":"))
+        content = json.dumps(model_visible_before, separators=(",", ":"), ensure_ascii=False)
     else:
         skip()
 
-    # 10. Validate it's JSON (needed for attribution on skip-tools too)
-    parsed = try_parse_json(tool_response)
-    if parsed is None:
-        skip()
-
-    # 11. Extract caller context
-    session_id = input_data.get("session_id", "")
-    tool_use_id = resolve_tool_call_id(agent_id, input_data)
-
-    # 12. Environment attribution analysis
-    env_attribution = ""
-    attr_category, attr_fix_hint = classify_env_error(parsed)
-    if attr_category:
-        env_attribution = (
-            f"[tokenless:env] {tool_name} failed: "
-            f"{attr_category} ({attr_fix_hint}). Skip retry."
+    # 8. Capability declaration: what can this host actually do?
+    if cosh_ng_detected:
+        can_replace = True
+        replace_with_text = True  # updatedToolResponse accepts any text
+    elif agent_id in {_QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
+        can_replace = True
+        # An unwrapped shell field is plain text regardless of its envelope.
+        replace_with_text = shell_field is not None or not isinstance(
+            tool_response_raw, (dict, list)
         )
-
-    # 13. Content retrieval -- skip entirely (preserve integrity)
-    if tool_name in SKIP_TOOLS:
-        _emit_attribution_or_skip(env_attribution)
-
-    # 14. All other tools -- skip small responses, but still inject
-    # env attribution for error cases (small size doesn't mean the
-    # error classification is unimportant to the agent).
-    if len(tool_response) < _MIN_RESPONSE_CHARS:
-        _emit_attribution_or_skip(env_attribution)
-
-    # 15. Step 1: Response compression with 3-layer thresholds
-    compressed = tool_response
-    used_resp_compression = False
-
-    if isinstance(parsed, (dict, list)):
-        thresholds = get_thresholds(tool_name)
-        cmd = [
-            tokenless_bin, "compress-response",
-            "--agent-id", agent_id,
-            "--truncate-strings-at", str(thresholds[0]),
-            "--truncate-arrays-at", str(thresholds[1]),
-            "--max-depth", str(thresholds[2]),
-        ]
-        if session_id:
-            cmd.extend(["--session-id", session_id])
-        if tool_use_id:
-            cmd.extend(["--tool-use-id", tool_use_id])
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=tool_response,
-                capture_output=True, text=True, timeout=3,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                candidate = proc.stdout.strip()
-                # Compare against actual model-visible before size
-                if len(candidate) < len(tool_response):
-                    compressed = candidate
-                    used_resp_compression = True
-            elif proc.returncode != 0:
-                _warn_subprocess("compress-response", proc)
-        except Exception as e:
-            warn(f"Response compression error: {e}")
-
-    # 16. Step 2: TOON encoding
-    toon_output = ""
-
-    if tokenless_bin:
-        toon_parsed = try_parse_json(compressed)
-        if toon_parsed is not None:
-            toon_cmd = [tokenless_bin, "compress-toon", "--agent-id", agent_id]
-            if session_id:
-                toon_cmd.extend(["--session-id", session_id])
-            if tool_use_id:
-                toon_cmd.extend(["--tool-use-id", tool_use_id])
-            try:
-                proc = subprocess.run(
-                    toon_cmd,
-                    input=compressed,
-                    capture_output=True, text=True, timeout=1,
-                )
-                if proc.returncode == 0 and proc.stdout.strip():
-                    candidate = proc.stdout.strip()
-                    if len(candidate) < len(compressed):
-                        toon_output = candidate
-                elif proc.returncode != 0:
-                    _warn_subprocess("compress-toon", proc)
-            except Exception as e:
-                warn(f"TOON encoding error: {e}")
-
-    # Determine final output
-    final_output = toon_output if toon_output else compressed
-
-    # Nothing shrank — pass the original through untouched instead of
-    # emitting a same-size duplicate of the response (applies to all agents).
-    if not used_resp_compression and not toon_output:
-        _emit_attribution_or_skip(env_attribution)
-
-    # 17. Build response — dispatch by agent runtime.
-    #
-    # Claude Code, Qoder, and OpenCode support real tool-output replacement. Keep
-    # additionalContext for additive diagnostics only; using it for compressed
-    # data would leave the original result in context and increase token use.
-    if agent_id in {_CLAUDE_AGENT_ID, _QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
-        if agent_id == _CLAUDE_AGENT_ID and not _claude_supports_replacement():
+    elif agent_id == _CLAUDE_AGENT_ID:
+        can_replace = _claude_supports_replacement()
+        replace_with_text = shell_field is not None or not isinstance(
+            tool_response_raw, (dict, list)
+        )
+        if not can_replace:
             warn(
                 "Claude Code < 2.1.121 (or version unknown): "
                 "updatedToolOutput unsupported, response compression disabled."
             )
-            _emit_attribution_or_skip(env_attribution)
+    else:
+        # additionalContext-only hosts have no true replacement: passthrough
+        # (additive injection would duplicate the original — see module doc).
+        can_replace = False
+        replace_with_text = True
 
-        replace, updated_output = _build_replacement_output(
-            tool_response_raw,
-            tool_response,
-            compressed,
-            final_output,
-            used_resp_compression,
-        )
-        if not replace:
-            _emit_attribution_or_skip(env_attribution)
-
-        # Qoder validates updatedToolOutput as a string even when the original
-        # tool response is structured. Preserve the compact schema as JSON text.
-        if agent_id == _QODER_AGENT_ID and not isinstance(updated_output, str):
-            updated_output = json.dumps(
-                updated_output, separators=(",", ":"), ensure_ascii=False
+    # 9. Map host facts into the required lifecycle fields.
+    if tool_name in SKIP_TOOLS:
+        content_origin = "file_content"
+    elif tool_name in SHELL_TOOLS:
+        content_origin = "command_output"
+    else:
+        content_origin = "api_response"
+    raw_status = str(input_data.get("status", "")).lower()
+    shell_process_result = model_visible_before if isinstance(model_visible_before, dict) else None
+    shell_process_error = (
+        tool_name in SHELL_TOOLS
+        and shell_process_result is not None
+        and (
+            shell_process_result.get("error") is not None
+            or (
+                shell_process_result.get("exit_code") is not None
+                and shell_process_result.get("exit_code") != 0
             )
+            or (
+                shell_process_result.get("exitCode") is not None
+                and shell_process_result.get("exitCode") != 0
+            )
+        )
+    )
+    if raw_status in {"interrupted", "denied"}:
+        status = raw_status
+    elif input_data.get("is_error") is True or (
+        isinstance(tool_response_raw, dict) and tool_response_raw.get("isError") is True
+    ):
+        status = "error"
+    elif shell_process_error:
+        status = "error"
+    else:
+        status = "success"
 
-        hook_output = {
-            "hookEventName": "PostToolUse",
-            "updatedToolOutput": updated_output,
-        }
-        if env_attribution:
-            hook_output["additionalContext"] = env_attribution
-        _emit({"suppressOutput": True, "hookSpecificOutput": hook_output})
-        return
+    # Shell envelopes often carry a large stdout alongside the actual failure
+    # in a short stderr. Error results are never replaced, so send the error
+    # stream to Core for diagnosis while the host keeps the original envelope.
+    if status == "error" and tool_name in SHELL_TOOLS and isinstance(model_visible_before, dict):
+        error_parts = []
+        for field in ("stderr", "error"):
+            value = model_visible_before.get(field)
+            if isinstance(value, str) and value.strip():
+                error_parts.append(value)
+        if error_parts:
+            content = "\n".join(error_parts)
 
-    # Cosh-NG: use updatedToolResponse for response replacement.
-    # Skip compression if it doesn't reduce model-visible size.
+    retrieve_result = status == "success" and is_tokenless_retrieve_command(
+        tool_name, input_data.get("tool_input")
+    )
+    retrieval_available = (
+        can_replace
+        and status == "success"
+        and output_optimization == "none"
+        and not retrieve_result
+        and tokenless_retrieve_command_available()
+    )
+
+    # 10. The one Tokenless subprocess: Core owns all PostTool policy.
+    request = build_post_tool_request(
+        content,
+        agent_id,
+        tool_name,
+        status,
+        content_origin,
+        output_optimization,
+        result_kind="retrieve" if retrieve_result else "tool",
+        recovery={"kind": "shell" if retrieval_available else "none"},
+        session_id=session_id,
+        tool_use_id=tool_use_id,
+        replace_output=can_replace,
+        replace_with_text=replace_with_text,
+    )
+    response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT, "post_tool")
+    env_attribution = response.get("additional_context", "") if response is not None else ""
+    if response is None or response.get("disposition") != "applied":
+        _emit_attribution_or_skip(env_attribution)
+
+    output_text = response.get("output")
+    if not isinstance(output_text, str) or not output_text:
+        warn("tokenless compress returned no output. Passing through unchanged.")
+        _emit_attribution_or_skip(env_attribution)
+
+    # 11. Envelope construction — dispatch by agent runtime. An unwrapped
+    # shell field is re-injected into a same-shaped envelope: the compressed
+    # text replaces exactly the field that was sent, every other field stays
+    # byte-identical.
+    rewrapped = None
+    if shell_field is not None:
+        rewrapped = dict(model_visible_before)
+        rewrapped[shell_field[0]] = output_text
+
     if cosh_ng_detected:
-        if len(final_output) >= len(tool_response):
-            _emit_attribution_or_skip(env_attribution)
-
         hook_specific = {
             "hookEventName": "PostToolUse",
-            "updatedToolResponse": final_output,
+            "updatedToolResponse": rewrapped if rewrapped is not None else output_text,
         }
         if env_attribution:
             hook_specific["additionalContext"] = env_attribution
         _emit({"suppressOutput": True, "hookSpecificOutput": hook_specific})
         return
 
-    # Other agents: inject via additionalContext per their hook contracts.
-    context = _build_additional_context(
-        final_output,
-        env_attribution=env_attribution,
-    )
+    if rewrapped is not None:
+        updated_output = rewrapped
+    elif replace_with_text:
+        updated_output = output_text
+    else:
+        # Structured slot: the entry point guarantees schema-stable JSON for
+        # an applied response. A parse failure means the subprocess boundary
+        # was violated — fail open.
+        updated_output = try_parse_json(output_text)
+        if updated_output is None:
+            warn("tokenless compress returned non-JSON for a structured slot.")
+            _emit_attribution_or_skip(env_attribution)
 
-    _emit({
-        "suppressOutput": True,
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": context,
-        },
-    })
+    # Qoder validates updatedToolOutput as a string even when the original
+    # tool response is structured. The entry point's compact serialization
+    # is exactly that string; a rewrapped shell envelope serializes here.
+    if agent_id == _QODER_AGENT_ID and not isinstance(updated_output, str):
+        if rewrapped is not None:
+            updated_output = json.dumps(rewrapped, separators=(",", ":"), ensure_ascii=False)
+        else:
+            updated_output = output_text
+
+    hook_output = {
+        "hookEventName": "PostToolUse",
+        "updatedToolOutput": updated_output,
+    }
+    if env_attribution:
+        hook_output["additionalContext"] = env_attribution
+    _emit({"suppressOutput": True, "hookSpecificOutput": hook_output})
 
 
 if __name__ == "__main__":

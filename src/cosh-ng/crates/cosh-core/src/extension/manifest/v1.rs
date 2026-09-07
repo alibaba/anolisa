@@ -335,6 +335,12 @@ pub(super) fn legacy_hook_records(config: &ExtensionConfig) -> Vec<CapabilityRec
                 if !hook.env.is_empty() {
                     projection["env"] = json!(hook.env);
                 }
+                // Fail-open changes whether hook execution failures authorize
+                // the guarded action, so enabling it requires fresh consent.
+                // Omit false to preserve existing legacy fingerprints.
+                if hook.fail_open {
+                    projection["fail_open"] = Value::Bool(true);
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
                     projection,
@@ -424,6 +430,9 @@ fn validate_and_convert_hooks(
                 if let Some(timeout) = hook.timeout {
                     projection["timeout"] = Value::Number(timeout.into());
                 }
+                if hook.fail_open {
+                    projection["fail_open"] = Value::Bool(true);
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
                     projection,
@@ -434,6 +443,7 @@ fn validate_and_convert_hooks(
                     name: Some(hook.name),
                     description: hook.description,
                     timeout: hook.timeout,
+                    fail_open: hook.fail_open,
                     env: hook.env,
                 });
             }
@@ -784,6 +794,8 @@ struct CommandHookV1 {
     description: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    fail_open: bool,
     #[serde(default)]
     env: BTreeMap<String, String>,
 }

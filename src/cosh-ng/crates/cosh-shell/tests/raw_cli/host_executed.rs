@@ -90,10 +90,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-pipeline"
 
 #[test]
 fn raw_cli_host_executed_untracked_handoff_closes_and_recovers() {
-    // Simulates a real lost-preexec condition deterministically: the user
-    // (or a rogue rc snippet) clears the DEBUG trap, so preexec is never
-    // emitted for the injected handoff while PROMPT_COMMAND still emits
-    // precmd (ShellReady). The prompt boundary must close the pending
+    // Simulates a real lost-preexec condition deterministically: a rogue rc
+    // snippet replaces the bounded handoff preparation function and omits its
+    // marker while still allowing the owner-only sidecar to execute. The
+    // following prompt boundary must close the pending
     // handoff with degraded untracked evidence instead of deadlocking the
     // Agent (specs/shell-handoff-preexec-loss D2, validation A9/A10).
     let home = temp_shell_home("qwen-untracked-handoff");
@@ -139,7 +139,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-untracked
         ],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
-            (b"trap - DEBUG\n".to_vec(), Duration::from_millis(800)),
+            (
+                b"_cosh_prepare_staged_handoff() { _COSH_HANDOFF_ACTIVE=1; return 0; }\n".to_vec(),
+                Duration::from_millis(800),
+            ),
             (
                 b"?? provider-untracked-handoff\n".to_vec(),
                 Duration::from_millis(800),

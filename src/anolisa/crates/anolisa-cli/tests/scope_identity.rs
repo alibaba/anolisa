@@ -133,6 +133,33 @@ impl ScopeFixture {
         )
     }
 
+    fn run_human_forget(&self, quiet: bool) -> Output {
+        let prefix = self.system_prefix.to_string_lossy();
+        let mut args = vec!["--no-color"];
+        if quiet {
+            args.push("--quiet");
+        }
+        args.extend([
+            "--install-mode",
+            "user",
+            "--prefix",
+            &prefix,
+            "forget",
+            "legacy-name",
+        ]);
+        common::run_with_path_env(
+            &args,
+            &[
+                ("HOME", self.home.as_path()),
+                ("XDG_DATA_HOME", self.data_home.as_path()),
+                ("XDG_CONFIG_HOME", self.config_home.as_path()),
+                ("XDG_STATE_HOME", self.state_home.as_path()),
+                ("XDG_CACHE_HOME", self.cache_home.as_path()),
+                ("XDG_RUNTIME_DIR", self.runtime_dir.as_path()),
+            ],
+        )
+    }
+
     fn seed_user_claim(&self, component: &str) {
         let mut state = StateStore::load(
             &self.user_state_path,
@@ -291,6 +318,8 @@ fn adapter_claim(component: &str) -> AdapterClaim {
         enabled_at: "2026-01-01T00:00:00Z".to_string(),
         resource_root: PathBuf::from("/tmp/adapter-resource"),
         bundle_digest: None,
+        source_revision: None,
+        materialized_files: Vec::new(),
         driver_schema: 1,
         status: ClaimStatus::Enabled,
         notices: Vec::new(),
@@ -344,12 +373,13 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
     )
     .expect("distribution index");
     std::fs::write(
-        repo_v1.join("components.toml"),
+        repo_v1.join("components-v2.toml"),
         r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "raw"
@@ -424,6 +454,18 @@ fn forget_writable_package_identity_does_not_mutate_repo_alias_target() {
     let envelope = json(&output);
 
     assert!(output.status.success(), "forget must succeed: {envelope}");
+    assert_eq!(envelope["command"], "forget");
+    assert_eq!(envelope["data"]["component"], "user-tool");
+    assert_eq!(envelope["data"]["provenance"], "owned");
+    assert_eq!(envelope["data"]["install_mode"], "user");
+    assert_eq!(envelope["data"]["forgotten"], true);
+    assert_eq!(envelope["data"]["dry_run"], false);
+    assert!(
+        envelope["data"]["operation_id"]
+            .as_str()
+            .is_some_and(|operation_id| operation_id.starts_with("op-forget-")),
+        "missing operation id: {envelope}"
+    );
     let state = StateStore::load(
         &fixture.user_state_path,
         anolisa_platform::privilege::effective_uid(),
@@ -438,6 +480,34 @@ fn forget_writable_package_identity_does_not_mutate_repo_alias_target() {
         "the repository alias target must remain",
     );
     assert!(fixture.owned_file.is_file());
+}
+
+#[test]
+fn forget_human_and_quiet_output_remain_compatible() {
+    let human_fixture = ScopeFixture::new();
+    human_fixture.add_writable_package_owner();
+    let human = human_fixture.run_human_forget(false);
+    assert!(
+        human.status.success(),
+        "human forget failed: {}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("✓ forgot user-tool (owned)"), "{stdout}");
+    assert!(
+        stdout.contains("no package operation was performed"),
+        "{stdout}"
+    );
+
+    let quiet_fixture = ScopeFixture::new();
+    quiet_fixture.add_writable_package_owner();
+    let quiet = quiet_fixture.run_human_forget(true);
+    assert!(
+        quiet.status.success(),
+        "quiet forget failed: {}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert!(quiet.stdout.is_empty(), "quiet stdout must stay empty");
 }
 
 #[test]
@@ -616,7 +686,7 @@ fn incomplete_system_visibility_blocks_adapter_alias_inference() {
 }
 
 #[test]
-fn incomplete_system_visibility_pins_a_user_install_to_the_literal_name() {
+fn incomplete_system_visibility_blocks_install_alias_inference() {
     for failure in [
         SystemStateFailure::FutureSchema,
         SystemStateFailure::InvalidToml,
@@ -625,16 +695,35 @@ fn incomplete_system_visibility_pins_a_user_install_to_the_literal_name() {
         let fixture = ScopeFixture::new();
         fixture.break_system_state(failure);
 
+        // `legacy-name` is an index alias of `cosh`: remapping it needs
+        // complete visibility, because the unreadable system root could hold
+        // an exact `legacy-name` record. The literal input is no longer
+        // pinned as a new identity (issue #2630) — the install refuses.
         let output = fixture.run("install");
         let envelope = json(&output);
 
+        assert!(
+            !output.status.success(),
+            "alias install must refuse under incomplete visibility: {envelope}"
+        );
+        let reason = envelope["error"]["reason"].as_str().expect("error reason");
+        assert!(
+            reason.contains("visible state is incomplete"),
+            "wrong failure: {reason}"
+        );
+
+        // A canonical index name involves no remapping and stays addressable
+        // even while the system root is unreadable — here it hits the
+        // fixture's existing user record and reports the idempotent NoOp.
+        let output = fixture.run_args(&["install", "cosh"], true);
+        let envelope = json(&output);
         assert_eq!(
             output.status.code(),
             Some(0),
-            "literal user install should remain available: {envelope}; stderr: {}",
+            "canonical user install should remain available: {envelope}; stderr: {}",
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_eq!(envelope["data"]["component"], "legacy-name");
-        assert_eq!(envelope["data"]["action"], "planned");
+        assert_eq!(envelope["data"]["component"], "cosh");
+        assert_eq!(envelope["data"]["action"], "already-installed");
     }
 }

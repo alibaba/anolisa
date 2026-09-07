@@ -2,11 +2,14 @@
 
 [English](../../../../en/user-entrypoint/cosh-ng/shell/ai-analysis.md)
 
-`cosh`可以检查命令失败和有价值的诊断输出，然后建议下一步或启动Agent分析。分析模式只控制主动帮助；任何模式都可以显式请求Agent。
+增强集成可以检查命令失败和有价值的诊断输出，随后建议下一步或启动 Agent
+分析。Assisted（`◇ `）和 Shell-only（`◌ `）都可提供命令执行后的洞察，只有
+Assisted 会在执行前路由自然语言。Native 没有命令事件、洞察或 Agent 请求路由。
 
 ## 选择模式
 
-运行时使用`/mode analysis <mode>`切换，也可以设置`shell.analysis_mode`。
+Enhanced 是默认集成。运行时使用 `/mode analysis <mode>` 切换分析模式，也可以
+通过 `shell.analysis_mode` 持久化。
 
 | 模式 | 行为 |
 |------|------|

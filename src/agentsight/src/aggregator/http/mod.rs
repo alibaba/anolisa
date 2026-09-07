@@ -12,6 +12,7 @@ pub use aggregator::{ConnectionId, HttpConnectionAggregator};
 pub(crate) use aggregator::ConnectionState;
 pub use pair::HttpPair;
 pub use response::AggregatedResponse;
+pub(crate) use response::event_has_meaningful_output;
 
 // Re-export ParsedRequest from parser (replaces AggregatedRequest)
 pub use crate::parser::http::ParsedRequest;

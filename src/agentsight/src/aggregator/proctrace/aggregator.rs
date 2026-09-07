@@ -13,7 +13,7 @@ pub struct ProcessEventAggregator {
     /// Map of PID to aggregated process data
     pub aggregates: HashMap<u32, AggregatedProcess>,
     /// pid → session_id map for ppid-chain propagation.
-    /// Seeded by direct `/proc/{pid}/environ` reads; children that fail
+    /// Seeded by direct `<procfs root>/{pid}/environ` reads; children that fail
     /// the direct read inherit from their parent via ppid lookup.
     session_map: HashMap<u32, String>,
 }
