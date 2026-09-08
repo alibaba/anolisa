@@ -48,6 +48,34 @@ if [ "${AGENT_MEMORY_SAFE_INSTALL:-0}" = "1" ]; then
     INSTALL_ARGS=("--force")
 fi
 
+# OpenClaw gates capability-declaring plugins behind install-time consent:
+# a noninteractive `plugins install` is rejected unless --accept-capabilities
+# is passed. Version boundaries here are unreliable — the flag shipped in
+# 2026.8.1 but the CLI reference documents it only since 2026.9.1, and older
+# releases abort on the unknown option outright — so probe the host's
+# installer help instead of version-gating. Whole-token match (near-miss
+# options such as --no-accept-capabilities stay out), mirroring tokenless's
+# installer and anolisa-core's help_lists_flag().
+PROBE_RC=0
+INSTALL_HELP="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
+    "$OPENCLAW_BIN" plugins install --help 2>&1)" || PROBE_RC=$?
+if [ "$PROBE_RC" -ne 0 ]; then
+    # Degrade to the base flags instead of failing closed: the script must
+    # keep installing on every host the manifest claims to support. Clearing
+    # INSTALL_HELP keeps probe error text from being mistaken for an
+    # advertised option.
+    printf '[%s] WARNING: cannot inspect OpenClaw installer options (rc=%s): %s\n' \
+        "$COMPONENT" "$PROBE_RC" "$INSTALL_HELP" >&2
+    printf '[%s]          Installing with the base flags only.\n' "$COMPONENT" >&2
+    INSTALL_HELP=""
+fi
+if [[ "$INSTALL_HELP" =~ (^|[^[:alnum:]_.-])--accept-capabilities([^[:alnum:]_.-]|$) ]]; then
+    INSTALL_ARGS+=("--accept-capabilities")
+    echo "[${COMPONENT}] Passing --accept-capabilities: granting install-time consent to memory-anolisa's declared capabilities."
+elif [ -n "$INSTALL_HELP" ]; then
+    echo "[${COMPONENT}] OpenClaw did not advertise --accept-capabilities (pre-2026.8.1 host); installing with the base flags."
+fi
+
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_DIR" \
     "${INSTALL_ARGS[@]}" || {
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2

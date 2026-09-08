@@ -115,6 +115,8 @@ anolisa adapter status agent-memory
 
 **Prerequisite**: `openclaw` CLI on `$PATH`. The script logs clearly and exits 0 if missing — rerun after installing OpenClaw. `yum remove agent-memory` triggers `%preun` to call the uninstall script, leaving no orphaned config.
 
+Running `anolisa adapter enable agent-memory openclaw` or the agent-memory OpenClaw `install.sh` accepts the plugin's declared capabilities. Both entry points pass `--accept-capabilities` only when `plugins install --help` advertises that exact option, so older hosts keep working.
+
 Plugin contract ↔ agent-memory MCP tool mapping:
 
 | OpenClaw contract | agent-memory MCP tool |
@@ -590,6 +592,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | search misses just-written content | inside the 200 ms debounce window | retry, or use `mem_grep` (regex on the filesystem, no index) |
 | `mem_promote` reports `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` unset or scratch missing | see Promote workflow |
 | OpenClaw plugin not loaded | `openclaw` CLI not on PATH | rerun `install.sh` after installing OpenClaw |
+| install.sh reports `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 consent gate; installer-options probe failed, or script predates the fix | check install output for the probe WARNING line; update agent-memory, or run `openclaw plugins install <plugin-dir> --force --accept-capabilities` manually |
 | system state out of sync after manual dnf | — | `sudo anolisa --install-mode system repair agent-memory`; use system-scoped `forget` / `adopt` only when intentionally rebuilding the record for a present RPM |
 
 For deeper investigation: start with `RUST_LOG=agent_memory=debug` and inspect both stderr and `<mount>/.anolisa/audit.log`.

@@ -114,6 +114,8 @@ anolisa adapter status agent-memory
 
 **前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
 
+执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。
+
 插件 contract 名 ↔ agent-memory MCP 工具映射：
 
 | OpenClaw contract | agent-memory MCP 工具 |
@@ -589,6 +591,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
+| install.sh 报 `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 的能力同意门禁；安装参数探测失败或脚本早于修复版本 | 查看安装输出中的探测 WARNING 行；升级 agent-memory，或手动执行 `openclaw plugins install <插件目录> --force --accept-capabilities` |
 | 手动 dnf 操作后 system 状态不同步 | — | `sudo anolisa --install-mode system repair agent-memory`；仅在为仍存在的 RPM 重建记录时使用 system-scoped `forget` / `adopt` |
 
 深入排查：`RUST_LOG=agent_memory=debug` 启动，检查服务端 stderr 与 `<mount>/.anolisa/audit.log`。
