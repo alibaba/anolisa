@@ -363,6 +363,7 @@ impl Probes {
     /// A single background thread polls the shared ring buffer and dispatches
     /// events as unified Event type to the channel.
     pub fn run(&self) -> Result<ProbesPoller> {
+        crate::config::initialize_event_clock().context("failed to initialize event clock")?;
         let proc_min_sz = mem::size_of::<ProcEventHeader>();
         let procmon_event_size = mem::size_of::<ProcMonEvent>();
         let filewatch_event_size = mem::size_of::<RawFileWatchEvent>();

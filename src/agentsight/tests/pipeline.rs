@@ -15,6 +15,94 @@ use agentsight::genai::semantic::{GenAISemanticEvent, MessagePart};
 use agentsight::parser::Parser;
 use agentsight::response_map::ResponseSessionMapper;
 
+#[test]
+fn native_event_clock_reaches_semantic_output() {
+    use agentsight::probes::sslsniff::{SslEvent, bpf::probe_SSL_data_t as Raw};
+    use std::mem::offset_of;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let wall_ns = || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    };
+    // Allow the bounded clock-sampling bracket; a container-epoch shift is far larger.
+    let start = wall_ns();
+    let parser = Parser::new();
+    let mut aggregator = Aggregator::new();
+    let analyzer = Analyzer::new();
+    let builder = GenAIBuilder::new();
+    let mapper = ResponseSessionMapper::new();
+    let cache = HashMap::new();
+    let mut result = Vec::new();
+    for (rw, payload) in [
+        (
+            1_i32,
+            common::make_openai_request_bytes("clock-fixture", "clock-check", false),
+        ),
+        (
+            0_i32,
+            common::make_openai_json_response_bytes("clock-response", "clock-fixture", "ok", 5, 3),
+        ),
+    ] {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a valid writable timespec is supplied to the clock syscall.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) },
+            0
+        );
+        let ktime = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+        let header_len = offset_of!(Raw, buf);
+        let mut bytes = vec![0_u8; header_len + payload.len()];
+        for (offset, value) in [
+            (offset_of!(Raw, timestamp_ns), ktime.to_ne_bytes().to_vec()),
+            (offset_of!(Raw, pid), 5070_u32.to_ne_bytes().to_vec()),
+            (offset_of!(Raw, tid), 5070_u32.to_ne_bytes().to_vec()),
+            (
+                offset_of!(Raw, len),
+                (payload.len() as u32).to_ne_bytes().to_vec(),
+            ),
+            (
+                offset_of!(Raw, buf_size),
+                (payload.len() as u32).to_ne_bytes().to_vec(),
+            ),
+            (offset_of!(Raw, rw), rw.to_ne_bytes().to_vec()),
+            (offset_of!(Raw, ssl_ptr), 0xCAFE_u64.to_ne_bytes().to_vec()),
+            (offset_of!(Raw, comm), b"python3\0".to_vec()),
+        ] {
+            bytes[offset..offset + value.len()].copy_from_slice(&value);
+        }
+        bytes[header_len..].copy_from_slice(&payload);
+        let ssl = SslEvent::from_bytes(&bytes).expect("native clock must decode");
+        assert!(ssl.timestamp_ns >= start.saturating_sub(5_000_000));
+        for aggregated in aggregator.process_result(parser.parse_event(Event::Ssl(ssl))) {
+            let analyzed = analyzer.analyze_aggregated(&aggregated);
+            result.extend(
+                builder
+                    .build_with_pending(&analyzed, &mapper, &cache)
+                    .0
+                    .events,
+            );
+        }
+    }
+    let end = wall_ns();
+    let calls: Vec<_> = result
+        .iter()
+        .filter_map(|e| match e {
+            GenAISemanticEvent::LLMCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].start_timestamp_ns >= start.saturating_sub(5_000_000));
+    assert!(calls[0].end_timestamp_ns <= end + 5_000_000);
+    assert!(calls[0].end_timestamp_ns >= calls[0].start_timestamp_ns);
+}
+
 /// Run a sequence of SslEvents through the full pipeline, return any GenAI events produced.
 fn run_pipeline(ssl_events: Vec<(u32, u64, i32, Vec<u8>, &str)>) -> Vec<GenAISemanticEvent> {
     let parser = Parser::new();

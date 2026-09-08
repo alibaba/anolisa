@@ -169,7 +169,9 @@ impl SslEvent {
 
         Some(Self {
             source: u32_at(mem::offset_of!(R, source)),
-            timestamp_ns: config::ktime_to_unix_ns(u64_at(mem::offset_of!(R, timestamp_ns))),
+            timestamp_ns: config::ktime_to_unix_ns(u64_at(mem::offset_of!(R, timestamp_ns)))
+                .inspect_err(|error| config::report_clock_error("sslsniff", error))
+                .ok()?,
             delta_ns: u64_at(mem::offset_of!(R, delta_ns)),
             pid: u32_at(mem::offset_of!(R, pid)),
             tid: u32_at(mem::offset_of!(R, tid)),
@@ -590,6 +592,7 @@ impl SslSniff {
     /// Returns a [`SslPoller`] handle.  Drop it (or call [`SslPoller::stop`])
     /// to signal the poll thread to exit.
     pub fn run(&self) -> Result<SslPoller> {
+        config::initialize_event_clock().context("failed to initialize event clock")?;
         let tx = self.tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);

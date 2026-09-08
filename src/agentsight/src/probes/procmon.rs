@@ -83,14 +83,18 @@ impl Event {
                 tid: raw.tid,
                 ppid: raw.ppid,
                 uid: raw.uid,
-                timestamp_ns: config::ktime_to_unix_ns(raw.timestamp_ns),
+                timestamp_ns: config::ktime_to_unix_ns(raw.timestamp_ns)
+                    .inspect_err(|error| config::report_clock_error("procmon", error))
+                    .ok()?,
                 comm,
             }),
             PROCMON_EVENT_EXIT => Some(Event::Exit {
                 pid: raw.pid,
                 tid: raw.tid,
                 uid: raw.uid,
-                timestamp_ns: config::ktime_to_unix_ns(raw.timestamp_ns),
+                timestamp_ns: config::ktime_to_unix_ns(raw.timestamp_ns)
+                    .inspect_err(|error| config::report_clock_error("procmon", error))
+                    .ok()?,
                 comm,
                 exit_code: raw.exit_code,
             }),
