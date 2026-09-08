@@ -128,6 +128,15 @@ run_rpm_packaging() {
   bash tests/test-package-rpm.sh
 }
 
+run_wsl_launcher() {
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "shellcheck is required by the WSL launcher gate" >&2
+    return 1
+  fi
+  shellcheck scripts/cosh-wsl tests/test-cosh-wsl.sh
+  bash tests/test-cosh-wsl.sh
+}
+
 case "${1:-all}" in
   fast)
     scripts/check-test-inventory.sh
@@ -135,6 +144,7 @@ case "${1:-all}" in
     crates/cosh-shell/scripts/check-layout.sh
     run_raw_packaging
     run_rpm_packaging
+    run_wsl_launcher
     cargo test --locked --workspace --exclude cosh-core --exclude cosh-shell
     run_canonical_units cosh-core cosh-core
     run_canonical_units cosh-shell cosh-shell 1
@@ -154,6 +164,7 @@ case "${1:-all}" in
     crates/cosh-shell/scripts/check-layout.sh
     run_raw_packaging
     run_rpm_packaging
+    run_wsl_launcher
     cargo test --locked --workspace --exclude cosh-core --exclude cosh-shell
     run_canonical_units cosh-core cosh-core
     run_core_integrations
