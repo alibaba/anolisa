@@ -1169,6 +1169,11 @@ mod tests {
                 command: system::SystemCommands::Status { json: false },
             },
         )));
+        assert_read_only(Commands::Management(ManagementCommands::Telemetry(
+            telemetry::TelemetryArgs {
+                command: telemetry::TelemetryCommands::Status { json: false },
+            },
+        )));
         assert_read_only(Commands::Management(ManagementCommands::Osbase(
             osbase::OsbaseArgs {
                 command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
