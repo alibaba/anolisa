@@ -726,10 +726,11 @@ fn hex_sha256(value: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Instant;
 
     use super::*;
 
@@ -759,14 +760,50 @@ mod tests {
     }
 
     impl MockServer {
+        /// How long the mock waits for a connection that may never come.
+        ///
+        /// A client that gives up before it dials — `request_timeout_is_classified`
+        /// uses a 10ms timeout, which under a saturated CPU can fire before the
+        /// request future is ever polled — leaves nothing to accept. A blocking
+        /// accept would then leave the thread alive forever and `finish()`'s
+        /// `join()` would stall the whole test binary rather than failing one
+        /// test.
+        const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+
         fn spawn(replies: Vec<Reply>) -> Self {
+            Self::spawn_with_accept_timeout(replies, Self::ACCEPT_TIMEOUT)
+        }
+
+        fn spawn_with_accept_timeout(replies: Vec<Reply>, accept_timeout: Duration) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
             let address = listener.local_addr().expect("mock address");
             let requests = Arc::new(Mutex::new(Vec::new()));
             let captured = Arc::clone(&requests);
             let thread = thread::spawn(move || {
+                listener
+                    .set_nonblocking(true)
+                    .expect("mock listener nonblocking");
                 for reply in replies {
-                    let (mut stream, _) = listener.accept().expect("accept mock request");
+                    let deadline = Instant::now() + accept_timeout;
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    // No client arrived. Leave the recorded
+                                    // requests short so an assertion fails
+                                    // instead of the suite hanging.
+                                    return;
+                                }
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(err) => panic!("accept mock request: {err}"),
+                        }
+                    };
+                    // `read_request` relies on a read timeout, which needs a
+                    // blocking socket; accepted sockets can inherit the
+                    // listener's non-blocking flag.
+                    stream.set_nonblocking(false).expect("mock stream blocking");
                     let request = read_request(&mut stream);
                     captured.lock().unwrap().push(request);
                     if !reply.delay.is_zero() {
@@ -1167,6 +1204,32 @@ mod tests {
         assert_eq!(
             preflight_auth(&provider(&format!("http://{address}/v1"), "dashscope")).await,
             Err(AuthPreflightError::EndpointUnreachable)
+        );
+    }
+
+    /// `finish()` must return even when no client ever connects.
+    ///
+    /// This is the hang `request_timeout_is_classified` triggered: a 10ms client
+    /// timeout can fire before the request future is first polled, so nothing is
+    /// ever dialed. With a blocking accept the mock thread never exits and
+    /// `join()` stalls the entire test binary — one flaky test becomes a hung
+    /// suite with no failing assertion to point at.
+    #[test]
+    fn mock_server_finish_returns_when_no_client_connects() {
+        let accept_timeout = Duration::from_millis(200);
+        let server = MockServer::spawn_with_accept_timeout(
+            vec![Reply::json(200, r#"{"id":"unused"}"#)],
+            accept_timeout,
+        );
+
+        let started = Instant::now();
+        let requests = server.finish();
+        let elapsed = started.elapsed();
+
+        assert!(requests.is_empty(), "no request should have been recorded");
+        assert!(
+            elapsed < accept_timeout * 10,
+            "finish() blocked for {elapsed:?}, accept timeout was {accept_timeout:?}"
         );
     }
 
