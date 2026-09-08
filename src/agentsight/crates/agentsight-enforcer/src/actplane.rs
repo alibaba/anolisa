@@ -124,7 +124,7 @@ impl ActPlaneBackend {
         engine
             .protect_pid(std::process::id() as i32)
             .map_err(|error| kernel_error("protect enforcer pid", error))?;
-        let _ = prepare_runtime(
+        let drained = prepare_runtime(
             || {
                 reload
                     .clear_runtime_state()
@@ -140,6 +140,9 @@ impl ActPlaneBackend {
         let state = Arc::new(RuntimeState::new());
         let stop = Arc::new(AtomicBool::new(false));
         let poller = spawn_poller(Arc::clone(&engine), Arc::clone(&state), Arc::clone(&stop));
+        log::info!(
+            "ActPlane engine ready: drained {drained} stale pinned events, violation poller started"
+        );
         Ok(Self {
             engine,
             reload,
@@ -233,9 +236,10 @@ impl ActPlaneBackend {
         let id = runtime_domain.unwrap_or_else(|| domain_id(request.binding_id));
         let kernel_pid = resolve_kernel_pid(request.root_pid);
         if kernel_pid != request.root_pid {
-            eprintln!(
+            log::info!(
                 "PID namespace detected: namespace pid {} -> kernel pid {}",
-                request.root_pid, kernel_pid
+                request.root_pid,
+                kernel_pid
             );
         }
         self.engine
@@ -336,8 +340,25 @@ impl ActPlaneBackend {
         if !bindings.is_empty() {
             return Err(BackendError::BindingConflict(request.binding_id));
         }
-        let prepared = self.prepare_binding(request, credential_policy)?;
-        self.install_prepared_locked(&mut bindings, prepared, None)
+        let binding_id = request.binding_id;
+        let prepared = match self.prepare_binding(request, credential_policy) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                log::warn!("policy apply rejected: binding_id={binding_id}: {error}");
+                return Err(error);
+            }
+        };
+        let result = self.install_prepared_locked(&mut bindings, prepared, None);
+        match &result {
+            Ok(binding) => log::info!(
+                "policy enforced: binding_id={} root_pid={} domain_id={:?}",
+                binding.request.binding_id,
+                binding.request.root_pid,
+                binding.domain_id
+            ),
+            Err(error) => log::error!("policy apply failed: binding_id={binding_id}: {error}"),
+        }
+        result
     }
 
     fn detach_binding_locked(
@@ -540,7 +561,7 @@ impl Drop for ActPlaneBackend {
             if errors.is_empty() {
                 self.state.bindings().remove(&domain_id);
             } else {
-                eprintln!(
+                log::error!(
                     "agentsight-enforcer could not clear binding {} during shutdown: {}",
                     binding.binding.request.binding_id,
                     errors.join("; ")
@@ -556,7 +577,7 @@ impl Drop for ActPlaneBackend {
         if let Some(poller) = poller
             && poller.join().is_err()
         {
-            eprintln!("agentsight-enforcer ActPlane poller panicked during shutdown");
+            log::error!("agentsight-enforcer ActPlane poller panicked during shutdown");
         }
     }
 }
@@ -590,14 +611,17 @@ fn spawn_poller(
                             }
                         }
                         Err(error) => {
-                            *callback_state.runtime_error() =
-                                Some(format!("normalize ActPlane evidence: {error}"));
+                            let message = format!("normalize ActPlane evidence: {error}");
+                            log::error!("{message}");
+                            *callback_state.runtime_error() = Some(message);
                         }
                     }
                 }
             }
         }) {
-            *state.runtime_error() = Some(format!("violation poller stopped: {error}"));
+            let message = format!("violation poller stopped: {error}");
+            log::error!("{message}");
+            *state.runtime_error() = Some(message);
         }
     })
 }

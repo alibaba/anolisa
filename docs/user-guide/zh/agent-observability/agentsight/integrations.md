@@ -75,6 +75,16 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 采集与分析不受影响，只是风险拦截页面和 `/api/enforcement/*` 端点会消失。启动对应 unit 即可；源码构建
 请使用 `make build-all`。
 
+守护进程自身会向 journal 写日志——引擎启动、socket 监听、策略注入结果（内核步骤失败时含回滚细节）
+以及 poller 错误：
+
+```
+$ sudo journalctl -u agentsight-enforcer
+[INFO  agentsight_enforcer] agentsight-enforcer listening on /run/agentsight/enforcer.sock
+```
+
+默认级别为 `info`；在 unit 中添加 `Environment=RUST_LOG=debug` 可获得更详细的输出。
+
 ## cosh：用自然语言提问
 
 AgentSight 为 cosh 提供了对话式 Skill，Token 和审计相关的问题可以直接在终端里问，而不必敲 CLI：

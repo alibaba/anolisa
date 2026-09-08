@@ -96,7 +96,7 @@ impl<B: EnforcementBackend> EnforcerService<B> {
                         if let Err(error) =
                             handle_connection(stream, backend, required_subscriptions, allowed_gid)
                         {
-                            eprintln!("agentsight-enforcer connection failed: {error}");
+                            log::error!("agentsight-enforcer connection failed: {error}");
                         }
                     });
                 }
@@ -324,7 +324,7 @@ impl<B: EnforcementBackend> Drop for EnforcerService<B> {
         if let Err(error) = fs::remove_file(&self.socket_path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!("agentsight-enforcer could not remove socket: {error}");
+            log::warn!("agentsight-enforcer could not remove socket: {error}");
         }
     }
 }

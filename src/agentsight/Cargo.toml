@@ -27,6 +27,7 @@ chrono = { version = "0.4.41", features = ["serde"] }
 ctrlc = "3.4"
 dirs = "6"
 ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+env_filter = "1.0"
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"
@@ -68,7 +69,7 @@ agentsight-opt-store = { path = "crates/agentsight-opt-store", optional = true }
 agentsight-trajectory-collector = { path = "crates/agentsight-trajectory-collector" }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-env_filter = "1.0"
+env_filter = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 regex = "1.10.5"

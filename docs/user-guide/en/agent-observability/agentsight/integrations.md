@@ -82,6 +82,16 @@ Capture and analysis are unaffected; only the Risk Enforcement page and the
 `/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
 built from source.
 
+The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
+(including rollback detail when a kernel step fails), and poller errors:
+
+```
+$ sudo journalctl -u agentsight-enforcer
+[INFO  agentsight_enforcer] agentsight-enforcer listening on /run/agentsight/enforcer.sock
+```
+
+The default level is `info`; add `Environment=RUST_LOG=debug` to the unit for verbose output.
+
 ## cosh: ask in natural language
 
 AgentSight ships a conversational Skill for cosh, so Token and audit questions can be asked in the

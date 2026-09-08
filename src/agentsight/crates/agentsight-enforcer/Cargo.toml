@@ -13,7 +13,9 @@ actplane = ["dep:actplane-ifc-compiler", "dep:ebpf-ifc-engine"]
 agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
 anyhow = { workspace = true }
 ctrlc = { workspace = true }
+env_filter = { workspace = true }
 libc = { workspace = true }
+log = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
