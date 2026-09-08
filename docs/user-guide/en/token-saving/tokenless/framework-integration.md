@@ -215,7 +215,7 @@ the plugin's declared capabilities. Both entry points pass
 exact option, so older hosts keep working. The standalone `install.sh` also
 passes `--dangerously-force-unsafe-install` only while the installer advertises
 the option as effective; hosts that list it as a deprecated no-op (OpenClaw
-2026.9.2+) no longer receive it, and the safety scan there follows
+2026.6.5+) no longer receive it, and the safety scan there follows
 `security.installPolicy`.
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:

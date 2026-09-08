@@ -189,7 +189,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.9.2+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
+npm/手动安装脚本的区别在于“如何同意”而非“是否同意”：在安装器仍声明该参数有效时（旧版宿主），脚本会自动附加 `--dangerously-force-unsafe-install`，因为 Plugin 会启动固定的 `tokenless` 和 `rtk` 子进程。将该参数标记为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不会收到该参数——此时安全扫描由 `security.installPolicy` 决定，安装被拒时应由运维放宽该策略解决，而不是重跑脚本。应先审查 Adapter 和安全策略；策略禁止该覆盖参数时不要启用。
 
 ## 命令没有被重写
 

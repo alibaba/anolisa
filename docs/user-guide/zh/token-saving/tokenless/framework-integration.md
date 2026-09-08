@@ -194,7 +194,7 @@ DeepSeek Harness 按 profile 管理，因此必须至少提供一个 `--profile`
 插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的
 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。独立的 `install.sh`
 也只在安装器仍声明该参数有效时传递 `--dangerously-force-unsafe-install`；
-将其列为 deprecated no-op 的宿主（OpenClaw 2026.9.2+）不再收到该参数，
+将其列为 deprecated no-op 的宿主（OpenClaw 2026.6.5+）不再收到该参数，
 安全扫描改由 `security.installPolicy` 决定。
 
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
