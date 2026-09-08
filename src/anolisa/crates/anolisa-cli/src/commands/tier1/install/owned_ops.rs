@@ -1337,6 +1337,22 @@ impl OwnedOps for RawInstallOps<'_> {
                 write.label()
             )));
         }
+        let hooks = self.hooks()?;
+        if !hooks.post_install.is_empty() || !hooks.post_enable.is_empty() {
+            // Installation hooks may rewrite payload bytes. Capture their final
+            // content while retaining the declared modes and symlink referents.
+            for file in &mut self.placed {
+                if file.referent.is_none() {
+                    file.sha256 =
+                        installed_file_digest(self.layout, &file.path).map_err(|err| {
+                            OwnedOpError(format!(
+                                "failed to record post-hook digest for {}: {err}",
+                                file.path.display()
+                            ))
+                        })?;
+                }
+            }
+        }
         let prepared = self.prepared()?;
         let manifest_path = self.manifest_path.clone().ok_or_else(|| {
             OwnedOpError("internal: record commit ran before files were placed".to_string())
@@ -1491,6 +1507,38 @@ fn owned_file_rows(
         capabilities: Vec::new(),
     });
     files
+}
+
+fn installed_file_digest(layout: &FsLayout, path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Error, Read};
+
+    validate_owned_path(layout, path).map_err(Error::other)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Refuse replacement links and avoid blocking on a replacement FIFO.
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(Error::other("installed path is not a regular file"));
+    }
+    let mut hasher = Sha256::new();
+    // Bound the read by the observed size, as the integrity probe does.
+    let bytes = std::io::copy(
+        &mut file.take(metadata.len().saturating_add(1)),
+        &mut hasher,
+    )?;
+    if bytes != metadata.len() {
+        return Err(Error::other(
+            "installed file changed size while recording its digest",
+        ));
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn expected_mode_for_path(path: &Path, contract_files: &[ResolvedInstallFile]) -> Option<String> {

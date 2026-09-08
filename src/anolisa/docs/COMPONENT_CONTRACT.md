@@ -176,6 +176,20 @@ Display behavior:
 - `--dry-run` previews the notices that a real operation would show, labeled
   as a preview; nothing is executed.
 
+## Installation Hook Integrity
+
+On a fresh raw install, `post_install` and `post_enable` hooks may rewrite
+regular files placed by the component layout. The installed digest records
+the content after those hooks, so later content changes remain detectable.
+Declared permissions, capabilities, and symlink referents still apply.
+A removed regular file or one replaced by a symlink or special file
+prevents the digest from being recorded and rolls back the install.
+Files created by hooks outside the layout are not added to the ownership record.
+
+Raw repair and update restore the package payload (including declared content
+rendering); they do not replay installation hooks. Use `render` for layout-path
+substitution that must also be reproduced by repair and update.
+
 ## Content Rendering (`render`)
 
 A `[[component.layout.files]]` entry may request that ANOLISA render the

@@ -889,34 +889,104 @@ fn install_raw_end_to_end_records_declared_service() {
 
 #[test]
 #[cfg(unix)]
-fn install_raw_runs_post_install_hook() {
-    let tmp = tempdir().expect("tmpdir");
-    let prefix = tmp.path().join("sys");
-    let sentinel = tmp.path().join("post-install.ran");
-    let body = format!("#!/bin/sh\ntouch {}\n", sentinel.display());
-    let repo_url = write_local_repo_component_with_hook(
-        &tmp.path().join("repo"),
-        "agentsight",
-        "0.2.0",
-        "post_install",
-        false,
-        &body,
-    );
+fn install_raw_records_post_hook_bytes_and_detects_later_drift() {
+    use anolisa_core::integrity::{IntegrityStatus, check_owned_file};
 
-    let mut a = args("agentsight");
-    a.repo = Some(repo_url);
-    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install with a post_install hook must succeed");
+    for phase in ["post_install", "post_enable"] {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let layout = FsLayout::system(Some(prefix.clone()));
+        let binary = layout.bin_dir.join("agentsight");
+        let body = format!("#!/bin/sh\necho '# hook edit' >> '{}'\n", binary.display());
+        let repo_url = write_local_repo_component_with_hook(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            phase,
+            true,
+            &body,
+        );
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+            .expect("install with a modifying hook must succeed");
 
-    let layout = FsLayout::system(Some(prefix));
-    assert!(
-        layout.bin_dir.join("agentsight").exists(),
-        "binary installed"
-    );
-    assert!(
-        sentinel.exists(),
-        "post_install hook must run after files are laid down"
-    );
+        let bytes = std::fs::read(&binary).expect("installed binary");
+        assert!(
+            bytes.ends_with(b"# hook edit\n"),
+            "{phase} must modify the file"
+        );
+        let store = load_v5_store(&layout);
+        let artifact = owned_artifact(
+            store
+                .find(ObjectKind::Component, "agentsight")
+                .expect("record"),
+        );
+        for file in &artifact.files {
+            assert_eq!(
+                check_owned_file(&layout, file),
+                IntegrityStatus::Ok,
+                "{phase}: {}",
+                file.path.display()
+            );
+        }
+
+        std::fs::write(&binary, b"external edit").expect("modify installed binary");
+        let file = artifact
+            .files
+            .iter()
+            .find(|file| file.path == binary)
+            .expect("binary record");
+        assert!(matches!(
+            check_owned_file(&layout, file),
+            IntegrityStatus::ShaMismatch { .. }
+        ));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn install_raw_post_hook_digest_failure_rolls_back() {
+    for replacement in ["", "ln -s \"$0\"", "mkfifo"] {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let layout = FsLayout::system(Some(prefix.clone()));
+        let binary = layout.bin_dir.join("agentsight");
+        let replace = if replacement.is_empty() {
+            String::new()
+        } else {
+            format!("{replacement} '{}'\n", binary.display())
+        };
+        let body = format!("#!/bin/sh\nset -e\nrm '{}'\n{replace}", binary.display());
+        let repo_url = write_local_repo_component_with_hook(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            "post_install",
+            true,
+            &body,
+        );
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+            .expect_err("a removed or non-regular payload must abort record commit");
+        assert!(
+            err.reason().contains("failed to record post-hook digest"),
+            "{err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&binary).is_err(),
+            "rollback removes the replacement"
+        );
+        let snapshot = common::installed_component_manifest_path(&layout, "agentsight", COMMAND)
+            .expect("manifest path");
+        assert!(!snapshot.exists(), "rollback removes the manifest snapshot");
+        assert!(
+            load_v5_store(&layout)
+                .find(ObjectKind::Component, "agentsight")
+                .is_none()
+        );
+    }
 }
 
 #[test]
