@@ -187,13 +187,19 @@ fn parse_dmesg_lines(content: &str) -> Result<Vec<OomKillEvent>, Box<dyn std::er
         .unwrap_or(0);
 
     for line in content.lines() {
-        // Match: "Killed process <pid> (<name>)"
-        // Example: [Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) ...
-        if !line.contains("Killed process") {
+        // Summary format: "Killed process <pid> (<name>)"
+        // Structured format (memcg OOM): "oom-kill:...,task=<name>,pid=<pid>,..."
+        // Both must be recognised — memcg OOM on modern kernels (5.0+) emits
+        // only the structured line, so matching the summary alone misses it (#3130).
+        let parsed = if line.contains("Killed process") {
+            parse_killed_process(line)
+        } else if line.contains("oom-kill:") {
+            parse_oom_kill_structured(line)
+        } else {
             continue;
-        }
+        };
 
-        let (pid, process_name) = match parse_killed_process(line) {
+        let (pid, process_name) = match parsed {
             Some(v) => v,
             None => continue,
         };
@@ -237,6 +243,28 @@ fn parse_killed_process(line: &str) -> Option<(i32, String)> {
     }
 
     Some((pid, name))
+}
+
+/// Extract (pid, process_name) from a structured `oom-kill:` dmesg line.
+///
+/// Format: `oom-kill:constraint=...,task=<name>,pid=<pid>,uid=<uid>`
+/// This is the only line emitted by memcg OOM kills on kernels 5.0+.
+fn parse_oom_kill_structured(line: &str) -> Option<(i32, String)> {
+    let after = line.split("oom-kill:").nth(1)?;
+    let mut pid = None;
+    let mut task = None;
+    for field in after.split(',') {
+        let field = field.trim();
+        if let Some(v) = field.strip_prefix("pid=") {
+            pid = v.parse::<i32>().ok();
+        } else if let Some(v) = field.strip_prefix("task=") {
+            task = Some(v.to_string());
+        }
+    }
+    match (pid, task) {
+        (Some(p), Some(t)) if !t.is_empty() => Some((p, t)),
+        _ => None,
+    }
 }
 
 /// Parse timestamp from dmesg -T format: "[Fri Apr 17 15:58:28 2026]"
@@ -379,5 +407,49 @@ mod tests {
             "669334"
         ));
         assert!(!line_matches_oom_kill("", "669334"));
+    }
+
+    // ─── parse_dmesg_lines: startup recovery path (#3130) ─────────────────
+
+    #[test]
+    fn parse_dmesg_lines_recognises_structured_oom_kill() {
+        // The startup recovery path must recognise the same structured format
+        // that the real-time path (was_pid_oom_killed) already does.
+        let dmesg = format!(
+            "{}\n{}\n",
+            "[Fri Apr 17 10:00:00 2026] Out of memory: Killed process 12345 (openclaw-gatewa) total-vm:1024kB",
+            STRUCTURED_LINE,
+        );
+        let events = parse_dmesg_lines(&dmesg).expect("parse");
+        assert_eq!(events.len(), 2, "both formats must be recognised");
+        // Summary line
+        assert_eq!(events[0].pid, 12345);
+        assert_eq!(events[0].process_name, "openclaw-gatewa");
+        // Structured line
+        assert_eq!(events[1].pid, 669334);
+        assert_eq!(events[1].process_name, "python3");
+    }
+
+    #[test]
+    fn parse_dmesg_lines_structured_only() {
+        // memcg-only OOM: no summary line, only the structured one.
+        let events = parse_dmesg_lines(STRUCTURED_LINE).expect("parse");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].pid, 669334);
+        assert_eq!(events[0].process_name, "python3");
+    }
+
+    #[test]
+    fn parse_dmesg_lines_skips_malformed_structured() {
+        // Missing pid= or task= must not produce a bogus event.
+        assert!(
+            parse_oom_kill_structured("[ts] oom-kill:constraint=CONSTRAINT_MEMCG,task=node,uid=0")
+                .is_none()
+        );
+        assert!(
+            parse_oom_kill_structured("[ts] oom-kill:constraint=CONSTRAINT_MEMCG,pid=1234,uid=0")
+                .is_none()
+        );
+        assert!(parse_oom_kill_structured("").is_none());
     }
 }
