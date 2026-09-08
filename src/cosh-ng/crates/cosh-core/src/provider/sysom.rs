@@ -314,11 +314,20 @@ impl SysomProvider {
                 .header("x-acs-security-token", token);
         }
 
+        // Report the request before it is encrypted; see `provider::observe` for
+        // why an out-of-process observer cannot read it off the wire.
+        super::observe::tap_request("POST", &url, body_bytes);
+
         let response = req
             .body(body_bytes.to_vec())
             .send()
             .await
             .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        // Announce the response before the status check, mirroring
+        // `openai_compat`: an error response must still be reported or the
+        // observer is left with a pending request that never completes.
+        super::observe::tap_response_head(response.status().as_u16(), "text/event-stream");
 
         if !response.status().is_success() {
             let status = response.status();
@@ -326,15 +335,25 @@ impl SysomProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown".to_string());
+            super::observe::tap_response_chunk(text.as_bytes());
             return Err(format!("SysOM API error {status}: {text}"));
         }
 
         let cancelled = Arc::clone(&self.cancelled);
         // Normalizing to owned bytes keeps the SSE state machine testable with a
         // plain in-memory stream instead of a live HTTP response.
-        let byte_stream = response
-            .bytes_stream()
-            .map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|e| e.to_string()));
+        //
+        // The tap sits here rather than inside `sysom_event_stream` because that
+        // function is also driven by in-memory streams in its tests, which would
+        // report fixture bytes as if they came off the network.
+        let byte_stream = response.bytes_stream().map(|chunk| {
+            chunk
+                .map(|bytes| {
+                    super::observe::tap_response_chunk(&bytes);
+                    bytes.to_vec()
+                })
+                .map_err(|e| e.to_string())
+        });
 
         Ok(sysom_event_stream(Box::pin(byte_stream), cancelled))
     }
