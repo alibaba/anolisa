@@ -114,7 +114,7 @@ anolisa adapter status agent-memory
 
 **前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
 
-执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。
+执行 `anolisa adapter enable agent-memory openclaw` 或 agent-memory 的 OpenClaw `install.sh` 即同意插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的 `--accept-capabilities` 参数时传递它，以兼容旧版宿主。独立的 `install.sh` 同样只在安装器仍把 `--dangerously-force-unsafe-install` 标注为有效参数时才传入它：旧版宿主会在安装期扫描 Plugin 代码，并把此 Plugin 作为 MCP stdio 传输使用的 `child_process.spawn` 标记为风险。把该参数标注为已废弃空操作的宿主（OpenClaw 2026.9.2+）不再收到它，这些宿主上的安全扫描由运维自己维护的 `security.installPolicy` 决定。设置 `AGENT_MEMORY_SAFE_INSTALL=1` 可始终不请求该绕过参数。
 
 插件 contract 名 ↔ agent-memory MCP 工具映射：
 

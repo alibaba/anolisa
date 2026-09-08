@@ -115,7 +115,7 @@ anolisa adapter status agent-memory
 
 **Prerequisite**: `openclaw` CLI on `$PATH`. The script logs clearly and exits 0 if missing — rerun after installing OpenClaw. `yum remove agent-memory` triggers `%preun` to call the uninstall script, leaving no orphaned config.
 
-Running `anolisa adapter enable agent-memory openclaw` or the agent-memory OpenClaw `install.sh` accepts the plugin's declared capabilities. Both entry points pass `--accept-capabilities` only when `plugins install --help` advertises that exact option, so older hosts keep working.
+Running `anolisa adapter enable agent-memory openclaw` or the agent-memory OpenClaw `install.sh` accepts the plugin's declared capabilities. Both entry points pass `--accept-capabilities` only when `plugins install --help` advertises that exact option, so older hosts keep working. The standalone `install.sh` also passes `--dangerously-force-unsafe-install` only while the installer advertises that option as effective: legacy hosts scan plugin code at install time and flag the `child_process.spawn` this plugin uses as its MCP stdio transport. Hosts that list it as a deprecated no-op (OpenClaw 2026.9.2+) no longer receive it, and the safety scan there follows the operator-owned `security.installPolicy`. Set `AGENT_MEMORY_SAFE_INSTALL=1` to never request the bypass.
 
 Plugin contract ↔ agent-memory MCP tool mapping:
 
