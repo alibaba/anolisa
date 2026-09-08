@@ -642,7 +642,10 @@ Some text after"#;
     #[test]
     fn test_scan_skills_dir_recursive_in_tempdir() {
         use std::fs;
-        let tmp = std::env::temp_dir().join(format!("agentsight_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "agentsight_test_scan_skills_{}",
+            std::process::id()
+        ));
         // Create: tmp/ai/install-copaw/SKILL.md  and  tmp/network/SKILL.md
         fs::create_dir_all(tmp.join("ai").join("install-copaw")).unwrap();
         fs::write(
