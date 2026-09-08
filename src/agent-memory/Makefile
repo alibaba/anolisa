@@ -47,7 +47,7 @@ COMPONENT_CONTRACT := .anolisa/component.toml
 RPMBUILD_DIR ?= $(HOME)/rpmbuild
 SPEC_FILE := $(NAME).spec
 
-.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test lint fmt clean install \
+.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test test-openclaw-plugin lint fmt clean install \
         install-adapter-resources uninstall dist spec rpm srpm \
         smoke help
 
@@ -139,6 +139,18 @@ test-mcp: ## Run MCP integration tests only
 
 test-tools: ## Run Tier A file-tool integration tests only
 	cargo test --test file_tools_test
+
+# The OpenClaw adapter's install script talks to the openclaw CLI, which cargo
+# cannot cover. tests/unit/install-script-test.ts drives scripts/install.sh
+# against a fake openclaw and pins the installer-flag gating (capability consent
+# on OpenClaw >= 2026.9.1, no unknown-option regression on older releases).
+# Only that file is run: the rest of the adapter suite has pre-existing failures
+# (tests/unit/config-test.ts) and `npm run build:check` does not type-check
+# against the pinned openclaw 2026.5.7 devDependency, so adopting them is a
+# separate change.
+test-openclaw-plugin: ## Run the OpenClaw adapter install-script test (needs node/npm)
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npx tsx --test tests/unit/install-script-test.ts
 
 # =============================================================================
 # REMOTE Linux build/test (for cross-platform development)

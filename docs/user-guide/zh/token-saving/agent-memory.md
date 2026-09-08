@@ -114,6 +114,13 @@ anolisa adapter status agent-memory
 
 **前置条件**：`openclaw` CLI 在 `$PATH` 上。脚本缺失时输出明确日志并以 0 退出，安装 OpenClaw 后重跑即可。`yum remove agent-memory` 时 spec 的 `%preun` 自动调用 uninstall 脚本，配置不残留孤立项。
 
+**Capability consent（OpenClaw >= 2026.9.1）**：OpenClaw 在提交「非官方可信来源」的受管插件安装前要求 capability consent。`install.sh` 走本地路径安装，没有可用的制品完整性记录，因此每次安装都会要求同意，而非交互式命令无法弹出交互确认。脚本会先探测 `openclaw plugins install --help`，只有当前 CLI 广告了 `--accept-capabilities` 才追加该参数；OpenClaw <= 2026.8.2 没有注册这个选项，未知选项会直接失败。若运维策略禁止非交互式接受能力，可设 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 主动不传该参数——此时安装会以 `Plugin "memory-anolisa" requires capability consent` 失败，需要自行同意：
+
+```bash
+AGENT_MEMORY_ACCEPT_CAPABILITIES=0 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh   # 策略性关闭自动同意
+openclaw plugins install /usr/share/anolisa/adapters/agent-memory/openclaw --force --accept-capabilities       # 手动同意一次
+```
+
 插件 contract 名 ↔ agent-memory MCP 工具映射：
 
 | OpenClaw contract | agent-memory MCP 工具 |
@@ -589,6 +596,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
+| 运行 `install.sh` 报 `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.9.1 对该安装要求 capability consent，而 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 关掉了自动同意 | 去掉该环境变量重跑（默认自动同意），或用 `openclaw plugins install <adapter>/openclaw --force --accept-capabilities` 手动同意一次 |
 | 手动 dnf 操作后 system 状态不同步 | — | `sudo anolisa --install-mode system repair agent-memory`；仅在为仍存在的 RPM 重建记录时使用 system-scoped `forget` / `adopt` |
 
 深入排查：`RUST_LOG=agent_memory=debug` 启动，检查服务端 stderr 与 `<mount>/.anolisa/audit.log`。
