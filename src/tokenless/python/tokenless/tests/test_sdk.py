@@ -130,12 +130,12 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TokenlessError, "not authorized"):
             await sdk.retrieve(RetrieveRequest(marker.group(1), frozenset(), self.attribution))
 
-    def test_config_contains_only_runtime_resources(self) -> None:
+    def test_config_contains_runtime_resources_and_search_control(self) -> None:
         with self.assertRaisesRegex(ValueError, "absolute path"):
             TokenlessConfig(data_dir="relative")
         self.assertEqual(
             {field.name for field in fields(TokenlessConfig)},
-            {"data_dir", "retrieve_tool_name", "rtk_enabled"},
+            {"data_dir", "retrieve_tool_name", "rtk_enabled", "search_path_sharing_enabled"},
         )
 
     def test_config_identifies_invalid_retrieve_tool_names(self) -> None:
@@ -307,6 +307,53 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(json.loads(restored.payload), records)
+
+    async def test_search_path_sharing_exposes_the_typed_operation(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        self.assertTrue(sdk.config.search_path_sharing_enabled)
+        original = "crates/long_directory/src/file.rs:42:  matching text  \r\n" * 12
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="Grep",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.API_RESPONSE,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(
+                    replace_output=True, recovery=RecoveryMethod(), replace_with_text=True
+                ),
+                attribution=Attribution("sdk-agent", "sdk-session", "search-1"),
+            )
+        )
+        self.assertEqual(result.applied_operations, (AppliedOperation.SEARCH_PATH_SHARING,))
+        self.assertEqual(result.content_type.value, "search_results")
+        self.assertEqual(result.recoverability.value, "lossless")
+        self.assertEqual(result.stash_keys, ())
+        self.assertEqual(result.output.count("42:  matching text  \r\n"), 12)
+        self.assertLess(len(result.output), len(original))
+
+    async def test_search_path_sharing_can_be_disabled(self) -> None:
+        sdk = self.sdk(rtk_enabled=False, search_path_sharing_enabled=False)
+        original = "crates/long_directory/src/file.rs:42:matching text\n" * 12
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="SearchFiles",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.API_RESPONSE,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(
+                    replace_output=True, recovery=RecoveryMethod(), replace_with_text=True
+                ),
+                attribution=Attribution("sdk-agent", "sdk-session", "search-disabled"),
+            )
+        )
+        self.assertFalse(sdk.config.search_path_sharing_enabled)
+        self.assertEqual(result.output, original)
+        self.assertEqual(result.applied_operations, ())
+        self.assertEqual(result.stash_keys, ())
 
     def test_stats_client_is_lazy_and_uses_runtime_data_dir(self) -> None:
         sdk = self.sdk(rtk_enabled=False)

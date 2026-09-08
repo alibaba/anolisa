@@ -53,6 +53,7 @@ class TokenlessRuntime:
         data_dir: str | os.PathLike[str] | None = None,
         *,
         compression_enabled: bool = True,
+        search_path_sharing_enabled: bool = True,
         stats_enabled: bool = True,
         sls_enabled: bool = False,
     ) -> None: ...

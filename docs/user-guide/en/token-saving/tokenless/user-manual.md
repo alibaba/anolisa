@@ -44,7 +44,8 @@ the [Python SDK guide](sdk.md) for both layers, runnable examples, and configura
 | Capability | Behavior implemented in the current code | Important boundary |
 |------------|------------------------------------------|--------------------|
 | Schema compression | Removes `title` and `examples`, removes fenced and inline code from descriptions, collapses whitespace, and truncates descriptions | Common BeforeModel passes lossy transformations through without marker-authorized recovery; OpenCode's per-tool path and the direct CLI still compress (Qwen Code skips the declared event) |
-| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; CSV/TSV is routed to `TabularCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Content-aware response compression | Successful PostTool JSON is routed to `JsonCompressor`; recognized successful build/test command output is routed to `BuildLogCompressor`; CSV/TSV is routed to `TabularCompressor`; supported search listings use `SearchResultsCompressor`; only a smaller end-to-end result is accepted | Other content domains and Tool Errors pass through; recoverable reduction requires either Marker-authorized framework retrieval or a supported Marker command path |
+| Search path sharing | Shares paths across consecutive API search records, including native Claude Grep, retaining all received text and positions | Enabled by default; requires API response origin, text replacement and no-context records; file and command outputs pass through this domain |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Replaces the original when the host accepts text replacement; hosts without replacement capability pass through |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | Recognized build/test commands stay native for Build Log handling; other unsupported or denied rewrites pass through |
 | Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
@@ -59,7 +60,7 @@ After an adapter is enabled, a tool call may pass through these stages:
 ```text
 Before the tool: hard-disabled Tool Ready hook → command rewrite
 Before the tool: reserve recognized build/test commands; otherwise RTK rewrite → carry output-optimization state
-After the tool: status and optimization bypass → JSON/CSV/TSV/Build Log PostTool Pipeline → optional Stash/TOON → statistics
+After the tool: status and optimization bypass → JSON/CSV/TSV/Search/Build Log PostTool Pipeline → optional Stash/TOON → statistics
 Before the model: schema compression → visible Marker extraction → conditional Retrieve declaration
 Retrieve: visible-Marker authorization → byte-identical Stash read
 ```
@@ -94,6 +95,24 @@ This setting does not disable RTK command rewriting, adapter execution, or retri
 anolisa adapter disable tokenless <framework>
 ```
 
+### Controlling search path sharing
+
+API search path sharing is enabled by default. Set `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`
+in the agent process environment to disable it through the CLI. When unset it stays enabled;
+`1`, `true`, and `yes` also enable it (case-insensitively). Empty and other values disable it.
+This setting is independent of `config.json`. Python SDK callers can disable it with
+`TokenlessConfig(search_path_sharing_enabled=False)`; Rust callers set
+`RuntimeConfig.search_path_sharing_enabled` to `false`. All entry points default to enabled.
+
+Disabling this feature returns search listings unchanged. JSON, table, and log compression
+remain available for other tool names. The exact name `Grep` always excludes those compressors
+to preserve received matches, even with path sharing disabled. A custom tool named `Grep`
+therefore cannot restore its pre-feature JSON/table/log compression through this switch.
+Supported no-context Claude Grep results retain all received matches; file reads and command outputs,
+including Bash without RTK, do not enter search path sharing. Other API tools can use the same
+Core capability. Whole-task savings depend on the workload; smaller search results do not
+guarantee lower total token use.
+
 ### CSV/TSV views can be incomplete
 
 Successful CSV/TSV tool results can be compressed when the host can replace output with text.
@@ -125,6 +144,19 @@ provenance are never partially reported.
 
 A reduced candidate must use fewer characters and estimated tokens than both the original and
 full view, including the notice. These checks do not guarantee savings with every model tokenizer.
+
+### Native Grep keeps every received match
+
+On Claude Code 2.1.121 or newer, native Grep content results can share repeated file paths.
+A `File="..."` heading supplies the full path for the following `line:text` rows, until the next
+file heading. All received records, source text, whitespace and line endings are retained.
+The view is used only when it is smaller; it needs no Stash entry or retrieval command.
+
+This first version supports no-context `path:line:text` listings with at least three records
+and paths without colons. Context queries, count/file-list modes, unsupported listings and
+file reads keep their existing behavior. Bash searches continue through RTK. Grep may already
+have applied a host limit before Tokenless receives the result; path sharing does not recover
+those missing matches. Lower first-result size does not guarantee lower total task cost.
 
 ### Reversible compression is conditional
 

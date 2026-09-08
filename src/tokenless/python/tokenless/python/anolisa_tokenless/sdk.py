@@ -128,6 +128,7 @@ class AppliedOperation(StrEnum):
     BUILD_LOG_REDUCTION = "build_log_reduction"
     TABULAR_COMPACTION = "tabular_compaction"
     TABULAR_ROW_REDUCTION = "tabular_row_reduction"
+    SEARCH_PATH_SHARING = "search_path_sharing"
     JSON_CLEANUP = "json_cleanup"
     JSON_RECORD_REDUCTION = "json_record_reduction"
     JSON_TRUNCATION = "json_truncation"
@@ -164,6 +165,7 @@ class TokenlessConfig:
     data_dir: str | os.PathLike[str] | None = None
     retrieve_tool_name: str = "tokenless_retrieve"
     rtk_enabled: bool = True
+    search_path_sharing_enabled: bool = True
 
     def __post_init__(self) -> None:
         try:
@@ -256,7 +258,11 @@ class PostToolCapabilities:
 
 @dataclass(frozen=True)
 class PostToolRequest:
-    """One final model-visible tool result before Core routing."""
+    """One final model-visible tool result before Core routing.
+
+    The exact tool name ``Grep`` opts into search-only routing; its output
+    never enters JSON, table, or log compressors.
+    """
 
     result_kind: ResultKind
     tool_name: str
@@ -312,7 +318,10 @@ class TokenlessSdk:
 
     def __init__(self, config: TokenlessConfig | None = None) -> None:
         self.config = config or TokenlessConfig()
-        self.runtime = TokenlessRuntime(self.config.data_dir)
+        self.runtime = TokenlessRuntime(
+            self.config.data_dir,
+            search_path_sharing_enabled=self.config.search_path_sharing_enabled,
+        )
         self._rtk_path = self._resolve_rtk() if self.config.rtk_enabled else None
         self._stats: TokenlessStats | None = None
 

@@ -42,6 +42,41 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 No Savings 和 Recoverability Unavailable 等正常 Core Disposition 返回 typed 结果。候选
 只有严格更短时才会采用；Schema 和响应截断还必须能够恢复。
 
+## 搜索路径共享
+
+PostTool 仅在搜索路径共享已开启、来源为 `api_response` 且支持文本替换时，将识别为
+`search_results` 的内容交给 `SearchResultsCompressor`。这是按内容派发的 Core 能力，不限定 Agent ID；
+文件内容和命令输出均不进入该域，包括未由 RTK 处理的 Bash 输出。
+成功的 `path:line:text` 列表至少包含三条记录，连续记录可以共享完整文件路径。
+行号、正文、顺序和换行保持字节可逆。输入契约不包含路径内的冒号和上下文列表；
+任意不支持的记录都会拒绝整份候选。字节数与估算 Token 均减少后，再经过现有 Runtime 仲裁。
+实际采用时操作为 `search_path_sharing`，Python SDK 对应 `AppliedOperation.SEARCH_PATH_SHARING`；
+恢复等级为 `lossless`，不写入 Stash。
+
+Claude Code Adapter 仅提取无上下文选项的原生 Grep `mode=content` 响应，将其文本槽声明为
+API 响应，再只替换原输出对象的 `content` 字段。包括宿主限额在内的其他元数据保持不变；
+完整性指保留收到的所有记录，不表示宿主裁剪前的全部可能命中。
+其他 Grep 模式和宿主保留既有路由。RTK 负责的 Bash 输出继续绕过原生 PostTool 压缩。
+
+搜索路径共享默认开启。CLI 可通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 关闭；
+未设置时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；空值和其他值均关闭。
+该变量独立于 JSON 配置文件。
+Rust 使用 `RuntimeConfig.search_path_sharing_enabled`；Python 使用
+`TokenlessConfig(search_path_sharing_enabled=False)` 或 `TokenlessRuntime` 的同名参数。
+关闭该域时搜索列表原样返回且不计算搜索候选。其他工具名仍可使用 JSON、表格和日志压缩。
+精确名称 `Grep` 始终排除这些域，以保留全部已收到命中；关闭路径共享不会恢复此功能引入前
+自定义 `Grep` 工具的 JSON、表格和日志派发。全局压缩开关仍控制已开启域的 dry-run。
+整任务节省取决于工作负载；保留全部收到的字节并不保证后续工具调用更少或总 Token 用量更低。
+
+首行为固定格式声明，后续 `File=` 行包含 JSON 编码的路径；数据行必以 ASCII 数字和 `:` 开头，
+因此不可能被误认为文件头。还原时在每个数据行前拼接当前解码路径与 `:`，保留原始行尾；
+同一路径在非连续位置出现时会生成新的文件头。
+
+解包的 Grep 列表在统计中记作 `api_response`，而非 `file_content`，因为它是筛选后的工具响应，
+不是权威文件副本。按来源分组的历史查询因此存在版本边界。Core 将精确工具名 `Grep` 视为
+仅适用搜索压缩的工具；即使搜索路径共享关闭，也不会转入 JSON、表格或日志压缩。SDK 调用者
+仅应对符合此搜索契约的工具使用该名称。
+
 ## Stats 查询
 
 `TokenlessStats` 是只读的公开查询客户端，复用 CLI 相同的 Rust `StatsRecorder` 和

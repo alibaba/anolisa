@@ -5,6 +5,7 @@
 
 mod build_log;
 mod json;
+mod search_results;
 mod tabular;
 mod terminal_cleanup;
 
@@ -13,5 +14,6 @@ pub use json::{
     JsonCompressionConfig, JsonCompressionContext, JsonCompressor, JsonError, JsonMetrics,
     JsonOperation, JsonOutcome, Recoverability,
 };
+pub use search_results::SearchResultsCompressor;
 pub use tabular::{TabularCompressor, TabularMetrics, TabularOperation, TabularOutcome};
 pub use tokenless_protocol::RecoveryMethod;

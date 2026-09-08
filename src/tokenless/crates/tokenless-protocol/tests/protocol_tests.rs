@@ -143,9 +143,10 @@ fn record_reduction_has_a_stable_wire_name() {
 }
 
 #[test]
-fn tabular_operations_have_stable_wire_names() {
+fn content_operations_have_stable_wire_names() {
     for (operation, name) in [
         (AppliedOperation::TabularCompaction, "tabular_compaction"),
+        (AppliedOperation::SearchPathSharing, "search_path_sharing"),
         (
             AppliedOperation::TabularRowReduction,
             "tabular_row_reduction",

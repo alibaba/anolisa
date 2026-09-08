@@ -107,6 +107,12 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
     )
     cases = [
         ("build_success", raw_log, {}, "build_log_reduction"),
+        (
+            "search_path_sharing",
+            "".join(f"crates/long_directory/src/file.rs:{i}:match-{i}\r\n" for i in range(100)),
+            {"tool_name": "Grep", "content_origin": "api_response"},
+            "search_path_sharing",
+        ),
         ("full_toon", full_records, {}, "toon"),
         ("records_contract", records, {}, "json_record_reduction"),
         (
@@ -181,14 +187,22 @@ def core_checks(raw_log: str, failure_log: str, records: str) -> None:
             assert result["disposition"] == "applied", (name, result["disposition"])
             assert operation in result["applied_operations"], (name, result["applied_operations"])
             assert result["recoverability"] == (
-                "lossless" if name == "full_toon" or name.startswith("tabular_full") else "retrievable"
+                "lossless"
+                if name in ("full_toon", "search_path_sharing") or name.startswith("tabular_full")
+                else "retrievable"
             )
             assert result["after_tokens"] < result["before_tokens"]
             assert set(keys) == set(REFERENCE.findall(result["output"]))
             assert "<<tokenless:" not in result["output"]
             stashed = rows(directory, "stash.db", "SELECT hash, payload FROM stash")
             assert len(stashed) == len(keys) == (stats[0]["stash_writes"] or 0)
-            if name == "records_contract":
+            if name == "search_path_sharing":
+                lines = result["output"].splitlines(keepends=True)
+                assert lines[0] == "[Search results grouped by file; all received lines retained]\n"
+                path = json.loads(lines[1].removeprefix("File="))
+                assert "".join(path + ":" + line for line in lines[2:]) == content
+                assert not keys
+            elif name == "records_contract":
                 REPORT["record_target"] = next(
                     record["id"]
                     for record in json.loads(content)[4:-4]

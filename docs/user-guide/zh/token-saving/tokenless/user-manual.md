@@ -42,7 +42,8 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
 |------|------------------------|----------|
 | Schema 压缩 | 移除 `title` 和 `examples`，删除描述中的围栏代码和行内代码，合并空白并截断描述 | Common BeforeModel 在没有 Marker 授权恢复时透传有损变换；OpenCode 逐工具路径和直接 CLI 仍会压缩（Qwen Code 会跳过声明的事件） |
-| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；CSV/TSV 路由给 `TabularCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| Content-aware 响应压缩 | 成功的 PostTool JSON 路由给 `JsonCompressor`；已识别的成功构建/测试命令输出路由给 `BuildLogCompressor`；CSV/TSV 路由给 `TabularCompressor`；支持的搜索列表交给 `SearchResultsCompressor`；只接受端到端更小的结果 | 其他内容域与 Tool Error 透传；可恢复缩减需要受 Marker 授权的 Framework 恢复或受支持的 Marker 命令路径 |
+| 搜索路径共享 | API 搜索记录（含 Claude 原生 Grep）的连续行共享完整路径，保留收到的全部文本与位置 | 默认开启；需要 API 响应来源、文本替换能力及无上下文记录；文件和命令输出不进入此域 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | 宿主支持文本替换时替换原文；无替换能力的宿主透传 |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 已识别的构建/测试命令保持原生输出交给 Build Log；其他无规则或被拒绝的改写透传 |
 | Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
@@ -56,7 +57,7 @@ Python SDK 分为两层。`anolisa-tokenless` 包开放通用 `TokenlessSdk`、�
 
 ```text
 工具调用前：已识别的构建/测试命令预留给 Build Log；其他命令 RTK 改写 → 传递输出优化状态
-工具调用后：状态与优化旁路 → JSON/CSV/TSV/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
+工具调用后：状态与优化旁路 → JSON/CSV/TSV/Search/Build Log PostTool Pipeline → 可选 Stash/TOON → 写入统计
 模型调用前：Schema 压缩 → 提取可见 Marker → 条件式 Retrieve 声明
 Retrieve：可见 Marker 授权 → 字节级一致的 Stash Read
 ```
@@ -90,6 +91,21 @@ CLI-only 用法不需要 Adapter。
 anolisa adapter disable tokenless <framework>
 ```
 
+### 控制搜索路径共享
+
+API 搜索路径共享默认开启。在 Agent 进程环境中设置 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`，
+可通过 CLI 关闭该功能。未设置时保持开启，`1`、`true`、`yes`（不区分大小写）也表示开启；
+空值和其他值均关闭。该设置独立于 `config.json`。Python SDK 可使用
+`TokenlessConfig(search_path_sharing_enabled=False)` 关闭；Rust 将
+`RuntimeConfig.search_path_sharing_enabled` 设为 `false`。所有入口均默认开启。
+
+关闭此功能时搜索列表原样返回。其他工具名仍可使用 JSON、表格和日志压缩。精确名称 `Grep`
+始终排除这些压缩器以保留已收到命中，即使路径共享关闭也不例外。因此，自定义 `Grep` 工具
+无法通过此开关恢复此功能引入前的 JSON、表格和日志压缩。支持的无上下文 Claude Grep 结果
+保留全部已收到命中；
+文件读取和命令输出（包括没有 RTK 的 Bash）均不进入搜索路径共享。其他 API 工具也可使用同一 Core 能力。
+整任务节省取决于工作负载；搜索结果变小并不保证总 Token 用量更低。
+
 ### CSV/TSV 视图可能不完整
 
 宿主支持用文本替换输出时，成功的 CSV/TSV 工具结果可以被压缩。文件来源结果、失败工具、
@@ -114,6 +130,17 @@ Markdown 或定宽表格。
 
 计入提示后，缩减候选的字符数和估算 Token 数必须同时小于原文及全量视图。
 这些检查不保证在所有模型的 Tokenizer 下都有节省。
+
+### 原生 Grep 保留收到的全部命中
+
+Claude Code 2.1.121 及更新版本的原生 Grep 文本结果可以共享重复文件路径。
+`File="..."` 头提供后续 `line:text` 记录的完整路径，直到下一个文件头。
+收到的全部记录、源码正文、空白和换行均保留。仅采用更小的表示，不需要 Stash 条目或回取命令。
+
+首版支持至少三条记录的无上下文 `path:line:text` 列表，路径不能包含冒号。
+上下文查询、计数/文件列表模式、不支持的格式和文件读取保持现有行为；Bash 搜索继续经过 RTK。
+Grep 可能在 Tokenless 收到结果前已经应用宿主限额，路径共享无法恢复此前未交付的命中。
+首次结果变短不保证整个任务的总消耗下降。
 
 ### 可逆压缩是有条件的
 

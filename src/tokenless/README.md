@@ -6,7 +6,7 @@
 
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
-- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline compresses JSON, CSV/TSV tables, and recognized build/test command logs.
+- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline compresses JSON, CSV/TSV tables, supported search listings, and recognized build/test command logs.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing syntax overhead for suitable structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
@@ -35,6 +35,7 @@ retrieval, and attribution.
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
 | Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
+| Search path sharing | workload-dependent | Enabled by default: API search listings, including Claude native Grep, share consecutive file paths and retain every received match; disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False`; command output remains on its existing route |
 | CSV/TSV table compression | workload-dependent | Preserves every cell when compacting quoting and record separators; larger tables can retain selected rows with an explicit incomplete-table notice and byte-exact original retrieval. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |

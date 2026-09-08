@@ -562,6 +562,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 &request,
                 &EntryOptions {
                     compression_enabled: compression_on,
+                    search_path_sharing_enabled: std::env::var(
+                        "TOKENLESS_SEARCH_PATH_SHARING_ENABLED",
+                    )
+                    .map_or(true, |value| {
+                        value == "1"
+                            || value.eq_ignore_ascii_case("true")
+                            || value.eq_ignore_ascii_case("yes")
+                    }),
                     stash_enabled: true,
                     rtk_path,
                     rtk_data_dir,
