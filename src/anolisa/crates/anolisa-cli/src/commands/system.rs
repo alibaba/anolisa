@@ -9,7 +9,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -17,7 +16,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::daemon_server::DaemonServer;
-use anolisa_platform::command::CommandRunner;
+use anolisa_platform::command::{CommandRunner, InheritedLocaleCommandRunner};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
 use anolisa_platform::privilege;
@@ -169,16 +168,13 @@ fn handle_setup(
         }
     })?;
 
-    if !upgrade {
-        // 5. Create anolisa system group (ignore if already exists)
-        setup_group(cmd)?;
-
-        // 6. Add calling user to anolisa group
-        setup_user_membership(cmd)?;
-    }
-
-    // 7. Create /run/anolisa/ directory
-    setup_runtime_dir(cmd)?;
+    setup_access_with(
+        cmd,
+        upgrade,
+        &InheritedLocaleCommandRunner,
+        || std::env::var("SUDO_USER"),
+        RUNTIME_DIR,
+    )?;
 
     // 8. Generate systemd unit file
     write_unit_file(cmd, &helper_path, &unit_path)?;
@@ -197,18 +193,35 @@ fn handle_setup(
     Ok(())
 }
 
-fn setup_group(cmd: &str) -> Result<(), CliError> {
-    let output = Command::new("groupadd")
-        .args(["-r", ANOLISA_GROUP])
-        .output()
+fn setup_access_with<R, F>(
+    cmd: &str,
+    upgrade: bool,
+    runner: &R,
+    read_sudo_user: F,
+    runtime_dir: &str,
+) -> Result<(), CliError>
+where
+    R: CommandRunner,
+    F: FnOnce() -> Result<String, std::env::VarError>,
+{
+    if !upgrade {
+        setup_group(cmd, runner)?;
+        setup_user_membership(cmd, runner, read_sudo_user)?;
+    }
+    setup_runtime_dir(cmd, runner, runtime_dir)
+}
+
+fn setup_group<R: CommandRunner>(cmd: &str, runner: &R) -> Result<(), CliError> {
+    let output = runner
+        .run("groupadd", &["-r", ANOLISA_GROUP])
         .map_err(|e| CliError::Runtime {
             command: cmd.to_string(),
             reason: format!("failed to run groupadd: {e}"),
         })?;
 
     // Exit code 9 means group already exists — not an error.
-    if !output.status.success() && output.status.code() != Some(9) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !matches!(output.code, Some(0 | 9)) {
+        let stderr = output.stderr;
         return Err(CliError::Runtime {
             command: cmd.to_string(),
             reason: format!("groupadd -r {ANOLISA_GROUP} failed: {stderr}"),
@@ -218,23 +231,26 @@ fn setup_group(cmd: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn setup_user_membership(cmd: &str) -> Result<(), CliError> {
-    let user = std::env::var("SUDO_USER").unwrap_or_default();
+fn setup_user_membership<R, F>(cmd: &str, runner: &R, read_sudo_user: F) -> Result<(), CliError>
+where
+    R: CommandRunner,
+    F: FnOnce() -> Result<String, std::env::VarError>,
+{
+    let user = read_sudo_user().unwrap_or_default();
     if user.is_empty() {
         eprintln!("[setup] warning: $SUDO_USER not set, skipping group membership");
         return Ok(());
     }
 
-    let output = Command::new("usermod")
-        .args(["-aG", ANOLISA_GROUP, &user])
-        .output()
+    let output = runner
+        .run("usermod", &["-aG", ANOLISA_GROUP, &user])
         .map_err(|e| CliError::Runtime {
             command: cmd.to_string(),
             reason: format!("failed to run usermod: {e}"),
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.code != Some(0) {
+        let stderr = output.stderr;
         return Err(CliError::Runtime {
             command: cmd.to_string(),
             reason: format!("usermod -aG {ANOLISA_GROUP} {user} failed: {stderr}"),
@@ -244,36 +260,37 @@ fn setup_user_membership(cmd: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn setup_runtime_dir(cmd: &str) -> Result<(), CliError> {
-    fs::create_dir_all(RUNTIME_DIR).map_err(|e| CliError::Runtime {
+fn setup_runtime_dir<R: CommandRunner>(
+    cmd: &str,
+    runner: &R,
+    runtime_dir: &str,
+) -> Result<(), CliError> {
+    fs::create_dir_all(runtime_dir).map_err(|e| CliError::Runtime {
         command: cmd.to_string(),
-        reason: format!("failed to create {RUNTIME_DIR}: {e}"),
+        reason: format!("failed to create {runtime_dir}: {e}"),
     })?;
 
-    // chgrp anolisa /run/anolisa
-    let output = Command::new("chgrp")
-        .args([ANOLISA_GROUP, RUNTIME_DIR])
-        .output()
+    let output = runner
+        .run("chgrp", &[ANOLISA_GROUP, runtime_dir])
         .map_err(|e| CliError::Runtime {
             command: cmd.to_string(),
             reason: format!("failed to run chgrp: {e}"),
         })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.code != Some(0) {
+        let stderr = output.stderr;
         return Err(CliError::Runtime {
             command: cmd.to_string(),
-            reason: format!("chgrp {ANOLISA_GROUP} {RUNTIME_DIR} failed: {stderr}"),
+            reason: format!("chgrp {ANOLISA_GROUP} {runtime_dir} failed: {stderr}"),
         });
     }
 
-    // chmod 0750 /run/anolisa
-    fs::set_permissions(RUNTIME_DIR, fs::Permissions::from_mode(0o750)).map_err(|e| {
+    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o750)).map_err(|e| {
         CliError::Runtime {
             command: cmd.to_string(),
-            reason: format!("failed to chmod {RUNTIME_DIR}: {e}"),
+            reason: format!("failed to chmod {runtime_dir}: {e}"),
         }
     })?;
-    eprintln!("[setup] runtime directory {RUNTIME_DIR} ready");
+    eprintln!("[setup] runtime directory {runtime_dir} ready");
     Ok(())
 }
 
@@ -942,6 +959,453 @@ mod tests {
 
     fn assert_systemd_finished(calls: &FakeCalls) {
         assert!(calls.borrow().is_empty());
+    }
+
+    struct FakeSetupRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        outcomes: RefCell<VecDeque<FakeOutcome>>,
+        runtime_dir: PathBuf,
+        remove_runtime_dir: bool,
+    }
+
+    impl FakeSetupRunner {
+        fn new(runtime_dir: &Path, outcomes: Vec<FakeOutcome>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                outcomes: RefCell::new(outcomes.into()),
+                runtime_dir: runtime_dir.to_path_buf(),
+                remove_runtime_dir: false,
+            }
+        }
+    }
+
+    impl CommandRunner for FakeSetupRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            match program {
+                "groupadd" | "usermod" => assert!(!self.runtime_dir.exists()),
+                "chgrp" => {
+                    assert_eq!(args, [ANOLISA_GROUP, self.runtime_dir.to_str().unwrap()]);
+                    assert!(self.runtime_dir.is_dir());
+                    if self.remove_runtime_dir {
+                        // This runner owns only the test's dedicated empty directory.
+                        fs::remove_dir(&self.runtime_dir).unwrap();
+                    }
+                }
+                _ => panic!("unexpected setup program: {program}"),
+            }
+            self.calls.borrow_mut().push(
+                std::iter::once(program)
+                    .chain(args.iter().copied())
+                    .map(str::to_string)
+                    .collect(),
+            );
+            match self
+                .outcomes
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected setup call")
+            {
+                FakeOutcome::Output(output) => Ok(output),
+                FakeOutcome::Spawn(kind) => Err(io::Error::new(kind, "fake setup spawn failure")),
+            }
+        }
+    }
+
+    #[test]
+    fn setup_access_preserves_command_and_environment_order() {
+        for group_code in [0, 9] {
+            let tmp = tempfile::tempdir().unwrap();
+            let runtime_dir = tmp.path().join("run with spaces/anolisa");
+            let runtime = runtime_dir.to_str().unwrap();
+            let runner = FakeSetupRunner::new(
+                &runtime_dir,
+                vec![non_zero(group_code, "ignored\n"), success(), success()],
+            );
+            let reads = std::cell::Cell::new(0);
+            setup_access_with(
+                "system setup",
+                false,
+                &runner,
+                || {
+                    reads.set(reads.get() + 1);
+                    assert_eq!(
+                        *runner.calls.borrow(),
+                        vec![vec!["groupadd", "-r", ANOLISA_GROUP]]
+                    );
+                    assert!(!runtime_dir.exists());
+                    Ok("alice".to_string())
+                },
+                runtime,
+            )
+            .unwrap();
+            assert_eq!(reads.get(), 1);
+            assert_eq!(
+                *runner.calls.borrow(),
+                vec![
+                    vec!["groupadd", "-r", ANOLISA_GROUP],
+                    vec!["usermod", "-aG", ANOLISA_GROUP, "alice"],
+                    vec!["chgrp", ANOLISA_GROUP, runtime],
+                ]
+            );
+            assert!(runner.outcomes.borrow().is_empty());
+            assert_eq!(
+                fs::metadata(&runtime_dir).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+        }
+    }
+
+    #[test]
+    fn setup_access_skips_unavailable_or_empty_user() {
+        use std::os::unix::ffi::OsStringExt;
+
+        for user in [
+            Ok(String::new()),
+            Err(std::env::VarError::NotPresent),
+            Err(std::env::VarError::NotUnicode(
+                std::ffi::OsString::from_vec(vec![0xff]),
+            )),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let runtime_dir = tmp.path().join("run");
+            let runtime = runtime_dir.to_str().unwrap();
+            let runner = FakeSetupRunner::new(&runtime_dir, vec![success(), success()]);
+            let reads = std::cell::Cell::new(0);
+            setup_access_with(
+                "system setup",
+                false,
+                &runner,
+                || {
+                    reads.set(reads.get() + 1);
+                    assert_eq!(runner.calls.borrow().len(), 1);
+                    user
+                },
+                runtime,
+            )
+            .unwrap();
+            assert_eq!(reads.get(), 1);
+            assert_eq!(
+                *runner.calls.borrow(),
+                vec![
+                    vec!["groupadd", "-r", ANOLISA_GROUP],
+                    vec!["chgrp", ANOLISA_GROUP, runtime],
+                ]
+            );
+            assert!(runner.outcomes.borrow().is_empty());
+            assert_eq!(
+                fs::metadata(&runtime_dir).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+        }
+    }
+
+    #[test]
+    fn setup_access_upgrade_never_reads_user_or_manages_groups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_dir = tmp.path().join("run");
+        let runtime = runtime_dir.to_str().unwrap();
+        let runner = FakeSetupRunner::new(&runtime_dir, vec![success()]);
+        setup_access_with(
+            "system setup",
+            true,
+            &runner,
+            || panic!("upgrade must not read SUDO_USER"),
+            runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            *runner.calls.borrow(),
+            vec![vec!["chgrp", ANOLISA_GROUP, runtime]]
+        );
+        assert!(runner.outcomes.borrow().is_empty());
+        assert_eq!(
+            fs::metadata(&runtime_dir).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+
+    #[test]
+    fn setup_access_command_failures_keep_diagnostics_and_stop_followups() {
+        for stage in 0..3 {
+            for (failure, stderr) in [
+                (FakeOutcome::Spawn(io::ErrorKind::NotFound), None),
+                (FakeOutcome::Spawn(io::ErrorKind::PermissionDenied), None),
+                (non_zero(1, " \tdenied\n"), Some(" \tdenied\n")),
+                (non_zero(2, ""), Some("")),
+                (
+                    FakeOutcome::Output(CommandOutput {
+                        code: Some(3),
+                        stdout: "stdout only".to_string(),
+                        stderr: " \n".to_string(),
+                    }),
+                    Some(" \n"),
+                ),
+                (
+                    FakeOutcome::Output(CommandOutput {
+                        code: None,
+                        stdout: "ignored".to_string(),
+                        stderr: "killed\n".to_string(),
+                    }),
+                    Some("killed\n"),
+                ),
+                (
+                    FakeOutcome::Output(CommandOutput {
+                        code: None,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }),
+                    Some(""),
+                ),
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let runtime_dir = tmp.path().join("run");
+                let runtime = runtime_dir.to_str().unwrap();
+                let mut outcomes: Vec<_> = (0..stage).map(|_| success()).collect();
+                outcomes.push(failure);
+                let runner = FakeSetupRunner::new(&runtime_dir, outcomes);
+                let reads = std::cell::Cell::new(0);
+                let error = setup_access_with(
+                    "system setup",
+                    false,
+                    &runner,
+                    || {
+                        reads.set(reads.get() + 1);
+                        assert_eq!(runner.calls.borrow().len(), 1);
+                        Ok("alice".to_string())
+                    },
+                    runtime,
+                )
+                .unwrap_err();
+                let expected = [
+                    vec!["groupadd", "-r", ANOLISA_GROUP],
+                    vec!["usermod", "-aG", ANOLISA_GROUP, "alice"],
+                    vec!["chgrp", ANOLISA_GROUP, runtime],
+                ];
+                let reason = match stderr {
+                    Some(stderr) => format!("{} failed: {stderr}", expected[stage].join(" ")),
+                    None => format!(
+                        "failed to run {}: fake setup spawn failure",
+                        expected[stage][0]
+                    ),
+                };
+                assert_eq!(error.command(), "system setup");
+                assert_eq!(error.code(), "EXECUTION_FAILED");
+                assert_eq!(error.exit_code(), 1);
+                assert_eq!(error.reason(), reason);
+                assert_eq!(error.to_string(), format!("execution failed: {reason}"));
+                assert_eq!(*runner.calls.borrow(), expected[..=stage]);
+                assert!(runner.outcomes.borrow().is_empty());
+                assert_eq!(reads.get(), usize::from(stage > 0));
+                assert_eq!(runtime_dir.exists(), stage == 2);
+            }
+        }
+    }
+
+    #[test]
+    fn setup_access_mkdir_failure_never_calls_chgrp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("file");
+        fs::write(&blocker, "not a directory").unwrap();
+        let runtime_dir = blocker.join("run");
+        let runner = FakeSetupRunner::new(&runtime_dir, vec![]);
+        let error = setup_access_with(
+            "system setup",
+            true,
+            &runner,
+            || panic!("upgrade must not read SUDO_USER"),
+            runtime_dir.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .reason()
+                .starts_with(&format!("failed to create {}: ", runtime_dir.display()))
+        );
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert_eq!(error.exit_code(), 1);
+        assert!(runner.calls.borrow().is_empty());
+        assert_eq!(fs::read_to_string(blocker).unwrap(), "not a directory");
+    }
+
+    #[test]
+    fn setup_access_chgrp_failure_preserves_directory_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_dir = tmp.path().join("run");
+        fs::create_dir(&runtime_dir).unwrap();
+        fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let runner = FakeSetupRunner::new(&runtime_dir, vec![non_zero(1, "denied")]);
+        setup_access_with(
+            "system setup",
+            true,
+            &runner,
+            || panic!("upgrade must not read SUDO_USER"),
+            runtime_dir.to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            fs::metadata(&runtime_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(runner.outcomes.borrow().is_empty());
+    }
+
+    #[test]
+    fn setup_access_chmod_failure_follows_chgrp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_dir = tmp.path().join("run");
+        let runtime = runtime_dir.to_str().unwrap();
+        let mut runner = FakeSetupRunner::new(&runtime_dir, vec![success()]);
+        runner.remove_runtime_dir = true;
+        let error = setup_access_with(
+            "system setup",
+            true,
+            &runner,
+            || panic!("upgrade must not read SUDO_USER"),
+            runtime,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .reason()
+                .starts_with(&format!("failed to chmod {runtime}: "))
+        );
+        assert_eq!(error.command(), "system setup");
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert_eq!(error.exit_code(), 1);
+        assert_eq!(
+            *runner.calls.borrow(),
+            vec![vec!["chgrp", ANOLISA_GROUP, runtime]]
+        );
+        assert!(runner.outcomes.borrow().is_empty());
+        assert!(!runtime_dir.exists());
+    }
+
+    #[test]
+    fn setup_access_preserves_progress_and_error_output() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        for scenario in ["normal", "missing", "upgrade", "failure"] {
+            for mode in ["human", "json", "quiet"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        format!("{module}::setup_access_output_child"),
+                        "--exact".to_string(),
+                        "--nocapture".to_string(),
+                    ])
+                    .env("ANOLISA_TEST_SETUP_ACCESS", scenario)
+                    .env("ANOLISA_TEST_SETUP_OUTPUT", mode)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let runtime = stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("SETUP_RUNTIME="))
+                    .unwrap();
+                let (_, rendered) = stdout.split_once("SETUP_OUTPUT_BEGIN\n").unwrap();
+                let (rendered, _) = rendered.split_once("SETUP_OUTPUT_END\n").unwrap();
+                let mut expected_stderr = String::new();
+                if scenario != "upgrade" {
+                    expected_stderr.push_str("[setup] system group 'anolisa' ensured\n");
+                    expected_stderr.push_str(if scenario == "missing" {
+                        "[setup] warning: $SUDO_USER not set, skipping group membership\n"
+                    } else {
+                        "[setup] user 'alice' added to group 'anolisa'\n"
+                    });
+                }
+                if scenario == "failure" {
+                    let reason = format!("chgrp anolisa {runtime} failed:  denied\n");
+                    if mode == "json" {
+                        let json: serde_json::Value = serde_json::from_str(rendered).unwrap();
+                        assert_eq!(
+                            json,
+                            serde_json::json!({
+                                "ok": false,
+                                "schema_version": response::SCHEMA_VERSION,
+                                "command": "system setup",
+                                "warnings": [],
+                                "error": {"code": "EXECUTION_FAILED", "reason": reason},
+                            })
+                        );
+                    } else {
+                        expected_stderr.push_str(&format!("error: {reason}\n"));
+                        assert!(rendered.is_empty());
+                    }
+                } else {
+                    expected_stderr
+                        .push_str(&format!("[setup] runtime directory {runtime} ready\n"));
+                    assert!(rendered.is_empty());
+                }
+                assert_eq!(String::from_utf8(output.stderr).unwrap(), expected_stderr);
+                assert!(stdout.contains("test result: ok."));
+            }
+        }
+    }
+
+    #[test]
+    fn setup_access_output_child() {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        // Only the dedicated capture invocation may consume the scenario inputs.
+        if std::env::args().skip(1).collect::<Vec<_>>()
+            != [
+                format!("{module}::setup_access_output_child"),
+                "--exact".to_string(),
+                "--nocapture".to_string(),
+            ]
+        {
+            return;
+        }
+        let scenario = std::env::var("ANOLISA_TEST_SETUP_ACCESS").unwrap();
+        let mode = std::env::var("ANOLISA_TEST_SETUP_OUTPUT").unwrap();
+        let sandbox = crate::test_support::TestSandbox::new();
+        let runtime_dir = sandbox.root().join("run");
+        let runtime = runtime_dir.to_str().unwrap();
+        let outcomes = match scenario.as_str() {
+            "normal" => vec![success(), success(), success()],
+            "missing" => vec![success(), success()],
+            "upgrade" => vec![success()],
+            "failure" => vec![success(), success(), non_zero(1, " denied\n")],
+            _ => panic!("unknown setup fixture"),
+        };
+        let runner = FakeSetupRunner::new(&runtime_dir, outcomes);
+        println!("SETUP_RUNTIME={runtime}");
+        println!("SETUP_OUTPUT_BEGIN");
+        let result = setup_access_with(
+            "system setup",
+            scenario == "upgrade",
+            &runner,
+            || {
+                assert_ne!(scenario, "upgrade");
+                if scenario == "missing" {
+                    Err(std::env::VarError::NotPresent)
+                } else {
+                    Ok("alice".to_string())
+                }
+            },
+            runtime,
+        );
+        if scenario == "failure" {
+            let error = result.unwrap_err();
+            let ctx = sandbox.context_with(
+                crate::context::InstallMode::System,
+                crate::test_support::TestContextOptions {
+                    json: mode == "json",
+                    quiet: mode == "quiet",
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                response::render_error(&ctx, &error),
+                std::process::ExitCode::from(1)
+            );
+        } else {
+            result.unwrap();
+        }
+        assert!(runner.outcomes.borrow().is_empty());
+        println!("SETUP_OUTPUT_END");
     }
 
     #[test]
