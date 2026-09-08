@@ -212,7 +212,11 @@ must repeat every profile that should remain registered.
 Running OpenClaw adapter enable or the tokenless OpenClaw `install.sh` accepts
 the plugin's declared capabilities. Both entry points pass
 `--accept-capabilities` only when `plugins install --help` advertises that
-exact option, so older hosts keep working.
+exact option, so older hosts keep working. The standalone `install.sh` also
+passes `--dangerously-force-unsafe-install` only while the installer advertises
+the option as effective; hosts that list it as a deprecated no-op (OpenClaw
+2026.9.2+) no longer receive it, and the safety scan there follows
+`security.installPolicy`.
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
@@ -278,7 +282,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/uninstall.sh
 
 The scripts call the framework's own plugin or extension mechanism. Follow their restart instructions. If a script is missing, fails, or reports an incompatible framework version, prefer an anolisa-managed installation.
 
-The OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries through Node.js child-process APIs. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
+On hosts whose installer still enforces the safety scan, the OpenClaw install script invokes `plugins install` with `--dangerously-force-unsafe-install` because the plugin launches the `tokenless` and `rtk` binaries through Node.js child-process APIs. Hosts that advertise the option as a deprecated no-op no longer receive it; there the scan follows `security.installPolicy`. Review the installed adapter source and your OpenClaw policy before running it. If that policy does not permit the override, do not install the plugin.
 
 ### npm with cosh
 
@@ -302,7 +306,7 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
+The install script uses OpenClaw's unsafe-install override on legacy hosts, as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
 
 ### Hermes
 
