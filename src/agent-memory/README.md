@@ -33,8 +33,22 @@ The bundled plugin (`memory-anolisa`) is deployed by
 grants the plugin's declared capabilities by default. Set
 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold consent — on hosts that gate
 consent the install then fails until consent is granted interactively. Set
-`AGENT_MEMORY_SAFE_INSTALL=1` to omit the unsafe-install bypass flag. Full
-reference: [user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
+`AGENT_MEMORY_SAFE_INSTALL=1` to decline the unsafe-install bypass on hosts
+that would still receive one. Full reference:
+[user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw gateway restart
+```
+
+Both optional installer flags are negotiated from `openclaw plugins install
+--help`: `--accept-capabilities` is passed only when the host advertises that
+exact option, and `--dangerously-force-unsafe-install` only while the host still
+advertises the bypass as effective (OpenClaw 2026.6.1 and earlier). Current hosts
+list it as a deprecated no-op and never receive it — there install-time safety
+follows the operator-owned `security.installPolicy`, and neither switch changes
+the argv; the install log states which case applied.
 
 ### Integration (MCP client)
 
