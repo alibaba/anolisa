@@ -163,6 +163,7 @@ fn run_registry_request_with_args_and_env(
         .arg("--registry")
         .args(args)
         .env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
         .env_remove("COSH_AI_PROVIDER")
         .env_remove("COSH_MODEL")
         .env_remove("OPENAI_BASE_URL")
@@ -178,9 +179,13 @@ fn run_registry_request_with_args_and_env(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    registry_command_response(command, request)
+}
+
+fn registry_command_response(mut command: Command, request: Value) -> Value {
     let mut child = command
         .spawn()
-        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
+        .unwrap_or_else(|e| panic!("Failed to spawn registry command: {e}"));
 
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -836,6 +841,114 @@ fn registry_skills_list_returns_success() {
     assert_eq!(resp["request_id"], "test-1");
     assert_eq!(resp["success"], true);
     assert!(resp["data"].is_array(), "data should be array: {resp}");
+}
+
+#[test]
+fn registry_skills_does_not_autodiscover_raw_user_roots() {
+    let xdg = tempfile::tempdir().unwrap();
+    for data_home in [None, Some(xdg.path().to_str().unwrap())] {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let data_dir = data_home
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.path().join(".local/share"));
+        let skill_dir = data_dir.join("anolisa/skills/raw-install-probe");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: raw-install-probe\ndescription: raw user install\n---\nRaw skill body.",
+        )
+        .unwrap();
+        let legacy = home.path().join(".copilot-shell/skills/legacy-probe");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("SKILL.md"),
+            "---\nname: legacy-probe\ndescription: legacy user install\n---\nLegacy body.",
+        )
+        .unwrap();
+        let env: Vec<_> = data_home
+            .map(|value| ("XDG_DATA_HOME", value))
+            .into_iter()
+            .collect();
+        let response = run_registry_request_with_args_and_env(
+            "skills",
+            "list",
+            Value::Null,
+            home.path(),
+            Some(project.path()),
+            &[],
+            &env,
+        );
+        assert_eq!(response["success"], true);
+        let skills = response["data"].as_array().unwrap();
+        assert!(skills.iter().any(|skill| skill["name"] == "legacy-probe"));
+        assert!(!skills
+            .iter()
+            .any(|skill| skill["name"] == "raw-install-probe"));
+        let detail = run_registry_request_with_args_and_env(
+            "skills",
+            "detail",
+            serde_json::json!({"name": "raw-install-probe"}),
+            home.path(),
+            Some(project.path()),
+            &[],
+            &env,
+        );
+        assert_eq!(detail["success"], false);
+    }
+}
+
+#[test]
+fn registry_skills_discovers_custom_system_prefix() {
+    let binary = binary_path();
+    let prefix = tempfile::tempdir_in(binary.parent().unwrap()).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for (data_root, description) in [
+        ("usr/local/share/anolisa", "raw"),
+        ("usr/share/anolisa", "package"),
+    ] {
+        let skill = prefix.path().join(data_root).join("skills/prefix-probe");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: prefix-probe\ndescription: {description}\n---\nBody."),
+        )
+        .unwrap();
+    }
+    for runtime in [
+        "usr/local/libexec/anolisa/cosh-ng",
+        "usr/libexec/anolisa/cosh-ng",
+    ] {
+        let executable = prefix.path().join(runtime).join("cosh-core");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        // Relocate without opening the executable for writing during parallel spawns.
+        std::fs::hard_link(&binary, &executable).unwrap();
+        let mut command = Command::new(executable);
+        command
+            .arg("--registry")
+            .env_clear()
+            .env("HOME", home.path())
+            .current_dir(home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let response = registry_command_response(
+            command,
+            serde_json::json!({
+                "type": "registry_request", "request_id": "prefix-probe",
+                "domain": "skills", "action": "list", "params": null,
+            }),
+        );
+        assert_eq!(response["success"], true);
+        let skill = response["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["name"] == "prefix-probe")
+            .unwrap_or_else(|| panic!("skill missing for runtime {runtime}"));
+        assert_eq!(skill["level"], "system");
+        assert_eq!(skill["description"], "raw");
+    }
 }
 
 #[test]

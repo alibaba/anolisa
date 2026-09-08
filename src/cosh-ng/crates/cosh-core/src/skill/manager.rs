@@ -6,7 +6,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use super::loader;
 use super::types::{SkillConfig, SkillLevel};
-use super::{COPILOT_CONFIG_DIR, SKILLS_DIR, SYSTEM_SKILLS_DIR};
+use super::{COPILOT_CONFIG_DIR, SKILLS_DIR};
 
 /// Central manager for skill discovery, caching, hot-reload and priority
 /// merging. Mirrors the role of copilot-shell's `SkillManager`.
@@ -18,9 +18,8 @@ pub struct SkillManager {
     change_tx: broadcast::Sender<()>,
     #[allow(dead_code)]
     watcher_handle: RwLock<Option<notify::RecommendedWatcher>>,
-    /// Test-only overrides for user / system directories.
-    user_dir_override: Option<PathBuf>,
-    system_dir_override: Option<PathBuf>,
+    user_paths: Vec<PathBuf>,
+    system_paths: Vec<PathBuf>,
 }
 
 impl SkillManager {
@@ -44,8 +43,14 @@ impl SkillManager {
             extension_paths,
             change_tx,
             watcher_handle: RwLock::new(None),
-            user_dir_override: None,
-            system_dir_override: None,
+            user_paths: dirs::home_dir()
+                .map(|home| home.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
+                .into_iter()
+                .collect(),
+            system_paths: crate::paths::system_data_dirs()
+                .into_iter()
+                .map(|dir| dir.join(SKILLS_DIR))
+                .collect(),
         })
     }
 
@@ -58,17 +63,15 @@ impl SkillManager {
         user_dir: Option<PathBuf>,
         system_dir: Option<PathBuf>,
     ) -> Arc<Self> {
-        let (change_tx, _) = broadcast::channel(16);
-        Arc::new(Self {
-            cache: RwLock::new(HashMap::new()),
-            project_root,
-            custom_paths,
-            extension_paths: Vec::new(),
-            change_tx,
-            watcher_handle: RwLock::new(None),
-            user_dir_override: user_dir,
-            system_dir_override: system_dir,
-        })
+        let mut manager = Self::new(project_root, custom_paths, Vec::new());
+        let inner = Arc::get_mut(&mut manager).unwrap();
+        if let Some(dir) = user_dir {
+            inner.user_paths = vec![dir];
+        }
+        if let Some(dir) = system_dir {
+            inner.system_paths = vec![dir];
+        }
+        manager
     }
 
     /// Rescan all skill directories and update the internal cache.
@@ -76,44 +79,13 @@ impl SkillManager {
         let mut new_cache: HashMap<SkillLevel, Vec<SkillConfig>> = HashMap::new();
 
         for &level in SkillLevel::all() {
-            if level == SkillLevel::Custom || level == SkillLevel::Extension {
-                continue; // handled separately below
-            }
-            if let Some(dir) = self.base_dir_of(level) {
-                if dir.exists() {
-                    let skills = loader::load_skills_from_dir(&dir, level);
-                    if !skills.is_empty() {
-                        new_cache.insert(level, skills);
-                    }
-                }
-            }
-        }
-
-        // Custom level: multiple paths
-        if !self.custom_paths.is_empty() {
-            let mut custom_skills: Vec<SkillConfig> = Vec::new();
-            for custom_path in &self.custom_paths {
-                if custom_path.exists() {
-                    let skills = loader::load_skills_from_dir(custom_path, SkillLevel::Custom);
-                    custom_skills.extend(skills);
-                }
-            }
-            if !custom_skills.is_empty() {
-                new_cache.insert(SkillLevel::Custom, custom_skills);
-            }
-        }
-
-        // Extension level: multiple paths from loaded extensions
-        if !self.extension_paths.is_empty() {
-            let mut ext_skills: Vec<SkillConfig> = Vec::new();
-            for ext_path in &self.extension_paths {
-                if ext_path.exists() {
-                    let skills = loader::load_skills_from_dir(ext_path, SkillLevel::Extension);
-                    ext_skills.extend(skills);
-                }
-            }
-            if !ext_skills.is_empty() {
-                new_cache.insert(SkillLevel::Extension, ext_skills);
+            let skills: Vec<_> = self
+                .dirs_of(level)
+                .iter()
+                .flat_map(|dir| loader::load_skills_from_dir(dir, level))
+                .collect();
+            if !skills.is_empty() {
+                new_cache.insert(level, skills);
             }
         }
 
@@ -132,7 +104,8 @@ impl SkillManager {
         // overwrite lower ones.
         for &level in SkillLevel::all().iter().rev() {
             if let Some(skills) = cache.get(&level) {
-                for skill in skills {
+                // Earlier directories within a level also win, matching load().
+                for skill in skills.iter().rev() {
                     merged.insert(skill.name.clone(), skill.clone());
                 }
             }
@@ -217,45 +190,30 @@ impl SkillManager {
 
     // ── private helpers ──────────────────────────────────────────────
 
-    fn base_dir_of(&self, level: SkillLevel) -> Option<PathBuf> {
+    fn dirs_of(&self, level: SkillLevel) -> Vec<PathBuf> {
         match level {
             SkillLevel::Project => {
                 // Skip if project_root is the same as home (avoids double-scan)
                 let home = dirs::home_dir().and_then(|h| h.canonicalize().ok());
                 let project = self.project_root.canonicalize().ok();
                 if home.is_some() && home == project {
-                    None
+                    Vec::new()
                 } else {
-                    Some(self.project_root.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
+                    vec![self.project_root.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR)]
                 }
             }
-            SkillLevel::Custom => None, // custom paths are iterated separately
-            SkillLevel::Extension => None, // extension paths are iterated separately
-            SkillLevel::User => {
-                if let Some(ref p) = self.user_dir_override {
-                    return Some(p.clone());
-                }
-                dirs::home_dir().map(|h| h.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
-            }
-            SkillLevel::System => {
-                if let Some(ref p) = self.system_dir_override {
-                    return Some(p.clone());
-                }
-                Some(PathBuf::from(SYSTEM_SKILLS_DIR))
-            }
+            SkillLevel::Custom => self.custom_paths.clone(),
+            SkillLevel::Extension => self.extension_paths.clone(),
+            SkillLevel::User => self.user_paths.clone(),
+            SkillLevel::System => self.system_paths.clone(),
         }
     }
 
     fn watch_dirs(&self) -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        for &level in SkillLevel::all() {
-            if let Some(d) = self.base_dir_of(level) {
-                dirs.push(d);
-            }
-        }
-        dirs.extend(self.custom_paths.iter().cloned());
-        dirs.extend(self.extension_paths.iter().cloned());
-        dirs
+        SkillLevel::all()
+            .iter()
+            .flat_map(|&level| self.dirs_of(level))
+            .collect()
     }
 }
 
@@ -442,40 +400,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordered_directories_agree_for_list_load_and_watch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut mgr = SkillManager::new(
+            root.path().join("project"),
+            vec![root.path().join("custom-1"), root.path().join("custom-2")],
+            vec![
+                root.path().join("extension-1"),
+                root.path().join("extension-2"),
+            ],
+        );
+        let inner = Arc::get_mut(&mut mgr).unwrap();
+        assert_eq!(
+            inner.system_paths,
+            vec![
+                PathBuf::from("/usr/local/share/anolisa/skills"),
+                PathBuf::from("/usr/share/anolisa/skills"),
+            ]
+        );
+        inner.user_paths = vec![root.path().join("home/.copilot-shell/skills")];
+        inner.system_paths = inner
+            .system_paths
+            .iter()
+            .map(|path| root.path().join(path.strip_prefix("/").unwrap()))
+            .collect();
+        let dirs = mgr.watch_dirs();
+        assert_eq!(dirs.len(), 8);
+        for (i, dir) in dirs.iter().enumerate() {
+            std::fs::create_dir_all(dir).unwrap();
+            for name in ["shared".to_string(), format!("only-{i}")] {
+                std::fs::write(
+                    dir.join(format!("{name}.md")),
+                    format!("---\nname: {name}\ndescription: directory {i}\n---\nBody {i}"),
+                )
+                .unwrap();
+            }
+        }
+        // Removing each winner exposes the next directory without hiding
+        // skills unique to any lower-priority root.
+        for dir in &dirs {
+            mgr.refresh().await;
+            let listed = mgr.list().await;
+            assert_eq!(listed.len(), dirs.len() + 1);
+            let listed = listed.iter().find(|skill| skill.name == "shared").unwrap();
+            let loaded = mgr.load("shared").await.unwrap();
+            assert_eq!(listed.file_path, dir.join("shared.md"));
+            assert_eq!(loaded.file_path, listed.file_path);
+            assert_eq!(loaded.body, listed.body);
+            std::fs::remove_file(dir.join("shared.md")).unwrap();
+        }
+        // Missing roots are normal when only one install mode is in use.
+        std::fs::remove_dir_all(&dirs[0]).unwrap();
+        mgr.refresh().await;
+        assert!(mgr.load("shared").await.is_none());
+        assert_eq!(mgr.list().await.len(), dirs.len() - 1);
+    }
+
+    #[tokio::test]
     async fn watcher_triggers_refresh() {
         let project_dir = tempfile::tempdir().unwrap();
         let custom_dir = tempfile::tempdir().unwrap();
 
-        let mgr = isolated_manager(project_dir.path(), vec![custom_dir.path().to_path_buf()]);
+        let mut mgr = isolated_manager(project_dir.path(), vec![custom_dir.path().to_path_buf()]);
+        let inner = Arc::get_mut(&mut mgr).unwrap();
+        inner.user_paths = vec![project_dir.path().join("home/.copilot-shell/skills")];
+        inner.system_paths = vec![project_dir.path().join("usr/local/share/anolisa/skills")];
+        let dirs = mgr.watch_dirs();
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         mgr.refresh().await;
         assert!(mgr.list().await.is_empty());
 
         mgr.start_watching().await;
 
-        // Create a new skill file in the custom dir
-        let new_skill_dir = custom_dir.path().join("new-skill");
-        std::fs::create_dir_all(&new_skill_dir).unwrap();
-        std::fs::write(
-            new_skill_dir.join("SKILL.md"),
-            "---\nname: new-skill\ndescription: dynamic\n---\n\nDynamic body.",
-        )
-        .unwrap();
+        for (i, dir) in dirs.iter().enumerate() {
+            let name = format!("new-skill-{i}");
+            let new_skill_dir = dir.join(&name);
+            std::fs::create_dir_all(&new_skill_dir).unwrap();
+            std::fs::write(
+                new_skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: dynamic\n---\n\nDynamic body."),
+            )
+            .unwrap();
 
-        // Wait for the watcher to pick up the new skill (poll up to 5s).
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            let all = mgr.list().await;
-            if all.iter().any(|s| s.name == "new-skill") {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                let names: Vec<&String> = all.iter().map(|s| &s.name).collect();
-                panic!(
-                    "watcher did not pick up new-skill within 5s, found: {:?}",
-                    names
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            while mgr.load(&name).await.is_none() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "watcher did not pick up {} within 5s",
+                    new_skill_dir.display()
                 );
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
 
