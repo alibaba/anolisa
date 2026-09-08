@@ -202,9 +202,11 @@ pub enum FileOwner {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnedFileKind {
-    /// Regular file (data, executable, config, library).
+    /// Immutable regular file (data, executable, library).
     #[default]
     File,
+    /// Administrator-editable regular file; integrity checks skip its digest.
+    Config,
     /// Symbolic link created by the install runner. The integrity probe
     /// verifies `readlink` against the recorded [`OwnedFile::referent`]
     /// instead of hashing content through the link.
@@ -229,8 +231,8 @@ pub struct OwnedFile {
     /// instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// Regular file vs. managed symlink. Defaults to `File` for backward
-    /// compatibility with state written before schema v4.
+    /// Immutable file, editable config, or managed symlink. Defaults to `File`
+    /// for backward compatibility with state written before schema v4.
     #[serde(default, skip_serializing_if = "is_default_owned_file_kind")]
     pub kind: OwnedFileKind,
     /// Expected symlink target (only meaningful when `kind == Symlink`).

@@ -39,6 +39,9 @@ anolisa update all
 | `adopt` | Record an existing system RPM as adopted without default removal authority |
 | `forget` | Drop state record without package operations |
 
+`status` and `doctor` allow content edits to raw-installed `type = "config"`
+files while continuing to check their presence, permissions, and path safety.
+
 ### Tier 2 — Management
 
 | Command | Description |

@@ -190,6 +190,27 @@ Raw repair and update restore the package payload (including declared content
 rendering); they do not replay installation hooks. Use `render` for layout-path
 substitution that must also be reproduced by repair and update.
 
+## Editable Files (`type = "config"`)
+
+The raw backend records config layout entries, including files expanded from
+directory sources, as `kind = "config"` in owned-file state. Their install-time
+digest remains recorded, but integrity probes skip content hashing after checking
+path boundaries, file type, permissions, and applied capabilities. Other regular
+files remain immutable. This does not change update or uninstall behavior.
+
+The runner carries the kind and mode from the actual source mapping through
+directory expansion and placement. Distinct sources can share or overlap a
+destination without changing each other's file contracts.
+
+Legacy records recover config kinds from exact file declarations or when every
+matching directory declaration is config. Mixed directory kinds are ambiguous
+without source provenance, so those legacy files retain digest checking.
+Back up edited configs and reinstall to record their kinds accurately; directory
+permissions are inferred only when all matching declarations agree.
+Read-only diagnostics do not rewrite state. Older CLI binaries cannot deserialize
+the new `config` kind; before downgrading, back up state and change owned-file
+`kind = "config"` entries to `kind = "file"`, restoring the old digest-check behavior.
+
 ## Content Rendering (`render`)
 
 A `[[component.layout.files]]` entry may request that ANOLISA render the

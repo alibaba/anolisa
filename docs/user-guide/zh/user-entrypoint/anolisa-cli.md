@@ -114,6 +114,13 @@ system root 时，它会在修复建议中补全
 `sudo anolisa --install-mode system`。`--fix` 在当前版本中仍为保留参数；请
 显式执行输出的 `fix_plan`。
 
+对于 raw 安装，`status` 和 `doctor` 允许修改声明为 `type = "config"` 的文件
+内容。文件缺失、不安全路径、意外符号链接、权限或 capability 偏移仍会检查失败；
+普通 data 和 executable 文件仍需通过 SHA-256 校验。旧安装记录会从保存的
+component manifest 在内存中恢复无歧义的 config 声明。若重叠的目录声明混合了
+config 和不可变类型，旧文件因缺少来源映射而继续进行摘要校验。
+请先备份编辑过的配置，再重新安装组件以记录准确类型。诊断不会改写状态文件。
+
 ### restart
 
 重启所选 scope 安装记录中的 service：

@@ -451,6 +451,176 @@ sha256 = "{sha}"
 }
 
 #[test]
+fn config_edits_pass_doctor_but_data_edits_fail() {
+    use crate::commands::tier1::doctor::{DoctorArgs, handle as doctor};
+    use sha2::{Digest, Sha256};
+
+    for reverse in [false, true] {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo = tmp.path().join("repo");
+        let repo_url = write_local_repo(&repo);
+        let manifest = format!(
+            "{}\n{}",
+            component_manifest_toml("agentsight", "0.2.0", &["system"]),
+            r#"[[component.layout.files]]
+source = "share/settings.toml"
+target = "{datadir}/components/agentsight/settings.toml"
+mode = "0644"
+type = "config"
+
+[[component.layout.files]]
+source = "conf.d/"
+target = "{datadir}/components/agentsight/conf.d"
+type = "config"
+
+[[component.layout.files]]
+source = "data/"
+target = "{datadir}/components/agentsight"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/tool"
+target = "{datadir}/components/agentsight/conf.d/tool"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "immutable/"
+target = "{datadir}/components/agentsight/conf.d/assets"
+mode = "0644"
+
+[[component.layout.files]]
+source = "shared-data/"
+target = "{datadir}/components/agentsight/shared"
+mode = "0600"
+
+[[component.layout.files]]
+source = "shared-config/"
+target = "{datadir}/components/agentsight/shared"
+mode = "0644"
+type = "config"
+
+[[component.layout.files]]
+source = "unambiguous/"
+target = "{datadir}/isolated-config"
+type = "config"
+"#
+        );
+        let mut manifest: toml::Value = toml::from_str(&manifest).expect("manifest");
+        if reverse {
+            manifest["component"]["layout"]["files"]
+                .as_array_mut()
+                .expect("files")
+                .reverse();
+        }
+        let manifest = toml::to_string(&manifest).expect("serialize manifest");
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/agentsight", b"#!/bin/sh\necho agentsight\n"),
+            ("share/settings.toml", b"enabled = true\n"),
+            ("conf.d/extra.toml", b"enabled = true\n"),
+            ("data/plain.dat", b"immutable\n"),
+            ("data/conf.d/from-data.dat", b"immutable\n"),
+            ("shared-data/plain.dat", b"immutable\n"),
+            ("shared-config/settings.toml", b"enabled = true\n"),
+            ("unambiguous/settings.toml", b"enabled = true\n"),
+            ("bin/tool", b"#!/bin/sh\necho tool\n"),
+            ("immutable/plain.dat", b"immutable\n"),
+        ]);
+        std::fs::write(repo.join("v1/agentsight.tar.gz"), &artifact).expect("artifact");
+        let index_path = repo.join("v1/index.toml");
+        let mut index: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&index_path).expect("index")).expect("parse");
+        index["entries"][0]["sha256"] = format!("{:x}", Sha256::digest(&artifact)).into();
+        std::fs::write(index_path, toml::to_string(&index).expect("serialize")).expect("index");
+
+        let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        handle_with_fake_rpm(a, &ctx).expect("install");
+        let layout = FsLayout::system(Some(prefix));
+        let files_dir = layout.datadir.join("components/agentsight");
+        std::fs::write(
+            layout.datadir.join("isolated-config/settings.toml"),
+            b"enabled = false\n",
+        )
+        .expect("edit unambiguous directory config");
+        let store = load_v5_store(&layout);
+        let installed = store
+            .find(ObjectKind::Component, "agentsight")
+            .expect("installed");
+        for name in ["settings.toml", "conf.d/extra.toml", "shared/settings.toml"] {
+            let row = owned_artifact(installed)
+                .files
+                .iter()
+                .find(|file| file.path == files_dir.join(name))
+                .expect("config row");
+            assert_eq!(row.kind, anolisa_core::OwnedFileKind::Config);
+            assert!(row.sha256.is_some(), "retain the install-time digest");
+            std::fs::write(&row.path, b"enabled = false\n").expect("edit config");
+        }
+        for name in [
+            "plain.dat",
+            "conf.d/tool",
+            "conf.d/assets/plain.dat",
+            "conf.d/from-data.dat",
+            "shared/plain.dat",
+        ] {
+            let row = owned_artifact(installed)
+                .files
+                .iter()
+                .find(|file| file.path == files_dir.join(name))
+                .expect("immutable row");
+            assert_eq!(row.kind, anolisa_core::OwnedFileKind::File);
+        }
+        let diagnose = || {
+            doctor(
+                DoctorArgs {
+                    component: Some("agentsight".into()),
+                    fix: false,
+                },
+                &ctx,
+            )
+        };
+        diagnose().expect("operator config edits must stay healthy");
+
+        // Legacy directory rows have no source provenance; ambiguous kinds must
+        // retain hashing. Exact config mappings remain safe to recover.
+        for name in ["conf.d/extra.toml", "shared/settings.toml"] {
+            std::fs::write(files_dir.join(name), b"enabled = true\n").expect("restore config");
+        }
+        let state_path = layout.state_dir.join("installed.toml");
+        let legacy = std::fs::read_to_string(&state_path)
+            .expect("state")
+            .replace("kind = \"config\"\n", "");
+        std::fs::write(&state_path, &legacy).expect("legacy state");
+        diagnose().expect("exact legacy config edits must stay healthy");
+        assert_eq!(std::fs::read_to_string(&state_path).expect("state"), legacy);
+
+        for name in [
+            "plain.dat",
+            "conf.d/tool",
+            "conf.d/assets/plain.dat",
+            "conf.d/from-data.dat",
+            "shared/plain.dat",
+            "conf.d/extra.toml",
+            "shared/settings.toml",
+        ] {
+            let path = files_dir.join(name);
+            let original = std::fs::read(&path).expect("read original");
+            std::fs::write(&path, b"tampered\n").expect("tamper hash-checked file");
+            assert!(
+                matches!(diagnose(), Err(CliError::DiagnosticsFound { .. })),
+                "{name}"
+            );
+            std::fs::write(&path, original).expect("restore original");
+            diagnose().expect("restored file is healthy");
+        }
+    }
+}
+
+#[test]
 fn install_raw_end_to_end_from_local_repo() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");

@@ -71,7 +71,7 @@ const MAX_PROBE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// < CapabilityMismatch < ShaMismatch`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IntegrityStatus {
-    /// File exists and sha256 matches the recorded value.
+    /// File satisfies its contract; config content is intentionally mutable.
     Ok,
     /// Owner is not ANOLISA-managed — we deliberately don't probe.
     Skipped,
@@ -199,10 +199,11 @@ impl IntegrityStatus {
 /// stat, follow, or read that path.
 ///
 /// Returns [`IntegrityStatus::Skipped`] for non-ANOLISA-owned entries so
-/// the caller never accidentally hashes a third-party config file. For
-/// ANOLISA-owned entries with no recorded sha256 it returns
+/// the caller never accidentally hashes a third-party config file.
+/// Immutable ANOLISA-owned entries with no recorded sha256 return
 /// [`IntegrityStatus::Unverified`] rather than `Ok` — the absence of a
 /// recorded hash is a degradation signal, not a clean state.
+/// Config entries skip hashing after path, type, mode, and capability checks.
 pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus {
     if file.owner != FileOwner::Anolisa {
         return IntegrityStatus::Skipped;
@@ -273,6 +274,10 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
             Err(err) => return IntegrityStatus::ReadError(err.to_string()),
         }
     }
+    if file.kind == OwnedFileKind::Config {
+        return IntegrityStatus::Ok;
+    }
+
     // Digest gate BEFORE the size gate, so each label keeps the meaning its
     // documentation promises: `Unverified` means no digest was ever
     // recorded, `ProbeLimitExceeded` means one was recorded but this run
@@ -533,6 +538,60 @@ mod tests {
         assert_eq!(
             check_owned_file(&layout, &owned),
             IntegrityStatus::Unverified,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_skips_only_content_checks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("settings.toml");
+        fs::write(&path, b"operator edit").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let mut owned = anolisa_owned(path.clone(), Some("old digest".into()));
+        owned.kind = OwnedFileKind::Config;
+        owned.mode = Some("0644".into());
+        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
+        owned.sha256 = None;
+        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
+
+        #[cfg(target_os = "linux")]
+        {
+            owned.capabilities.push("CAP_NET_BIND_SERVICE".into());
+            assert!(matches!(
+                check_owned_file(&layout, &owned),
+                IntegrityStatus::CapabilityMismatch { .. }
+            ));
+            owned.capabilities.clear();
+        }
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert!(matches!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::ModeMismatch { .. }
+        ));
+        fs::remove_file(&path).expect("remove");
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::MissingFile
+        );
+        fs::create_dir(&path).expect("directory");
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::NotRegularFile
+        );
+        fs::remove_dir(&path).expect("remove directory");
+        let target = layout.bin_dir.join("target");
+        fs::write(&target, b"target").expect("target");
+        symlink(&target, &path).expect("symlink");
+        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Symlink);
+        owned.path = tmp.path().join("outside-owned-roots");
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::OutOfBounds
         );
     }
 

@@ -122,6 +122,16 @@ system root. It qualifies system repair suggestions with
 that root. `--fix` is reserved in this release; follow the reported `fix_plan`
 explicitly.
 
+For raw installations, `status` and `doctor` allow content edits to files
+declared as `type = "config"`. Missing files, unsafe paths, unexpected symlinks,
+and permission or capability drift still fail checks; ordinary data and
+executable files still undergo SHA-256 verification. Older installation records
+recover unambiguous config declarations from their saved component manifest in
+memory. If overlapping directory declarations mix config and immutable kinds,
+legacy files retain digest checking because their source mapping is unknown.
+Back up edited configs and reinstall the component to record accurate kinds.
+Diagnostics do not rewrite state.
+
 ### restart
 
 Restart services recorded for an installation in the selected scope:

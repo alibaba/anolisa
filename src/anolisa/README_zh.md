@@ -39,6 +39,9 @@ anolisa update all
 | `adopt` | 将已有 system RPM 记录为已采纳安装 |
 | `forget` | 仅删除状态记录，不执行包操作 |
 
+`status` 和 `doctor` 允许修改 raw 安装中 `type = "config"` 文件的内容，
+同时继续检查文件是否存在、权限和路径安全。
+
 ### 二级命令 — 管理
 
 | 命令 | 说明 |
