@@ -459,7 +459,17 @@ Codex and Qoder CLI are low-level integrity gates that run `skill-ledger check <
 
 All six adapters enable Skill Ledger by default. Hermes uses policy `observe`; the other adapters retain policy `ask`. copilot-shell, Codex, Qoder CLI, and Qwen Code register their corresponding hook boundaries in their default manifests. OpenClaw and Hermes can also take capability configuration, while `SKILL_LEDGER_MODE` remains the deployment-level override. Apart from the explicitly documented Qoder CLI low-level gate above, the other compatibility hooks remain fail-open when the CLI infrastructure misbehaves, avoiding blocked Skill loads.
 
-The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, and the RPM and raw-install system roots `/usr/share/anolisa/skills/` and `/usr/local/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
+The built-in Ledger discovery entries also include the raw user root.
+For this root, an unset, empty, relative, or dot-segment `XDG_DATA_HOME` uses
+`~/.local/share`, matching ANOLISA and cosh. `enableDefaultSkillDirs=false`
+also disables this built-in entry. The hook keeps the existing policy and
+unmanaged-skill behavior; recognizing a directory does not certify its contents.
+
+`agent-sec-cli capabilities --agent cosh --capability skill-ledger --output json`
+reports the effective XDG data-root setting without resolving the user's home
+or reading Agent configuration. Its fallback is displayed as `~/.local/share`.
+
+The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, the raw user root `$XDG_DATA_HOME/anolisa/skills/` (default `~/.local/share/anolisa/skills/`), and the RPM and raw-install system roots `/usr/share/anolisa/skills/` and `/usr/local/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
 
 For batch certification or post-install certification, complete directory resolution and certification before letting the Agent read uncertified Skill content: avoid proactively reading an uncertified Skill's `SKILL.md` or auxiliary files before batch certification; after a successful install, locate the final local directory, confirm it contains `SKILL.md`, then run quick-scan certification.
 

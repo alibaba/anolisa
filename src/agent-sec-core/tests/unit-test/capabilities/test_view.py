@@ -770,3 +770,14 @@ def test_renderers_emit_stable_shapes() -> None:
     assert "HOOKS" not in lines[1]
     assert "SOURCE" not in lines[1]
     assert "code-scan" in table
+
+
+@pytest.mark.parametrize(
+    "data_home", [None, "", "relative", "/x/./y", "/x/../y", "/Data With Spaces"]
+)
+def test_cosh_ledger_xdg_view_preserves_paths_and_fallback(data_home):
+    env = {} if data_home is None else {"XDG_DATA_HOME": data_home}
+    record = query_capabilities(agent="cosh", capability="skill-ledger", env=env)[0]
+    expected = data_home if data_home == "/Data With Spaces" else "~/.local/share"
+    assert record.env["XDG_DATA_HOME"]["effective"] == expected
+    assert record.mode == "ask"

@@ -424,7 +424,16 @@ Codex 和 Qoder CLI 是低层完整性门禁，均在完成 canonical path 和�
 
 六个 adapter 均默认启用 Skill Ledger；Hermes 使用 `observe`，其它 adapter 保持 `ask`。copilot-shell、Codex、Qoder CLI 和 Qwen Code 在默认 manifest 注册各自的 hook 边界。OpenClaw 和 Hermes 还可使用 capability 配置，`SKILL_LEDGER_MODE` 仍作为部署级覆盖。除上述明确说明的 Qoder CLI 低层门禁外，其它兼容 hook 在 CLI 基础设施异常时保持 fail-open，避免阻断 Skill 加载。
 
-copilot-shell hook 当前仅覆盖 project / user / system 三类目录：`<cwd>/.copilot-shell/skills/`、`~/.copilot-shell/skills/`，以及 RPM 与 raw install 对应的 system 根目录 `/usr/share/anolisa/skills/` 和 `/usr/local/share/anolisa/skills/`。若 Skill 来自 custom、extension、remote 或其它路径，hook 会 fail-open 并跳过 skill-ledger 检查；OpenClaw 插件则按读取到的 `SKILL.md` 路径提取 Skill 目录。
+Ledger 内置发现项也包含 raw 用户目录。对此目录，`XDG_DATA_HOME`
+未设置、为空、为相对路径或包含 `.`、`..` 路径段时使用 `~/.local/share`，
+与 ANOLISA 和 cosh 保持一致。`enableDefaultSkillDirs=false` 也会禁用此内置项。
+hook 保留现有 policy 和未管理 Skill 的处理规则；识别目录不代表认证其内容。
+
+`agent-sec-cli capabilities --agent cosh --capability skill-ledger --output json`
+会显示生效的 XDG 数据根目录设置，不解析用户 home，也不读取 Agent 配置；
+回退值显示为 `~/.local/share`。
+
+copilot-shell hook 当前仅覆盖 project / user / system 三类目录：`<cwd>/.copilot-shell/skills/`、`~/.copilot-shell/skills/`、raw 用户目录 `$XDG_DATA_HOME/anolisa/skills/`（默认 `~/.local/share/anolisa/skills/`），以及 RPM 与 raw install 对应的 system 根目录 `/usr/share/anolisa/skills/` 和 `/usr/local/share/anolisa/skills/`。若 Skill 来自 custom、extension、remote 或其它路径，hook 会 fail-open 并跳过 skill-ledger 检查；OpenClaw 插件则按读取到的 `SKILL.md` 路径提取 Skill 目录。
 
 批量认证或安装后认证场景中，建议先完成目录定位和认证，再让 Agent 读取未认证 Skill 内容：批量认证前避免主动读取未认证 Skill 的 `SKILL.md` 或辅助文件；安装成功后应先定位最终本地目录，确认包含 `SKILL.md`，再执行快速扫描认证。
 
@@ -511,7 +520,7 @@ agent-sec-cli skill-ledger decide /path/to/skill --clear
 
 #### 配置 Skill 目录（批量扫描使用）
 
-默认已包含六个内置目录：`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`、`/usr/local/share/anolisa/skills/*`。项目级 Qoder 目录不作为相对默认项；对项目 Skill 显式执行 `scan` 或 `certify` 后，其绝对目录会沿用自动记忆机制写入 `managedSkillDirs`。如需添加其它目录，创建或编辑 `~/.config/agent-sec/skill-ledger/config.json`：
+默认已包含以下静态目录及 raw 用户目录：`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`、`/usr/local/share/anolisa/skills/*`。项目级 Qoder 目录不作为相对默认项；对项目 Skill 显式执行 `scan` 或 `certify` 后，其绝对目录会沿用自动记忆机制写入 `managedSkillDirs`。如需添加其它目录，创建或编辑 `~/.config/agent-sec/skill-ledger/config.json`：
 
 ```json
 {

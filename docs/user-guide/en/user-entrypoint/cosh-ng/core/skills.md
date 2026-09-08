@@ -24,13 +24,15 @@ The first matching name wins, in this order:
 1. `<workspace>/.copilot-shell/skills/`
 2. Paths in `skills.custom_paths`
 3. `~/.copilot-shell/skills/`
-4. Skill directories from Extensions
-5. `/usr/local/share/anolisa/skills/`
-6. `/usr/share/anolisa/skills/`
+4. `$XDG_DATA_HOME/anolisa/skills/` (default `~/.local/share/anolisa/skills/`)
+5. Skill directories from Extensions
+6. `/usr/local/share/anolisa/skills/`
+7. `/usr/share/anolisa/skills/`
 
-The raw backend of `anolisa install os-skills` uses
-`/usr/local/share/anolisa/skills/` for system installs. Raw user data directories
-are not searched automatically. Within custom or Extension directories,
+The raw backend of `anolisa install os-skills` uses the user data directory
+for user installs and `/usr/local/share/anolisa/skills/` for system installs.
+An unset, empty, or relative `XDG_DATA_HOME`, or one containing `.` or `..`
+path segments, uses the default above. Within custom or Extension directories,
 the first directory containing a name wins for both listing and loading.
 
 For a custom system prefix, run the cosh installed under that same prefix.

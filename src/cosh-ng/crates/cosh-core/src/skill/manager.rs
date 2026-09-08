@@ -43,10 +43,10 @@ impl SkillManager {
             extension_paths,
             change_tx,
             watcher_handle: RwLock::new(None),
-            user_paths: dirs::home_dir()
-                .map(|home| home.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
-                .into_iter()
-                .collect(),
+            user_paths: user_skill_dirs(
+                dirs::home_dir(),
+                std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+            ),
             system_paths: crate::paths::system_data_dirs()
                 .into_iter()
                 .map(|dir| dir.join(SKILLS_DIR))
@@ -215,6 +215,25 @@ impl SkillManager {
             .flat_map(|&level| self.dirs_of(level))
             .collect()
     }
+}
+
+// ANOLISA uses the XDG layout on both Linux and macOS, rather than the
+// platform-specific data directory returned by dirs::data_dir(). Match its
+// install layout by ignoring relative roots and explicit dot segments.
+fn user_skill_dirs(home: Option<PathBuf>, data_home: Option<PathBuf>) -> Vec<PathBuf> {
+    let data_home = data_home
+        .filter(|path| {
+            path.is_absolute()
+                && !path
+                    .to_string_lossy()
+                    .split(std::path::MAIN_SEPARATOR)
+                    .any(|segment| segment == "." || segment == "..")
+        })
+        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+    home.into_iter()
+        .map(|home| home.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
+        .chain(data_home.map(|data| data.join("anolisa/skills")))
+        .collect()
 }
 
 /// Expand `~`, `${VAR}`, and `$VAR` in a path string.
@@ -418,14 +437,21 @@ mod tests {
                 PathBuf::from("/usr/share/anolisa/skills"),
             ]
         );
-        inner.user_paths = vec![root.path().join("home/.copilot-shell/skills")];
+        inner.user_paths = user_skill_dirs(Some(root.path().join("home")), None);
+        assert_eq!(
+            inner.user_paths,
+            vec![
+                root.path().join("home/.copilot-shell/skills"),
+                root.path().join("home/.local/share/anolisa/skills"),
+            ]
+        );
         inner.system_paths = inner
             .system_paths
             .iter()
             .map(|path| root.path().join(path.strip_prefix("/").unwrap()))
             .collect();
         let dirs = mgr.watch_dirs();
-        assert_eq!(dirs.len(), 8);
+        assert_eq!(dirs.len(), 9);
         for (i, dir) in dirs.iter().enumerate() {
             std::fs::create_dir_all(dir).unwrap();
             for name in ["shared".to_string(), format!("only-{i}")] {
@@ -436,8 +462,8 @@ mod tests {
                 .unwrap();
             }
         }
-        // Removing each winner exposes the next directory without hiding
-        // skills unique to any lower-priority root.
+        // Removing each winner exposes the next directory, including both
+        // raw roots, without hiding skills unique to any lower-priority root.
         for dir in &dirs {
             mgr.refresh().await;
             let listed = mgr.list().await;
@@ -463,7 +489,7 @@ mod tests {
 
         let mut mgr = isolated_manager(project_dir.path(), vec![custom_dir.path().to_path_buf()]);
         let inner = Arc::get_mut(&mut mgr).unwrap();
-        inner.user_paths = vec![project_dir.path().join("home/.copilot-shell/skills")];
+        inner.user_paths = user_skill_dirs(Some(project_dir.path().join("home")), None);
         inner.system_paths = vec![project_dir.path().join("usr/local/share/anolisa/skills")];
         let dirs = mgr.watch_dirs();
         for dir in &dirs {

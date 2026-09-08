@@ -918,3 +918,33 @@ def test_invalid_mode_reports_ask_fallback(monkeypatch, capsys):
 
     assert skill_ledger_hook._read_policy() == "ask"
     assert "invalid SKILL_LEDGER_MODE; using ask" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "data_home", [None, "", "relative", "/x/./y", "/x/../y", "absolute"]
+)
+@pytest.mark.parametrize("with_context", [False, True])
+def test_raw_user_skill_reaches_block_policy(
+    mock_cli_env, tmp_path, data_home, with_context
+):
+    env = mock_cli_env["make_env"](json.dumps({"message": "raw skill denied"}))
+    home = tmp_path / "home"
+    root = tmp_path / "XDG Data" if data_home == "absolute" else home / ".local/share"
+    skill = root / "anolisa/skills/raw-probe"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
+    env.update(
+        HOME=str(home),
+        XDG_DATA_HOME=str(root) if data_home == "absolute" else data_home or "",
+        SKILL_LEDGER_MODE="block",
+    )
+    output = _run_hook(
+        _make_ng_skill_event(
+            "raw-probe",
+            mock_cli_env["cwd"],
+            skill / "SKILL.md" if with_context else None,
+        ),
+        env_override=env,
+    )
+    assert output["decision"] == "block"
+    assert "raw skill denied" in output["reason"]

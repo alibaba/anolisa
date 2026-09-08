@@ -22,12 +22,14 @@ Skills 是可复用的操作指令，用于处理重复任务。添加 Skill 后
 1. `<workspace>/.copilot-shell/skills/`
 2. `skills.custom_paths` 中的路径
 3. `~/.copilot-shell/skills/`
-4. Extensions 提供的 Skill 目录
-5. `/usr/local/share/anolisa/skills/`
-6. `/usr/share/anolisa/skills/`
+4. `$XDG_DATA_HOME/anolisa/skills/`（默认 `~/.local/share/anolisa/skills/`）
+5. Extensions 提供的 Skill 目录
+6. `/usr/local/share/anolisa/skills/`
+7. `/usr/share/anolisa/skills/`
 
-`anolisa install os-skills` 的 raw backend 在系统级安装时使用
-`/usr/local/share/anolisa/skills/`。raw 用户数据目录不会被自动搜索。
+`anolisa install os-skills` 的 raw backend 在用户级安装时使用上述用户数据目录，
+在系统级安装时使用 `/usr/local/share/anolisa/skills/`。
+`XDG_DATA_HOME` 未设置、为空、为相对路径或包含 `.`、`..` 路径段时使用上述默认值。
 在自定义或 Extension 目录中，同名 Skill 均采用第一个包含该名称的目录，列表与加载结果一致。
 
 使用自定义系统前缀时，应运行安装在同一前缀下的 cosh。

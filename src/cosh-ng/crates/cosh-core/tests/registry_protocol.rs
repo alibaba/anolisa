@@ -844,26 +844,30 @@ fn registry_skills_list_returns_success() {
 }
 
 #[test]
-fn registry_skills_does_not_autodiscover_raw_user_roots() {
+fn registry_skills_discovers_raw_user_data_directory() {
     let xdg = tempfile::tempdir().unwrap();
-    for data_home in [None, Some(xdg.path().to_str().unwrap())] {
+    let dot = xdg.path().join("./data");
+    let parent = xdg.path().join("../data");
+    for (data_home, use_xdg) in [
+        (None, false),
+        (Some(xdg.path().to_str().unwrap()), true),
+        (Some(""), false),
+        (Some("relative-data"), false),
+        (Some(dot.to_str().unwrap()), false),
+        (Some(parent.to_str().unwrap()), false),
+    ] {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let data_dir = data_home
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| home.path().join(".local/share"));
+        let data_dir = if use_xdg {
+            xdg.path().to_path_buf()
+        } else {
+            home.path().join(".local/share")
+        };
         let skill_dir = data_dir.join("anolisa/skills/raw-install-probe");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: raw-install-probe\ndescription: raw user install\n---\nRaw skill body.",
-        )
-        .unwrap();
-        let legacy = home.path().join(".copilot-shell/skills/legacy-probe");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(
-            legacy.join("SKILL.md"),
-            "---\nname: legacy-probe\ndescription: legacy user install\n---\nLegacy body.",
         )
         .unwrap();
         let env: Vec<_> = data_home
@@ -880,21 +884,13 @@ fn registry_skills_does_not_autodiscover_raw_user_roots() {
             &env,
         );
         assert_eq!(response["success"], true);
-        let skills = response["data"].as_array().unwrap();
-        assert!(skills.iter().any(|skill| skill["name"] == "legacy-probe"));
-        assert!(!skills
+        let skill = response["data"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|skill| skill["name"] == "raw-install-probe"));
-        let detail = run_registry_request_with_args_and_env(
-            "skills",
-            "detail",
-            serde_json::json!({"name": "raw-install-probe"}),
-            home.path(),
-            Some(project.path()),
-            &[],
-            &env,
-        );
-        assert_eq!(detail["success"], false);
+            .find(|skill| skill["name"] == "raw-install-probe")
+            .unwrap_or_else(|| panic!("raw skill missing for XDG_DATA_HOME={data_home:?}"));
+        assert_eq!(skill["level"], "user");
     }
 }
 
