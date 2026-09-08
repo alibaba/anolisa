@@ -47,6 +47,15 @@ The page reads Tokenless's own statistics database, so numbers appear only after
 optimized something. A savings figure of 0 usually means Tokenless is installed but not active for
 the Agent that produced those sessions.
 
+Savings association also requires AgentSight to capture and parse the corresponding output tool-call
+ID. Non-SSE HTTP/1.1 responses split across TLS reads are assembled using Content-Length or chunked
+framing before usage and tool calls are extracted. Oversized responses are discarded with a collector
+warning. Incomplete responses, including close-delimited responses without Content-Length or chunked
+framing, cannot supply complete usage or tool-call IDs; Tokenless stats can therefore remain
+unassociated. When SQLite storage is enabled, idle calls retain their request as pending evidence
+for interruption detection and can still complete if the response resumes. Response buffering remains
+bounded by the connection capacity and per-connection body limit.
+
 ## agent-sec-core: security observability and audit
 
 When [agent-sec-core](../../agent-security/agent-sec-core/QUICKSTART.md) is installed, two more

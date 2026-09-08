@@ -44,6 +44,13 @@ Token，两侧都不需要额外配置：
 该页面读取的是 Tokenless 自己的统计数据库，因此只有 Tokenless 真正优化过之后才会有数字。节省量为 0
 通常意味着 Tokenless 装了但没有对产生这些会话的 Agent 生效。
 
+节省统计的关联还要求 AgentSight 完整采集并解析对应的输出 tool-call ID。非 SSE HTTP/1.1 响应跨多次
+TLS 读取时，会依据 Content-Length 或 chunked 消息边界完成组装，再提取 usage 和工具调用。超限响应
+会被丢弃并在采集器日志中告警。不完整响应（包括没有 Content-Length 或 chunked 定界、仅靠关闭连接
+确定结束的响应）无法提供完整的 usage 或 tool-call ID，Tokenless 已记录的 stats 因此仍可能无法关联。
+启用 SQLite 存储时，空闲调用会保留请求作为 pending 证据供中断检测使用，响应恢复后仍可继续完成；
+响应缓冲仍受连接数量和单连接响应体大小上限约束。
+
 ## agent-sec-core：安全可观测与审计
 
 装了 [agent-sec-core](../../agent-security/agent-sec-core/QUICKSTART.md) 后，Dashboard 会多出两页：
