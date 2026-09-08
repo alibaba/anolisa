@@ -49,7 +49,7 @@ SPEC_FILE := $(NAME).spec
 
 .PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test lint fmt clean install \
         install-adapter-resources uninstall dist spec rpm srpm \
-        smoke help
+        test-openclaw-plugin smoke help
 
 all: build
 
@@ -139,6 +139,16 @@ test-mcp: ## Run MCP integration tests only
 
 test-tools: ## Run Tier A file-tool integration tests only
 	cargo test --test file_tools_test
+
+# The openclaw adapter ships TS unit tests (tests/unit/*-test.ts) that `npm test`
+# runs through tsx. They are deliberately not a prerequisite of `test:` above —
+# that target is cargo-only and must stay runnable without a Node toolchain or
+# registry access. Use this target to exercise the adapter suite (see #3134 for
+# wiring it into the `Test agent-memory` CI job, which has no Node step today).
+test-openclaw-plugin: ## Run openclaw adapter TS unit tests (needs npm registry)
+	@echo "==> Running openclaw adapter unit tests..."
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm test
 
 # =============================================================================
 # REMOTE Linux build/test (for cross-platform development)
