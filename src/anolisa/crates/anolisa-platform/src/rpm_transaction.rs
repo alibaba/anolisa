@@ -136,6 +136,54 @@ impl<R: CommandRunner> RpmTransaction<R> {
 }
 
 impl<R: CommandRunner> PackageTransaction for RpmTransaction<R> {
+    fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        let mut args = self.dnf_args("install", packages);
+        // Override both our non-interactive apply flag and host configuration.
+        args.retain(|arg| arg != "-y");
+        // A site may allow skipped targets or hide the messages we classify.
+        // Preflight must prove every requested package is installable.
+        args.splice(
+            0..0,
+            [
+                "--assumeno",
+                "--setopt=strict=1",
+                "--setopt=debuglevel=2",
+                "--setopt=errorlevel=2",
+            ]
+            .map(str::to_string),
+        );
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self
+            .runner
+            .run(DNF, &refs)
+            .map_err(|err| map_spawn_error(err, DNF, "install preflight"))?;
+        // DNF 4 declines a solved transaction with exit 1. Logging and plugins
+        // may put the confirmation marker in either stream alongside warnings.
+        // Other pre-confirmation refusals reuse the same bare abort message.
+        let lines = || out.stdout.lines().chain(out.stderr.lines());
+        let resolved = lines().any(|line| line.trim() == "Dependencies resolved.");
+        let declined = lines().any(|line| {
+            matches!(
+                line.trim(),
+                "Operation aborted." | "Error: Operation aborted."
+            )
+        });
+        let refused = lines().any(|line| {
+            line.contains("usr_drift_protected_paths")
+                || line.contains("Persistent transactions aren't supported")
+                || line.contains("configured to be read-only")
+        });
+        if out.code == Some(0) || (out.code == Some(1) && resolved && declined && !refused) {
+            return Ok(());
+        }
+        Err(PackageTransactionError::TransactionFailed {
+            command: DNF.to_string(),
+            operation: "install preflight".to_string(),
+            code: out.code,
+            stderr: format!("{}{}", out.stdout, out.stderr),
+        })
+    }
+
     fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.run_dnf("install", packages)
     }
@@ -272,6 +320,132 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
         })
+    }
+
+    #[test]
+    fn install_preflight_distinguishes_solver_success_from_failures() {
+        for (code, stdout, stderr, succeeds) in [
+            (Some(0), "Nothing to do.\n", "", true),
+            (
+                Some(1),
+                "Dependencies resolved.\nTransaction Summary\n",
+                "Operation aborted.\n",
+                true,
+            ),
+            (
+                Some(1),
+                "Dependencies resolved.\nOperation aborted.\n",
+                "",
+                true,
+            ),
+            (
+                Some(1),
+                "Dependencies resolved.\n",
+                "Error: Operation aborted.\n",
+                true,
+            ),
+            (
+                Some(1),
+                "Dependencies resolved.\n",
+                "Plugin warning: optional integration unavailable\nOperation aborted.\n",
+                true,
+            ),
+            (
+                Some(1),
+                "Operation aborted.\n",
+                "Dependencies resolved.\n",
+                true,
+            ),
+            (
+                Some(1),
+                "Dependencies resolved.\nThis bootc system is configured to be read-only.\n",
+                "Operation aborted.\n",
+                false,
+            ),
+            (
+                Some(1),
+                "Dependencies resolved.\nPersistent transactions aren't supported on bootc systems.\n",
+                "Error: Operation aborted.\n",
+                false,
+            ),
+            (
+                Some(1),
+                "Dependencies resolved.\n",
+                "Operation aborted. Pass --setopt=usr_drift_protected_paths= to disable this check.\n",
+                false,
+            ),
+            (
+                Some(1),
+                "",
+                "installed cosh-ng conflicts with copilot-shell",
+                false,
+            ),
+            (Some(1), "", "Operation aborted.\n", false),
+            (
+                Some(1),
+                "Dependencies resolved.\n",
+                "repository failed",
+                false,
+            ),
+            (
+                None,
+                "Dependencies resolved.\n",
+                "Operation aborted.\n",
+                false,
+            ),
+            (
+                Some(1),
+                "",
+                "This command has to be run with superuser privileges",
+                false,
+            ),
+        ] {
+            let t = RpmTransaction::with_runner(FakeCommandRunner {
+                dnf: Some(ok_out(code, stdout, stderr)),
+                expected_verb: String::new(),
+                expected_package: String::new(),
+                expected_args: Some(vec![
+                    "--assumeno".into(),
+                    "--setopt=strict=1".into(),
+                    "--setopt=debuglevel=2".into(),
+                    "--setopt=errorlevel=2".into(),
+                    "install".into(),
+                    "copilot-shell".into(),
+                ]),
+            });
+            let result = t.check_install(&["copilot-shell"]);
+            assert_eq!(result.is_ok(), succeeds, "{code:?}: {stdout} {stderr}");
+            if let Err(err) = result {
+                assert!(err.to_string().contains(stderr.trim()));
+            }
+        }
+    }
+
+    #[test]
+    fn install_preflight_keeps_repo_pins_and_joint_solver_targets() {
+        let t = txn_with_repo(
+            "install",
+            "cosh-ng-0.23.0-1.alnx4.x86_64",
+            &[
+                "--assumeno",
+                "--setopt=strict=1",
+                "--setopt=debuglevel=2",
+                "--setopt=errorlevel=2",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "repository-packages",
+                "anolisa-configured",
+                "install",
+                "cosh-ng-0.23.0-1.alnx4.x86_64",
+                "copilot-shell",
+            ],
+            ok_out(Some(1), "", "cosh-ng conflicts with copilot-shell"),
+        );
+        let err = t
+            .check_install(&["cosh-ng-0.23.0-1.alnx4.x86_64", "copilot-shell"])
+            .expect_err("joint solver conflict");
+        assert!(err.to_string().contains("cosh-ng conflicts"));
     }
 
     #[test]

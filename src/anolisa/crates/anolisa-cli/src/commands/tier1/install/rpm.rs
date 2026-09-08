@@ -153,3 +153,18 @@ pub(crate) fn rpm_package_candidates_with_index(
         }
     })
 }
+
+/// Reject native solver failures before creating recovery evidence.
+pub(crate) fn check_rpm_install(
+    provider: &anolisa_core::providers::DelegatedProvider<'_>,
+    packages: &[&str],
+    command: &str,
+) -> Result<(), crate::response::CliError> {
+    provider.check_install(packages).map_err(|err| crate::response::CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "RPM install preflight for '{}' failed: {err}; no packages were changed and no recovery journal was created — resolve the reported package-manager error before retrying",
+            packages.join(", ")
+        ),
+    })
+}

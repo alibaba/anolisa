@@ -64,7 +64,8 @@ use super::owned_ops::{
 use super::raw::{load_dry_run_install_contract, resolve_raw};
 use super::render::repo_config_err;
 use super::rpm::{
-    PinError, RpmTarget, resolve_pinned_candidate, rpm_package_candidates_with_index,
+    PinError, RpmTarget, check_rpm_install, resolve_pinned_candidate,
+    rpm_package_candidates_with_index,
 };
 use super::types::{RawRepositoryOrigin, RawResolution, ResolveInputs};
 use super::{ANOLISA_RPM_REPO_ID, COMMAND, InstallArgs};
@@ -603,6 +604,18 @@ pub(crate) fn plan_component(
             PlannedRoute::AlreadyInstalled { version }
         }
     };
+
+    if let ProviderTarget::Delegated {
+        package, artifact, ..
+    } = &request.target
+        && matches!(route, PlannedRoute::Delegated { .. })
+    {
+        check_rpm_install(
+            &provider,
+            &[artifact.as_deref().unwrap_or(package)],
+            &command,
+        )?;
+    }
 
     Ok(PlannedComponent {
         command,
@@ -1299,6 +1312,13 @@ fn install_applied(
         degraded_rpmdb,
         command,
     )?;
+
+    if let ProviderTarget::Delegated {
+        package, artifact, ..
+    } = &request.target
+    {
+        check_rpm_install(provider, &[artifact.as_deref().unwrap_or(package)], command)?;
+    }
 
     let evidence = JournalEvidence::new(journal_dir, &store.operations);
     let mut journal_gate = LockedJournalGate::load(&lock, evidence, command)?;

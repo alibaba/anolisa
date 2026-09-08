@@ -118,6 +118,10 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
+    fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        panic!("this path must not preflight an install")
+    }
+
     fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())

@@ -97,6 +97,10 @@ impl NoNativeTransaction {
 }
 
 impl PackageTransaction for NoNativeTransaction {
+    fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        Err(Self::refused("install preflight", packages))
+    }
+
     fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         Err(Self::refused("install", packages))
     }

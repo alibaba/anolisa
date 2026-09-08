@@ -84,6 +84,9 @@ installation even when the same component is already installed system-wide.
 See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
 for command forms, scope behavior, and recovery workflows.
 
+RPM install plans run DNF conflict checks before creating a recovery journal.
+DNF 4 requires root even for this check; use `sudo` with RPM `--dry-run`.
+
 ## Architecture
 
 Five-crate Cargo workspace:

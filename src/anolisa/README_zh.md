@@ -83,6 +83,9 @@ scope。因此，即使 system scope 已安装同名组件，
 完整的命令形式、scope 行为与恢复流程见
 [CLI 用户指南](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md)。
 
+RPM 安装计划会先通过 DNF 检查冲突，再创建 recovery journal。
+DNF 4 的预检也要求 root，因此 RPM `--dry-run` 需要使用 `sudo`。
+
 ## 架构
 
 五 crate Cargo workspace：

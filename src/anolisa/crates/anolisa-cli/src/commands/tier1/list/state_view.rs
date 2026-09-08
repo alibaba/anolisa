@@ -4,7 +4,10 @@ use anolisa_core::state_store::StateStore;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 
 use crate::commands::common;
-use crate::resolution::ComponentIndexEntry;
+use crate::resolution::{
+    BackendKind, ComponentIndex, ComponentIndexEntry, ComponentResolver, ResolutionSet,
+    ResolveOptions,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalState {
@@ -97,20 +100,22 @@ impl LocalProjection {
 
 pub(super) fn project_component(
     entry: &ComponentIndexEntry,
+    index: &ComponentIndex,
     state: &StateStore,
     rpm_query: Option<&dyn PackageQuery>,
 ) -> LocalProjection {
     match state.find(ObjectKind::Component, &entry.name) {
         Some(installation) => project_tracked_object(installation, rpm_query),
-        None => project_untracked_entry(entry, rpm_query),
+        None => project_untracked_entry(entry, index, rpm_query),
     }
 }
 
 fn project_untracked_entry(
     entry: &ComponentIndexEntry,
+    index: &ComponentIndex,
     rpm_query: Option<&dyn PackageQuery>,
 ) -> LocalProjection {
-    match observed_rpm_info(entry, rpm_query) {
+    match observed_rpm_info(entry, index, rpm_query) {
         Some(info) => projection_from_observed_rpm(info),
         None => LocalProjection {
             backend: None,
@@ -227,37 +232,25 @@ fn rpm_drift_state(
 
 fn observed_rpm_info(
     entry: &ComponentIndexEntry,
+    index: &ComponentIndex,
     rpm_query: Option<&dyn PackageQuery>,
 ) -> Option<PackageInfo> {
     let query = rpm_query?;
-
-    // 1. Probe RPM backend package names.
-    for backend in entry.backends.iter().filter(|b| b.kind == "rpm") {
-        if let Some(info) = safe_query_installed(query, &backend.package) {
-            return Some(info);
-        }
+    // Without an RPM mapping, the resolver would query available providers;
+    // list only observes installed packages from the published RPM backends.
+    if !entry.backends.iter().any(|backend| backend.kind == "rpm") {
+        return None;
     }
-
-    // 2. Probe RPM package aliases (alternate historical names).
-    for alias in entry.aliases.iter().filter(|a| a.kind == "rpm-package") {
-        if let Some(info) = safe_query_installed(query, &alias.name) {
-            return Some(info);
-        }
-    }
-
-    // 3. Fallback: use `what_provides` for backends that declare a Provides
-    //    capability. This catches legacy RPMs whose package name differs from
-    //    the index entry but still declares `anolisa-component(<name>)`.
-    for backend in entry.backends.iter().filter(|b| b.kind == "rpm") {
-        let Some(capability) = backend.provides.as_deref().filter(|p| !p.is_empty()) else {
-            continue;
-        };
-        if let Some(info) = safe_what_provides(query, capability) {
-            return Some(info);
-        }
-    }
-
-    None
+    // Observation must use the same package authority as install. Aliases
+    // identify components; a stale capability cannot override the index.
+    let resolver = ComponentResolver::new(Some(index), None, Some(query));
+    let ResolutionSet::Unique(target) = resolver
+        .resolve(&entry.name, BackendKind::Rpm, ResolveOptions::default())
+        .ok()?
+    else {
+        return None;
+    };
+    safe_query_installed(query, &target.package)
 }
 
 /// Query an installed package, treating all errors as "not found" so the list
@@ -272,18 +265,6 @@ fn safe_query_installed(query: &dyn PackageQuery, package: &str) -> Option<Packa
         }
         Ok(None) => None,
         Err(_) => None,
-    }
-}
-
-/// Resolve a capability to a single installed package via `what_provides`,
-/// then fetch its full info. Returns `None` for zero or ambiguous (>1)
-/// providers so the list summary never picks an arbitrary package.
-fn safe_what_provides(query: &dyn PackageQuery, capability: &str) -> Option<PackageInfo> {
-    let names = query.what_provides_installed(capability).ok()?;
-    if names.len() == 1 {
-        safe_query_installed(query, &names[0])
-    } else {
-        None
     }
 }
 

@@ -212,7 +212,24 @@ pub(super) fn run(
             members: members.clone(),
         });
         if preview {
+            let per_args = per_component_args(&merged[0].name, request.args);
+            let packages: Vec<&str> = merged.iter().map(|item| item.package.as_str()).collect();
+            let preflight = host_backends(&merged[0].name, &per_args, &suppressed_ctx).and_then(
+                |(query, txn)| {
+                    super::super::check_rpm_install(
+                        &anolisa_core::providers::DelegatedProvider::new(&query, &txn),
+                        &packages,
+                        "install --all",
+                    )
+                },
+            );
             for item in &merged {
+                if let Err(err) = &preflight {
+                    results.insert(item.name.clone(), failed_item(&item.name, err.reason()));
+                    fail_fast_tripped = request.args.fail_fast;
+                    continue;
+                }
+
                 let steps = item.planned.route.steps().to_vec();
                 output(BatchOutputEvent::PreviewPlan {
                     component: item.name.clone(),

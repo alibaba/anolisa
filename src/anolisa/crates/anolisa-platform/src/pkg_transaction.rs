@@ -65,6 +65,14 @@ pub enum PackageTransactionError {
 /// single-package call is the one-element slice; callers must not pass an
 /// empty slice.
 pub trait PackageTransaction {
+    /// Resolve an install using the same repositories and solver as apply,
+    /// without downloading packages, running scriptlets, or changing rpmdb.
+    /// Metadata caches may be refreshed. Pass the exact pinned specs, if any.
+    ///
+    /// # Errors
+    /// Returns [`PackageTransactionError`] if solving fails or cannot run.
+    fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError>;
+
     /// Install `packages` from the configured repos in one transaction.
     ///
     /// Delegates the whole file transaction (dependency solving, download,

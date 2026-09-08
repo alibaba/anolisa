@@ -146,7 +146,7 @@ fn build_rows_for_target(
         .components
         .iter()
         .filter_map(|entry| {
-            let projection = project_component(entry, state, rpm_query);
+            let projection = project_component(entry, index, state, rpm_query);
             if args.installed && !projection.local_state.matches_installed_filter() {
                 return None;
             }
@@ -188,7 +188,8 @@ fn build_rows_from_view(
                 return matching_records
                     .into_iter()
                     .filter_map(|record| {
-                        let projection = project_component(entry, &record.root.state, rpm_query);
+                        let projection =
+                            project_component(entry, index, &record.root.state, rpm_query);
                         if args.installed && !projection.local_state.matches_installed_filter() {
                             return None;
                         }
@@ -207,7 +208,7 @@ fn build_rows_from_view(
                     .collect::<Vec<_>>();
             }
 
-            let projection = project_component(entry, &view.writable.state, rpm_query);
+            let projection = project_component(entry, index, &view.writable.state, rpm_query);
             if args.installed && !projection.local_state.matches_installed_filter() {
                 return Vec::new();
             }

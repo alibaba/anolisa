@@ -1285,6 +1285,10 @@ mod tests {
     }
 
     impl PackageTransaction for FakeRpm {
+        fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+            panic!("this path must not preflight an install")
+        }
+
         fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("uninstall path must not delegate a dnf install");
         }
@@ -1360,6 +1364,10 @@ mod tests {
     }
 
     impl PackageTransaction for RacingRpm {
+        fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+            panic!("this path must not preflight an install")
+        }
+
         fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("uninstall path must not install")
         }

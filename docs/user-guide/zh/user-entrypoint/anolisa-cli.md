@@ -55,6 +55,17 @@ anolisa install --all
 另一个 scope 中已有安装，不会让当前 scope 变成“already installed”。已有
 记录的重装或变更由 lifecycle planner 处理，不会被静默覆盖。
 
+RPM 安装（包括 `--dry-run` 和合并的 `--all` 计划）会在创建 recovery
+journal 前，让 DNF 求解依赖和包冲突。预检使用与安装相同的仓库和版本约束，
+可能刷新仓库 metadata，但不会下载包或修改 rpmdb。DNF 4 的预检也要求 root：
+
+```bash
+sudo anolisa --install-mode system --dry-run install cosh --backend rpm
+```
+
+存在冲突时命令失败，不留下 pending operation；解决报告的冲突后再重试。
+预检成功不保证后续下载、scriptlet 或 transaction 一定成功。
+
 ### uninstall
 
 从所选 scope 移除一个安装：
@@ -97,6 +108,11 @@ anolisa status <component>
 user view 中两个 scope 都有同名组件时，user record 为 active，system record
 仍作为 shadowed state 可见。system-mode view 只读取 system root，不枚举其他
 用户的 state。
+
+未跟踪的 RPM 观察使用与安装相同的包解析器。index 映射优先于历史包 alias
+和 capability：提供 `anolisa-component(cosh)` 的旧 cosh-ng RPM 显示在
+cosh-ng 下，cosh 仍解析到 copilot-shell。`action=install` 表示生命周期操作，
+并不代表已检查 native 依赖；请通过 RPM install dry-run 检查这些包能否共存。
 
 ### doctor
 
@@ -155,6 +171,10 @@ sudo anolisa --install-mode system forget <component>
 authority。`repair` 协调指定 scope 的 record 与 rpmdb 或中断 journal。
 `forget` 只删除所选 scope 的记录，绝不执行 package 或 owned-file 删除；
 user scope 的 forget 不能删除只是在视图中可见的 system 记录。
+
+有 pending operation 时，即使安装尚未创建安装记录就失败，`forget` 也会
+引导先运行 `repair`。repair 会将 journal 与 rpmdb 协调；forget 不能丢弃
+可能已经改变系统的 transaction 证据。
 
 ### adapter
 

@@ -168,7 +168,7 @@ fn rpm_query_command_missing_keeps_state_index_projection() {
 }
 
 #[test]
-fn observed_rpm_found_via_alias_when_backend_package_not_installed() {
+fn alias_does_not_override_the_install_package() {
     let index = sample_index_with_aliases();
     // Backend package "copilot-shell" is not installed; alias "cosh-old" is.
     let query = FakeRpmQuery {
@@ -182,14 +182,14 @@ fn observed_rpm_found_via_alias_when_backend_package_not_installed() {
 
     let projection = projection_for_index(&index, "cosh", &empty_state(), &query);
 
-    assert_eq!(projection.local_state_label(), "observed");
-    assert_eq!(projection.ownership_label(), "rpm");
+    assert_eq!(projection.local_state_label(), "not_installed");
+    assert_eq!(projection.ownership_label(), "none");
     assert_eq!(projection.action_label(), "install");
-    assert_eq!(projection.rpm_package.as_deref(), Some("cosh-old"));
+    assert_eq!(projection.rpm_package, None);
 }
 
 #[test]
-fn observed_rpm_found_via_provides_when_no_direct_match() {
+fn capability_does_not_override_the_install_package() {
     let index = sample_index_with_aliases();
     // Neither backend package nor alias is installed, but a package providing
     // `anolisa-component(cosh)` exists in rpmdb.
@@ -207,10 +207,10 @@ fn observed_rpm_found_via_provides_when_no_direct_match() {
 
     let projection = projection_for_index(&index, "cosh", &empty_state(), &query);
 
-    assert_eq!(projection.local_state_label(), "observed");
-    assert_eq!(projection.ownership_label(), "rpm");
+    assert_eq!(projection.local_state_label(), "not_installed");
+    assert_eq!(projection.ownership_label(), "none");
     assert_eq!(projection.action_label(), "install");
-    assert_eq!(projection.rpm_package.as_deref(), Some("cosh-legacy"));
+    assert_eq!(projection.rpm_package, None);
 }
 
 #[test]
@@ -239,4 +239,78 @@ fn observed_rpm_provides_with_ambiguous_providers_is_not_observed() {
 
     assert_eq!(projection.local_state_label(), "not_installed");
     assert_eq!(projection.ownership_label(), "none");
+}
+
+#[test]
+fn legacy_cosh_ng_capability_is_not_counted_as_cosh() {
+    let mut index = sample_index_with_aliases();
+    let mut ng = index.components[0].clone();
+    ng.name = "cosh-ng".to_string();
+    ng.aliases.clear();
+    ng.backends.retain(|backend| backend.kind == "rpm");
+    ng.backends[0].package = "cosh-ng".to_string();
+    ng.backends[0].provides = Some("anolisa-component(cosh-ng)".to_string());
+    index.components.push(ng);
+    let query = FakeRpmQuery {
+        installed: vec![(
+            "cosh-ng".to_string(),
+            pkg_info("cosh-ng", "0.23.0", Some("1.alnx4"), "x86_64"),
+        )],
+        what_provides: vec![(
+            "anolisa-component(cosh)".to_string(),
+            vec!["cosh-ng".to_string()],
+        )],
+        command_missing: false,
+    };
+    for state in [
+        empty_state(),
+        state_with_component_object(rpm_component_object(
+            "cosh-ng",
+            LifecycleStatus::Installed,
+            managed(),
+            "cosh-ng",
+            "0.23.0-1.alnx4",
+        )),
+    ] {
+        let cosh = projection_for_index(&index, "cosh", &state, &query);
+        assert_eq!(cosh.local_state_label(), "not_installed");
+        assert_eq!(cosh.rpm_package, None);
+        let ng = projection_for_index(&index, "cosh-ng", &state, &query);
+        assert_eq!(ng.rpm_package.as_deref(), Some("cosh-ng"));
+    }
+}
+
+#[test]
+fn ambiguous_install_packages_are_not_arbitrarily_observed() {
+    let mut index = sample_index_with_aliases();
+    let mut backend = index.components[0].backends[1].clone();
+    backend.package = "cosh-vendor".to_string();
+    index.components[0].backends.push(backend);
+    let query = FakeRpmQuery {
+        installed: vec![(
+            "copilot-shell".to_string(),
+            pkg_info("copilot-shell", "2.8.0", None, "x86_64"),
+        )],
+        ..Default::default()
+    };
+    let projection = projection_for_index(&index, "cosh", &empty_state(), &query);
+    assert_eq!(projection.rpm_package, None);
+}
+
+#[test]
+fn raw_only_list_entry_does_not_query_rpm_repositories() {
+    struct NoRpmQuery;
+    impl PackageQuery for NoRpmQuery {
+        fn query_installed(&self, _: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            panic!("raw-only entries have no RPM observation target");
+        }
+        fn query_available(&self, _: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            panic!("list must not query available packages");
+        }
+        fn what_provides_installed(&self, _: &str) -> Result<Vec<String>, PackageQueryError> {
+            panic!("raw-only entries must not enter capability resolution");
+        }
+    }
+    let projection = projection_for("tokenless", &empty_state(), &NoRpmQuery);
+    assert_eq!(projection.local_state_label(), "not_installed");
 }
