@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anolisa_core::download::DownloadCache;
+use anolisa_core::download::{DownloadCache, DownloadError};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use serde::{Deserialize, Serialize};
@@ -702,11 +702,24 @@ pub(crate) fn load_component_index_from_base(
             reason: format!("test mode: refusing non-file URL {url}"),
         });
     }
-    let downloaded = cache
-        .fetch(&url, None)
-        .map_err(|err| ComponentIndexError::Fetch {
-            reason: format!("failed to fetch {url}: {err}"),
-        })?;
+    let temporary_cache;
+    let downloaded = match cache.fetch(&url, None) {
+        Err(DownloadError::Io { path, source })
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+                && path.starts_with(&layout.cache_dir) =>
+        {
+            // System previews must not require a writable system cache or home.
+            // Keep the private cache alive until the index has been parsed.
+            temporary_cache = tempfile::tempdir().map_err(|err| ComponentIndexError::Fetch {
+                reason: format!("cannot create temporary component index cache: {err}"),
+            })?;
+            DownloadCache::new(temporary_cache.path().to_path_buf()).fetch(&url, None)
+        }
+        result => result,
+    }
+    .map_err(|err| ComponentIndexError::Fetch {
+        reason: format!("failed to fetch {url}: {err}"),
+    })?;
     ComponentIndex::load(&downloaded.cached_path)
 }
 
@@ -723,6 +736,55 @@ pub(crate) fn load_optional_component_index(
 mod tests {
     use super::*;
     use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
+
+    #[cfg(unix)]
+    #[test]
+    fn component_index_loads_without_write_access_to_system_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses mode bits; run this regression as an unprivileged user.
+        if anolisa_platform::privilege::is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let repo = tmp.path().join("repo/v1");
+        std::fs::create_dir_all(&repo).expect("repo directory");
+        let index_path = repo.join("components-v2.toml");
+        std::fs::write(
+            &index_path,
+            "schema_version = 2\n[[components]]\nname = 'cosh'\ntargets = [{ os = 'linux', arch = 'x86_64' }]\n",
+        )
+        .expect("index");
+        std::fs::create_dir_all(&layout.cache_dir).expect("cache directory");
+        std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("read-only cache");
+
+        let base_url = format!("file://{}", repo.display());
+        let loaded = load_component_index_from_base(&layout, &base_url);
+        std::fs::write(&index_path, "schema_version = 1\n").expect("invalid index");
+        let invalid = load_component_index_from_base(&layout, &base_url);
+        let cache_entries = std::fs::read_dir(&layout.cache_dir)
+            .expect("read cache")
+            .count();
+        std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore cache permissions");
+
+        let index = loaded.expect("read-only cache must not prevent index validation");
+        assert_eq!(
+            resolve_index_identity("cosh", Some(&index)),
+            IndexIdentity::Resolved("cosh".to_string())
+        );
+        assert_eq!(
+            resolve_index_identity("unknown", Some(&index)),
+            IndexIdentity::Unsupported
+        );
+        assert!(matches!(
+            invalid,
+            Err(ComponentIndexError::UnsupportedSchema { .. })
+        ));
+        assert_eq!(cache_entries, 0, "system cache must remain untouched");
+    }
 
     #[derive(Default)]
     struct FakeQuery {
