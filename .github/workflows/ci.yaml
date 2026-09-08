@@ -1032,6 +1032,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # scripts/install.sh talks to the openclaw CLI, which cargo cannot
+      # cover; the stub-based negotiation test needs no Node/npm and runs
+      # in ~1 s using only the runner's bash + make, so it precedes all
+      # toolchain setup — cheapest check fails fastest.
+      - name: Test OpenClaw adapter installer script
+        run: |
+          cd src/agent-memory
+          make test-openclaw-install
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.89.0'

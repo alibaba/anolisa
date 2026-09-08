@@ -26,6 +26,16 @@ anolisa install agent-memory
 sudo yum install agent-memory
 ```
 
+### OpenClaw adapter
+
+The bundled plugin (`memory-anolisa`) is deployed by
+`/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh`, which
+grants the plugin's declared capabilities by default. Set
+`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold consent — on hosts that gate
+consent the install then fails until consent is granted interactively. Set
+`AGENT_MEMORY_SAFE_INSTALL=1` to omit the unsafe-install bypass flag. Full
+reference: [user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
+
 ### Integration (MCP client)
 
 Add to your MCP config (Claude Code, Cursor, etc.):

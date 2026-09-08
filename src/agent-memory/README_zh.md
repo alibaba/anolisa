@@ -26,6 +26,13 @@ anolisa install agent-memory
 sudo yum install agent-memory
 ```
 
+### OpenClaw 适配器
+
+随包附带的插件（`memory-anolisa`）由
+`/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh` 部署，默认授予插件声明的能力。设置
+`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。设置
+`AGENT_MEMORY_SAFE_INSTALL=1` 可省略 unsafe-install 覆盖参数。完整说明见[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。
+
 ### 集成（MCP 客户端）
 
 添加到 MCP 配置（Claude Code、Cursor 等）：

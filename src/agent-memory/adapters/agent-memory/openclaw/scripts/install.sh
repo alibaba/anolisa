@@ -19,6 +19,29 @@ OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR%/}"
 OPENCLAW_HOME="${OPENCLAW_HOME%/}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 
+# Normalize the consent switch with the same systemd-style token table as
+# the Rust side's env_bool() (src/config.rs): only leading/trailing
+# whitespace is trimmed — deleting interior whitespace would normalize
+# 't rue' into a grant — and matching is case-insensitive. Unset or empty
+# accepts (the documented default); every other value, including
+# whitespace-only, aborts with rc=2 before any CLI call — the operator
+# must never believe they have withheld consent while the script accepts
+# it. This runs before every early exit (missing CLI, missing dist) so a
+# bad value is reported unconditionally.
+ACCEPT_CAPABILITIES=1
+_consent="${AGENT_MEMORY_ACCEPT_CAPABILITIES-}"
+if [ -n "$_consent" ]; then
+    _consent="${_consent#"${_consent%%[![:space:]]*}"}"
+    _consent="${_consent%"${_consent##*[![:space:]]}"}"
+    case "$(printf '%s' "$_consent" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) ACCEPT_CAPABILITIES=1 ;;
+        0|false|no|off) ACCEPT_CAPABILITIES=0 ;;
+        *)
+            echo "[${COMPONENT}] ERROR: AGENT_MEMORY_ACCEPT_CAPABILITIES='${AGENT_MEMORY_ACCEPT_CAPABILITIES}' is not a boolean (use 1/true/yes/on or 0/false/no/off)." >&2
+            exit 2 ;;
+    esac
+fi
+
 echo "[${COMPONENT}] Installing ${AGENT} plugin..."
 
 if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
@@ -69,18 +92,65 @@ if [ "$PROBE_RC" -ne 0 ]; then
     printf '[%s]          Installing with the base flags only.\n' "$COMPONENT" >&2
     INSTALL_HELP=""
 fi
+CONSENT_WITHHELD=0
 if [[ "$INSTALL_HELP" =~ (^|[^[:alnum:]_.-])--accept-capabilities([^[:alnum:]_.-]|$) ]]; then
-    INSTALL_ARGS+=("--accept-capabilities")
-    echo "[${COMPONENT}] Passing --accept-capabilities: granting install-time consent to memory-anolisa's declared capabilities."
+    if [ "$ACCEPT_CAPABILITIES" = "0" ]; then
+        # Deliberate refusal, not a silent skip: policies that forbid
+        # non-interactive consent grants must see the install fail loudly
+        # on gating hosts instead of succeeding with an implicit grant.
+        CONSENT_WITHHELD=1
+        echo "[${COMPONENT}] AGENT_MEMORY_ACCEPT_CAPABILITIES=0: withholding --accept-capabilities — capability consent is not granted by this script." >&2
+        echo "[${COMPONENT}]          Hosts that gate consent will reject this install until consent is granted interactively." >&2
+    else
+        INSTALL_ARGS+=("--accept-capabilities")
+        echo "[${COMPONENT}] Passing --accept-capabilities: granting install-time consent to memory-anolisa's declared capabilities."
+    fi
 elif [ -n "$INSTALL_HELP" ]; then
     echo "[${COMPONENT}] OpenClaw did not advertise --accept-capabilities (pre-2026.8.1 host); installing with the base flags."
+elif [ "$ACCEPT_CAPABILITIES" = "0" ]; then
+    # Unreachable unless the probe failed: the host's gating status is
+    # unknown, so surface that the opt-out is shaping the install.
+    echo "[${COMPONENT}] AGENT_MEMORY_ACCEPT_CAPABILITIES=0 is active; if this host gates consent, the install will fail." >&2
 fi
 
-env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_DIR" \
-    "${INSTALL_ARGS[@]}" || {
+# The transcript (tee into a log file, then grep the file — never a
+# short-circuit pipe, whose early match would SIGPIPE the producer under
+# pipefail) exists only for the consent-withheld path, the sole consumer of
+# the consent-rejection signal; every other install runs the CLI exactly as
+# before — stderr stays stderr, stdout stays the operator's terminal, so
+# TTY-gated colour/prompts survive on the SAFE_INSTALL blocking-scan path.
+# The merged 2>&1 on the withheld path is deliberate for a non-interactive
+# refusal transcript: the CLI's stderr surfaces on this script's stdout.
+INSTALL_CMD=(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
+    "$OPENCLAW_BIN" plugins install "$PLUGIN_DIR" "${INSTALL_ARGS[@]}")
+INSTALL_RC=0
+if [ "$CONSENT_WITHHELD" = "1" ]; then
+    INSTALL_LOG="$(mktemp -t agent-memory-openclaw-install.XXXXXX)"
+    trap 'rm -f "$INSTALL_LOG"' EXIT
+    "${INSTALL_CMD[@]}" 2>&1 | tee "$INSTALL_LOG" || INSTALL_RC=${PIPESTATUS[0]}
+else
+    INSTALL_LOG=""
+    "${INSTALL_CMD[@]}" || INSTALL_RC=$?
+fi
+if [ "$INSTALL_RC" -ne 0 ]; then
+    # Attribute the failure to the withheld consent only when OpenClaw's
+    # output carries the documented consent-rejection phrase ("Plugin "…"
+    # requires capability consent. …"); permissions, a broken manifest, or
+    # a security scan must keep the generic failure code so callers do not
+    # mistake a real install failure for a policy refusal. If OpenClaw
+    # rewords the message, this degrades to rc=1 with the opt-out note.
+    if [ "$CONSENT_WITHHELD" = "1" ] && grep -qi 'requires capability consent' "$INSTALL_LOG"; then
+        echo "[${COMPONENT}] install failed with consent withheld by AGENT_MEMORY_ACCEPT_CAPABILITIES=0 — grant consent interactively or unset the variable to let this script grant it." >&2
+        echo "[${COMPONENT}]   openclaw plugins install <plugin-dir> --force --accept-capabilities" >&2
+        echo "[${COMPONENT}]   plugin-dir: $PLUGIN_DIR" >&2
+        exit 3
+    fi
+    if [ "$CONSENT_WITHHELD" = "1" ]; then
+        echo "[${COMPONENT}] Note: AGENT_MEMORY_ACCEPT_CAPABILITIES=0 is active, but this failure does not look like a consent rejection." >&2
+    fi
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
     exit 1
-}
+fi
 
 # OpenClaw 2026.6.11 requires non-bundled plugins to explicitly opt-in
 # to conversation hooks (agent_end, before_prompt_build, etc.). Without

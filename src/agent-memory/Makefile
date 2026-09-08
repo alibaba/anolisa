@@ -47,7 +47,7 @@ COMPONENT_CONTRACT := .anolisa/component.toml
 RPMBUILD_DIR ?= $(HOME)/rpmbuild
 SPEC_FILE := $(NAME).spec
 
-.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test lint fmt clean install \
+.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test test-openclaw-install lint fmt clean install \
         install-adapter-resources uninstall dist spec rpm srpm \
         smoke help
 
@@ -130,9 +130,16 @@ build-debug: ## Build debug binary
 # TEST
 # =============================================================================
 
-test: ## Run all tests (Linux only — use `make remote-test` on macOS/Windows)
+test: test-openclaw-install ## Run all tests (Linux only — use `make remote-test` on macOS/Windows)
 	@echo "==> Running tests..."
 	cargo test --locked
+
+# Bash-only consent-negotiation test for the OpenClaw installer (no Node).
+# A future npm/tsx-based plugin unit-test target is a separate entry point
+# and deliberately not part of `make test`.
+test-openclaw-install: ## Run the OpenClaw adapter installer consent-negotiation test
+	@echo "==> Testing OpenClaw adapter installer..."
+	bash tests/test-openclaw-adapter-install.sh
 
 test-mcp: ## Run MCP integration tests only
 	cargo test --test mcp_integration_test
@@ -164,7 +171,7 @@ remote-build: remote-push ## Push + ssh $(REMOTE_HOST): pull + cargo build --rel
 
 remote-test: remote-push ## Push + ssh $(REMOTE_HOST): full test + clippy
 	@echo "==> Testing on $(REMOTE_HOST):$(REMOTE_PATH)..."
-	ssh $(REMOTE_HOST) 'cd $(REMOTE_PATH) && $(REMOTE_RESET_GUARD) git fetch $(REMOTE_REPO) $(REMOTE_BRANCH) && git reset --hard $(REMOTE_REPO)/$(REMOTE_BRANCH) && cd src/agent-memory && cargo test --release | grep "test result" && cargo clippy --release --all-targets -- -D warnings | tail -3'
+	ssh $(REMOTE_HOST) 'cd $(REMOTE_PATH) && $(REMOTE_RESET_GUARD) git fetch $(REMOTE_REPO) $(REMOTE_BRANCH) && git reset --hard $(REMOTE_REPO)/$(REMOTE_BRANCH) && cd src/agent-memory && bash tests/test-openclaw-adapter-install.sh && cargo test --release | grep "test result" && cargo clippy --release --all-targets -- -D warnings | tail -3'
 
 # =============================================================================
 # CODE QUALITY
