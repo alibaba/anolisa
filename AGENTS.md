@@ -20,6 +20,7 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **ws-ckpt** | `src/ws-ckpt/` | Rust + TypeScript | Linux only |
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
 | **blaze** | `src/blaze/` | Rust | Linux only |
+| **aw** | `src/aw/` | Rust / JSON Schema | All (contract library) |
 
 > `agent-sec-core`, `agent-memory`, `skillfs`, `ktuner`, and `blaze` require Linux. `agentsight` provides full eBPF tracing on Linux and limited trajectory collection plus the local viewer on macOS. `cosh-ng` is Linux-first and supports limited functionality on macOS. Do **not** attempt to build the Linux-only components on macOS or Windows. (tokenless ships macOS CLI binaries and framework adapters via npm, but the binaries are cross-compiled **from Linux** — building tokenless on macOS is still unsupported.)
 
@@ -109,6 +110,14 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 
+# aw (portable contract library, per-component)
+cd src/aw
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+python3 tests/check_canonical.py  # also requires Node.js
+cargo doc --workspace --no-deps --locked
+
 # blaze (Linux only, per-component)
 cd src/blaze
 cargo fmt --all --check
@@ -118,7 +127,7 @@ cargo test --workspace
 
 ## 3. Rust Common Conventions
 
-> Applies to these Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `blaze`.
+> Applies to these Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `blaze`, `aw`.
 
 ### 3.1 Comment Guidelines
 
@@ -293,6 +302,7 @@ When generating commits, detect the active tool and fill in the actual version. 
 | `src/skillfs/` | `skillfs` |
 | `src/ktuner/` | `ktuner` |
 | `src/blaze/` | `blaze` |
+| `src/aw/` | `aw` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -360,6 +370,7 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
 | **blaze** | [`src/blaze/AGENTS.md`](src/blaze/AGENTS.md) | Two-crate workspace, sandbox backends, daemon lifecycle |
+| **aw** | [`src/aw/AGENTS.md`](src/aw/AGENTS.md) | Versioned schemas, evidence boundaries, offline validation |
 
 ## 11.1 File Placement & Documentation Structure
 
