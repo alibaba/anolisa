@@ -88,7 +88,7 @@ async fn run_binary_scenario(configure_admin: bool) {
     let directory = unique_directory();
     std::fs::create_dir(&directory).unwrap();
     let socket_path = directory.join("daemon.sock");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_asc-daemon"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"));
     if configure_admin {
         let uid = std::fs::metadata(&directory).unwrap().uid();
         command.args(["--policy-admin-uid", &uid.to_string()]);

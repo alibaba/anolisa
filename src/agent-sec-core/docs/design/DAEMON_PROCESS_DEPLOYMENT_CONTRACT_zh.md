@@ -217,11 +217,12 @@ operator-visible semantics 必须进入 compatibility/change record。journald �
 
 ### 8.1 **[TARGET V2][PARTIAL]** 当前 Rust transport bring-up
 
-`v2/apps/asc-daemon` 当前提供可执行的前台 Rust binary 和 composition bootstrap。它接受
-无子命令或显式 `serve` 两种形式，要求通过 `--socket` 提供绝对路径，安装 SIGTERM/SIGINT
-cooperative shutdown，并消费 SIGHUP 而不 reload。bootstrap 使用
-`asc-daemon-service` 完成真实 UDS bind、bounded admission、单请求 frame 读取、drain 和同
-inode socket cleanup。
+`v2/apps/asc-daemon` 当前提供对外名为 `agent-sec-daemon` 的前台 Rust binary 和
+composition bootstrap。它接受无子命令或显式 `serve` 两种形式；`--socket` 可提供显式绝对
+路径，省略时沿用 V1 service 契约，从 `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` 解析
+兼容路径。进程安装 SIGTERM/SIGINT cooperative shutdown，并消费 SIGHUP 而不 reload。
+bootstrap 使用 `asc-daemon-service` 完成真实 UDS bind、bounded admission、单请求 frame
+读取、drain 和同 inode socket cleanup。
 
 transport 对 frame read、application dispatch、transport rejection encode、response
 write 和 drain 分别设置显式 deadline。dispatch deadline 到期会释放 connection admission
@@ -249,8 +250,9 @@ Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
 framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 transaction 或其它共享阻塞
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
-当前还未实现 packaging-owned system socket 默认值、runtime directory hardening、Host
-singleton/stale-socket 判定、日志/OTel 和 health readiness。因此这一 slice 提供
+当前仅实现了兼容 V1 user service 的 `$XDG_RUNTIME_DIR` socket 默认值，尚未实现目标态的
+packaging-owned system socket 默认值、runtime directory hardening、Host singleton/stale-socket
+判定、日志/OTel 和 health readiness。因此这一 slice 提供
 DPROC-002/DPROC-003 的 focused process evidence，以及 DPROC-013 中 binary + UDS protocol
 注册、server-side permission 和 signal cleanup 的部分证据；它不能宣称 DPROC-012、完整
 DPROC-013、DPROC-014 或 production process gate 已完成。

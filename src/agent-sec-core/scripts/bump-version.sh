@@ -22,7 +22,8 @@
 #  10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json ("version" field)
 #  11. qoder-plugin/.qoder-plugin/plugin.json ("version" field)
 #  12. qwen-code-extension/qwen-extension.json ("version" field)
-#  13. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
+#  13. v2/Cargo.toml                         (workspace.package.version)
+#  14. Lock files: Cargo.lock, v2/Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
 #
 # Manual update required (not automated):
 #   - agent-sec-core.spec.in  (%changelog entry)
@@ -228,7 +229,18 @@ bump_file "$PROJECT_ROOT/qwen-code-extension/qwen-extension.json" \
     "qwen-code-extension/qwen-extension.json"
 
 # -----------------------------------------------------------------------------
-# 13. Regenerate lock files
+# 13. v2/Cargo.toml
+#
+# The V2 Rust workspace owns its own version source; it is kept in lockstep with
+# the V1 one so a single bump produces one coherent release across both trees.
+# -----------------------------------------------------------------------------
+bump_file "$PROJECT_ROOT/v2/Cargo.toml" \
+    "^version = \"$OLD_VERSION\"" \
+    "version = \"$NEW_VERSION\"" \
+    "v2/Cargo.toml"
+
+# -----------------------------------------------------------------------------
+# 14. Regenerate lock files
 # -----------------------------------------------------------------------------
 log "Regenerating lock files..."
 
@@ -241,6 +253,13 @@ if command -v cargo &>/dev/null; then
         fi
     )
     ok "agent-sec-cli/Cargo.lock"
+    (
+        cd "$PROJECT_ROOT/v2"
+        if ! cargo update --workspace 2>/dev/null; then
+            cargo generate-lockfile 2>/dev/null
+        fi
+    )
+    ok "v2/Cargo.lock"
 else
     warn "cargo not found, skipping Cargo.lock update"
 fi
