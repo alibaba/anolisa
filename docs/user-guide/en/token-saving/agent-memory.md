@@ -115,12 +115,14 @@ anolisa adapter status agent-memory
 
 **Prerequisite**: `openclaw` CLI on `$PATH`. The script logs clearly and exits 0 if missing — rerun after installing OpenClaw. `yum remove agent-memory` triggers `%preun` to call the uninstall script, leaving no orphaned config.
 
-**Capability consent (OpenClaw >= 2026.9.1)**: OpenClaw requires capability consent before it commits a managed plugin install whose source is not a trusted official/first-party record. `install.sh` installs from a local path, which carries no recorded artifact integrity, so consent is requested on every install — and a non-interactive command cannot prompt. The script therefore probes `openclaw plugins install --help` and appends `--accept-capabilities` only when the running CLI advertises it; OpenClaw <= 2026.8.2 does not register the option and rejects unknown options outright. Set `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold the flag where operator policy forbids non-interactive capability acceptance — the install then fails with `Plugin "memory-anolisa" requires capability consent` until you consent yourself:
+**Capability consent (OpenClaw >= 2026.8.1)**: OpenClaw requires capability consent before it commits a managed plugin install whose source is not a trusted official/first-party record. `install.sh` installs from a local path, which carries no recorded artifact integrity, so consent is requested on every install — and a non-interactive command cannot prompt. The script therefore probes `openclaw plugins install --help` and appends `--accept-capabilities` only when the running CLI advertises it. The gate is probe-driven rather than version-driven because the boundary is easy to misread: `plugins install` registers the option from OpenClaw 2026.8.1, while the OpenClaw CLI reference only documents it from 2026.9.1. Older builds reject unknown options outright (verified on 2026.5.7 and 2026.6.10), so passing the flag there would turn a working install into a hard failure. Set `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold the flag where operator policy forbids non-interactive capability acceptance — the install then fails with `Plugin "memory-anolisa" requires capability consent` until you consent yourself:
 
 ```bash
 AGENT_MEMORY_ACCEPT_CAPABILITIES=0 bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh   # policy-driven opt-out
-openclaw plugins install /usr/share/anolisa/adapters/agent-memory/openclaw --force --accept-capabilities       # manual consent
+openclaw plugins install /usr/share/anolisa/adapters/agent-memory/openclaw --force --dangerously-force-unsafe-install --accept-capabilities   # manual consent, the argv install.sh uses
 ```
+
+Keep `--dangerously-force-unsafe-install` in the manual command: the plugin bundle launches the agent-memory MCP server through `child_process`, which OpenClaw's install scanner blocks as a "dangerous code pattern" (`rc=1`) unless that flag is present. Drop it if you installed with `AGENT_MEMORY_SAFE_INSTALL=1` — on failure `install.sh` prints the exact argv it used, so you can copy that instead.
 
 Plugin contract ↔ agent-memory MCP tool mapping:
 
@@ -597,7 +599,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | search misses just-written content | inside the 200 ms debounce window | retry, or use `mem_grep` (regex on the filesystem, no index) |
 | `mem_promote` reports `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` unset or scratch missing | see Promote workflow |
 | OpenClaw plugin not loaded | `openclaw` CLI not on PATH | rerun `install.sh` after installing OpenClaw |
-| `Plugin "memory-anolisa" requires capability consent` when running `install.sh` | OpenClaw >= 2026.9.1 gates the install and `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` withheld the consent flag | rerun without that variable (the default accepts), or consent once with `openclaw plugins install <adapter>/openclaw --force --accept-capabilities` |
+| `Plugin "memory-anolisa" requires capability consent` when running `install.sh` | OpenClaw >= 2026.8.1 gates the install and `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` withheld the consent flag | rerun without that variable (the default accepts), or consent once with `openclaw plugins install /usr/share/anolisa/adapters/agent-memory/openclaw --force --dangerously-force-unsafe-install --accept-capabilities` |
 | system state out of sync after manual dnf | — | `sudo anolisa --install-mode system repair agent-memory`; use system-scoped `forget` / `adopt` only when intentionally rebuilding the record for a present RPM |
 
 For deeper investigation: start with `RUST_LOG=agent_memory=debug` and inspect both stderr and `<mount>/.anolisa/audit.log`.

@@ -53,11 +53,14 @@ if [ ! -f "$PLUGIN_DIR/dist/index.js" ]; then
     exit 1
 fi
 
-# Read the installer's option list once; it is the CLI contract every optional
-# flag below is gated on. A failed or empty probe is not fatal: the script falls
-# back to the base flags, which is what it did before the probe existed. The
-# probe's output is discarded on failure so an error message can never be
-# mistaken for an advertised option.
+# Read the installer's option list once; it is the CLI contract the capability
+# flag below is gated on. The other two flags stay unconditional: --force and
+# --dangerously-force-unsafe-install are registered by every OpenClaw this
+# adapter supports (checked against the 2026.5.7 / 2026.8.1 / 2026.8.2 help
+# output), so gating them would only add a way to be wrong. A failed or empty
+# probe is not fatal: the script falls back to the base flags, which is what it
+# did before the probe existed. The probe's output is discarded on failure so an
+# error message can never be mistaken for an advertised option.
 INSTALL_HELP="$(openclaw_cli plugins install --help 2>&1)" || INSTALL_HELP=""
 if [ -z "$INSTALL_HELP" ]; then
     echo "[${COMPONENT}] WARNING: could not read '${OPENCLAW_BIN} plugins install --help'; installing with the base flags only." >&2
@@ -77,7 +80,7 @@ if [ "${AGENT_MEMORY_SAFE_INSTALL:-0}" = "1" ]; then
     INSTALL_ARGS=("--force")
 fi
 
-# OpenClaw >= 2026.9.1 requires capability consent before it commits a managed
+# OpenClaw >= 2026.8.1 requires capability consent before it commits a managed
 # plugin install whose source is not a trusted official/first-party record. This
 # adapter installs from a local path, which carries no recorded artifact
 # integrity, so a previous acceptance can never be carried forward and consent
@@ -96,12 +99,17 @@ fi
 # surface being non-empty — a local-path install asks either way — so do not
 # "fix" this by editing openclaw.plugin.json.
 #
-# The flag is gated on the help probe above because OpenClaw <= 2026.8.2 does
-# not register it (first documented in 2026.9.1) and commander would exit 1 on
-# the unknown option, turning "installs fine" into "always fails" on hosts this
-# adapter still claims to support (manifest.json compatibleVersions ">=5.0.0").
-# Set AGENT_MEMORY_ACCEPT_CAPABILITIES=0 to withhold the flag where operator
-# policy forbids non-interactive capability acceptance.
+# The flag is gated on the help probe above rather than on a version number,
+# because the boundary is easy to get wrong: `plugins install` registers
+# --accept-capabilities from OpenClaw 2026.8.1 (on `enable` / `install` /
+# `update`), but the CLI reference (docs/cli/plugins.md) only documents it from
+# 2026.9.1, so counting documentation mentions puts the boundary one minor line
+# too late. Builds without it (verified absent on 2026.5.7, 2026.5.22 and
+# 2026.6.10) make commander exit 1 on the unknown option, turning "installs
+# fine" into "always fails" on hosts this adapter still claims to support
+# (manifest.json compatibleVersions ">=5.0.0"). Set
+# AGENT_MEMORY_ACCEPT_CAPABILITIES=0 to withhold the flag where operator policy
+# forbids non-interactive capability acceptance.
 ACCEPT_CAPABILITIES_FLAG="--accept-capabilities"
 ACCEPT_CAPABILITIES_ADVERTISED=0
 ACCEPT_CAPABILITIES_WITHHELD=0
@@ -111,11 +119,15 @@ fi
 
 if [ "${AGENT_MEMORY_ACCEPT_CAPABILITIES:-1}" = "0" ]; then
     ACCEPT_CAPABILITIES_WITHHELD=1
-    echo "[${COMPONENT}] AGENT_MEMORY_ACCEPT_CAPABILITIES=0: withholding ${ACCEPT_CAPABILITIES_FLAG}; OpenClaw >= 2026.9.1 refuses a non-interactive install that requires capability consent." >&2
+    if [ "$ACCEPT_CAPABILITIES_ADVERTISED" = "1" ]; then
+        echo "[${COMPONENT}] AGENT_MEMORY_ACCEPT_CAPABILITIES=0: withholding ${ACCEPT_CAPABILITIES_FLAG}; OpenClaw >= 2026.8.1 refuses a non-interactive install that requires capability consent." >&2
+    else
+        echo "[${COMPONENT}] AGENT_MEMORY_ACCEPT_CAPABILITIES=0: noted; '${OPENCLAW_BIN} plugins install' does not advertise ${ACCEPT_CAPABILITIES_FLAG} anyway, so there is nothing to withhold." >&2
+    fi
 elif [ "$ACCEPT_CAPABILITIES_ADVERTISED" = "1" ]; then
     INSTALL_ARGS+=("$ACCEPT_CAPABILITIES_FLAG")
 else
-    echo "[${COMPONENT}] '${OPENCLAW_BIN} plugins install' does not advertise ${ACCEPT_CAPABILITIES_FLAG} (OpenClaw < 2026.9.1); installing without it." >&2
+    echo "[${COMPONENT}] '${OPENCLAW_BIN} plugins install' does not advertise ${ACCEPT_CAPABILITIES_FLAG} (not listed in its --help); installing without it." >&2
 fi
 
 if ! openclaw_cli plugins install "$PLUGIN_DIR" "${INSTALL_ARGS[@]}"; then
@@ -123,10 +135,14 @@ if ! openclaw_cli plugins install "$PLUGIN_DIR" "${INSTALL_ARGS[@]}"; then
     if [ "$ACCEPT_CAPABILITIES_WITHHELD" = "1" ] && [ "$ACCEPT_CAPABILITIES_ADVERTISED" = "1" ]; then
         echo "[${COMPONENT}]   ${ACCEPT_CAPABILITIES_FLAG} was withheld by AGENT_MEMORY_ACCEPT_CAPABILITIES=0." >&2
         echo "[${COMPONENT}]   If the error above is 'requires capability consent', re-run with AGENT_MEMORY_ACCEPT_CAPABILITIES unset (default: accept)," >&2
-        echo "[${COMPONENT}]   or consent yourself: ${OPENCLAW_BIN} plugins install ${PLUGIN_DIR} --force ${ACCEPT_CAPABILITIES_FLAG}" >&2
+        echo "[${COMPONENT}]   or consent yourself: ${OPENCLAW_BIN} plugins install ${PLUGIN_DIR} ${INSTALL_ARGS[*]} ${ACCEPT_CAPABILITIES_FLAG}" >&2
+    elif [ "$ACCEPT_CAPABILITIES_ADVERTISED" = "0" ] && [ -z "$INSTALL_HELP" ]; then
+        echo "[${COMPONENT}]   The '${OPENCLAW_BIN} plugins install --help' probe returned nothing, so ${ACCEPT_CAPABILITIES_FLAG} support could not be detected." >&2
+        echo "[${COMPONENT}]   If the error above is 'requires capability consent', this openclaw may well support the flag (registered since 2026.8.1): check OPENCLAW_BIN and re-run," >&2
+        echo "[${COMPONENT}]   or consent yourself: ${OPENCLAW_BIN} plugins install ${PLUGIN_DIR} ${INSTALL_ARGS[*]} ${ACCEPT_CAPABILITIES_FLAG}" >&2
     elif [ "$ACCEPT_CAPABILITIES_ADVERTISED" = "0" ]; then
-        echo "[${COMPONENT}]   This openclaw predates ${ACCEPT_CAPABILITIES_FLAG} (< 2026.9.1), so it cannot offer capability consent." >&2
-        echo "[${COMPONENT}]   If the error above is 'requires capability consent', upgrade OpenClaw to >= 2026.9.1 and re-run." >&2
+        echo "[${COMPONENT}]   This openclaw does not list ${ACCEPT_CAPABILITIES_FLAG} in 'plugins install --help' (OpenClaw registers it from 2026.8.1), so it cannot offer capability consent." >&2
+        echo "[${COMPONENT}]   If the error above is 'requires capability consent', upgrade OpenClaw to >= 2026.8.1 and re-run." >&2
     fi
     echo "[${COMPONENT}]   Otherwise inspect the ${OPENCLAW_BIN} output above; the adapter itself requires OpenClaw >= 5.0.0 (manifest.json compatibleVersions)." >&2
     exit 1

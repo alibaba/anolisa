@@ -6,7 +6,7 @@
  * 1. `plugins install` is a commander subcommand that registers its options
  *    explicitly, so an option the running release does not know is a hard
  *    failure (`error: unknown option '<flag>'`, rc=1) — not a ignored extra.
- * 2. OpenClaw >= 2026.9.1 requires capability consent before committing a
+ * 2. OpenClaw >= 2026.8.1 requires capability consent before committing a
  *    managed install from a source without recorded artifact integrity (this
  *    adapter always installs from a local path), and a non-interactive command
  *    cannot prompt, so it fails with rc=1 unless `--accept-capabilities` is
@@ -14,7 +14,13 @@
  *
  * Together they pin the gating: append the flag iff the installer help
  * advertises it. Reverting install.sh to an unconditional
- * `--accept-capabilities` turns the "pre-2026.9.1 host" case red.
+ * `--accept-capabilities` turns the "installer does not register the option"
+ * case red.
+ *
+ * The version numbers above are context, not the contract: `plugins install`
+ * registers `--accept-capabilities` from 2026.8.1 while the OpenClaw CLI
+ * reference only documents it from 2026.9.1, which is exactly why install.sh
+ * probes the running CLI instead of comparing versions.
  *
  * Pattern follows src/agent-sec-core/openclaw-plugin/tests/unit/deploy-script-test.ts.
  */
@@ -38,8 +44,11 @@ const INSTALL_SCRIPT = resolve("scripts/install.sh");
 
 /**
  * What the fake installer help advertises:
- * - `consent`: OpenClaw >= 2026.9.1 (`--accept-capabilities` present).
- * - `legacy`: OpenClaw <= 2026.8.2 (flag absent).
+ * - `consent`: an OpenClaw whose installer registers `--accept-capabilities`
+ *   (2026.8.1 and later).
+ * - `legacy`: an OpenClaw whose installer does not register the flag and
+ *   therefore rejects it as an unknown option (verified on 2026.5.7 and
+ *   2026.6.10; 2026.5.22 has no occurrence of it in `dist` either).
  * - `near-miss`: only a longer, different flag is present — proves token-boundary
  *   matching instead of substring matching.
  * - `unavailable`: the help probe itself fails.
@@ -223,7 +232,7 @@ function installArgvLine(log: string): string {
 }
 
 describe("install.sh capability-consent gating", () => {
-  it("passes --accept-capabilities when the installer advertises it (OpenClaw >= 2026.9.1)", () => {
+  it("passes --accept-capabilities when the installer advertises it (OpenClaw >= 2026.8.1)", () => {
     const result = runInstall({ consentRequired: true, installHelpMode: "consent" });
 
     assert.equal(result.status, 0, result.stderr);
@@ -237,7 +246,7 @@ describe("install.sh capability-consent gating", () => {
     assert.match(result.log, /config set plugins\.entries\.memory-anolisa\.hooks\.allowConversationAccess true/);
   });
 
-  it("omits --accept-capabilities on a pre-2026.9.1 host that would reject the unknown option", () => {
+  it("omits --accept-capabilities when the installer does not register it and would reject the unknown option", () => {
     const result = runInstall({ consentRequired: false, installHelpMode: "legacy" });
 
     assert.equal(result.status, 0, result.stderr);
@@ -246,7 +255,7 @@ describe("install.sh capability-consent gating", () => {
       installArgvLine(result.log),
       `plugins install ${join(result.rootDir, "adapter", "openclaw")} --force --dangerously-force-unsafe-install`,
     );
-    assert.match(result.stderr, /does not advertise --accept-capabilities \(OpenClaw < 2026\.9\.1\)/);
+    assert.match(result.stderr, /does not advertise --accept-capabilities \(not listed in its --help\)/);
   });
 
   it("matches the flag as a whole option token, not as a substring", () => {
@@ -284,7 +293,46 @@ describe("install.sh capability-consent gating", () => {
     assert.match(result.stderr, /AGENT_MEMORY_ACCEPT_CAPABILITIES=0: withholding --accept-capabilities/);
     assert.match(result.stderr, /requires capability consent/);
     assert.match(result.stderr, /was withheld by AGENT_MEMORY_ACCEPT_CAPABILITIES=0/);
-    assert.match(result.stderr, /or consent yourself: openclaw plugins install .* --force --accept-capabilities/);
+    assert.match(
+      result.stderr,
+      /or consent yourself: openclaw plugins install .* --force --dangerously-force-unsafe-install --accept-capabilities/,
+    );
+  });
+
+  it("echoes the safe-install argv when the manual consent hint is printed under AGENT_MEMORY_SAFE_INSTALL=1", () => {
+    const result = runInstall({
+      acceptCapabilitiesEnv: "0",
+      consentRequired: true,
+      installHelpMode: "consent",
+      safeInstallEnv: "1",
+    });
+
+    assert.equal(result.status, 1);
+    assert.equal(
+      installArgvLine(result.log),
+      `plugins install ${join(result.rootDir, "adapter", "openclaw")} --force`,
+    );
+    // The hint must be copy-pasteable: same argv the script just used, so the
+    // unsafe-install flag is absent here exactly as it is absent above.
+    assert.match(
+      result.stderr,
+      /or consent yourself: openclaw plugins install .* --force --accept-capabilities/,
+    );
+    assert.doesNotMatch(result.stderr, /consent yourself: .*--dangerously-force-unsafe-install/);
+  });
+
+  it("does not claim to withhold the flag on an installer that never advertised it", () => {
+    const result = runInstall({
+      acceptCapabilitiesEnv: "0",
+      consentRequired: false,
+      installHelpMode: "legacy",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /AGENT_MEMORY_ACCEPT_CAPABILITIES=0: noted/);
+    assert.match(result.stderr, /nothing to withhold/);
+    assert.doesNotMatch(result.stderr, /withholding --accept-capabilities/);
+    assert.doesNotMatch(installArgvLine(result.log), /--accept-capabilities( |$)/);
   });
 
   it("survives an unreadable installer help and still installs on a host without the gate", () => {
@@ -299,7 +347,21 @@ describe("install.sh capability-consent gating", () => {
     const result = runInstall({ consentRequired: true, installHelpMode: "legacy" });
 
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /predates --accept-capabilities \(< 2026\.9\.1\)/);
-    assert.match(result.stderr, /upgrade OpenClaw to >= 2026\.9\.1 and re-run/);
+    assert.match(result.stderr, /does not list --accept-capabilities in 'plugins install --help'/);
+    assert.match(result.stderr, /OpenClaw registers it from 2026\.8\.1/);
+    assert.match(result.stderr, /upgrade OpenClaw to >= 2026\.8\.1 and re-run/);
+  });
+
+  it("blames the failed help probe, not the OpenClaw version, when the probe returned nothing", () => {
+    // A 2026.8.x host whose probe fails falls back to the base flags and then
+    // hits the consent gate. Telling that operator to upgrade is useless — the
+    // CLI already registers the flag — so the hint must point at the probe.
+    const result = runInstall({ consentRequired: true, installHelpMode: "unavailable" });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not read 'openclaw plugins install --help'/);
+    assert.match(result.stderr, /probe returned nothing/);
+    assert.match(result.stderr, /may well support the flag \(registered since 2026\.8\.1\)/);
+    assert.doesNotMatch(result.stderr, /upgrade OpenClaw to/);
   });
 });
