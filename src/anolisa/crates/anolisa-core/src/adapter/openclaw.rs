@@ -679,6 +679,32 @@ impl FrameworkDriver for OpenClawDriver {
                 messages.push(format!(
                     "openclaw plugin '{plugin_id}' was already unregistered"
                 ));
+            } else if uninstall_reports_untracked_plugin(&output, &plugin_id) {
+                // Missing package ownership does not prove that the plugin is
+                // gone. Verify against the same instance as the uninstall.
+                let mut cmd = build_list_cmd(&home, ctx.user_home.as_deref());
+                cmd.args.push("--json".to_string());
+                let verification = ctx.ops.run_framework_cli_json(cmd);
+                if !verification
+                    .as_ref()
+                    .is_ok_and(|output| json_list_confirms_plugin_absent(output, &plugin_id))
+                {
+                    let reason = match verification {
+                        Ok(output) => inspect_diagnostics(&output),
+                        Err(err) => err.to_string(),
+                    };
+                    return Ok(DisableReport {
+                        cleanup_complete: false,
+                        messages: vec![format!(
+                            "openclaw plugin '{plugin_id}' has no tracked package install; \
+                             `plugins list --json` could not confirm absence: {reason}; \
+                             repair the OpenClaw plugin registry and retry disable"
+                        )],
+                    });
+                }
+                messages.push(format!(
+                    "openclaw plugin '{plugin_id}' is absent from `plugins list --json`"
+                ));
             } else {
                 return Ok(DisableReport {
                     cleanup_complete: false,
@@ -2817,6 +2843,56 @@ fn uninstall_reports_missing_plugin(output: &CliOutput, plugin_id: &str) -> bool
     matches!(lines.next(), Some(line) if line == expected) && lines.next().is_none()
 }
 
+fn uninstall_reports_untracked_plugin(output: &CliOutput, plugin_id: &str) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let expected = format!(
+        "plugin \"{}\" is not associated with a tracked package install.",
+        plugin_id.to_ascii_lowercase()
+    );
+    let combined = format!(
+        "{}\n{}",
+        strip_ansi(&output.stdout),
+        strip_ansi(&output.stderr)
+    );
+    let mut lines = combined
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_ascii_lowercase);
+    matches!(lines.next(), Some(line) if line == expected || line.starts_with(&format!("{expected} ")))
+        && lines.next().is_none()
+}
+
+fn json_list_confirms_plugin_absent(output: &CliOutput, plugin_id: &str) -> bool {
+    if !output.success() || !output.stderr.trim().is_empty() {
+        return false;
+    }
+    // A text/table miss or a partial discovery report cannot authorize
+    // deleting cleanup ownership. Require JSON IDs and clean diagnostics.
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    let Some(plugins) = report.get("plugins").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let mut diagnostics = vec![report.get("diagnostics")];
+    if let Some(registry) = report.get("registry") {
+        diagnostics.push(registry.get("diagnostics"));
+    }
+    plugins.iter().all(|plugin| {
+        plugin
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty() && id != plugin_id)
+    }) && diagnostics.into_iter().all(|value| {
+        value
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["level"] == "info"))
+    })
+}
+
 /// Extract skill names from a claim's `skill_resources` by parsing the
 /// resource ids. Each id has the form `openclaw_skill_<name>`, and we
 /// extract `<name>` as the directory name under `<home>/skills/`.
@@ -3017,6 +3093,91 @@ mod tests {
             ..missing
         };
         assert!(!uninstall_reports_missing_plugin(&timed_out, "tokenless"));
+    }
+
+    #[test]
+    fn untracked_uninstall_requires_exact_plugin_and_completed_output() {
+        let output = CliOutput {
+            status: Some(1),
+            timed_out: false,
+            stdout: String::new(),
+            stderr: "\x1b[31mPlugin \"tokenless\" is not associated with a tracked package install.\x1b[0m\n".to_string(),
+        };
+        assert!(uninstall_reports_untracked_plugin(&output, "tokenless"));
+        assert!(!uninstall_reports_missing_plugin(&output, "tokenless"));
+        assert!(!uninstall_reports_untracked_plugin(&output, "token"));
+        for stderr in [
+            "Plugin \"tokenless-other\" is not associated with a tracked package install.",
+            "Plugin \"tokenless\" is not associated with a tracked package installer.",
+            "Plugin \"tokenless\" is not associated with a tracked package install.\nUnable to update registry",
+        ] {
+            assert!(!uninstall_reports_untracked_plugin(
+                &CliOutput {
+                    stderr: stderr.to_string(),
+                    ..output.clone()
+                },
+                "tokenless"
+            ));
+        }
+        assert!(!uninstall_reports_untracked_plugin(
+            &CliOutput {
+                timed_out: true,
+                ..output
+            },
+            "tokenless"
+        ));
+    }
+
+    #[test]
+    fn json_absence_requires_success_and_usable_diagnostics() {
+        let output = CliOutput {
+            status: Some(0),
+            timed_out: false,
+            stdout:
+                r#"{"plugins":[],"diagnostics":[{"level":"info"}],"registry":{"diagnostics":[]}}"#
+                    .to_string(),
+            stderr: String::new(),
+        };
+        assert!(json_list_confirms_plugin_absent(&output, "tokenless"));
+        for failed in [
+            CliOutput {
+                timed_out: true,
+                ..output.clone()
+            },
+            CliOutput {
+                status: Some(1),
+                ..output.clone()
+            },
+            CliOutput {
+                status: None,
+                ..output.clone()
+            },
+            CliOutput {
+                stderr: "discovery failed".to_string(),
+                ..output.clone()
+            },
+        ] {
+            assert!(!json_list_confirms_plugin_absent(&failed, "tokenless"));
+        }
+        for stdout in [
+            r#"{"plugins":[]}"#,
+            r#"{"plugins":[],"diagnostics":null}"#,
+            r#"{"plugins":[],"diagnostics":[{}]}"#,
+            r#"{"plugins":[],"diagnostics":[],"registry":{}}"#,
+            r#"{"plugins":[{"id":""}],"diagnostics":[]}"#,
+            r#"{"plugins":[{"id":"tokenless","status":"error"}],"diagnostics":[]}"#,
+        ] {
+            assert!(
+                !json_list_confirms_plugin_absent(
+                    &CliOutput {
+                        stdout: stdout.to_string(),
+                        ..output.clone()
+                    },
+                    "tokenless"
+                ),
+                "{stdout}"
+            );
+        }
     }
 
     #[test]
