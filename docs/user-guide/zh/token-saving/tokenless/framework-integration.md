@@ -190,6 +190,10 @@ DeepSeek Harness 按 profile 管理，因此必须至少提供一个 `--profile`
 `dsh --profile <profile>` 使用的名称一致，不带 profile 的通用命令会被拒绝。
 后续 enable 或 re-enable 必须再次列出需要保留的全部 profile。
 
+执行 OpenClaw adapter enable 或 tokenless 的 OpenClaw `install.sh` 即同意
+插件声明的能力。两个入口仅在 `plugins install --help` 列出完整的
+`--accept-capabilities` 参数时传递它，以兼容旧版宿主。
+
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
 ```bash

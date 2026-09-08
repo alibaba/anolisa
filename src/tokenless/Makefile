@@ -281,6 +281,8 @@ test-hook-parity:
 	python3 tests/test_hook_parity.py
 
 test-adapters: build-openclaw-plugin build-dsh-plugin
+	@echo "==> Testing OpenClaw adapter installer..."
+	bash tests/test-openclaw-adapter-install.sh
 	@echo "==> Testing openclaw Protocol v2 lifecycle..."
 	node --test tests/test-openclaw-lifecycle-v2.mjs
 	@echo "==> Testing native dsh adapter bundle..."

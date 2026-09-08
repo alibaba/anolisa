@@ -52,6 +52,10 @@ anolisa update all
 | `env` | Show environment detection results |
 | `bug` | Generate a bug report |
 
+Running `anolisa adapter enable <component> openclaw` accepts the plugin's
+declared capabilities when the host supports capability consent. This does
+not authorize an unsafe-install bypass.
+
 ## Install Modes
 
 | Mode | Prefix | When |

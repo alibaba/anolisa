@@ -52,6 +52,10 @@ anolisa update all
 | `env` | 显示环境检测结果 |
 | `bug` | 生成 bug 报告 |
 
+执行 `anolisa adapter enable <component> openclaw` 即同意插件声明的能力，
+CLI 会在宿主支持 capability consent 时传递对应参数。此操作不授予
+unsafe-install 覆盖权限。
+
 ## 安装模式
 
 | 模式 | 前缀 | 使用场景 |

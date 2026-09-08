@@ -152,9 +152,11 @@ pub enum PreparedEnable {
     #[default]
     None,
     /// OpenClaw install/verify capabilities resolved before the first
-    /// mutation. `apply_enable` uses these to decide the unsafe-retry hint and
-    /// the runtime-inspect form without a second probe.
+    /// mutation. `apply_enable` uses these to choose consent arguments, the
+    /// unsafe-retry hint, and the runtime-inspect form without a second probe.
     OpenClaw {
+        /// The host's installer supports accepting the plugin's declared capabilities.
+        supports_accept_capabilities: bool,
         /// The host's `plugins install --help` exposes the unsafe flag.
         supports_unsafe_install: bool,
         /// The host's `plugins inspect --help` exposes `--json`.

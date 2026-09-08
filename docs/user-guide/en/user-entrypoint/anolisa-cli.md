@@ -177,6 +177,12 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
+For OpenClaw plugins, executing `adapter enable` accepts the plugin's declared
+capabilities. ANOLISA adds `--accept-capabilities` only when the installer's
+help advertises it, including in the dry-run plan. Capability consent does
+not authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
+separately from a plugin-safety rejection.
+
 ### logs and bug reports
 
 Inspect component logs or generate a diagnostic bundle:

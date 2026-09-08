@@ -167,6 +167,11 @@ anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
 
+对于 OpenClaw 插件，执行 `adapter enable` 即同意插件声明的能力。ANOLISA
+仅在安装器 help 列出 `--accept-capabilities` 时添加该参数，dry-run 计划也
+遵循相同规则。Capability consent 不授予 `--allow-unsafe-plugin-install`
+权限；同意被拒绝时会单独诊断，不归为插件安全扫描拒绝。
+
 ### logs 与 bug report
 
 查看组件日志或生成诊断包：

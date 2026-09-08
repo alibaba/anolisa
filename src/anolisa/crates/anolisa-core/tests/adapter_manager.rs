@@ -247,6 +247,7 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OPENCLAW_FAIL",
     "FAKE_OC_VERSION",
     "FAKE_OC_INSTALL_FORCE",
+    "FAKE_OC_INSTALL_ACCEPT",
     "FAKE_OC_INSTALL_UNSAFE",
     "FAKE_OC_INSTALL_UNSAFE_NOOP",
     "FAKE_OC_INSPECT_JSON",
@@ -458,6 +459,8 @@ case "$action" in
     if [ "$arg3" = "--help" ]; then
       echo "Usage: openclaw plugins install <path> [options]"
       [ "${FAKE_OC_INSTALL_FORCE:-1}" = "1" ] && echo "  --force                             overwrite an existing plugin"
+      [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "1" ] && echo "  --accept-capabilities               accept declared capabilities"
+      [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "near_match" ] && echo "  --accept-capabilities-only          unrelated option"
       if [ "${FAKE_OC_INSTALL_UNSAFE:-0}" = "1" ]; then
         if [ "${FAKE_OC_INSTALL_UNSAFE_NOOP:-0}" = "1" ]; then
           echo "  --dangerously-force-unsafe-install  Deprecated no-op; security.installPolicy may still block"
@@ -470,6 +473,19 @@ case "$action" in
     fi
     reg="$OPENCLAW_STATE_DIR/registry"; mkdir -p "$reg" 2>/dev/null
     if [ "${FAKE_OPENCLAW_FAIL:-}" = "install" ]; then echo "boom-install" >&2; exit 7; fi
+    case "${FAKE_OPENCLAW_FAIL:-}" in
+      install_consent*)
+        [ "$FAKE_OPENCLAW_FAIL" = "install_consent_warning" ] && echo "--dangerously-force-unsafe-install is deprecated and no longer affects plugin installs"
+        echo 'Plugin requires capability consent. Use --accept-capabilities, then retry.' >&2
+        exit 15 ;;
+    esac
+    accepted=0
+    for option in "$@"; do [ "$option" = "--accept-capabilities" ] && accepted=1; done
+    if [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "1" ]; then
+      if [ "$accepted" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
+    elif [ "$accepted" = 1 ]; then
+      echo "unknown option --accept-capabilities" >&2; exit 2
+    fi
     if [ "${FAKE_OPENCLAW_FAIL:-}" = "install_unsafe_policy" ]; then
       echo "refusing install: plugin failed safety checks (pass --dangerously-force-unsafe-install to override)" >&2
       exit 11
@@ -3256,6 +3272,79 @@ fn each_probe_runs_exactly_once_per_enable() {
         1,
         "one inspect --help probe: {lines:?}"
     );
+}
+
+#[test]
+fn enable_accepts_capabilities_only_when_install_help_supports_it() {
+    let guard = OpenClawEnvGuard::acquire();
+    for support in ["1", "0", "near_match"] {
+        let world = stage();
+        world.apply_env(&guard, None);
+        guard.set("FAKE_OC_INSTALL_ACCEPT", support);
+        let argv_log = world.argv_log();
+        guard.set("FAKE_OC_ARGV_LOG", &argv_log);
+        let manager = world.manager();
+        let preview = manager
+            .enable(COMPONENT, Some(FRAMEWORK), true)
+            .expect("preview");
+        let EnableOutcome::Planned { plan, .. } = preview else {
+            panic!("expected preview")
+        };
+        assert_eq!(
+            plan.register_command
+                .unwrap()
+                .contains("--accept-capabilities"),
+            support == "1"
+        );
+        assert!(!world.has_claim());
+        assert!(!world.registry_marker_exists());
+        std::fs::write(&argv_log, "").expect("reset probe log");
+        manager
+            .enable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("enable");
+        let log = std::fs::read_to_string(&argv_log).expect("argv log");
+        assert_eq!(
+            log.lines()
+                .filter(|line| *line == "plugins install --help")
+                .count(),
+            1
+        );
+        let install = log
+            .lines()
+            .find(|line| line.starts_with("plugins install ") && !line.ends_with("--help"))
+            .expect("install argv");
+        assert_eq!(install.contains("--accept-capabilities"), support == "1");
+        assert!(!install.contains("--dangerously-force-unsafe-install"));
+        assert!(world.registry_marker_exists());
+    }
+}
+
+#[test]
+fn capability_consent_failure_takes_precedence_over_safety_warning() {
+    let guard = OpenClawEnvGuard::acquire();
+    for failure in ["install_consent", "install_consent_warning"] {
+        let world = stage();
+        world.apply_env(&guard, Some(failure));
+        guard.set("FAKE_OC_INSTALL_UNSAFE", "1");
+        let err = world
+            .manager()
+            .enable(COMPONENT, Some(FRAMEWORK), false)
+            .expect_err("consent rejection");
+        let reason = err.to_string();
+        assert!(reason.contains("OpenClaw capability consent"), "{reason}");
+        assert!(
+            !reason.contains("--allow-unsafe-plugin-install"),
+            "{reason}"
+        );
+        assert_eq!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, FRAMEWORK)
+                .unwrap()
+                .status,
+            ClaimStatus::CleanupFailed
+        );
+    }
 }
 
 /// P2 (negative): when the host does NOT expose the unsafe flag, a plain

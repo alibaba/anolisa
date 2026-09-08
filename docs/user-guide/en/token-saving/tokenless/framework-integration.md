@@ -209,6 +209,11 @@ DeepSeek Harness is profile-scoped and therefore requires at least one
 generic command without a profile is rejected. A later enable or re-enable
 must repeat every profile that should remain registered.
 
+Running OpenClaw adapter enable or the tokenless OpenClaw `install.sh` accepts
+the plugin's declared capabilities. Both entry points pass
+`--accept-capabilities` only when `plugins install --help` advertises that
+exact option, so older hosts keep working.
+
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
 ```bash

@@ -46,6 +46,7 @@ fi
 
 if [ "$DRY_RUN" = "1" ]; then
     echo "DRY-RUN: env -u OPENCLAW_HOME OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR $OPENCLAW_BIN plugins install $PLUGIN_SRC --force --dangerously-force-unsafe-install"
+    echo "DRY-RUN: add --accept-capabilities only if advertised by plugins install --help"
     exit 0
 fi
 
@@ -53,6 +54,17 @@ if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
     echo "[${COMPONENT}] openclaw CLI not found (OPENCLAW_BIN=${OPENCLAW_BIN}) — skipping plugin installation."
     echo "[${COMPONENT}] Install OpenClaw first, then run this script again."
     exit 0
+fi
+
+INSTALL_ARGS=(plugins install "$PLUGIN_SRC" --force --dangerously-force-unsafe-install)
+if ! INSTALL_HELP="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install --help 2>&1)"; then
+    printf '[%s] Cannot inspect OpenClaw installer options: %s\n' "$COMPONENT" "$INSTALL_HELP" >&2
+    exit 1
+fi
+# Invoking this installer accepts declared capabilities. Older hosts must
+# never receive an unsupported flag or a similarly named option.
+if [[ "$INSTALL_HELP" =~ (^|[^[:alnum:]_.-])--accept-capabilities([^[:alnum:]_.-]|$) ]]; then
+    INSTALL_ARGS+=(--accept-capabilities)
 fi
 
 # OpenClaw's built-in security scanner flags child_process imports as "dangerous
@@ -65,8 +77,7 @@ echo "[${COMPONENT}] Note: --dangerously-force-unsafe-install is required becaus
 echo "[${COMPONENT}]       this plugin wraps tokenless/rtk system binaries via child_process."
 echo "[${COMPONENT}]       See https://github.com/alibaba/anolisa for source."
 
-env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
-    --force --dangerously-force-unsafe-install || {
+env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" "${INSTALL_ARGS[@]}" || {
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
     exit 1
 }
