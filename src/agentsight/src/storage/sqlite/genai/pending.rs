@@ -274,7 +274,8 @@ impl GenAISqliteStore {
                         event_json          = ?27,
                         tool_call_ids       = ?28,
                         call_kind           = ?29,
-                        first_output_timestamp_ns = ?30
+                        first_output_timestamp_ns = ?30,
+                        is_sse = COALESCE(?32, is_sse)
                     WHERE call_id = ?31 AND status IN ('pending', 'interrupted')",
                     params![
                         call.metadata.get("response_id"),
@@ -317,6 +318,12 @@ impl GenAISqliteStore {
                             .get("first_output_timestamp_ns")
                             .and_then(|value| value.parse::<i64>().ok()),
                         call.call_id.as_str(),
+                        // Backfill from the observed value so protocols whose
+                        // streaming switch lives in request headers (not the
+                        // body "stream" field) are recorded correctly (#3129).
+                        call.metadata
+                            .get("is_sse")
+                            .map(|s| if s == "true" { 1i64 } else { 0 }),
                     ],
                 )?;
 
@@ -379,7 +386,8 @@ impl GenAISqliteStore {
                             tool_call_ids       = ?28,
                             call_kind           = ?29,
                             first_output_timestamp_ns = ?30,
-                            call_id             = ?31
+                            call_id             = ?31,
+                            is_sse              = COALESCE(?33, is_sse)
                          WHERE id = (
                             SELECT id FROM genai_events
                             WHERE event_type = 'llm_call'
@@ -431,6 +439,9 @@ impl GenAISqliteStore {
                                 .and_then(|value| value.parse::<i64>().ok()),
                             call.call_id.as_str(),
                             match_key.as_str(),
+                            call.metadata
+                                .get("is_sse")
+                                .map(|s| if s == "true" { 1i64 } else { 0 }),
                         ],
                     )?;
 

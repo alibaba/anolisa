@@ -1000,6 +1000,120 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
     cleanup_db(&path);
 }
 
+/// Regression: `complete_pending` must backfill `is_sse` from the observed
+/// metadata value so that protocols whose streaming switch lives in request
+/// headers (e.g. DashScope native `X-DashScope-SSE: enable`) instead of the
+/// body `stream` field are recorded as streaming calls (#3129).
+///
+/// Without the fix the UPDATE leaves the request-side `is_sse=0` in place
+/// while `sse_event_count` is correctly updated — the two columns contradict
+/// each other and `streaming_call_count` misses the call entirely.
+#[test]
+fn test_complete_pending_backfills_is_sse_from_observed_metadata() {
+    let path =
+        std::env::temp_dir().join(format!("test_genai_sse_backfill_{}.db", std::process::id()));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    // Simulate a native DashScope streaming request: body has no "stream"
+    // field so the request-side capture writes is_sse=false.
+    let info = PendingCallInfo {
+        call_id: "native-sse".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-native".to_string()),
+        session_id: Some("s-native".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "test-proc".to_string(),
+        agent_name: Some("test-agent".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/api/v1/services/aigc/text-generation/generation".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: Some("hello".to_string()),
+        is_sse: false,
+        model: Some("qwen-flash".to_string()),
+        provider: Some("dashscope".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: None,
+    };
+    store.insert_pending(&info).unwrap();
+
+    let request = LLMRequest {
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        top_p: None,
+        top_k: None,
+        seed: None,
+        stop_sequences: None,
+        stream: false,
+        tools: None,
+        raw_body: None,
+    };
+    let mut call = LLMCall::new(
+        "native-sse".to_string(),
+        BASE_NS as u64,
+        "dashscope".to_string(),
+        "qwen-flash".to_string(),
+        request,
+        42,
+        "test-agent".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "1, 2, 3".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "native-sse".to_string());
+    call.metadata
+        .insert("conversation_id".to_string(), "c-native".to_string());
+    call.metadata
+        .insert("session_id".to_string(), "s-native".to_string());
+    call.metadata
+        .insert("status_code".to_string(), "200".to_string());
+    call.metadata
+        .insert("sse_event_count".to_string(), "6".to_string());
+    call.metadata
+        .insert("is_sse".to_string(), "true".to_string());
+    call.metadata
+        .insert("call_kind".to_string(), "main".to_string());
+
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (status, is_sse, sse_count): (String, i64, Option<i64>) = conn
+        .query_row(
+            "SELECT status, is_sse, sse_event_count FROM genai_events WHERE call_id = 'native-sse'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "complete");
+    assert_eq!(
+        is_sse, 1,
+        "complete_pending must backfill is_sse from observed metadata (#3129)"
+    );
+    assert_eq!(sse_count, Some(6));
+    drop(conn);
+    cleanup_db(&path);
+}
+
 #[test]
 fn test_mark_interrupted_stale() {
     let (store, path) = create_populated_store("mark_stale");
