@@ -1600,28 +1600,150 @@ def test_readonly_system_scan_all_skips_while_read_commands_still_run(
     assert not (system_skill / ".skill-meta").exists()
 
 
-def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
-    ws,
-    monkeypatch,
+@pytest.mark.parametrize("command", [["scan", "--all"], ["init"]])
+@pytest.mark.parametrize("existing_meta", [False, True])
+def test_readonly_raw_user_batch_skips_but_explicit_and_managed_scans_fail(
+    tmp_path, monkeypatch, command, existing_meta
 ):
-    """Skipped system Skills do not mask writable success or real user errors."""
-    case_root = ws.root / "mixed_system_scan"
-    system_root = case_root / "system-skills"
+    """Exercise real write permissions at the skill root and existing metadata."""
+    data_root = tmp_path / "xdg_data"
+    skill = make_skill(data_root / "anolisa/skills", "weather", {})
+    target = skill / ".skill-meta" if existing_meta else skill
+    target.mkdir(exist_ok=True)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+    config = {"enableDefaultSkillDirs": True, "managedSkillDirs": []}
+    write_skill_ledger_config(tmp_path, config)
+    config_path = tmp_path / "xdg_config/agent-sec/skill-ledger/config.json"
+    config_before = config_path.read_bytes()
+    tree_before = snapshot_file_tree(skill)
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [])
+
+    target.chmod(0o555)
+    try:
+        if os.access(target, os.W_OK):
+            pytest.skip("requires a user subject to directory write permissions")
+        result = run_skill_ledger(command, env_extra=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        out = parse_json_output(result.stdout)
+        assert out["keyCreated"] is True
+        assert out["results"] == [
+            {
+                "canonicalSkillDir": str(skill),
+                "skillName": "weather",
+                "status": "skipped",
+                "reasonCode": "readonly_default_skill",
+                "persisted": False,
+            }
+        ]
+        assert config_path.read_bytes() == config_before
+        assert snapshot_file_tree(skill) == tree_before
+        assert (skill / ".skill-meta").exists() == existing_meta
+
+        explicit = run_skill_ledger(["scan", str(skill)], env_extra=env)
+        assert explicit.returncode == 1
+
+        config["enableDefaultSkillDirs"] = False
+        for entry in (str(skill), str(skill.parent) + "/*"):
+            config["managedSkillDirs"] = [entry]
+            write_skill_ledger_config(tmp_path, config)
+            managed = run_skill_ledger(command, env_extra=env)
+            assert managed.returncode == 1
+            assert parse_json_output(managed.stdout)["results"][0]["status"] == "error"
+            assert config_path.read_bytes() == json.dumps(config).encode()
+            assert snapshot_file_tree(skill) == tree_before
+    finally:
+        target.chmod(0o755)
+
+
+@pytest.mark.parametrize("command", [["scan", "--all"], ["init"]])
+@pytest.mark.parametrize("readonly_first", [False, True])
+@pytest.mark.parametrize("existing_meta", [False, True])
+def test_raw_user_mixed_readonly_batch_remains_skipped_on_repeat(
+    tmp_path, monkeypatch, command, readonly_first, existing_meta
+):
+    """Remembering a writable Skill must not manage its read-only sibling."""
+    data_root = tmp_path / "data"
+    root = data_root / "anolisa/skills"
+    readonly = make_skill(root, "a-readonly" if readonly_first else "z-readonly", {})
+    writable = make_skill(root, "z-writable" if readonly_first else "a-writable", {})
+    target = readonly / ".skill-meta" if existing_meta else readonly
+    target.mkdir(exist_ok=True)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg_config"),
+        "XDG_DATA_HOME": str(data_root),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "AGENT_SEC_DATA_DIR": str(tmp_path / "events"),
+    }
+    write_skill_ledger_config(tmp_path, {"managedSkillDirs": []})
+    config_path = tmp_path / "xdg_config/agent-sec/skill-ledger/config.json"
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [])
+    tree_before = snapshot_file_tree(readonly)
+    target.chmod(0o555)
+    try:
+        if os.access(target, os.W_OK):
+            pytest.skip("requires a user subject to directory write permissions")
+        for writable_status in ("scanned", "noop"):
+            result = run_skill_ledger(
+                [*command, "--scanners", "code-scanner"], env_extra=env
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            items = parse_json_output(result.stdout)["results"]
+            assert [item["skillName"] for item in items] == sorted(
+                [readonly.name, writable.name]
+            )
+            by_name = {item["skillName"]: item for item in items}
+            assert by_name[readonly.name] == {
+                "canonicalSkillDir": str(readonly),
+                "skillName": readonly.name,
+                "status": "skipped",
+                "reasonCode": "readonly_default_skill",
+                "persisted": False,
+            }
+            assert by_name[writable.name]["status"] == writable_status
+            assert json.loads(config_path.read_text())["managedSkillDirs"] == [
+                str(writable)
+            ]
+            assert (writable / ".skill-meta/latest.json").is_file()
+            assert snapshot_file_tree(readonly) == tree_before
+            assert (readonly / ".skill-meta").exists() == existing_meta
+    finally:
+        target.chmod(0o755)
+
+
+@pytest.mark.parametrize("raw_user", [False, True])
+def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
+    tmp_path,
+    monkeypatch,
+    raw_user,
+):
+    """Skipped defaults do not mask writable success or real user errors."""
+    case_root = tmp_path / "mixed_system_scan"
+    data_root = case_root / "xdg_data"
+    system_root = (
+        data_root / "anolisa/skills" if raw_user else case_root / "system-skills"
+    )
     system_skill = make_skill(system_root, "system", {"main.py": "print('ok')\n"})
     user_skill = make_skill(
         case_root / "user-skills",
         "user",
         {"main.py": "print('ok')\n"},
     )
-    data_root = case_root / "xdg_data"
     runtime_root = case_root / "runtime"
-    data_root.mkdir(parents=True)
+    data_root.mkdir(parents=True, exist_ok=True)
     runtime_root.mkdir()
     write_skill_ledger_config(
         case_root,
         {
-            "enableDefaultSkillDirs": False,
-            "managedSkillDirs": [str(system_skill), str(user_skill)],
+            "enableDefaultSkillDirs": raw_user,
+            "managedSkillDirs": (
+                [str(user_skill)] if raw_user else [str(system_skill), str(user_skill)]
+            ),
         },
     )
     env = {
@@ -1629,11 +1751,9 @@ def test_scan_all_preserves_mixed_skip_success_and_error_exit_codes(
         "XDG_DATA_HOME": str(data_root),
         "XDG_RUNTIME_DIR": str(runtime_root),
     }
-    monkeypatch.setattr(
-        config_module,
-        "DEFAULT_SYSTEM_SKILL_ROOTS",
-        (system_root,),
-    )
+    if not raw_user:
+        monkeypatch.setattr(config_module, "DEFAULT_SYSTEM_SKILL_ROOTS", (system_root,))
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [])
     monkeypatch.setattr(
         "agent_sec_cli.skill_ledger.core.certifier.ledger_update_access",
         lambda _root: (False, "read-only"),

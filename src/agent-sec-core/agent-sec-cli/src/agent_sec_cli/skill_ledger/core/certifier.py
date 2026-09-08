@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from agent_sec_cli.skill_ledger.config import (
     is_default_system_skill_dir,
+    is_default_user_skill_dir,
+    is_managed_covered,
     remember_skill_dir,
 )
 from agent_sec_cli.skill_ledger.core.file_hasher import (
@@ -87,11 +89,19 @@ def _remember_skill_dir_best_effort(skill_dir: str) -> None:
         )
 
 
-def _readonly_system_skip_payload(
+def _readonly_default_skip_payload(
     root: ResolvedSkillRoot,
 ) -> dict[str, Any] | None:
-    """Return a batch skip result for a host-backed, read-only system Skill."""
-    if root.source != "host" or not is_default_system_skill_dir(root.canonical_dir):
+    """Skip read-only host defaults while keeping managed user Skills strict."""
+    if root.source != "host":
+        return None
+    if is_default_system_skill_dir(root.canonical_dir):
+        reason_code = "readonly_system_skill"
+    elif is_default_user_skill_dir(root.canonical_dir) and not is_managed_covered(
+        root.canonical_dir
+    ):
+        reason_code = "readonly_default_skill"
+    else:
         return None
     writable, _reason = ledger_update_access(root)
     if writable:
@@ -100,7 +110,7 @@ def _readonly_system_skip_payload(
         "canonicalSkillDir": str(root.canonical_dir),
         "skillName": root.skill_name,
         "status": "skipped",
-        "reasonCode": "readonly_system_skill",
+        "reasonCode": reason_code,
         "persisted": False,
     }
 
@@ -521,7 +531,10 @@ def scan_skill(
     """Run built-in scanners as needed and record signed scan results."""
     root = resolve_skill_root(skill_dir)
     validate_resolved_skill_root(root)
-    if _readonly_system_skip_payload(root) is not None:
+    if (
+        is_default_system_skill_dir(root.canonical_dir)
+        and _readonly_default_skip_payload(root) is not None
+    ):
         raise SkillLedgerError(
             f"cannot update read-only system skill: {root.canonical_dir}; "
             "use 'agent-sec-cli skill-ledger analyze <skill_dir> --format json' "
@@ -624,7 +637,7 @@ def scan_batch(
         try:
             root = resolve_skill_root(skill_dir)
             validate_resolved_skill_root(root)
-            skipped = _readonly_system_skip_payload(root)
+            skipped = _readonly_default_skip_payload(root)
             if skipped is not None:
                 results.append(skipped)
                 continue

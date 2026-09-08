@@ -154,6 +154,15 @@ written for the skipped item, while global key initialization keeps its normal
 behavior. An explicit `scan <dir>` remains strict: it exits `1` and points the
 caller to `analyze` for read-only findings.
 
+The same batch skip also applies to host-backed Skills directly under
+`$XDG_DATA_HOME/anolisa/skills/` (default `~/.local/share/anolisa/skills/`), with
+`reasonCode=readonly_default_skill`, when ledger state is not writable and the
+Skill is not covered by `managedSkillDirs`. This includes image-provided raw
+user Skills made read-only to the runtime user. Writable raw user Skills are
+scanned normally; skipped Skills are not added to `managedSkillDirs`.
+Explicit scans and writes to managed user Skills still fail on permission
+errors. SkillFS backing and resolver errors remain errors.
+
 `check` and `status` are unchanged. A skipped Skill with no prior ledger
 artifacts returns `none`, and aggregate health can remain `unscanned`. These
 values do not turn the batch skip into an attestation or a safety verdict.
@@ -574,6 +583,15 @@ Default directories are enabled by default; `managedSkillDirs` holds directories
 - `"path/to/skill"` — a single Skill directory (must also contain `SKILL.md`)
 
 Non-existent directories are silently ignored. Additionally, running `scan` or `certify` on a Skill auto-appends unregistered directories to the config for later `--all` batch operations. `check` is a read-only status query and never writes config.
+
+For direct children of the raw user root `$XDG_DATA_HOME/anolisa/skills/` (default
+`~/.local/share/anolisa/skills/`), auto-remember records only the individual Skill
+path, even when sibling Skills exist. Scanning a writable Skill therefore does
+not add its read-only siblings to `managedSkillDirs`. Other roots retain the
+existing parent-glob heuristic. Existing configuration entries are not rewritten:
+an existing glob still makes covered user Skills managed and keeps write failures
+strict. If you confirm that a raw-root glob was unintentionally added, replace it
+with the individual paths you intend to manage, preserving any intentional coverage.
 
 #### Scheduled Default Quick Scans
 

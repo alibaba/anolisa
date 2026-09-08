@@ -359,7 +359,10 @@ The six integrity states are `pass` / `none` / `drifted` / `warn` / `deny` /
 `analyze` for read-only content findings. In batch mode, a host-backed packaged
 Skill under `/usr/share/anolisa/skills/` or `/usr/local/share/anolisa/skills/`
 whose ledger state is read-only is reported as `status=skipped`,
-`reasonCode=readonly_system_skill`, `persisted=false`. This operational skip is
+`reasonCode=readonly_system_skill`, `persisted=false`. Read-only host Skills directly
+under `$XDG_DATA_HOME/anolisa/skills/` (default `~/.local/share/anolisa/skills/`)
+are also skipped with `reasonCode=readonly_default_skill` unless covered by
+`managedSkillDirs`; managed user Skills retain write errors. This operational skip is
 not a `pass` result or an attestation. An explicit `scan <dir>` remains an error.
 When a skipped Skill has no prior ledger artifacts, `check` and `status`
 continue to report `none` / `unscanned`; neither value means `pass`.

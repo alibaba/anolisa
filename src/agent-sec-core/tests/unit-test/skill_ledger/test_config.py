@@ -28,6 +28,7 @@ from agent_sec_cli.skill_ledger.config import (
     effective_skill_dir_entries,
     is_covered,
     is_default_system_skill_dir,
+    is_default_user_skill_dir,
     is_managed_covered,
     load_config,
     remember_skill_dir,
@@ -567,6 +568,41 @@ class TestIsCovered(unittest.TestCase):
         self.assertTrue(is_managed_covered(hidden, config))
 
 
+def test_raw_user_remember_keeps_individual_paths(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for custom_xdg in (False, True):
+        data_root = tmp_path / "data" if custom_xdg else home / ".local/share"
+        if custom_xdg:
+            monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
+        else:
+            monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(data_root / "config"))
+        root = data_root / "anolisa/skills"
+        first, sibling, later = [root / name for name in ("first", "sibling", "later")]
+        for skill in (first, sibling):
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\nname: test\n---\n")
+        config_module.save_config({"managedSkillDirs": []})
+
+        assert remember_skill_dir(first) == str(first)
+        assert not is_managed_covered(sibling)
+        later.mkdir()
+        (later / "SKILL.md").write_text("---\nname: test\n---\n")
+        assert remember_skill_dir(later) == str(later)
+        assert load_config()["managedSkillDirs"] == [str(first), str(later)]
+        assert not is_managed_covered(sibling)
+        before = config_module.config_path().read_bytes()
+        assert remember_skill_dir(first) is None
+        assert config_module.config_path().read_bytes() == before
+
+        for entry in (str(first), str(root) + "/*", str(root) + "/**"):
+            config_module.save_config({"managedSkillDirs": [entry]})
+            before = config_module.config_path().read_bytes()
+            assert remember_skill_dir(first) is None
+            assert config_module.config_path().read_bytes() == before
+
+
 def test_raw_user_defaults_follow_xdg_and_default_opt_out(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -592,6 +628,11 @@ def test_raw_user_defaults_follow_xdg_and_default_opt_out(tmp_path, monkeypatch)
         (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
         assert skill in resolve_skill_dirs({"enableDefaultSkillDirs": True})
         assert not resolve_skill_dirs({"enableDefaultSkillDirs": False})
+        assert is_default_user_skill_dir(skill)
+        assert not is_default_user_skill_dir(skill.parent)
+        assert not is_default_user_skill_dir(skill / "nested")
+        assert not is_default_user_skill_dir(root / "anolisa/skills-evil/raw-probe")
+        assert not is_default_system_skill_dir(skill)
 
 
 def test_raw_user_defaults_normalize_leading_slashes(tmp_path, monkeypatch):
@@ -608,6 +649,7 @@ def test_raw_user_defaults_normalize_leading_slashes(tmp_path, monkeypatch):
         (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
         assert skill in resolve_skill_dirs(config)
         assert is_covered(skill, config)
+        assert is_default_user_skill_dir(skill)
 
 
 if __name__ == "__main__":

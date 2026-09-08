@@ -258,7 +258,7 @@ class SigningBackend(Protocol):
 
 **合并策略**：默认目录默认启用，由 `enableDefaultSkillDirs` 控制；`managedSkillDirs` 存放 skill-ledger 动态管理或用户额外配置的目录，不再兼容旧的 `skillDirs` 字段。解析时默认目录在前，`managedSkillDirs` 在后，自动去重。`scanners` 按 `name` 合并，用户配置可覆盖同名扫描器；`activationPolicy` 是全局运行态策略，当前只执行 `pass_warn_only` 行为，历史配置值 `pass_only` / `latest_scanned` 会兼容读取并归一化；`signingBackend` 当前会被读取到配置摘要中，但不会改变实际签名后端。
 
-**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录不在当前有效目录中，会自动追加到 `managedSkillDirs`。其中 `scan` 只在 manifest 持久化成功或成功返回 `noop` 后记忆；scanner 失败、落盘失败和批量跳过均不触发记忆。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。若父目录下有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。
+**自动记忆**：用户对某个 skill 执行 `scan` 或 `certify` 时，若该 skill 目录未被 `managedSkillDirs` 覆盖，会自动追加到该配置。其中 `scan` 只在 manifest 持久化成功或成功返回 `noop` 后记忆；scanner 失败、落盘失败和批量跳过均不触发记忆。`check` 是只读状态检查，不会写配置、manifest 或 snapshot。raw 用户默认根的直接子 Skill 仅登记自身路径，避免可写 Skill 将只读兄弟 Skill 一并纳管；其它根目录下若有 ≥2 个包含 `SKILL.md` 的兄弟 skill，则追加父目录 glob（`parent/*`）而非单个路径。追加后自动压缩（compact）：若某 glob 已覆盖某个单目录条目，则移除冗余的单目录条目。已有 glob 不自动收窄，因为配置不区分用户显式设置与历史自动登记；确认属于误扩大的 raw 根条目后，可手动替换为需要纳管的各个 Skill 路径。
 
 #### 默认后端：Ed25519 + 加密密钥文件
 
@@ -378,6 +378,8 @@ GPG 仍是**分发签名**（sign-skill.sh → trusted-keys → verifier.py）�
 - 已有对应 scanner 结果且文件未变时跳过该 scanner。
 
 `scan --all` 对所有发现的 Skill 执行相同补齐逻辑；若没有任何 scanner 需要执行，不写 manifest，只报告 `noop`。对于上述只读已打包系统 Skill，批量路径不运行 scanner，也不写入逐 Skill manifest、snapshot、`.skill-meta` 状态或配置，返回 `status=skipped`、`reasonCode=readonly_system_skill`、`persisted=false`。`skipped` 是运行状态，不是六种完整性状态之一，不表示 `pass`，也不构成认证；它本身不使批量命令失败，只有实际 `status=error` 才使批量命令返回退出码 1。全局密钥初始化行为不变。`--force` 会强制重跑其它请求 scanner 并重签 manifest。
+
+`scan --all` 和默认 `init` baseline 对 raw 用户默认根 `$XDG_DATA_HOME/anolisa/skills/`（回退为 `~/.local/share/anolisa/skills/`）的直接子目录也应用批量跳过：仅当来源为 host、未被 `managedSkillDirs` 覆盖且实际账本写入目标不可写时，返回 `status=skipped`、`reasonCode=readonly_default_skill`、`persisted=false`，不运行 scanner、不写账本或自动纳管。已纳管的用户 Skill、显式扫描、SkillFS backing 和 resolver 错误仍保持原有错误语义；可写目录正常扫描。已有 `.skill-meta` 时检查该目录的写入权限，否则检查 Skill 根目录。
 
 新版本只会链接历史中最近的完整可信 artifact：候选的 schema、`versionId`/文件名、`skillName`、manifestHash、签名与 snapshot 必须全部匹配。版本号从该可信父版本之后选择首个未被版本 JSON 或 snapshot 占用的编号；没有可信父版本时从 `v000001` 起选择首个空槽。这样既不覆盖损坏或部分写入的证据，也不允许无效 latest 或孤立的超大编号控制恢复可用性。无可信父版本时两个 previous 字段均为 `null`；只有可信父版本的 `always_allow` 决策可以继承。
 

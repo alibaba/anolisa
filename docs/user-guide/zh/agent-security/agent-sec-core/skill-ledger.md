@@ -143,6 +143,14 @@ child.on("close", (code) => {
 全局密钥初始化行为保持不变。显式 `scan <dir>` 仍保持严格语义：退出码为 `1`，并提示
 调用方使用 `analyze` 获取只读 findings。
 
+同样的批量跳过规则也适用于 `$XDG_DATA_HOME/anolisa/skills/`（默认
+`~/.local/share/anolisa/skills/`）直接子目录中由 host 提供的 Skill：
+当账本状态不可写且未被 `managedSkillDirs` 覆盖时，返回
+`reasonCode=readonly_default_skill`。这包括镜像中对运行用户只读的 raw 用户 Skill。
+可写的 raw 用户 Skill 正常扫描；跳过项不会加入 `managedSkillDirs`。
+显式扫描和已纳管用户 Skill 的写入仍会因权限错误而失败。
+SkillFS backing 和 resolver 的错误仍按错误处理。
+
 `check` 和 `status` 的语义不变。若跳过项此前不存在任何账本 artifact，`check`
 返回 `none`，聚合健康度仍可能为 `unscanned`；这些值不会把批量跳过转化为认证或
 安全结论。
@@ -538,6 +546,13 @@ agent-sec-cli skill-ledger decide /path/to/skill --clear
 - `"path/to/skill"` — 单个 Skill 目录（同样需包含 `SKILL.md`）
 
 不存在的目录会被静默忽略。此外，对 Skill 执行 `scan` 或 `certify` 时，未收录的目录会自动追加到配置中，方便后续 `--all` 批量操作。`check` 是只读状态检查，不会写入配置。
+
+对于 raw 用户根 `$XDG_DATA_HOME/anolisa/skills/`（默认
+`~/.local/share/anolisa/skills/`）的直接子 Skill，自动记忆仅登记该 Skill
+自身路径，即使存在其它兄弟 Skill 也不扩大为父目录通配符。因此，扫描可写 Skill
+不会把只读兄弟 Skill 一并加入 `managedSkillDirs`。其它根目录保留现有父目录通配符规则。
+已有配置条目不会自动改写：已有通配符覆盖的用户 Skill 仍视为已纳管，写入失败仍会报错。
+若确认 raw 根通配符属于误添加，可将它替换为实际需要纳管的各个 Skill 路径，保留有意配置的覆盖范围。
 
 #### 定时执行默认快速扫描
 
