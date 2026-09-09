@@ -143,7 +143,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Sun Sep 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Sep 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Allow editable raw configs and record post-hook file digests.
+- Accept OpenClaw capability consent and recover verified plugin cleanup.
+- Preflight RPM conflicts and align installed package observations with the catalog.
+- Allow index previews with a private cache and register ktuner in both catalogs.
+
+* Sun Sep 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.10-1
 - Manage QwenPaw plugin adapters through the framework CLI with verified cleanup.
 - Log limits now return recent matches without blocking new log appends during scans.
 
