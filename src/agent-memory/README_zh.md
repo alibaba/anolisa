@@ -38,7 +38,7 @@ bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
 openclaw gateway restart
 ```
 
-两个可选安装参数都从 `openclaw plugins install --help` 协商：只有宿主列出完整的 `--accept-capabilities` 时才传递它，只有宿主仍声明 `--dangerously-force-unsafe-install` 有效时才传递该覆盖参数（OpenClaw 2026.6.1 及更早版本）。当前宿主把它标注为 deprecated no-op，因此不会收到它——此时安装期安全由运维自有的 `security.installPolicy` 决定，两个开关都不会改变 argv；安装日志会说明命中的是哪一种情况。
+两个可选安装参数都从 `openclaw plugins install --help` 协商，但两个开关并不对称。只有宿主列出完整的 `--accept-capabilities` 时才传递它——当前宿主会列出，因此 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 在这些宿主上仍然会改变 argv：取 `1` 时在 `openclaw plugins install <插件目录> --force` 之后追加 `--accept-capabilities`，取 `0` 时省略它，带同意门禁的宿主随后会拒绝这次安装。只有宿主仍声明 `--dangerously-force-unsafe-install` 有效时才传递该覆盖参数（OpenClaw 2026.6.1 及更早版本）。当前宿主把它标注为 deprecated no-op，两种取值下都不会收到它，因此 `AGENT_MEMORY_SAFE_INSTALL` 在这些宿主上不产生任何差别，安装期安全由运维自有的 `security.installPolicy` 决定。安装日志会说明命中的是哪一种情况。
 
 ### 集成（MCP 客户端）
 

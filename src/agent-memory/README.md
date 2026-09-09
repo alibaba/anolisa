@@ -43,12 +43,17 @@ openclaw gateway restart
 ```
 
 Both optional installer flags are negotiated from `openclaw plugins install
---help`: `--accept-capabilities` is passed only when the host advertises that
-exact option, and `--dangerously-force-unsafe-install` only while the host still
-advertises the bypass as effective (OpenClaw 2026.6.1 and earlier). Current hosts
-list it as a deprecated no-op and never receive it — there install-time safety
-follows the operator-owned `security.installPolicy`, and neither switch changes
-the argv; the install log states which case applied.
+--help`, but the two switches are not symmetric. `--accept-capabilities` is
+passed only when the host advertises that exact option — current hosts do, so
+`AGENT_MEMORY_ACCEPT_CAPABILITIES` still shapes the argv there: `1` appends
+`--accept-capabilities` to `openclaw plugins install <dir> --force`, while `0`
+omits it and a host that gates consent then rejects the install.
+`--dangerously-force-unsafe-install` is passed only while the host still
+advertises the bypass as effective (OpenClaw 2026.6.1 and earlier). Current
+hosts list it as a deprecated no-op and never receive it under either setting,
+so `AGENT_MEMORY_SAFE_INSTALL` changes nothing there and install-time safety
+follows the operator-owned `security.installPolicy`. The install log states
+which case applied.
 
 ### Integration (MCP client)
 
