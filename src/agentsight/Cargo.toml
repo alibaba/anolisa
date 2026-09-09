@@ -21,6 +21,7 @@ edition = "2024"
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
 anyhow = "1.0.86"
+object = "0.36"
 actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -131,6 +132,7 @@ symbolic-demangle = { version = "12.10.0", default-features = false, features = 
     "rust",
     "cpp",
 ] }
+object = { workspace = true }
 base64 = "0.22"
 openssl = { version = "0.10", features = ["vendored"] }
 flate2 = "1"

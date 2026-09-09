@@ -990,6 +990,72 @@ impl RustlsOffsets {
     }
 }
 
+/// Locate rustls' plaintext chokepoints in `path` by ELF symbol table.
+///
+/// When the binary retains its symbol table (`strip = "debuginfo"`), the two
+/// functions are found by demangling every symbol and matching the qualified
+/// name. This is immune to codegen drift — the symbol name comes from the
+/// source, not the compiled bytes. Returns `None` when the symbol table is
+/// absent (fully stripped) so the caller falls back to prologue scanning.
+fn find_rustls_offsets_by_symbol(path: &str) -> Option<RustlsOffsets> {
+    use object::{Object, ObjectSegment, ObjectSymbol};
+
+    // mmap instead of fs::read: a cosh-ng binary can be tens of MB and the
+    // tracer is memory-capped. Faulting only the pages we touch keeps the
+    // resident set bounded (same reason scan_file_patterns uses windows).
+    let file_handle = fs::File::open(path).ok()?;
+    let mmap = unsafe { memmap2::Mmap::map(&file_handle).ok()? };
+    let file = object::File::parse(&*mmap).ok()?;
+
+    let mut found = RustlsOffsets::default();
+    for sym in file.symbols() {
+        let name = sym.name().unwrap_or("");
+        if !name.contains("buffer_plaintext") && !name.contains("take_received_plaintext") {
+            continue;
+        }
+        // Demangle to confirm it's the CommonState method, not a trait impl
+        // or a test helper that happens to share the short name.
+        let demangled = symbolic_demangle::demangle(name);
+        let is_write = demangled.contains("CommonState") && demangled.contains("buffer_plaintext");
+        let is_read =
+            demangled.contains("CommonState") && demangled.contains("take_received_plaintext");
+        if !is_write && !is_read {
+            continue;
+        }
+        // st_value is the virtual address; convert to file offset via the
+        // program header that contains it.
+        let vaddr = sym.address();
+        let mut file_off = None;
+        for seg in file.segments() {
+            let seg_vaddr = seg.address();
+            let seg_size = seg.size();
+            if vaddr >= seg_vaddr && vaddr < seg_vaddr + seg_size {
+                let (seg_off, _) = seg.file_range();
+                file_off = Some((vaddr - seg_vaddr + seg_off) as usize);
+                break;
+            }
+        }
+        let Some(off) = file_off else { continue };
+        if is_write {
+            found.write = Some(off);
+        } else {
+            found.read = Some(off);
+        }
+    }
+
+    if found.is_usable() {
+        log::info!(
+            "rustls: resolved plaintext offsets via symbol table in {path} \
+             (write={:x?}, read={:x?})",
+            found.write,
+            found.read
+        );
+        Some(found)
+    } else {
+        None
+    }
+}
+
 /// Locate rustls' plaintext chokepoints in `path` by function-prologue matching.
 ///
 /// `CommonState::buffer_plaintext` and `CommonState::take_received_plaintext` are
@@ -1012,6 +1078,11 @@ impl RustlsOffsets {
 /// when either moves. A miss is safe: the caller reports the binary as
 /// untraceable, which is exactly the behaviour before rustls was supported.
 fn find_rustls_offsets(path: &str) -> Option<RustlsOffsets> {
+    // Prefer symbol-table lookup: it is immune to rustls/toolchain codegen
+    // drift. Fall back to prologue scanning for stripped binaries.
+    if let Some(off) = find_rustls_offsets_by_symbol(path) {
+        return Some(off);
+    }
     /// `CommonState::buffer_plaintext`: push block, `sub $0x78,%rsp`, then
     /// `mov %rdx,%r15; mov %rsi,%r14; mov 0x308(%rdi),%rbp` — the tail also
     /// pins rdi as the `&mut CommonState` this probe reports as the connection.
@@ -2052,5 +2123,28 @@ mod tests {
             parse_reattach_ttl(Some("not-a-number")),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn rustls_symbol_lookup_on_non_elf_returns_none() {
+        // A zero-filled image is not an ELF, so the symbol path must return
+        // None and the pattern path must also find nothing.
+        let img = vec![0u8; 0x5000];
+        with_static_ssl_fixture("rustls-no-elf", &img, |path| {
+            assert!(find_rustls_offsets_by_symbol(path).is_none());
+        });
+    }
+
+    #[test]
+    fn rustls_symbol_lookup_on_self_finds_rustls_symbols() {
+        // The test binary links rustls (via reqwest), so the symbol lookup
+        // must find both CommonState methods. This is an end-to-end check
+        // that ELF parsing, demangling and offset conversion all work.
+        let exe = std::env::current_exe().expect("current exe");
+        let path = exe.to_str().expect("utf8 path");
+        let off = find_rustls_offsets_by_symbol(path)
+            .expect("test binary links rustls, symbols must be found");
+        assert!(off.write.is_some(), "buffer_plaintext not found");
+        assert!(off.read.is_some(), "take_received_plaintext not found");
     }
 }
