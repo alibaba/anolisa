@@ -124,7 +124,7 @@ test_manifest_parser_covers_component_dependencies() {
     assert_contains "$output" 'sight|ebpf-btf|platform-capability||||btf||5.8'
     [[ "$(wc -l < "$output")" -eq 14 ]] || fail "unexpected manifest dependency count"
 
-    local source_dependency
+    local source_dependency expected
     COMPONENTS=(cosh-ng)
     source_dependency="$(source_build_runtime_dependencies)"
     [[ -z "$source_dependency" ]] || \
@@ -146,6 +146,14 @@ test_manifest_parser_covers_component_dependencies() {
     [[ "$source_dependency" == \
         'sight|node|language-runtime|node --version|nodejs|nodejs||>=20|' ]] || \
         fail "agentsight source Node dependency was not collected"
+
+    COMPONENTS=(memory)
+    source_dependency="$(source_build_runtime_dependencies)"
+    expected="$(printf '%s\n%s' \
+        'memory|node|language-runtime|node --version|nodejs|nodejs||>=20|' \
+        'memory|npm|language-runtime|npm --version|npm|npm|||')"
+    [[ "$source_dependency" == "$expected" ]] || \
+        fail "agent-memory source Node/npm dependencies were not collected"
 }
 
 test_user_skips_ws_ckpt_noop_install_dependencies() {
@@ -785,6 +793,318 @@ test_dry_run_skips_host_preflight() {
     (( preflight_line < install_line )) || fail "dry-run listed install before preflight"
 }
 
+test_memory_source_build_sets_up_node() {
+    reset_preflight_stubs
+    COMPONENTS=(memory)
+    TEST_DEPENDENCIES=(
+        'memory|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+        'memory|npm|language-runtime|npm --version|npm|npm|||'
+    )
+    query_repo_ver() { echo 18.19.0; }
+    detect_distro() { :; }
+    install_node() {
+        echo NODE_SETUP_ACTION
+        PRESENT_DEPENDENCIES[node]=true
+        PRESENT_DEPENDENCIES[npm]=true
+    }
+    install_rust() { :; }
+
+    set +e
+    do_install_deps > "$TEST_OUTPUT" 2>&1
+    TEST_STATUS=$?
+    set -e
+
+    [[ $TEST_STATUS -eq 0 ]] || \
+        fail "agent-memory source build did not set up its Node dependency"
+    assert_contains "$TEST_OUTPUT" NODE_SETUP_ACTION
+    assert_contains "$TEST_OUTPUT" 'runtime dependencies are available'
+}
+
+test_memory_dry_run_plan_lists_node_setup() {
+    reset_preflight_stubs
+    COMPONENTS=(memory)
+    DRY_RUN=true
+
+    do_install_deps > "$TEST_OUTPUT" 2>&1
+
+    assert_contains "$TEST_OUTPUT" 'DRY-RUN: check/install Node.js and npm if needed'
+    assert_contains "$TEST_OUTPUT" 'DRY-RUN: check/install Rust toolchain if needed'
+}
+
+test_memory_preflight_requires_npm_alongside_node() {
+    reset_preflight_stubs
+    COMPONENTS=(memory)
+    TEST_DEPENDENCIES=(
+        'memory|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+        'memory|npm|language-runtime|npm --version|npm|npm|||'
+    )
+    PRESENT_DEPENDENCIES[node]=true
+
+    run_preflight
+
+    [[ $TEST_STATUS -ne 0 ]] || \
+        fail "preflight passed although npm was missing"
+    assert_contains "$TEST_OUTPUT" 'memory: npm [language-runtime]'
+}
+
+test_install_node_provisions_missing_npm() {
+    reset_preflight_stubs
+    HOME="$TEST_TMP/node-npm-user"
+    SHELL="/bin/bash"
+    mkdir -p "$HOME"
+    NPM_INSTALLED=false
+    SUDO_ARGS=""
+    node() { echo v20.18.0; }
+    npm() {
+        $NPM_INSTALLED || return 127
+        echo 10.8.2
+    }
+    sudo() {
+        SUDO_ARGS="$*"
+        [[ "$*" == *npm* ]] || return 1
+        NPM_INSTALLED=true
+    }
+    query_repo_ver() { echo 20.18.0; }
+    _configure_npm_mirror() { :; }
+
+    install_node > "$TEST_OUTPUT" 2>&1
+
+    assert_contains "$TEST_OUTPUT" 'already installed, skipping'
+    assert_contains "$TEST_OUTPUT" 'npm 10.8.2 installed'
+    [[ "$SUDO_ARGS" == *npm* ]] || \
+        fail "npm was not provisioned through the package manager: $SUDO_ARGS"
+}
+
+# The nvm npm recovery has to work on a PATH that carries no npm at all, so
+# build a directory holding only the tools the recovery itself shells out to.
+make_minimal_bin() {
+    local dest="$1"; shift
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    local tool resolved
+    for tool in "$@"; do
+        resolved="$(command -v "$tool" 2>/dev/null || true)"
+        [[ -n "$resolved" ]] && ln -sfn "$resolved" "$dest/$tool"
+    done
+    return 0
+}
+
+MINIMAL_BIN_TOOLS=(sh bash env dirname basename mktemp curl grep head sed sort
+    tar gzip rm mkdir mv chmod ln cat uname tr)
+
+make_nvm_node_fixture() {
+    local node_dir="$1" node_version="$2"
+    mkdir -p "$node_dir/bin" "$node_dir/lib/node_modules"
+    printf '#!/bin/sh\necho %s\n' "$node_version" > "$node_dir/bin/node"
+    chmod +x "$node_dir/bin/node"
+}
+
+# A hermetic npm registry: dist-tags metadata plus real gzipped tarballs laid
+# out like the published npm package. curl reads them over file://, so these
+# tests need neither network nor a preinstalled npm.
+make_npm_registry_fixture() {
+    local root="$1"; shift
+    local staging="$TEST_TMP/npm-registry-fixture" version
+    rm -rf "$root"
+    mkdir -p "$root/-/package/npm" "$root/npm/-"
+    printf '{"latest":"%s"}\n' "$1" > "$root/-/package/npm/dist-tags"
+    for version in "$@"; do
+        rm -rf "$staging"
+        mkdir -p "$staging/package/bin"
+        printf '{"name":"npm","version":"%s"}\n' "$version" \
+            > "$staging/package/package.json"
+        printf '#!/bin/sh\necho %s\n' "$version" \
+            > "$staging/package/bin/npm-cli.js"
+        printf '#!/bin/sh\necho %s\n' "$version" \
+            > "$staging/package/bin/npx-cli.js"
+        chmod +x "$staging/package/bin/npm-cli.js" \
+            "$staging/package/bin/npx-cli.js"
+        tar -czf "$root/npm/-/npm-$version.tgz" -C "$staging" package
+    done
+}
+
+# The Node.js dist index records the npm version each Node release shipped
+# with; the recovery prefers it over the registry `latest` tag.
+make_node_dist_index_fixture() {
+    local root="$1" node_version="$2" npm_version="$3"
+    rm -rf "$root"
+    mkdir -p "$root"
+    printf '[\n{"version":"%s","date":"2026-01-01","files":["linux-x64"],"npm":"%s","lts":false,"security":false}\n]\n' \
+        "$node_version" "$npm_version" > "$root/index.json"
+}
+
+test_install_node_restores_npm_for_nvm_managed_node_without_sudo() {
+    reset_preflight_stubs
+    HOME="$TEST_TMP/nvm-restore-home"
+    SHELL="/bin/bash"
+    mkdir -p "$HOME"
+    NVM_DIR="$HOME/.nvm"
+    export NVM_DIR
+    local node_dir="$NVM_DIR/versions/node/v20.18.0"
+    make_nvm_node_fixture "$node_dir" v20.18.0
+
+    local registry="$TEST_TMP/nvm-restore-registry"
+    local existing_package="$node_dir/lib/node_modules/package"
+    mkdir -p "$existing_package"
+    printf '{"name":"package","version":"1.0.0"}\n' > "$existing_package/package.json"
+    printf 'module.exports = 3187;\n' > "$existing_package/index.js"
+    make_npm_registry_fixture "$registry" 99.0.1 10.8.2
+    npm_config_registry="file://$registry"
+    export npm_config_registry
+    local dist_mirror="$TEST_TMP/nvm-restore-node-dist"
+    make_node_dist_index_fixture "$dist_mirror" v20.18.0 10.8.2
+    NVM_NODEJS_ORG_MIRROR="file://$dist_mirror"
+    export NVM_NODEJS_ORG_MIRROR
+
+    local minimal_bin="$TEST_TMP/nvm-restore-bin"
+    make_minimal_bin "$minimal_bin" "${MINIMAL_BIN_TOOLS[@]}"
+    local sudo_log="$TEST_TMP/nvm-restore-sudo"
+    : > "$sudo_log"
+    sudo() { echo "$*" >> "$sudo_log"; return 1; }
+    _configure_npm_mirror() { :; }
+
+    local status=0
+    ( PATH="$node_dir/bin:$minimal_bin"; install_node ) \
+        > "$TEST_OUTPUT" 2>&1 || status=$?
+    [[ $status -eq 0 ]] || \
+        fail "install_node exited $status: $(tr '\n' '|' < "$TEST_OUTPUT")"
+
+    assert_contains "$TEST_OUTPUT" 'already installed, skipping'
+    assert_contains "$TEST_OUTPUT" 'Node.js v20.18.0 shipped with npm 10.8.2'
+    assert_contains "$TEST_OUTPUT" \
+        'npm 10.8.2 restored for the nvm-managed Node.js'
+    assert_not_contains "$TEST_OUTPUT" '99.0.1'
+    assert_not_contains "$TEST_OUTPUT" 'Failed to install npm'
+    [[ -d "$node_dir/lib/node_modules/npm" ]] || \
+        fail "npm was not unpacked into the nvm prefix"
+    [[ -x "$node_dir/bin/npm" && -x "$node_dir/bin/npx" ]] || \
+        fail "npm/npx were not linked into the nvm prefix bin"
+    [[ "$(PATH="$node_dir/bin:$minimal_bin" npm -v)" == "10.8.2" ]] || \
+        fail "the restored npm does not run"
+    [[ "$(cat "$existing_package/package.json")" == '{"name":"package","version":"1.0.0"}' && \
+       "$(cat "$existing_package/index.js")" == 'module.exports = 3187;' ]] || \
+        fail "npm recovery changed the existing global package"
+    [[ ! -s "$sudo_log" ]] || \
+        fail "nvm npm recovery needed the package manager: $(cat "$sudo_log")"
+}
+
+test_install_node_npm_restore_falls_back_to_registry_latest() {
+    reset_preflight_stubs
+    HOME="$TEST_TMP/nvm-latest-home"
+    SHELL="/bin/bash"
+    mkdir -p "$HOME"
+    NVM_DIR="$HOME/.nvm"
+    export NVM_DIR
+    local node_dir="$NVM_DIR/versions/node/v20.18.0"
+    make_nvm_node_fixture "$node_dir" v20.18.0
+
+    local registry="$TEST_TMP/nvm-latest-registry"
+    make_npm_registry_fixture "$registry" 99.0.1
+    npm_config_registry="file://$registry"
+    export npm_config_registry
+    # No dist index at all: an nvm mirror that only serves tarballs, or an
+    # offline build host, must still be able to recover npm.
+    NVM_NODEJS_ORG_MIRROR="file://$TEST_TMP/nvm-latest-node-dist-missing"
+    export NVM_NODEJS_ORG_MIRROR
+
+    local minimal_bin="$TEST_TMP/nvm-latest-bin"
+    make_minimal_bin "$minimal_bin" "${MINIMAL_BIN_TOOLS[@]}"
+    local sudo_log="$TEST_TMP/nvm-latest-sudo"
+    : > "$sudo_log"
+    sudo() { echo "$*" >> "$sudo_log"; return 1; }
+    _configure_npm_mirror() { :; }
+
+    local status=0
+    ( PATH="$node_dir/bin:$minimal_bin"; install_node ) \
+        > "$TEST_OUTPUT" 2>&1 || status=$?
+    [[ $status -eq 0 ]] || \
+        fail "install_node exited $status: $(tr '\n' '|' < "$TEST_OUTPUT")"
+
+    assert_contains "$TEST_OUTPUT" 'Could not read the Node.js dist index'
+    assert_contains "$TEST_OUTPUT" \
+        'npm 99.0.1 restored for the nvm-managed Node.js'
+    [[ "$(PATH="$node_dir/bin:$minimal_bin" npm -v)" == "99.0.1" ]] || \
+        fail "the registry-latest npm was not restored"
+    [[ ! -s "$sudo_log" ]] || \
+        fail "nvm npm recovery needed the package manager: $(cat "$sudo_log")"
+}
+
+test_install_node_reports_nvm_npm_restore_failure_and_tries_the_package() {
+    reset_preflight_stubs
+    HOME="$TEST_TMP/nvm-fallback-home"
+    SHELL="/bin/bash"
+    mkdir -p "$HOME"
+    NVM_DIR="$HOME/.nvm"
+    export NVM_DIR
+    local node_dir="$NVM_DIR/versions/node/v20.18.0"
+    make_nvm_node_fixture "$node_dir" v20.18.0
+
+    # Unreachable dist index and registry plus a sudo that records and refuses:
+    # the isolated reproduction from the review (nvm-managed Node, no npm, no
+    # sudo). Every step must stay visible instead of being swallowed.
+    npm_config_registry="file://$TEST_TMP/nvm-fallback-registry-missing"
+    export npm_config_registry
+    NVM_NODEJS_ORG_MIRROR="file://$TEST_TMP/nvm-fallback-node-dist-missing"
+    export NVM_NODEJS_ORG_MIRROR
+
+    local minimal_bin="$TEST_TMP/nvm-fallback-bin"
+    make_minimal_bin "$minimal_bin" "${MINIMAL_BIN_TOOLS[@]}"
+    local sudo_log="$TEST_TMP/nvm-fallback-sudo"
+    : > "$sudo_log"
+    sudo() { echo "$*" >> "$sudo_log"; return 1; }
+    _configure_npm_mirror() { :; }
+
+    local status=0
+    ( PATH="$node_dir/bin:$minimal_bin"; install_node ) \
+        > "$TEST_OUTPUT" 2>&1 || status=$?
+
+    [[ $status -ne 0 ]] || \
+        fail "install_node succeeded although npm could not be restored"
+    assert_contains "$TEST_OUTPUT" 'Restoring npm for the nvm-managed Node.js'
+    assert_contains "$TEST_OUTPUT" \
+        'Could not resolve an npm version for Node.js v20.18.0'
+    assert_contains "$TEST_OUTPUT" 'falling back to the npm package'
+    assert_contains "$TEST_OUTPUT" 'Failed to install npm'
+    [[ -s "$sudo_log" ]] || fail "the package-manager fallback was never attempted"
+}
+
+test_install_node_system_warns_when_npm_is_not_in_system_path() {
+    reset_preflight_stubs
+    INSTALL_MODE="system"
+    printf '#!/bin/bash\necho v20.18.0\n' > "$RUNTIME_SYSTEM_PATH/node"
+    chmod +x "$RUNTIME_SYSTEM_PATH/node"
+    local sudo_log="$TEST_TMP/system-npm-sudo"
+    : > "$sudo_log"
+    sudo() { echo "$*" >> "$sudo_log"; }
+    _configure_npm_mirror() { :; }
+
+    ( install_node ) > "$TEST_OUTPUT" 2>&1
+
+    assert_contains "$TEST_OUTPUT" 'already installed, skipping'
+    assert_contains "$TEST_OUTPUT" 'npm was not found in'
+    [[ ! -s "$sudo_log" ]] || \
+        fail "system mode mutated package state to provision npm: $(cat "$sudo_log")"
+}
+
+test_memory_system_preflight_blocks_on_missing_npm() {
+    reset_preflight_stubs
+    INSTALL_MODE="system"
+    INSTALL_RESULT="success"
+    COMPONENTS=(memory)
+    TEST_DEPENDENCIES=(
+        'memory|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+        'memory|npm|language-runtime|npm --version|npm|npm|||'
+    )
+    PRESENT_DEPENDENCIES[node]=true
+
+    run_preflight
+
+    [[ $TEST_STATUS -ne 0 ]] || \
+        fail "system preflight installed past a missing language runtime"
+    assert_contains "$TEST_OUTPUT" 'memory: npm [language-runtime]'
+    assert_contains "$TEST_OUTPUT" 'Install these language runtimes manually'
+}
+
 reset_rustup_stubs() {
     reset_preflight_stubs
     export CARGO_HOME="$TEST_TMP/rustup-cargo"
@@ -910,5 +1230,14 @@ run_test test_no_install_skips_runtime_preflight
 run_test test_preflight_failure_precedes_first_install
 run_test test_ignore_deps_skips_install_preflight
 run_test test_dry_run_skips_host_preflight
+run_test test_memory_source_build_sets_up_node
+run_test test_memory_dry_run_plan_lists_node_setup
+run_test test_memory_preflight_requires_npm_alongside_node
+run_test test_install_node_provisions_missing_npm
+run_test test_install_node_restores_npm_for_nvm_managed_node_without_sudo
+run_test test_install_node_npm_restore_falls_back_to_registry_latest
+run_test test_install_node_reports_nvm_npm_restore_failure_and_tries_the_package
+run_test test_install_node_system_warns_when_npm_is_not_in_system_path
+run_test test_memory_system_preflight_blocks_on_missing_npm
 run_test test_rustup_explicit_servers_are_preserved
 run_test test_rustup_automatic_mirrors_still_select_by_channel

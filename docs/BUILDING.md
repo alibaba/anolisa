@@ -53,14 +53,14 @@ component.
 
 | Need | Source of truth |
 |------|-----------------|
-| Node.js | `src/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
+| Node.js | `src/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agent-memory, agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
 | Python and uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` requires Python `==3.11.6`; use `uv` for that project. Do not replace this with a repository-wide Python minimum. |
 | Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `src/anolisa/rust-toolchain.toml` pins `1.93.1`; `src/blaze/rust-toolchain.toml` pins `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
 | cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
 | agent-sec-core | Linux sandbox runtime and integration checks may need bubblewrap, GnuPG, and `jq`. |
 | agentsight | Linux eBPF builds need clang, LLVM, libbpf and ELF development headers, kernel headers, and a BTF-enabled kernel. `make build-mac` builds the macOS local viewer without eBPF. |
 | tokenless | `just` is used to fetch and patch RTK; npm is needed for the OpenClaw plugin. |
-| agent-memory | Linux builds need CMake and libsystemd development headers. |
+| agent-memory | Linux builds need CMake and libsystemd development headers; npm builds the bundled OpenClaw adapter. |
 | SkillFS | FUSE 3 and `/dev/fuse` are needed for the smoke test; ordinary Cargo tests do not mount FUSE. |
 | ws-ckpt | Installing the daemon requires Linux systemd and root privileges. Its user-mode Makefile target intentionally does not install the service. |
 

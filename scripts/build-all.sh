@@ -613,7 +613,7 @@ node_version_satisfies_on_path() {
 }
 
 install_node() {
-    step "Node.js (for copilot-shell)"
+    step "Node.js (for copilot-shell, agent-sec-core, agentsight, agent-memory)"
     local REQUIRED="20.0.0"
     local NVM_INSTALL_MAJOR="24"
 
@@ -631,12 +631,157 @@ install_node() {
         if [[ -s "$NVM_DIR/nvm.sh" ]]; then source "$NVM_DIR/nvm.sh"; fi
     }
 
+    _node_command_path() {
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            echo "$RUNTIME_SYSTEM_PATH"
+        else
+            echo "$PATH"
+        fi
+    }
+
+    _npm_ok() {
+        PATH="$(_node_command_path)" npm -v &>/dev/null
+    }
+
+    # Several distributions ship nodejs without npm, while the plugin builds
+    # (`build-openclaw-plugin`, copilot-shell, agentsight) call npm directly.
+    # A node-only toolchain therefore is not a ready Node.js setup.
+    #
+    # `nvm install-latest-npm` is *not* a way to recover a missing npm: it
+    # starts by running `npm --version` and aborts with "Unable to obtain npm
+    # version" when that fails (see nvm_install_latest_npm in nvm.sh), so it
+    # needs the very npm that is gone. `nvm install <version>` does not help
+    # either: for a version that is already installed it exits 1 with
+    # "<version> is already installed." before unpacking anything. An
+    # nvm-managed Node keeps npm in <prefix>/lib/node_modules/npm behind the
+    # <prefix>/bin/npm and <prefix>/bin/npx symlinks, so restore exactly that
+    # from the registry tarball instead. It needs only curl and tar (both
+    # already required by this script) plus a writable prefix, never sudo, and
+    # leaves the existing Node install untouched.
+    #
+    # The npm release each Node.js release shipped with is recorded in the
+    # dist index, so prefer that: it is by construction inside the engine range
+    # of the node binary next to it, whereas the registry `latest` tag lands
+    # npm 12 on Node 20, which npm itself reports as unsupported.
+    _bundled_npm_version() {
+        local mirror="${1%/}" node_version="$2"
+        curl -fsSL --connect-timeout 10 --max-time 60 "$mirror/index.json" \
+            | tr '{' '\n' | grep -F "\"version\":\"$node_version\"" \
+            | head -1 | grep -o '"npm":"[0-9][0-9.]*"' | head -1 \
+            | sed 's/.*"\([0-9][0-9.]*\)"/\1/' || true
+    }
+
+    _latest_npm_version() {
+        local registry="$1" version=""
+        version="$(curl -fsSL --connect-timeout 10 --max-time 30 \
+                "$registry/-/package/npm/dist-tags" \
+            | grep -o '"latest"[[:space:]]*:[[:space:]]*"[0-9][^"]*"' \
+            | head -1 | sed 's/.*"\([0-9][^"]*\)"$/\1/' || true)"
+        if [[ -z "$version" ]]; then
+            version="$(curl -fsSL --connect-timeout 10 --max-time 30 \
+                    "$registry/npm/latest" \
+                | grep -o '"version"[[:space:]]*:[[:space:]]*"[0-9][^"]*"' \
+                | head -1 | sed 's/.*"\([0-9][^"]*\)"$/\1/' || true)"
+        fi
+        echo "${version:-}"
+    }
+
+    _restore_nvm_npm() {
+        local node_bin="$1"
+        local prefix modules npm_dir registry node_version version archive
+        prefix="$(cd "$(dirname "$node_bin")/.." && pwd)" || return 1
+        modules="$prefix/lib/node_modules"
+        npm_dir="$modules/npm"
+        registry="${npm_config_registry:-$NPM_REGISTRY}"
+        registry="${registry%/}"
+        node_version="${prefix##*/}"
+
+        info "Restoring npm for the nvm-managed Node.js in $prefix ..."
+        version=""
+        if [[ "$node_version" == v[0-9]* ]]; then
+            version="$(_bundled_npm_version \
+                "${NVM_NODEJS_ORG_MIRROR:-https://nodejs.org/dist}" "$node_version")"
+            if [[ -n "$version" ]]; then
+                info "Node.js $node_version shipped with npm $version"
+            fi
+        fi
+        if [[ -z "$version" ]]; then
+            version="$(_latest_npm_version "$registry")"
+            if [[ -n "$version" ]]; then
+                warn "Could not read the Node.js dist index; using the registry's latest npm $version, which may not support Node.js $node_version"
+            fi
+        fi
+        if [[ -z "$version" ]]; then
+            warn "Could not resolve an npm version for Node.js $node_version"
+            return 1
+        fi
+
+        archive="$(mktemp "${TMPDIR:-/tmp}/anolisa-npm-XXXXXX.tgz")" || return 1
+        if ! curl -fsSL --connect-timeout 10 --max-time 180 \
+                -o "$archive" "$registry/npm/-/npm-$version.tgz"; then
+            warn "Could not download npm $version from $registry"
+            rm -f "$archive"
+            return 1
+        fi
+
+        # Strip the archive's package/ prefix without touching sibling global packages.
+        rm -rf "$npm_dir"
+        if ! mkdir -p "$npm_dir" || ! tar -xzf "$archive" --strip-components=1 -C "$npm_dir"; then
+            warn "Could not unpack npm $version into $npm_dir"
+            rm -f "$archive"
+            return 1
+        fi
+        rm -f "$archive"
+        chmod +x "$npm_dir/bin/npm-cli.js" "$npm_dir/bin/npx-cli.js" 2>/dev/null || true
+        ln -sfn "../lib/node_modules/npm/bin/npm-cli.js" "$prefix/bin/npm"
+        ln -sfn "../lib/node_modules/npm/bin/npx-cli.js" "$prefix/bin/npx"
+
+        if _npm_ok; then
+            ok "npm $(PATH="$(_node_command_path)" npm -v) restored for the nvm-managed Node.js"
+            return 0
+        fi
+        warn "Unpacked npm $version into $npm_dir but it still does not run"
+        return 1
+    }
+
+    _ensure_npm() {
+        if _npm_ok; then
+            return 0
+        fi
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            # System installs never mutate package state: the operator owns
+            # language runtimes. Components whose build actually calls npm
+            # (agent-memory) declare it as a source-build dependency record,
+            # where the preflight already turns a missing npm into a manual
+            # blocker, so this stays a warning here.
+            warn "npm was not found in $RUNTIME_SYSTEM_PATH; the plugin builds invoke npm"
+            return 0
+        fi
+        warn "Node.js is available but npm is missing; the plugin builds invoke npm"
+        local node_bin
+        node_bin="$(PATH="$(_node_command_path)" command -v node 2>/dev/null || true)"
+        if [[ -n "$node_bin" && "$node_bin" == "${NVM_DIR:-$HOME/.nvm}"/* ]]; then
+            _restore_nvm_npm "$node_bin" && return 0
+            warn "Could not restore npm inside ${NVM_DIR:-$HOME/.nvm}; falling back to the $npm_pkg package"
+        fi
+        info "Installing $npm_pkg via $PKG_BASE ..."
+        if [[ "$PKG_BASE" == "deb" ]]; then sudo apt-get update -y 2>/dev/null || true; fi
+        # shellcheck disable=SC2086
+        sudo $PKG_INSTALL $npm_pkg || true
+        if _npm_ok; then
+            ok "npm $(PATH="$(_node_command_path)" npm -v) installed"
+            return 0
+        fi
+        die "Failed to install npm; the plugin builds run npm install and npm run build. Install the '$npm_pkg' package, or reinstall the Node.js version your nvm manages, then retry"
+    }
+
     _configure_npm_mirror
 
     if _node_ver_ok; then
         local command_path="$PATH"
         [[ "$INSTALL_MODE" == "system" ]] && command_path="$RUNTIME_SYSTEM_PATH"
         ok "Node.js $(PATH="$command_path" node -v) already installed, skipping"
+        _ensure_npm
         return 0
     fi
 
@@ -657,6 +802,7 @@ install_node() {
             local command_path="$PATH"
             [[ "$INSTALL_MODE" == "system" ]] && command_path="$RUNTIME_SYSTEM_PATH"
             ok "Node.js $(PATH="$command_path" node -v) installed via package manager"
+            _ensure_npm
             return 0
         fi
         warn "Package manager install did not satisfy version requirement"
@@ -737,6 +883,7 @@ install_node() {
     _configure_npm_mirror
 
     if _node_ver_ok; then
+        _ensure_npm
         ok "Node.js $(node -v), npm $(npm -v)"
         info "nvm was sourced for this session; open a new terminal (or run: source ~/.bashrc) to persist"
     else
@@ -1411,8 +1558,8 @@ do_install_deps() {
                 echo "DRY-RUN: preflight platform capabilities before user dependency setup"
             fi
         fi
-        if want_component cosh || want_component sec-core || want_component sight; then
-            echo "DRY-RUN: check/install Node.js if needed"
+        if want_component cosh || want_component sec-core || want_component sight || want_component memory; then
+            echo "DRY-RUN: check/install Node.js and npm if needed"
         fi
         if want_component cosh || want_component sec-core || want_component cosh-ng || want_component sight; then
             echo "DRY-RUN: check/install build tools if needed"
@@ -1447,7 +1594,7 @@ do_install_deps() {
         fi
     fi
 
-    if want_component cosh || want_component sec-core || want_component sight; then
+    if want_component cosh || want_component sec-core || want_component sight || want_component memory; then
         install_node
     fi
 
@@ -1980,6 +2127,17 @@ source_build_runtime_dependencies() {
         case "$component" in
             sight)
                 echo 'sight|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+                ;;
+            memory)
+                # `make install` bundles the OpenClaw adapter from source
+                # (npm install + esbuild), so Node.js is a source-build
+                # requirement even though the installed MCP server itself is
+                # a Rust binary that never shells out to node.
+                echo 'memory|node|language-runtime|node --version|nodejs|nodejs||>=20|'
+                # npm is a separate package on several distributions and
+                # `build-openclaw-plugin` calls it directly, so a node-only
+                # toolchain must not pass the source-build preflight.
+                echo 'memory|npm|language-runtime|npm --version|npm|npm|||'
                 ;;
         esac
     done < <(runtime_install_components)

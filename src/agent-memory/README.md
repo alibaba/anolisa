@@ -81,6 +81,7 @@ Profile gating (basic/advanced/expert) controls tool visibility per deployment.
 
 - Linux (x86_64 / aarch64)
 - Rust ≥ 1.85 (for source build)
+- Node.js ≥ 20 and npm (for source build — bundles the OpenClaw adapter)
 - Optional: embedding provider (OpenAI or Ollama) for vector search
 
 ## License

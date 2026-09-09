@@ -54,6 +54,13 @@ sudo yum install agent-memory
 - **Tier C**（7 工具）：治理（快照、版本控制、聚合）
 - **主权**（13 工具）：关于、遗忘、同意、导入导出、任务、梦境合成
 
+## 环境要求
+
+- Linux（x86_64 / aarch64）
+- Rust ≥ 1.85（源码构建）
+- Node.js ≥ 20 与 npm（源码构建 —— 打包内置的 OpenClaw adapter）
+- 可选：用于向量检索的 embedding 提供方（OpenAI 或 Ollama）
+
 ## 许可证
 
 Apache License 2.0 — 详见 [LICENSE](LICENSE)。
