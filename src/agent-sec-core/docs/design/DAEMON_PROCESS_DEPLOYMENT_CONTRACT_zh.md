@@ -242,7 +242,7 @@ root 使用 `RootManagedPrincipalPolicy`：UID 0 始终具有 PAP 管理权限�
 
 当前 PAP 由 `PolicyTemplateCompiler` 和过渡性的 process-local Repository 组成。Policy、Scope
 和 Binding CRUD 可在同一 daemon 生命周期内经真实 UDS 执行，但所有状态在进程重启后丢失，
-进程启动时会显式输出该限制。这些结果只证明 protocol、identity、authorization 和应用装配的
+进程启动时会 best-effort 输出该限制（诊断背压规则见 §11）。这些结果只证明 protocol、identity、authorization 和应用装配的
 integration slice，不表示 durable persistence、target enforcement 或 application READY。
 Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
 `RejectionEncoder` 投影，正常依赖图不包含 PAP、Repository 或 Compiler。
@@ -250,7 +250,8 @@ framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 trans
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
 当前还未实现 packaging-owned system socket 默认值、runtime directory hardening、Host
-singleton/stale-socket 判定、日志/OTel 和 health readiness。因此这一 slice 提供
+singleton/stale-socket 判定和 health readiness。OTel 初始化、诊断与关闭已接入，见 §11。
+因此这一 slice 提供
 DPROC-002/DPROC-003 的 focused process evidence，以及 DPROC-013 中 binary + UDS protocol
 注册、server-side permission 和 signal cleanup 的部分证据；它不能宣称 DPROC-012、完整
 DPROC-013、DPROC-014 或 production process gate 已完成。
@@ -263,11 +264,15 @@ DPROC-013、DPROC-014 或 production process gate 已完成。
 `--help` 和 `--version` 不连接 daemon。
 
 `--timeout-ms` 为正 u32，默认 5000；一次客户端 deadline 覆盖 connect/write/read，
-不向现有 wire envelope 添加 timeout 字段。请求和响应上限均为 4,194,304 字节，包含
-LF；完整 LF response 立即完成读取，也接受非空 EOF frame。客户端保留完整
+不向现有 wire envelope 添加 timeout 字段。请求业务预算为 4,194,304 字节，传播成员
+另有 32,768 字节，总上限 4,227,072 字节；响应仍为 4,194,304 字节，均包含 LF。
+分项超限为 `invalid_request`，transport 总上限超限为 `resource_exhausted`；详见协议 §13。
+完整 LF response 立即完成读取，也接受非空 EOF frame。客户端保留完整
 `DaemonResponse`；Policy 输出层将 success 的领域 result 输出到 stdout、退出 0，
 daemon error 的 `{requestId,error}` 输出到 stderr、退出 1。本地文件、transport、
-response 和 output failure 退出 1，参数用法错误退出 2。
+response 和 output failure 退出 1，参数用法错误退出 2。OTel subscriber 初始化冲突或
+无效 SDK 身份同样在发送请求前退出 1，stderr 的 `otel: subscriber_conflict` 或
+`otel: invalid_sdk_identity` 区分启动观测失败；daemon 也在接受请求前按此规则失败。
 
 请求发送后的超时或协议失败不证明业务未执行；CLI 不自动重试，也不把 Binding
 `PENDING_APPLY`/`PENDING_DELETE` 表述为目标生效或删除完成。CREATE identity、current
@@ -277,7 +282,7 @@ revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary �
 DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的 binary
 失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
 依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
-共同运行的双进程 E2E 暂缓接入。
+共同运行的 OTel 双进程 E2E 已由 §11 的 pytest 门禁覆盖；这不等于 RPM/systemd 验收。
 `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_runs_full_crud_without_root`
 同时为常规 Cargo 测试提供真实 daemon binary 成功场景。完整范围与命令见
 [`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
@@ -334,3 +339,34 @@ service/package、server-side admission 或真实 Kubernetes rollout 验证。
   v2/apps/asc-daemon/tests/bootstrap.rs；
 - Rust PAP 完整 serialized UDS scenario：
   v2/crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json。
+
+## 11. **[TARGET V2]** Tracing 生命周期补充（OTEL-CR-004）
+
+两个 Rust 产品 main 在 help/usage 处理后、业务启动前初始化真实 OTel SDK，固定
+AlwaysOff 但仍提供有效 TraceId/SpanId 和 Context/Baggage。main 调用一次 `init_runtime`；
+启用 runtime feature 本身不会初始化全局状态。本期没有公开 exporter 或 OTLP 配置，
+OTEL export/sampler/batch 环境设置不能开启导出或改变固定采样策略。
+初始化冲突在接受请求前退出 1；`otel: <reason>` 通过临时有界 worker best-effort 输出，
+最多等 50 ms；stderr 堵塞或 worker 创建失败不能阻止退出，也不保证诊断一定到达。
+
+停止顺序：现有 service drain → 应用 runtime 1 s shutdown → provider/诊断排空额外最多 2 s。
+CLI 业务 span 结束后最多等待 50 ms；失败不改变业务 exit code、不重试业务请求。
+仍运行的 blocking work 不能被 tracing 强停。单请求 scope 覆盖解码后授权/PAP/响应编码，
+不声称覆盖 socket 读写。
+
+每个正常 runtime 启动一个独立诊断线程写 stderr；JSON 关联诊断、daemon PAP 启动警告、
+signal/runtime/bind/serve 错误及异常链共用此 writer。队列最多 64 条，每条最多 32 KiB，
+排队 payload 最多 2 MiB。producer 不等待 sink I/O；满队列、超长、写失败或关闭预算
+用尽允许丢诊断，创建 worker 失败直接禁用诊断。RUST_LOG 默认 warn，仅过滤 JSON 关联
+记录；不抑制进程警告/错误。无按秒限速，接收方管理持续存储和 rotation。
+CLI help/usage/业务结果及错误、daemon 参数错误/help 仍同步输出，可能等待消费者；
+这些输出不能以丢弃诊断队列替代。SecurityEvent 持久化也不使用此队列。
+
+生产初始化还将 Rust 默认的同步 panic hook 替换为同一有界 writer，仅输出固定
+`runtime: panic`，不记录 panic payload，也不改变 unwind/abort 或业务错误映射。
+内部 runtime 子进程测试验证 caught panic 的固定诊断及 payload 隔离。
+
+DPROC tracing 扩展以 `v2/apps/asc-daemon/tests/tracing.rs` 和 `tests/v2/e2e/test_otel_e2e.py`
+作证据：真实 UDS timeout 后 span 不提前关闭；启动前填满 stderr 后仍能启动、响应及退出，
+重复 daemon 启动失败也能退出。原有 DPROC 条款仍由各自 fixtures 验收，
+此处不宣称完整 systemd/包装验收；用例统一接入 CI 由另一个 PR 完成。

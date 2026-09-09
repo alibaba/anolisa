@@ -149,3 +149,10 @@ fixtures；不能只恢复 enum 而让旧 selector 通过 authored 请求。当�
 fixtures；不能单独恢复模板输入而忽略其中的约束。此精简不涉及 Policy 模板/摘要。
 PAP-CR-009 为后续独立清理；回退时需一起恢复 Policy 摘要字段与 PAP 生成逻辑、依赖和
 fixtures，以及 Binding 旧字段读取实现。不能只恢复必填字段而使 PAP 返回值缺失它。
+
+### OTel carrier 的后续兼容扩展
+
+原生请求新增可选 version 1 `traceContext/compatibility`，请求新增独立 32 KiB 传播预算；
+业务 4 MiB、响应 schema/UUID、授权、revision 和 CAS 不变。现有 CRUD goldens 继续执行；
+新版 CLI wire capture 先校验 carrier，再逐项比较原业务 envelope。
+新增传播/故障/回滚证据见 [V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)，不扩展此处的持久化或分发验收声明。

@@ -10,29 +10,53 @@ belongs to the actual AgentSight/ActPlane deployment.
 
 | Dependency path | Purpose and review boundary |
 |---|---|
-| `asc-agentsight-client -> ureq -> rustls` | Synchronous HTTP/TLS for the AgentSight API, separate from daemon UDS transport. Locked rustls 0.23.43 forbids unsafe in its own crate. |
-| `rustls / rustls-webpki -> ring` | Cryptographic primitives; contains unsafe/native code. Review advisories, supported platforms and upstream audit evidence. No claim of a zero-unsafe TLS dependency tree. |
-| `ureq / Client -> url -> idna / ICU` | URL and domain-name handling. Keep input bounds and evaluate advisories for the resolved graph. |
+| `asc-daemon / asc-cli -> asc-observability[runtime] -> opentelemetry_sdk / tracing-opentelemetry` | Local context and stderr diagnostics only. No OTLP exporter, HTTP client or TLS provider in this path. |
+| `asc-agentsight-client -> ureq -> rustls / rustls-webpki -> ring` | AgentSight API HTTP/TLS. ureq 2.12.1 explicitly selects the ring provider for its default TLS config. This Client is not yet wired into the daemon. |
+| `rustls -> ring` | The AgentSight client crypto boundary contains unsafe/native code. Workspace-local unsafe prohibition does not establish a zero-unsafe dependency tree. |
+| `ureq / clients -> url -> idna / ICU` | URL and domain-name handling. Keep input bounds and evaluate advisories for the resolved graph. |
 | `tokio -> libc / mio / socket2` | Existing OS/socket boundary, also outside workspace-local `unsafe_code = "forbid"`. |
 | `Client -> uuid (v5) -> sha1_smol` | Deterministic target identity, not an authentication or signature algorithm. The v5 feature is requested only by the Client. Workspace builds can still unify features. |
 
-The removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml` chain is no
-longer in this workspace lockfile. No HTTP/TLS library or crypto-provider switch
-is part of this change. In particular, replacing ring with aws-lc-rs would add
-an FFI-based crypto implementation, not prove that unsafe exposure decreased.
+## Provider choice and build scope
 
-The daemon's normal/build dependency graph does not currently include the Client,
-Adapter, ureq or ring. Verify that boundary separately from workspace tests:
+The production OTel runtime is local-only. Removing its exporter also removes
+`opentelemetry-otlp`, reqwest, hyper and AWS-LC from the workspace lockfile.
+The current Linux normal/build graph for `asc-daemon` and `asc-cli` contains no
+HTTP/TLS stack. The AgentSight Client still uses ureq with rustls/ring, and is not
+yet wired into the daemon. A workspace build includes that separate client.
+The daemon service itself remains UDS-only; TLS belongs to outbound clients.
+
+Cargo unifies `asc-observability/runtime` across selected workspace members. The
+feature exposes process initialization helpers but no longer enables exporter
+or HTTP dependencies. Only product main installs the process-singleton runtime;
+depending on the crate does not automatically initialize OTel globals.
+
+Verify both scopes from `v2/` after dependency or composition changes:
 
 ```sh
-cargo tree -p asc-daemon --edges normal,build --locked --offline
-cargo tree -p asc-daemon --edges normal,build,features --locked --offline
+cargo tree -p asc-daemon -p asc-cli --edges normal,build,features --locked --offline
+cargo tree --workspace --edges normal,build,features --locked --offline
 ```
+
+The removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml` chain remains
+absent from this workspace lockfile.
+
+## Native build and packaging
+
+Local tracing adds no C/CMake crypto toolchain. Building the whole workspace
+still includes ring's native compilation through the AgentSight Client; review
+its target-specific prerequisites when that client enters product packaging.
+The current [RPM spec](../agent-sec-core.spec.in) builds V1 and other packaged
+components, not the V2 workspace. Do not infer V2 release packaging coverage
+from a successful developer workspace build.
 
 ## Release checks
 
 - Keep `Cargo.lock` reviewed; inspect new dependencies, enabled features, licenses,
   source origins and build scripts. Retain the existing ban on local unsafe code.
+- Recheck the product and workspace feature graphs above, including crypto
+  provider selection and native build requirements. A dependency upgrade must
+  not silently invalidate this inventory or the release environment's prerequisites.
 - Use `cargo audit` for known advisories, or `cargo deny check` for advisories plus
   source/license/dependency policies. Record tool version, advisory database
   revision, findings and time-bounded exceptions. A successful build is not an
@@ -47,7 +71,7 @@ cargo tree -p asc-daemon --edges normal,build,features --locked --offline
 
 This file registers the dependency boundary and follow-up release checks. No new
 advisory scan, third-party source audit, vendor bundle or CI audit gate is claimed
-by the reconciliation tests. These remain explicit release-engineering work.
+by the tracing or reconciliation tests. These remain explicit release-engineering work.
 
 References: [RustSec tooling](https://rustsec.org/),
 [cargo-deny](https://embarkstudios.github.io/cargo-deny/),

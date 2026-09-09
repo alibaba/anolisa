@@ -1,0 +1,31 @@
+[package]
+name = "asc-observability"
+description = "OpenTelemetry context, propagation and lifecycle for AgentSecCore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+runtime = []
+
+[dependencies]
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+percent-encoding.workspace = true
+
+[dev-dependencies]
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tokio.workspace = true
+
+[lints]
+workspace = true

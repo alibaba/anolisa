@@ -413,7 +413,7 @@ SecurityEventV2 增加显式版本和标准 span identity：
 - `tracestate` 不进入 SecurityEvent；
 - 缺少 `schema_version` 的历史记录按 V1 解释，其 `trace_id` 仍是 opaque correlation；
   reader/query 在迁移窗口必须支持混合 V1/V2 数据并显示 schema 语义；
-- V2 之后不再生成或保存新的 AgentSec legacy trace ID，也不定义
+- V2 之后不再生成或保存新的 AgentSec 自定义 trace ID，也不定义
   `agentsec.correlation.trace_id` attribute；
 - SecurityEvent 是独立的本地安全审计记录。OTel sampling decision、export queue、exporter
   或 Collector 故障不能使已路由 invocation 的 event 因此消失。
@@ -550,7 +550,7 @@ boundary failure 才返回 `ok=false`。需要 product error type 的新 wire co
 | SMC-019 | carrier 缺失或不合法时创建有效 root trace；未配置 exporter 时 daemon 路径仍有有效 TraceId/SpanId |
 | SMC-020 | Agent/session/run/call/tool-call/action/backend/policy/verdict 使用有界、脱敏 semantic attributes，不替代 OTel identity |
 | SMC-021 | SecurityEventV2 保存 `security.invoke` TraceId/SpanId；sampling/exporter/Collector 故障不改变 ActionResult 或 event sink attempt |
-| SMC-022 | V1/V2 event 由 schema version 区分并可混合读取；V2 不产生新的 legacy trace ID |
+| SMC-022 | V1/V2 event 由 schema version 区分并可混合读取；V2 不产生新的 V1 自定义 trace ID |
 | SMC-023 | TraceId/SpanId/`traceparent` 不参与 authorization、principal、idempotency、deduplication 或 replay decision |
 
 比较 current Python oracle 与 Rust action-runtime result 时，可以规范化 UUID、
@@ -576,3 +576,24 @@ V1 response 重建未传输的 `ActionResult.success/error_type`。
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/)；
 - [OpenTelemetry Context propagation](https://opentelemetry.io/docs/concepts/context-propagation/)；
 - [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)。
+
+## 附录：**[TARGET V2]** 调用关联的 OTel 投影（OTEL-CR-003/007）
+
+Rust tracing 以一个 OTel Context 持有 SDK identity、五个 Agent Baggage 字段和有限兼容标签。
+普通同步业务函数不显式传 metadata/span；task/thread 边界捕获完整 Context，创建 child 并
+instrument future，不能跨 await 持有 entered guard。调用方仍通过既有 trace-context/metadata
+输入提供业务归属，不能由 daemon 猜测缺失的 Agent session/tool 身份。
+
+`asc-observability::snapshot()` 为 SecurityEvent/log/observability 提供只读关联值，
+未采样和没有 Collector 时同样可读。事件 sink 按自己的契约执行和持久化，不依赖 exporter。
+`bind_trace_context_input` 保留 V1 alias/strip/截断；`bind_metadata` 保留 metadata 的字符串值语义。
+`bind_metadata(parent, value, kind)` 按 AgentRun/ModelCall/ToolCall 校验本次记录自身输入，
+再替换 session/run/call/tool_call 字段；必填字段缺失或 null 直接拒绝，可选字段缺失/null
+清除父值，其他 hook 的字段按原 schema 忽略。保留技术 parentage、请求引用、兼容标签和
+由 trace-context/carrier 提供的独立 agent_name。记录 scope 退出后恢复父 Context。
+消费者可用 `validate_metadata(AgentRun/ModelCall/ToolCall)` 校验 session/run、以及 tool hook 的 tool_call_id；
+普通 PAP 调用不执行该必填校验。空字符串的兼容语义不在本 tracing 层擅自改为 trim/拒绝。
+
+本次仅实现适配与投影；V1 Action lifecycle、verdict、SecurityEvent schema、写入失败语义和
+历史数据均未由本改动替换。实际 Rust 业务 sink/observability 接口、本地链路重组另行迁移。
+证据：[V2 OTel 验收](V2_OTEL_ACCEPTANCE_zh.md)。

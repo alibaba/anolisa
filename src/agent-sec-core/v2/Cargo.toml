@@ -13,6 +13,7 @@ members = [
     "crates/foundation/asc-foundation-types",
     "crates/integrations/asc-agentsight-client",
     "crates/policy/adapters/asc-policy-adapter-agentsight",
+    "crates/data/asc-observability",
     "crates/policy/asc-pap",
     "crates/policy/asc-pap-repository-memory",
     "crates/policy/asc-pcp",
@@ -32,6 +33,14 @@ publish = false
 
 [workspace.dependencies]
 asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
+asc-observability = { path = "crates/data/asc-observability" }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+tracing = "0.1"
+tracing-opentelemetry = { version = "0.33", default-features = false }
+tracing-subscriber = { version = "0.3", features = ["registry", "env-filter", "json"] }
+percent-encoding = "2"
+url = "2"
 asc-daemon = { path = "apps/asc-daemon" }
 asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }
 asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
@@ -49,13 +58,12 @@ asc-policy-repository = { path = "crates/policy/asc-policy-repository" }
 asc-policy-types = { path = "crates/policy/asc-policy-types" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 socket2 = "0.6"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
-url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]

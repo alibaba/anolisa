@@ -58,6 +58,7 @@ where
     ///
     /// # Errors
     /// Returns validation, lowering, conflict, revision, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.create_policy")]
     pub fn create_policy(
         &self,
         policy_name: &str,
@@ -73,6 +74,7 @@ where
     ///
     /// # Errors
     /// Returns validation, lowering, conflict, revision, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.update_policy")]
     pub fn update_policy(
         &self,
         policy_id: &ResourceId,
@@ -130,6 +132,7 @@ where
     ///
     /// # Errors
     /// Returns not-found or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.get_policy")]
     pub fn get_policy(
         &self,
         id: &ResourceId,
@@ -142,6 +145,7 @@ where
     ///
     /// # Errors
     /// Returns invalid-pagination or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.list_policies")]
     pub fn list_policies(&self, limit: u32, offset: u32) -> Result<Page<PreparedPolicy>, PapError> {
         validate_limit(limit)?;
         self.repository.list_policies(limit, offset)
@@ -151,6 +155,7 @@ where
     ///
     /// # Errors
     /// Returns not-found, conflict, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.delete_policy_revision")]
     pub fn delete_policy_revision(
         &self,
         id: &ResourceId,
@@ -165,6 +170,7 @@ where
     ///
     /// # Errors
     /// Returns validation, conflict, revision, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.create_scope")]
     pub fn create_scope(&self, selector: &ScopeSelector) -> Result<PreparedScope, PapError> {
         self.write_scope(WriteTarget::Create, selector)
     }
@@ -177,6 +183,7 @@ where
     ///
     /// # Errors
     /// Returns validation, conflict, revision, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.update_scope")]
     pub fn update_scope(
         &self,
         scope_id: &ResourceId,
@@ -236,6 +243,7 @@ where
     ///
     /// # Errors
     /// Returns not-found or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.get_scope")]
     pub fn get_scope(
         &self,
         id: &ResourceId,
@@ -248,6 +256,7 @@ where
     ///
     /// # Errors
     /// Returns invalid-pagination or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.list_scopes")]
     pub fn list_scopes(&self, limit: u32, offset: u32) -> Result<Page<PreparedScope>, PapError> {
         validate_limit(limit)?;
         self.repository.list_scopes(limit, offset)
@@ -257,6 +266,7 @@ where
     ///
     /// # Errors
     /// Returns not-found, conflict, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.delete_scope_revision")]
     pub fn delete_scope_revision(
         &self,
         id: &ResourceId,
@@ -272,6 +282,7 @@ where
     ///
     /// # Errors
     /// Returns not-found, validation, conflict, revision, or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.create_binding")]
     pub fn create_binding(
         &self,
         policy_id: &ResourceId,
@@ -301,6 +312,7 @@ where
     /// # Errors
     /// Returns not-found, validation, operation-in-progress, conflict, revision,
     /// or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.update_binding")]
     pub fn update_binding(
         &self,
         binding_id: &ResourceId,
@@ -452,6 +464,7 @@ where
     ///
     /// # Errors
     /// Returns not-found or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.get_binding")]
     pub fn get_binding(&self, id: &ResourceId) -> Result<BindingView, PapError> {
         self.repository.get_binding(id)
     }
@@ -460,6 +473,7 @@ where
     ///
     /// # Errors
     /// Returns invalid-pagination or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.list_bindings")]
     pub fn list_bindings(&self, limit: u32, offset: u32) -> Result<Page<BindingView>, PapError> {
         validate_limit(limit)?;
         self.repository.list_bindings(limit, offset)
@@ -473,6 +487,7 @@ where
     ///
     /// # Errors
     /// Returns not-found, conflict or persistence errors.
+    #[tracing::instrument(skip_all, name = "pap.delete_binding")]
     pub fn delete_binding(&self, id: &ResourceId) -> Result<BindingView, PapError> {
         for _ in 0..MAX_WRITE_ATTEMPTS {
             let current = self.repository.get_binding(id)?;

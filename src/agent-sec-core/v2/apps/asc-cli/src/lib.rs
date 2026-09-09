@@ -1,6 +1,7 @@
 //! Command parsing and input preparation, separate from transport and rendering.
 
 mod commands;
+mod context;
 pub mod output;
 
 use std::ffi::OsString;
@@ -19,6 +20,7 @@ pub struct Cli {
     pub socket: PathBuf,
     timeout_ms: u32,
     command: Command,
+    context: asc_observability::Context,
 }
 
 #[derive(Debug, Parser)]
@@ -34,6 +36,9 @@ struct Arguments {
     /// Total connect/write/read deadline in milliseconds; requests are never retried.
     #[arg(long, global = true, default_value_t = 5000, value_parser = clap::value_parser!(u32).range(1..))]
     timeout_ms: u32,
+    /// Version 1 W3C traceparent/tracestate/baggage JSON carrier.
+    #[arg(long, global = true)]
+    otel_context: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -48,12 +53,15 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let argv: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
+        let mut argv: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
+        let trace_context_input = context::extract_trace_context_input(&mut argv)?;
+        // V1 validates bootstrap context before help/command parsing.
+        context::parse(None, trace_context_input.as_deref())?;
         let arguments = Arguments::try_parse_from(&argv)?;
         // Clap propagates global values across subcommands using last-wins.
         // After successful parsing, a standalone --option token cannot be a
         // value: these commands do not accept hyphen values or positional tails.
-        for option in ["--socket", "--timeout-ms"] {
+        for option in ["--socket", "--timeout-ms", "--otel-context"] {
             let count = argv
                 .iter()
                 .skip(1)
@@ -84,8 +92,17 @@ impl Cli {
         Ok(Self {
             socket,
             timeout_ms: arguments.timeout_ms,
+            context: context::parse(
+                arguments.otel_context.as_deref(),
+                trace_context_input.as_deref(),
+            )?,
             command: arguments.command,
         })
+    }
+
+    /// Full context selected at ingress; business commands do not receive it.
+    pub fn context(&self) -> asc_observability::Context {
+        self.context.clone()
     }
 
     /// Returns the single call deadline duration.

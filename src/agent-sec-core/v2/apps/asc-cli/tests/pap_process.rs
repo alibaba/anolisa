@@ -136,7 +136,26 @@ async fn real_cli_processes_execute_the_complete_frozen_pap_crud_scenario() {
     assert_ne!(variables["policy_id"], variables["scope_id"]);
     assert_ne!(variables["binding_id"], variables["scope_id"]);
     assert_ne!(variables["binding_id"], variables["policy_id"]);
-    assert_eq!(*requests.lock().unwrap(), expected_requests);
+    let actual: Vec<_> = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(|mut request| {
+            let carrier: asc_daemon_protocol::TraceCarrierV1 = serde_json::from_value(
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("traceContext")
+                    .expect("CLI must propagate its SDK context"),
+            )
+            .unwrap();
+            assert_eq!(carrier.version, 1);
+            assert_eq!(carrier.traceparent.as_ref().unwrap().len(), 55);
+            request
+        })
+        .collect();
+    assert_eq!(actual, expected_requests);
     let request = json!({"method":"policy.templates.get","params":{"id":variables["policy_id"],"revision":2}});
     let args = common::args_for(&request, &directory.0, &socket);
     let output = tokio::task::spawn_blocking(move || common::run(&args))
