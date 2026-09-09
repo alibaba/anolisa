@@ -719,6 +719,30 @@ class TestSummaryAndOrdering:
         assert result["ok"] is True
         assert all(f["severity"] == "warn" for f in result["findings"])
 
+    def test_verdict_matches_highest_finding_severity(self) -> None:
+        """The verdict aggregates findings by severity, not by match order.
+
+        Expectations are derived from the returned findings rather than
+        hard-coded, so this keeps holding once a ``deny`` rule ships.  Every
+        shipped rule is ``warn`` today, which makes the ``deny`` aggregation
+        branch unreachable through the CLI; it is covered by unit tests that
+        inject synthetic rules instead.
+        """
+        result = _parse_result(_run_scan("rm -rf /tmp && chmod 777 /opt"))
+        severities = {f["severity"] for f in result["findings"]}
+        assert severities, "expected this input to produce findings"
+        assert result["verdict"] == ("deny" if "deny" in severities else "warn")
+
+    def test_ok_stays_true_when_findings_are_reported(self) -> None:
+        """``ok`` reports whether the scan *ran*, not whether the code is safe.
+
+        Treating ``ok`` as "no threat found" is the classic misreading of this
+        contract, so pin it against an input that definitely reports findings.
+        """
+        result = _parse_result(_run_scan("rm -rf /tmp/test"))
+        assert result["findings"]
+        assert result["ok"] is True
+
 
 class TestInlineExtractionRewritesLanguage:
     """Inline extraction swaps *both* code and language before rule loading."""
@@ -878,3 +902,83 @@ class TestLlmMode:
         """The empty-input guard precedes mode dispatch, so no model is needed."""
         proc = _run_scan("", mode="llm")
         assert proc.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# I. Mode dispatch is exact-match
+#
+# Only the literal string ``llm`` selects the LLM engine.  Every other value --
+# including a misspelling or a different case -- falls through to the regex
+# engine instead of failing.  A rewrite that validates ``mode`` as an enum
+# would silently turn today's typo-tolerant behaviour into an error, so the
+# fallthrough is pinned here rather than left implicit.
+# ---------------------------------------------------------------------------
+
+_MODE_FALLTHROUGH_VALUES = ["regex", "bogus", "LLM", "Regex", ""]
+
+
+def _scan_payload(result: dict) -> dict:
+    """Drop the one field that legitimately varies between two runs."""
+    return {key: value for key, value in result.items() if key != "elapsed_ms"}
+
+
+@pytest.mark.parametrize("mode", _MODE_FALLTHROUGH_VALUES)
+def test_non_llm_mode_matches_the_default_regex_result(mode: str) -> None:
+    baseline = _parse_result(_run_scan("rm -rf /tmp/test"))
+    actual = _parse_result(_run_scan("rm -rf /tmp/test", mode=mode))
+    assert _scan_payload(actual) == _scan_payload(baseline)
+
+
+# ---------------------------------------------------------------------------
+# J. Input edges
+# ---------------------------------------------------------------------------
+
+
+class TestInputEdges:
+    """Non-ASCII and large inputs must scan normally, not degrade or truncate."""
+
+    def test_non_ascii_survives_the_segment_evidence_path(self) -> None:
+        """Segment evidence returns the whole command, so encoding must survive.
+
+        ``EVIDENCE_GOLDENS`` already pins non-ASCII input on the no-target path,
+        where evidence is just the matched substring (``rm -rf``) and therefore
+        never carries the non-ASCII text.  ``shell-read-sensitive-file`` has
+        ``target_regexes``, so its evidence is the stripped segment and does
+        carry it.
+        """
+        proc = _run_scan("cat /etc/shadow # \u68c0\u67e5\u5bc6\u7801")
+        result = _parse_result(proc)
+        assert "\\u" not in proc.stdout, "non-ASCII got escaped in CLI stdout"
+        evidence = [
+            item
+            for finding in result["findings"]
+            if finding["rule_id"] == "shell-read-sensitive-file"
+            for item in finding["evidence"]
+        ]
+        assert evidence == ["cat /etc/shadow # \u68c0\u67e5\u5bc6\u7801"]
+
+    def test_non_ascii_input_without_a_match_still_passes(self) -> None:
+        result = _parse_result(_run_scan('echo "\u4f60\u597d\u4e16\u754c"'))
+        assert result["verdict"] == "pass"
+        assert result["findings"] == []
+
+    def test_large_input_still_matches_in_the_tail(self) -> None:
+        """No input-size shortcut may hide a match at the end of the input.
+
+        Asserts on the target rule rather than the whole finding list: the point
+        is that the tail was scanned, not that the filler matches nothing.
+        Kept well under ``ARG_MAX`` so this exercises the scanner rather than
+        the shell's argument limit.
+        """
+        filler = "\n".join(f"echo line-{index}" for index in range(4000))
+        result = _parse_result(_run_scan(f"{filler}\nrm -rf /tmp/test"))
+        assert result["verdict"] == "warn"
+        matched = [
+            finding
+            for finding in result["findings"]
+            if finding["rule_id"] == "shell-recursive-delete"
+        ]
+        assert (
+            len(matched) == 1
+        ), f"got findings: {[f['rule_id'] for f in result['findings']]}"
+        assert matched[0]["evidence"] == ["rm -rf"]
