@@ -9,6 +9,12 @@
 # `file`, `binary`). Legacy `tar.gz` / `tar` strings are still accepted by the
 # loader but normalized to `tar_gz`; new templates should use `tar_gz`.
 #
+# Do not use `os_version` to express installation requirements: it is retained
+# for compatibility with existing indexes but does not participate in matching.
+# Raw runtime dependencies belong in `[[component.dependencies]]` in the
+# artifact's `component.toml` and are handled by the install workflow. OS,
+# architecture, and other target selectors still apply.
+#
 # IMPORTANT: This file is a TEMPLATE. Every value wrapped in
 # `<REPLACE_WITH_...>` (and every `example.invalid` URL) is a placeholder
 # meant to be substituted before the file is published as an actual
@@ -37,7 +43,6 @@ artifact_type = "rpm"             # rpm | deb | tar_gz | zip | oci | file | bina
 backend = "github-release"        # github-release | yum-repo | apt-repo | aliyun-oss | internal-registry | local-file
 url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0.alinux4.x86_64.rpm"
 os = "alinux"
-os_version = ">=4"
 arch = "x86_64"
 libc = "glibc"
 pkg_base = "rpm"
@@ -45,7 +50,6 @@ install_modes = ["system"]
 sha256 = "<REPLACE_WITH_SHA256>"
 signature_url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0.alinux4.x86_64.rpm.sig"
 size = 12345678
-dependencies = ["kernel-headers"]
 
 # -----------------------------------------------------------------------------
 # agentsight 0.5.0 — generic Linux x86_64 tarball (user + system mode)
@@ -66,7 +70,6 @@ install_modes = ["user", "system"]
 sha256 = "<REPLACE_WITH_SHA256>"
 signature_url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0-linux-x86_64.tar.gz.sig"
 size = 9876543
-dependencies = []
 
 # -----------------------------------------------------------------------------
 # agentsight 0.5.0 — macOS aarch64 tarball (user mode only)
@@ -86,4 +89,3 @@ install_modes = ["user"]
 sha256 = "<REPLACE_WITH_SHA256>"
 signature_url = "https://example.invalid/<REPLACE_WITH_PATH>/agentsight-0.5.0-macos-aarch64.tar.gz.sig"
 size = 8765432
-dependencies = []
