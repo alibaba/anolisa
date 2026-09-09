@@ -108,63 +108,136 @@ fn response_pending_exit_and_dead_pid_preserve_crash_evidence() {
 
 #[test]
 fn response_pending_idle_snapshot_persists_once_and_can_resume() {
-    let body = r#"{"id":"fixture","model":"gpt-4","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#;
+    let body = r#"{"id":"fixture","object":"chat.completion","created":0,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#;
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    for split in [26, response.len() - 1] {
-        let mut aggregator = fixture(&response.as_bytes()[..split]);
-        aggregator.http_mut().evict_idle_and_oversized();
-        let snapshots = aggregator.snapshot_idle_connections();
-        assert_eq!(snapshots.len(), 1);
-        assert!(aggregator.snapshot_idle_connections().is_empty());
-        let (id, state) = &snapshots[0];
-        let mut pending = GenAIBuilder::new()
-            .build_pending_from_request(
-                state.pending_request().expect("retained request"),
-                id,
-                &ResponseSessionMapper::new(),
-                &HashMap::new(),
-            )
-            .unwrap();
-        pending.pending_origin = PendingOrigin::IdleDrain;
-        let dir = super::tests::unique_tmp_dir("response-pending");
-        let store = GenAISqliteStore::new_with_path(&dir.join("genai.db")).unwrap();
-        store.insert_pending(&pending).unwrap();
-        // Crash-candidate queries intentionally exclude idle snapshots; inspect
-        // the stored row to verify both persistence and in-place reconciliation.
-        let db = rusqlite::Connection::open(dir.join("genai.db")).unwrap();
-        let row_state = || {
-            db.query_row(
-                "SELECT COUNT(*), MIN(status), MIN(pending_origin) FROM genai_events",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .unwrap()
-        };
-        assert_eq!(row_state(), (1, "pending".into(), "idle_drain".into()));
-        aggregator.http_mut().evict_idle_and_oversized();
-        let completed = feed(&mut aggregator, 0, &response.as_bytes()[split..]);
-        assert_eq!(completed.len(), 1);
-        let analyzed = Analyzer::new().analyze_aggregated(&completed[0]);
-        let (output, _) = GenAIBuilder::new().build_with_pending(
-            &analyzed,
-            &ResponseSessionMapper::new(),
-            &HashMap::new(),
-        );
-        assert!(!output.events.is_empty());
-        for event in &output.events {
-            store.complete_pending(event).unwrap();
+    let sse_headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+    let sse_body = b"data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}\n\ndata: [DONE]\n\n";
+    for (prefix, remaining, is_sse) in [
+        (&response.as_bytes()[..0], response.as_bytes(), false),
+        (
+            &response.as_bytes()[..26],
+            &response.as_bytes()[26..],
+            false,
+        ),
+        (
+            &response.as_bytes()[..response.len() - 1],
+            &response.as_bytes()[response.len() - 1..],
+            false,
+        ),
+        (sse_headers.as_slice(), sse_body.as_slice(), true),
+    ] {
+        for deferred in [false, true] {
+            let mut aggregator = fixture(prefix);
+            aggregator.http_mut().evict_idle_and_oversized();
+            let snapshots = aggregator.snapshot_idle_connections();
+            assert_eq!(snapshots.len(), 1);
+            assert!(aggregator.snapshot_idle_connections().is_empty());
+            let (id, state) = &snapshots[0];
+            let mut pending = GenAIBuilder::new()
+                .build_pending_from_request(
+                    state.pending_request().expect("retained request"),
+                    id,
+                    &ResponseSessionMapper::new(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+            pending.pending_origin = PendingOrigin::IdleDrain;
+            let dir = super::tests::unique_tmp_dir("response-pending");
+            let store = GenAISqliteStore::new_with_path(&dir.join("genai.db")).unwrap();
+            store.insert_pending(&pending).unwrap();
+            let db = rusqlite::Connection::open(dir.join("genai.db")).unwrap();
+            let snapshot_id: i64 = db
+                .query_row("SELECT id FROM genai_events", [], |r| r.get(0))
+                .unwrap();
+            let count = || {
+                db.query_row("SELECT COUNT(*) FROM genai_events", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+            };
+            aggregator.http_mut().evict_idle_and_oversized();
+            let completed = feed(&mut aggregator, 0, remaining);
+            assert_eq!(completed.len(), 1);
+            let mut mapper = ResponseSessionMapper::new();
+            let session = "11111111-1111-4111-8111-111111111111";
+            if !deferred {
+                let buf = br#"{"responseId":"fixture"}"#.to_vec();
+                mapper.process_filewrite(&crate::probes::FileWriteEvent {
+                    pid: PID,
+                    tid: PID,
+                    uid: 0,
+                    timestamp_ns: 1,
+                    write_size: buf.len() as u32,
+                    comm: "fixture".into(),
+                    filename: format!("{session}.jsonl"),
+                    cgroup_id: 0,
+                    buf,
+                });
+            }
+            let analyzed = Analyzer::new().analyze_aggregated(&completed[0]);
+            let (mut output, formal) =
+                GenAIBuilder::new().build_with_pending(&analyzed, &mapper, &HashMap::new());
+            assert_eq!(output.pending_response_id.is_some(), deferred);
+            assert!(!output.events.is_empty());
+            let formal = formal.unwrap();
+            assert_eq!(formal.pending_match_key, pending.pending_match_key);
+            // Both immediate export and deferred session resolution insert first.
+            store.insert_pending(&formal).unwrap();
+            store.insert_pending(&formal).unwrap();
+            assert_eq!(count(), 1);
+            assert_eq!(store.list_pending_for_pids(&[PID as i32]).unwrap().len(), 1);
+            for event in &mut output.events {
+                if let GenAISemanticEvent::LLMCall(call) = event {
+                    // Simulate the session resolution that precedes deferred export.
+                    call.metadata.insert("session_id".into(), session.into());
+                }
+                store.complete_pending(event).unwrap();
+                store.insert_pending(&formal).unwrap();
+                store.complete_pending(event).unwrap();
+            }
+            assert_eq!(count(), 1);
+            let (id, call_id, status, input, output, session_id, body, streamed): (
+                i64,
+                String,
+                String,
+                i64,
+                i64,
+                String,
+                String,
+                bool,
+            ) = db
+                .query_row(
+                    "SELECT id, call_id, status, input_tokens, output_tokens, session_id,
+                     output_messages, is_sse FROM genai_events",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(id, snapshot_id);
+            assert_eq!(call_id, formal.call_id);
+            assert_eq!(status, "complete");
+            assert_eq!((input, output), (5, 3));
+            assert_eq!(session_id, session);
+            assert!(body.contains("hello"));
+            assert_eq!(streamed, is_sse);
+            assert!(!aggregator.has_pending());
+            drop(db);
+            drop(store);
+            std::fs::remove_dir_all(&dir).unwrap();
         }
-        assert_eq!(row_state(), (1, "complete".into(), "idle_drain".into()));
-        assert!(!aggregator.has_pending());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

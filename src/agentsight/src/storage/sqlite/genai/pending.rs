@@ -1,6 +1,6 @@
 //! Pending-call lifecycle methods for GenAI SQLite store.
 
-use rusqlite::params;
+use rusqlite::{TransactionBehavior, params};
 
 use super::GenAISqliteStore;
 use crate::genai::semantic::GenAISemanticEvent;
@@ -90,7 +90,9 @@ impl GenAISqliteStore {
     ///
     /// The record is later promoted to 'complete' via [`complete_pending`] once
     /// the full response arrives, or marked 'interrupted' by the stale-scan thread
-    /// if the agent crashes before the response is received.
+    /// if the agent crashes before the response is received. A request capture adopts
+    /// a unique unfinished idle snapshot with the same match key; replaying an
+    /// existing call ID leaves its row unchanged.
     pub fn insert_pending(&self, info: &PendingCallInfo) -> Result<(), Box<dyn std::error::Error>> {
         // Enforce size limit before creating a new row. Best-effort: if
         // pruning fails (e.g. VACUUM error), proceed with the INSERT — a
@@ -99,9 +101,67 @@ impl GenAISqliteStore {
             log::warn!("Pre-insert size check failed: {e}");
         }
 
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Cold instance-ID resolution may perform I/O; keep it outside the writer lock.
         let instance = crate::genai::instance_id::get_instance_id();
-        conn.execute(
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("GenAI pending insert mutex poisoned: {e}"))?;
+        // Reserve the writer before checking, including across store connections.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM genai_events
+             WHERE event_type = 'llm_call' AND call_id = ?1)",
+            params![info.call_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        if info.pending_origin == PendingOrigin::RequestCapture {
+            if let Some(match_key) = info.pending_match_key.as_deref() {
+                let candidates = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id FROM genai_events
+                         WHERE event_type = 'llm_call'
+                           AND status IN ('pending', 'interrupted')
+                           AND pending_origin = 'idle_drain'
+                           AND pending_match_key = ?1
+                         LIMIT 2",
+                    )?;
+                    stmt.query_map(params![match_key], |row| row.get::<_, i64>(0))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                if let [id] = candidates.as_slice() {
+                    // Keep request evidence and row identity; RequestCapture also
+                    // keeps deferred calls visible to crash recovery.
+                    tx.execute(
+                        "UPDATE genai_events SET
+                            call_id = ?1, trace_id = ?2, conversation_id = ?3,
+                            session_id = ?4, pending_origin = 'request_capture'
+                         WHERE id = ?5",
+                        params![
+                            info.call_id,
+                            info.trace_id,
+                            info.conversation_id,
+                            info.session_id,
+                            id,
+                        ],
+                    )?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+                if candidates.len() > 1 {
+                    log::warn!(
+                        "Ambiguous idle snapshots for pending call {}; preserving snapshots",
+                        info.call_id
+                    );
+                }
+            }
+        }
+        tx.execute(
             "INSERT INTO genai_events (
                 event_type, status, call_id, trace_id, conversation_id, session_id, instance,
                 start_timestamp_ns, pid, process_name, agent_name,
@@ -140,6 +200,7 @@ impl GenAISqliteStore {
                 info.pending_match_key,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
