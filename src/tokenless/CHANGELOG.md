@@ -9,6 +9,19 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-09
+
+### Added
+
+- CSV/TSV tool output can now preserve all cells through quoting and line-ending compaction, or reduce larger tables to boundary rows, diagnostic rows, and a representative sample when recovery is available. Reduced views identify omitted rows and provide byte-exact original retrieval; complete enumeration or calculations require the original table. File reads and hosts without a text replacement slot pass through unchanged ([#3089](https://github.com/alibaba/anolisa/pull/3089)).
+- SLS records can now carry `tokenless.trace_id` and `tokenless.span_id` from `TOKENLESS_TRACEPARENT` or `TRACEPARENT`, so observability backends can correlate token savings with a host trace. The launching host or adapter must inject the context; without a usable value, records remain uncorrelated, and local `stats.db` data is unchanged ([#3094](https://github.com/alibaba/anolisa/pull/3094)).
+
+### Fixed
+
+- Claude Code detection now briefly re-lists a staged plugin missing from the first successful registry scan, avoiding false “not installed” results immediately after installation ([#3085](https://github.com/alibaba/anolisa/pull/3085)).
+- Hermes now skips trusted shared hook modules whose APIs or call signatures are incompatible with the adapter, tries later compatible candidates, and reports rejected candidates when none work. This prevents stale installations or cached modules from breaking lifecycle hooks ([#2249](https://github.com/alibaba/anolisa/pull/2249)).
+- OpenClaw installation now accepts declared capabilities when the host supports that option and sends the unsafe-install flag only when the host advertises it as effective. Hosts marking it as a no-op receive no bypass flag, and rejected installs point operators to `security.installPolicy` ([#3126](https://github.com/alibaba/anolisa/pull/3126), [#3152](https://github.com/alibaba/anolisa/pull/3152)).
+
 ## [0.8.0] - 2026-09-06
 
 ### Added

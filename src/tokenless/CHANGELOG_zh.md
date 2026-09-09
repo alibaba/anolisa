@@ -9,6 +9,19 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.8.1] - 2026-09-09
+
+### 新增
+
+- CSV/TSV 工具输出现在可以通过精简引号和行结束符保留全部单元格；具备恢复能力时，较大的表格可以保留首尾行、诊断行及代表性采样。缩减视图会标明省略情况，并提供逐字节恢复原文的入口；完整枚举或计算必须使用原始表格。文件读取和缺少文本替换能力的宿主保持原样 ([#3089](https://github.com/alibaba/anolisa/pull/3089))。
+- SLS 记录现在可以从 `TOKENLESS_TRACEPARENT` 或 `TRACEPARENT` 携带 `tokenless.trace_id` 和 `tokenless.span_id`，让可观测后端将 Token 节省关联到宿主 trace。上下文必须由启动 Tokenless 的宿主或适配器注入；没有有效值时记录保持未关联状态，本地 `stats.db` 数据不变 ([#3094](https://github.com/alibaba/anolisa/pull/3094))。
+
+### 修复
+
+- Claude Code 检测现在会在首次成功查询注册表却未列出已准备好的插件时进行短暂重试，避免刚安装后误报“未安装” ([#3085](https://github.com/alibaba/anolisa/pull/3085))。
+- Hermes 现在会跳过 API 或调用签名与适配器不兼容的可信共享 hook 模块，继续寻找兼容候选；全部失败时会列出拒绝原因，避免旧安装或缓存模块破坏生命周期 hook ([#2249](https://github.com/alibaba/anolisa/pull/2249))。
+- OpenClaw 安装现在会在宿主支持相应选项时接受声明的能力，并且仅在宿主声明 unsafe-install 标志仍有效时传入该标志。将其标记为 no-op 的宿主不会收到绕过标志，安装被拒绝时会提示检查 `security.installPolicy` ([#3126](https://github.com/alibaba/anolisa/pull/3126), [#3152](https://github.com/alibaba/anolisa/pull/3152))。
+
 ## [0.8.0] - 2026-09-06
 
 ### 新增

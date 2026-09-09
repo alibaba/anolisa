@@ -504,6 +504,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Sep 09 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.1-1
+- Add recoverable CSV/TSV compression and host trace correlation in SLS records
+- Fix Claude Code detection and Hermes shared hook API compatibility
+- Negotiate OpenClaw capability consent and effective unsafe-install options
+
 * Sun Sep 06 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.8.0-1
 - Migrate CLI, Python SDK and adapters to Protocol v2 lifecycle requests
 - Add recoverable JSON record reduction and build/test log compression
