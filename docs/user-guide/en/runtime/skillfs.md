@@ -746,6 +746,7 @@ shares the same file for compatibility.
 | `--decision-command <CMD>` | Use legacy external decision mode |
 | `--pid-file <PATH>` | Write a process pid file |
 | `--allow-other` | Allow other users to access the FUSE mount |
+| `--read-only` | Reject mutations through the FUSE mount with `EROFS`; the separate physical source remains writable by its owner |
 | `--config <PATH>` | Load SkillFS TOML configuration |
 | `-v`, `--verbose` | Enable debug logging |
 | `--log-file <PATH>` | Write logs to a file |

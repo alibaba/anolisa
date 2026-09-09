@@ -9,6 +9,78 @@ source。
 仓库目前没有发布可直接拉取的 SkillFS Sidecar 专用镜像。请从准备部署的源码
 revision 构建镜像，完成本地验证后，再推送到集群可以访问的 registry。
 
+## 只读安装的 Skill 与 Ledger
+
+可选的 `30-ledger-pod.yaml` 将安装包中的平铺 Skill 复制到 `/state/source`，
+调用真实 Ledger 扫描与激活处理，然后依次启动 Ledger、SkillFS 和 Cosh。
+它保留 `--security --activation-mode file`，安装目录只读不会自动获得激活。
+`.skill-meta/activation.json` 及其版本快照仍位于各自 Skill 目录内。
+file 激活模式也会读取现有 xattr 协议。
+
+使用包含待验证 revision 的 `os-skills`、`agent-sec-core` 和 `cosh-ng` 的
+ANOLISA RPM 镜像，以及对应的 SkillFS 专用镜像。示例采用 RPM Python 路径和
+`/usr/share/anolisa/skills`。使用 raw 安装时，将 init 命令中的安装包参数和
+Python runtime 改为该镜像的实际安装路径。不要直接将安装包目录作为 SkillFS
+源目录。创建示例 namespace 后，从 `src/skillfs` 执行：
+
+```bash
+export NS=skillfs-container-example
+export IMAGE=registry.example.com/anolisa/skillfs-sidecar:validated
+export ANOLISA_IMAGE=registry.example.com/anolisa/anolisa:validated
+kubectl -n "$NS" create configmap skillfs-ledger-init \
+  --from-file=ledger-init.py=container/ledger-init.py --dry-run=client -o yaml |
+  kubectl -n "$NS" apply -f -
+sed -e "s|skillfs-sidecar:dev|$IMAGE|g" \
+    -e "s|anolisa:dev|$ANOLISA_IMAGE|g" deploy/kubernetes/30-ledger-pod.yaml |
+  kubectl -n "$NS" apply -f -
+kubectl -n "$NS" logs skillfs-ledger-example -c ledger-init
+kubectl -n "$NS" wait --for=condition=Ready pod/skillfs-ledger-example --timeout=300s
+```
+
+init 容器使用只读根文件系统。初始化脚本调整副本权限，拒绝链接、特殊文件和
+安装包附带的 Ledger 元数据，在发布完整源目录后执行扫描。它使用独立的 Ledger
+配置，显式设置 `managedSkillDirs`；启动 daemon 不会自动将默认发现目录纳入托管。
+扫描或激活执行错误会阻止初始化完成；策略结果，包括隐藏 Skill 和 Ledger 安全的
+待审核快照，均按原有判定保留，不自动批准。
+
+Agent 仅通过传统用户 Skill 目录读取传播后的 view。`--read-only` 使 FUSE 挂载自身
+以 `EROFS` 拒绝修改，传播后仍然生效。仅设置父卷的 `readOnly: true` 不能保护子挂载。
+Ledger 仍可写入独立的物理源目录。Agent 的 home 和 workspace 初始为空，
+RPM/raw 系统 Skill 与 extension 目录被遮蔽。`skills.custom_paths` 是追加配置，
+不能提供这种隔离。自定义 prefix 镜像、额外 extension 或预置 home 需要同等隔离。
+该示例使用 FUSE 激活判定作为执行边界，不启用独立的 Cosh Ledger hook。
+添加 hook 时应另行核对路径身份与 daemon 访问，不能将 `/state` 挂给 Agent。
+
+Ledger 的 startup probe 要求 `daemon.health` RPC 成功后才启动 SkillFS 和 Cosh。
+Readiness 使用同一 RPC，连续 liveness 失败会重启 Ledger sidecar。残留 socket 或
+daemon 无响应都会使 probe 失败；仅有 socket 文件不代表服务可用。
+
+挂载 probe 读取虚拟 `skill-discover/SKILL.md`，即使所有业务 Skill 都被隐藏也可用。
+Readiness 只确认挂载正常，不代表必需业务 Skill 已获批准；有此需求时补充应用就绪
+条件。activation watcher 会重新加载 Ledger 已发布的激活文件，无需重新挂载。
+此示例不会自动扫描任意源目录修改，JSONL 事件日志用于诊断，daemon 不会读取它。
+应将已导入内容视为不可变；安装包升级采用新源卷和重新扫描。可信操作员若修改已有
+源目录，必须显式请求 Ledger 扫描并更新激活，才能期待 view 随之变化。
+
+需要持久化时，将**整个** `state` emptyDir 替换为独立 PVC，同时保存签名密钥和各
+Skill 快照。相同安装包重跑会保留已有状态；安装包变化或来源无法识别时会报错，
+不会覆盖。复用 PVC 前先停止旧 Pod，并保留旧卷用于回退。不要让两个初始化程序或
+daemon 同时操作同一份状态。
+
+验证时，`python3 scripts/test-ledger-init.py` 无需外部依赖即可检查初始化。
+在带 `/dev/fuse` 的一次性特权 Linux 容器内，使用 agent-sec Python 3.11 环境，
+将当前 `skillfs`、`cosh-core`、`fusermount3` 和 `timeout` 放入 PATH，再运行
+`python scripts/test-ledger-init.py --integration`。它使用真实扫描器和快照、只读
+bind mount、非特权 Cosh 进程、原始目录绕过的反向验证，以及所有业务 Skill 隐藏后的
+probe 检查。这不能代替目标 Kubernetes 集群上的挂载传播验证。
+
+完成后删除示例 Pod 和 ConfigMap；PVC 应保留到不再需要其中状态时：
+
+```bash
+kubectl -n "$NS" delete pod skillfs-ledger-example
+kubectl -n "$NS" delete configmap skillfs-ledger-init
+```
+
 ## 前提条件
 
 - Kubernetes 1.29 或更高版本。

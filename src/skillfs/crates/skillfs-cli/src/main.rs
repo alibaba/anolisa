@@ -188,6 +188,12 @@ enum Commands {
         #[arg(long, help_heading = help_text::HEADING_MOUNT)]
         allow_other: bool,
 
+        /// Reject writes through the FUSE mount, including propagated submounts.
+        ///
+        /// The separate physical source remains writable by its owner.
+        #[arg(long, help_heading = help_text::HEADING_MOUNT)]
+        read_only: bool,
+
         /// Root visible to readers for paths advertised by skill-discover.
         ///
         /// Set this to the mounted skills directory when readers cannot access
@@ -552,6 +558,7 @@ async fn run(
             source,
             mountpoint,
             allow_other,
+            read_only,
             skill_discover_root,
             foreground,
             managed,
@@ -606,6 +613,7 @@ async fn run(
                 source,
                 mountpoint,
                 allow_other,
+                read_only,
                 skill_discover_root,
                 foreground,
                 pid_file,
@@ -837,6 +845,7 @@ async fn cmd_mount(
     source: PathBuf,
     mountpoint: PathBuf,
     allow_other: bool,
+    read_only: bool,
     skill_discover_root: Option<PathBuf>,
     foreground: bool,
     pid_file: Option<PathBuf>,
@@ -2103,6 +2112,7 @@ async fn cmd_mount(
     // Mount options
     let options = MountOptions {
         allow_other,
+        read_only,
         foreground,
         fuse_options: vec!["noatime".to_string()],
     };

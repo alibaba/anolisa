@@ -70,6 +70,8 @@ pub enum FuseError {
 pub struct MountOptions {
     /// Allow other users to access the mount (requires allow_other in fuse.conf)
     pub allow_other: bool,
+    /// Reject mutations through the FUSE mount at the kernel boundary.
+    pub read_only: bool,
     /// Run in foreground (don't daemonize)
     pub foreground: bool,
     /// Additional FUSE mount options
@@ -80,6 +82,7 @@ impl Default for MountOptions {
     fn default() -> Self {
         Self {
             allow_other: false,
+            read_only: false,
             foreground: false,
             fuse_options: vec!["noatime".to_string()],
         }

@@ -388,6 +388,13 @@ Kubernetes 1.29+、`/dev/fuse`，并允许 Sidecar 使用特权模式。
 Sidecar supervisor 检测 FUSE 读取失败，并在容器内重新挂载。可通过
 `SKILLFS_SUPERVISOR_*` 配置恢复预算；默认值和恢复边界见下方 Sidecar 用户指南。
 
+对于只读安装的 Skill，指南还提供 Ledger 部署示例，将初始内容复制到私有可写
+源目录，在挂载前扫描，并对 Cosh 隔离安装包原始目录。缺失或无效的 activation
+仍保持隐藏。
+该示例通过 `skillfs mount --read-only` 在内核边界拒绝 FUSE 写入，Ledger 仍可写入
+独立的私有源目录。
+Ledger RPC 探针控制启动与就绪状态，并在 daemon 无响应时触发重启。
+
 ```bash
 cd src/skillfs
 IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)

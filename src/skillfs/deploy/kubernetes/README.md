@@ -23,6 +23,12 @@ for the complete workflow.
 | `00-namespace.yaml` | Isolated example namespace |
 | `10-example-configmap.yaml` | Example default and secondary skills |
 | `20-pod.yaml` | SkillFS sidecar and workload Pod |
+| `30-ledger-pod.yaml` | Optional read-only package → Ledger → secure SkillFS → Cosh profile |
+
+The optional Ledger profile needs the initializer ConfigMap and an ANOLISA RPM
+image in addition to the dedicated sidecar image. Follow the user guide's
+read-only installation section; do not apply all Pod examples together with
+`kubectl apply -f .`.
 
 ## Deploy
 

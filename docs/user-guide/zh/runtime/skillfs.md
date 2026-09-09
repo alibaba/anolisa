@@ -670,6 +670,7 @@ mount-session summary 仍共享同一个文件。
 | `--decision-command <CMD>` | 使用旧 external decision 模式 |
 | `--pid-file <PATH>` | 写进程 pid file |
 | `--allow-other` | 允许其他用户访问 FUSE mount |
+| `--read-only` | FUSE 挂载以 `EROFS` 拒绝修改；独立的物理源目录仍可由其所有者写入 |
 | `--config <PATH>` | 加载 SkillFS TOML 配置 |
 | `-v`, `--verbose` | 启用 debug logging |
 | `--log-file <PATH>` | 将日志写入文件 |

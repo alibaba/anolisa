@@ -10,6 +10,93 @@ The repository does not currently publish a dedicated SkillFS sidecar image.
 Build the image from the source revision you plan to deploy, verify it locally,
 and push it to a registry that the cluster can pull from.
 
+## Read-only installed skills with Ledger
+
+The optional `30-ledger-pod.yaml` profile copies an installed, flat skill bundle
+into `/state/source`, runs the real Ledger scanner and activation processor,
+then starts Ledger, SkillFS and Cosh in that order. It keeps
+`--security --activation-mode file`; read-only package permissions never grant
+activation. Both `.skill-meta/activation.json` and its version snapshots remain
+inside each copied skill. File activation also reads the existing xattr protocol.
+
+Use an ANOLISA RPM image containing `os-skills`, `agent-sec-core` and `cosh-ng`
+from the revision being validated, and the corresponding dedicated SkillFS
+image. The example uses the RPM Python layout and `/usr/share/anolisa/skills`.
+For a raw install, change the init command's package argument and Python runtime
+to that image's installed paths. Do not point SkillFS directly at the package.
+Run these commands from `src/skillfs`, after creating the example namespace:
+
+```bash
+export NS=skillfs-container-example
+export IMAGE=registry.example.com/anolisa/skillfs-sidecar:validated
+export ANOLISA_IMAGE=registry.example.com/anolisa/anolisa:validated
+kubectl -n "$NS" create configmap skillfs-ledger-init \
+  --from-file=ledger-init.py=container/ledger-init.py --dry-run=client -o yaml |
+  kubectl -n "$NS" apply -f -
+sed -e "s|skillfs-sidecar:dev|$IMAGE|g" \
+    -e "s|anolisa:dev|$ANOLISA_IMAGE|g" deploy/kubernetes/30-ledger-pod.yaml |
+  kubectl -n "$NS" apply -f -
+kubectl -n "$NS" logs skillfs-ledger-example -c ledger-init
+kubectl -n "$NS" wait --for=condition=Ready pod/skillfs-ledger-example --timeout=300s
+```
+
+The init container has a read-only root filesystem. The initializer normalizes
+copied permissions, refuses links, special files and package-supplied Ledger
+metadata, and publishes a complete source tree before scanning. It uses a
+dedicated Ledger configuration with explicit `managedSkillDirs`; daemon startup
+alone does not turn default discovery roots into managed skills. Scanner or
+activation errors stop initialization; policy outcomes, including hidden skills
+and Ledger's safe pending-review snapshots, are preserved without auto-approval.
+
+The Agent receives only the propagated view via its legacy user skill directory.
+`--read-only` makes the FUSE mount itself reject mutations with `EROFS`, including
+after propagation. A parent volume's `readOnly: true` alone does not protect
+submounts. Ledger retains write access to the separate physical source.
+Its home and workspace start empty; RPM/raw system skill and extension roots are
+masked. `skills.custom_paths` is additive and cannot provide this isolation.
+Custom-prefix images, extra extensions or preloaded homes require equivalent
+masking. This profile uses FUSE activation as its enforcement boundary and does
+not enable an independent Cosh Ledger hook. Adding hooks requires checking their
+path identity and daemon access separately; do not mount `/state` in the Agent.
+
+Ledger's startup probe requires a successful `daemon.health` RPC before SkillFS
+and Cosh start. Readiness uses the same RPC, and repeated liveness failures
+restart the Ledger sidecar. A stale socket or an unresponsive daemon fails the
+probe; socket existence alone is insufficient.
+
+The mount probes read virtual `skill-discover/SKILL.md`, which remains available
+when all business skills are hidden. Readiness confirms the mount, not approval
+of a required business skill. Add an application readiness condition if needed.
+The activation watcher reloads activation artifacts already published by Ledger
+without a remount. This profile does not automatically rescan arbitrary source
+edits: the JSONL event log is diagnostic and the daemon does not tail it.
+Treat seeded content as immutable; package updates require a new source volume
+and a new scan. A trusted operator changing the existing source must explicitly
+request Ledger scanning and activation before expecting the view to change.
+
+For persistence, replace the **whole** `state` emptyDir with a dedicated PVC so
+signing keys and per-skill snapshots survive together. Reusing the same package
+preserves existing state; a changed or unrecognized seed fails instead of
+overwriting it. Quiesce the old Pod before reusing its PVC, and keep the old volume
+for rollback. Never run two initializers or daemons against the same state.
+
+Validation: `python3 scripts/test-ledger-init.py` checks seeding without external
+dependencies. In a disposable privileged Linux container with `/dev/fuse`, use
+the agent-sec Python 3.11 environment and place current `skillfs`, `cosh-core`,
+`fusermount3` and `timeout` on PATH, then run
+`python scripts/test-ledger-init.py --integration`. It uses real scanners and
+snapshots, a read-only bind mount, an unprivileged Cosh process, a raw-directory
+bypass negative control, and a probe after every business skill is hidden.
+This does not replace Kubernetes mount-propagation validation on the target cluster.
+
+Delete the example Pod and ConfigMap when finished; retain any PVC until its
+state is no longer needed:
+
+```bash
+kubectl -n "$NS" delete pod skillfs-ledger-example
+kubectl -n "$NS" delete configmap skillfs-ledger-init
+```
+
 ## Prerequisites
 
 - Kubernetes 1.29 or later.
