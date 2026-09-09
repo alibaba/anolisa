@@ -92,6 +92,10 @@ Enhanced Assisted 是默认模式。`◇ ` 前缀表示 Cosh 可能在前台 She
 COSH_SHELL_INTEGRATION=native cosh
 ```
 
+Enhanced 不会向子进程保留已导出的 Bash `PROMPT_COMMAND` 值。
+各版本的属性限制及 Native 替代方式见
+[Bash prompt 兼容边界](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-兼容边界)。
+
 ```text
 $ hello
 bash: hello: command not found

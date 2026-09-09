@@ -43,6 +43,29 @@ Native。切换集成需要重新启动 `cosh`，`Shift+Tab` 只切换 Enhanced 
 增强集成中获批的 Shell 命令仍在前台 Shell 执行，prompt、输出、任务控制和
 `Ctrl+C` 都可用。安全规则见[工具审批](approval.md)。
 
+## Bash prompt 兼容边界
+
+Enhanced 将用户的 `PROMPT_COMMAND` Hook 与 Cosh prompt Hook 组合执行。
+集成启动前配置的用户 Hook 按所选 Bash 版本的规则保留执行顺序。
+Assisted 和 Shell-only 均使用这套集成。
+
+变量表示和子进程环境存在以下限制：
+
+- Bash 5.1 及以上版本使用数组，保留原有 export 属性，但 Bash 不会导出数组值。
+  因此，原先导出的 scalar `PROMPT_COMMAND` 不再传入子进程，原值为空字符串时也如此。
+- Bash 4.3–5.0 使用不带 export 属性的组合 scalar，避免 Cosh 内部 Hook 文本
+  进入子进程；用户原有的 scalar 同样不会被导出。
+
+如果子 Shell 需要独立初始化 prompt Hook，请在各交互 Shell 的启动文件中配置。
+如果会话必须保留 Bash 自身的 prompt 变量表示和环境行为，请在启动时选择 Native。
+Native 不加载 Cosh Hook、不观察也不提供洞察；将 Enhanced 切换到 Shell-only
+不会消除上述限制。
+
+`--resume` 始终选择 Enhanced，即使设置了 `COSH_SHELL_INTEGRATION=native`
+或 `shell.integration = "native"`。需要 Native 行为时，请勿使用 `--resume`。
+
+这些限制仅适用于 Bash 的 `PROMPT_COMMAND`，不涉及普通环境变量或交互续行提示符 `PS2`。
+
 ## 会话与主动帮助
 
 - 增强会话由 cosh-core 保存，并按启动 cosh 时所在工作空间隔离。恢复会话只
