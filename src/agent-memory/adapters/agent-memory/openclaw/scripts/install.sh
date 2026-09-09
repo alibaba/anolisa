@@ -57,19 +57,10 @@ if [ ! -f "$PLUGIN_DIR/dist/index.js" ]; then
     exit 1
 fi
 
-# OpenClaw's security scanner flags child_process.spawn as a
-# "dangerous code pattern". The plugin uses spawn exclusively to
-# launch the agent-memory MCP server as a stdio subprocess — this is
-# the standard MCP transport mechanism and not arbitrary shell
-# execution. Since the scanner cannot distinguish between legitimate
-# subprocess communication and malicious shell usage, we bypass it
-# by default. Set AGENT_MEMORY_SAFE_INSTALL=1 to go through the
-# regular (blocking) safe-install path instead.
-INSTALL_ARGS=("--force" "--dangerously-force-unsafe-install")
-if [ "${AGENT_MEMORY_SAFE_INSTALL:-0}" = "1" ]; then
-    echo "[${COMPONENT}] AGENT_MEMORY_SAFE_INSTALL=1: using OpenClaw safe-install path (may block on child_process scan)." >&2
-    INSTALL_ARGS=("--force")
-fi
+# Base argv only. Both optional flags — capability consent and the legacy
+# unsafe-install bypass — are negotiated from the installer help probed below,
+# so nothing is appended before that probe has run.
+INSTALL_ARGS=("--force")
 
 # OpenClaw gates capability-declaring plugins behind install-time consent:
 # a noninteractive `plugins install` is rejected unless --accept-capabilities
@@ -83,13 +74,14 @@ PROBE_RC=0
 INSTALL_HELP="$(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
     "$OPENCLAW_BIN" plugins install --help 2>&1)" || PROBE_RC=$?
 if [ "$PROBE_RC" -ne 0 ]; then
-    # Degrade to the base flags instead of failing closed: the script must
-    # keep installing on every host the manifest claims to support. Clearing
-    # INSTALL_HELP keeps probe error text from being mistaken for an
-    # advertised option.
+    # Degrade instead of failing closed: the script must keep installing on
+    # every host the manifest claims to support. Clearing INSTALL_HELP keeps
+    # probe error text from being mistaken for an advertised option, and marks
+    # the unsafe-install decision below as unclassified rather than absent.
     printf '[%s] WARNING: cannot inspect OpenClaw installer options (rc=%s): %s\n' \
         "$COMPONENT" "$PROBE_RC" "$INSTALL_HELP" >&2
-    printf '[%s]          Installing with the base flags only.\n' "$COMPONENT" >&2
+    printf '[%s]          Installing without --accept-capabilities; the unsafe-install\n' "$COMPONENT" >&2
+    printf '[%s]          bypass cannot be classified either (see its own note below).\n' "$COMPONENT" >&2
     INSTALL_HELP=""
 fi
 CONSENT_WITHHELD=0
@@ -112,6 +104,80 @@ elif [ "$ACCEPT_CAPABILITIES" = "0" ]; then
     # unknown, so surface that the opt-out is shaping the install.
     echo "[${COMPONENT}] AGENT_MEMORY_ACCEPT_CAPABILITIES=0 is active; if this host gates consent, the install will fail." >&2
 fi
+
+# Hosts whose installer still runs the install-time safety scan need
+# --dangerously-force-unsafe-install as their only non-interactive bypass, and
+# this plugin trips that scan because it spawns the agent-memory MCP server as a
+# stdio subprocess. Later hosts dropped install-time dangerous-code blocking and
+# keep the token as a deprecated no-op, so passing it there accomplishes nothing
+# and fails outright once the token is removed. The boundary is not the
+# capability-consent one above: in the published npm packages 2026.6.1 still
+# advertises "Bypass built-in dangerous-code install blocking", while
+# 2026.6.2-beta.1 and every later release (stable from 2026.6.5) advertise
+# "Deprecated no-op; security.installPolicy may still block". Classify the option
+# from the help already captured above rather than from a version — the same
+# line-scoped, whole-token read anolisa-core's unsafe_install_support() performs
+# — and pass the flag only while it still has effect. `tr` rather than ${var,,}:
+# bash 3.2 has no case-conversion expansion.
+UNSAFE_SUPPORT=absent
+[ "$PROBE_RC" -eq 0 ] || UNSAFE_SUPPORT=unknown
+while IFS= read -r help_line; do
+    if [[ "$help_line" =~ (^|[^[:alnum:]_.-])--dangerously-force-unsafe-install([^[:alnum:]_.-]|$) ]]; then
+        help_line_lc="$(printf '%s' "$help_line" | tr '[:upper:]' '[:lower:]')"
+        case "$help_line_lc" in
+            *"no op"*|*"no-op"*) UNSAFE_SUPPORT=noop ;;
+            *) UNSAFE_SUPPORT=effective ;;
+        esac
+        break
+    fi
+done <<< "$INSTALL_HELP"
+
+# AGENT_MEMORY_SAFE_INSTALL=1 declines the bypass. That is a real choice only
+# where the bypass still does something; on a no-op host both paths are
+# identical, so say so instead of silently ignoring the variable.
+SAFE_INSTALL="${AGENT_MEMORY_SAFE_INSTALL:-0}"
+UNSAFE_DECLINED=0
+case "$UNSAFE_SUPPORT" in
+    effective)
+        if [ "$SAFE_INSTALL" = "1" ]; then
+            UNSAFE_DECLINED=1
+            echo "[${COMPONENT}] AGENT_MEMORY_SAFE_INSTALL=1: declining --dangerously-force-unsafe-install;" >&2
+            echo "[${COMPONENT}]       this host still scans plugin sources at install time and may block" >&2
+            echo "[${COMPONENT}]       the plugin for its child_process.spawn MCP transport." >&2
+        else
+            INSTALL_ARGS+=("--dangerously-force-unsafe-install")
+            echo "[${COMPONENT}] Passing --dangerously-force-unsafe-install: this host still scans plugin"
+            echo "[${COMPONENT}]       sources at install time, and that scan flags the child_process.spawn"
+            echo "[${COMPONENT}]       this plugin uses to launch the agent-memory MCP server over stdio."
+        fi
+        ;;
+    unknown)
+        # Probe failed: the host cannot be classified, so keep the bypass that
+        # every release still accepting the token needs, and name the opt-out.
+        if [ "$SAFE_INSTALL" = "1" ]; then
+            UNSAFE_DECLINED=1
+            echo "[${COMPONENT}] AGENT_MEMORY_SAFE_INSTALL=1: declining --dangerously-force-unsafe-install." >&2
+        else
+            INSTALL_ARGS+=("--dangerously-force-unsafe-install")
+            echo "[${COMPONENT}] WARNING: installer options are unclassified, so the legacy bypass is kept." >&2
+            echo "[${COMPONENT}]          Set AGENT_MEMORY_SAFE_INSTALL=1 to decline it on hosts that no" >&2
+            echo "[${COMPONENT}]          longer accept the option." >&2
+        fi
+        ;;
+    noop)
+        echo "[${COMPONENT}] Not passing --dangerously-force-unsafe-install: this OpenClaw advertises it"
+        echo "[${COMPONENT}]       as a deprecated no-op, so install-time safety follows the operator-owned"
+        echo "[${COMPONENT}]       security.installPolicy instead."
+        if [ "$SAFE_INSTALL" = "1" ]; then
+            echo "[${COMPONENT}]       AGENT_MEMORY_SAFE_INSTALL=1 changes nothing on this host: the flag is"
+            echo "[${COMPONENT}]       omitted either way."
+        fi
+        ;;
+    *)
+        echo "[${COMPONENT}] Not passing --dangerously-force-unsafe-install: this OpenClaw does not"
+        echo "[${COMPONENT}]       advertise the option."
+        ;;
+esac
 
 # The transcript (tee into a log file, then grep the file — never a
 # short-circuit pipe, whose early match would SIGPIPE the producer under
@@ -149,6 +215,14 @@ if [ "$INSTALL_RC" -ne 0 ]; then
         echo "[${COMPONENT}] Note: AGENT_MEMORY_ACCEPT_CAPABILITIES=0 is active, but this failure does not look like a consent rejection." >&2
     fi
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
+    if [ "$UNSAFE_SUPPORT" = "noop" ]; then
+        echo "[${COMPONENT}]       this OpenClaw treats --dangerously-force-unsafe-install as a deprecated" >&2
+        echo "[${COMPONENT}]       no-op, so the rejection comes from the operator-owned" >&2
+        echo "[${COMPONENT}]       security.installPolicy — relax that policy, not this script." >&2
+    elif [ "$UNSAFE_DECLINED" = "1" ]; then
+        echo "[${COMPONENT}]       AGENT_MEMORY_SAFE_INSTALL=1 declined the unsafe-install bypass; unset it" >&2
+        echo "[${COMPONENT}]       to let the script pass the bypass this host still honors." >&2
+    fi
     exit 1
 fi
 

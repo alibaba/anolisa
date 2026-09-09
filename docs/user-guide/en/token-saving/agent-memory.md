@@ -122,10 +122,12 @@ Install-time environment variables (runtime `MEMORY_*` variables are listed sepa
 | Variable | Default | Effect |
 |---|---|---|
 | `AGENT_MEMORY_ACCEPT_CAPABILITIES` | accept | `1`/`true`/`yes`/`on` grant consent when the host advertises the flag; `0`/`false`/`no`/`off` withhold it, so gating hosts reject the install; any other value aborts with an error (exit code 2) before install |
-| `AGENT_MEMORY_SAFE_INSTALL` | unset | `1` omits `--dangerously-force-unsafe-install` from the install call |
+| `AGENT_MEMORY_SAFE_INSTALL` | unset | `1` declines `--dangerously-force-unsafe-install` on hosts that would still receive it; hosts advertising it as a deprecated no-op omit it either way |
 | `OPENCLAW_BIN` | `openclaw` | openclaw CLI binary to invoke |
 | `OPENCLAW_STATE_DIR` | `~/.openclaw` | state directory passed to every openclaw CLI invocation |
 | `OPENCLAW_HOME` | `~/.openclaw` | default for `OPENCLAW_STATE_DIR` only; never passed to the CLI (unset for every call) |
+
+The standalone `install.sh` negotiates the unsafe-install bypass the same way: it passes `--dangerously-force-unsafe-install` only while the installer advertises that option as effective. OpenClaw 2026.6.1 and earlier run an install-time safety scan that blocks `child_process` plugins non-interactively — this plugin spawns the agent-memory MCP server over stdio — so those hosts receive the bypass. OpenClaw 2026.6.5 and later dropped install-time dangerous-code blocking and list the option as a deprecated no-op, so they never receive it; there install-time safety is decided by the operator-owned `security.installPolicy`, which no script flag can override. `AGENT_MEMORY_SAFE_INSTALL=1` declines the bypass on hosts where it still has effect and changes nothing on current ones — the install log states which case applied. If the `plugins install --help` probe itself fails, the host cannot be classified: the script keeps the bypass so pre-2026.6.2 hosts still install, logs a WARNING, and `AGENT_MEMORY_SAFE_INSTALL=1` declines it there too.
 
 Plugin contract ↔ agent-memory MCP tool mapping:
 
@@ -603,6 +605,8 @@ RUST_LOG=agent_memory=debug agent-memory
 | `mem_promote` reports `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` unset or scratch missing | see Promote workflow |
 | OpenClaw plugin not loaded | `openclaw` CLI not on PATH | rerun `install.sh` after installing OpenClaw |
 | install.sh reports `Plugin "memory-anolisa" requires capability consent` | OpenClaw >= 2026.8.1 consent gate; installer-options probe failed, `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` is set, or script predates the fix | check install output for the probe WARNING or opt-out refusal line; update agent-memory, unset the opt-out, or run `openclaw plugins install <plugin-dir> --force --accept-capabilities` manually. A withheld install rejected by the gate exits with code 3; if OpenClaw rewords the rejection message, the script falls back to exit 1 with the opt-out note |
+| install.sh reports the install was blocked by `security.installPolicy` | OpenClaw 2026.6.5+ runs no install-time scan; `--dangerously-force-unsafe-install` is a deprecated no-op there, so the script omits it | relax `security.installPolicy` — re-running the script or setting `AGENT_MEMORY_SAFE_INSTALL` cannot override that policy |
+| install.sh reports the safety scan blocked the plugin | OpenClaw 2026.6.1 or earlier scans plugin sources at install time and flags the plugin's `child_process.spawn` MCP transport | unset `AGENT_MEMORY_SAFE_INSTALL` so the script passes the bypass it declined, or upgrade OpenClaw |
 | system state out of sync after manual dnf | — | `sudo anolisa --install-mode system repair agent-memory`; use system-scoped `forget` / `adopt` only when intentionally rebuilding the record for a present RPM |
 
 For deeper investigation: start with `RUST_LOG=agent_memory=debug` and inspect both stderr and `<mount>/.anolisa/audit.log`.

@@ -134,10 +134,11 @@ test: test-openclaw-install ## Run all tests (Linux only — use `make remote-te
 	@echo "==> Running tests..."
 	cargo test --locked
 
-# Bash-only consent-negotiation test for the OpenClaw installer (no Node).
+# Bash-only flag-negotiation test for the OpenClaw installer (no Node):
+# capability consent plus the legacy unsafe-install bypass.
 # A future npm/tsx-based plugin unit-test target is a separate entry point
 # and deliberately not part of `make test`.
-test-openclaw-install: ## Run the OpenClaw adapter installer consent-negotiation test
+test-openclaw-install: ## Run the OpenClaw adapter installer flag-negotiation test
 	@echo "==> Testing OpenClaw adapter installer..."
 	bash tests/test-openclaw-adapter-install.sh
 

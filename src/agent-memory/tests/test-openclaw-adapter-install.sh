@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Pin the capability-consent negotiation of scripts/install.sh against a
-# stub openclaw CLI: probe form (help captured, not piped to grep), whole-
-# token flag matching, consent opt-out, and per-outcome log lines. No real
-# plugin is installed.
+# Pin the installer flag negotiation of scripts/install.sh against a stub
+# openclaw CLI: probe form (help captured, not piped to grep), whole-token
+# matching for both negotiated flags — capability consent and the legacy
+# unsafe-install bypass — the consent opt-out, AGENT_MEMORY_SAFE_INSTALL, and
+# the per-outcome log lines. No real plugin is installed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +35,30 @@ if [ "$1" = plugins ] && [ "$2" = install ] && [ "$3" = --help ]; then
             echo 'Options:'
             echo '  --accept-capabilities-only          unrelated option (default: false)'
             echo '  --no-accept-capabilities             reverse switch (default: false)' ;;
+        # Deprecated no-op hosts: the token is still advertised, so a
+        # version-gated or presence-only read would keep passing it.
+        noop)
+            echo 'Usage: openclaw plugins install [options] <path>'
+            echo 'Options:'
+            echo "  --accept-capabilities  Accept the plugin's declared capabilities (default: false)"
+            echo '  --dangerously-force-unsafe-install  Deprecated no-op; security.installPolicy may still block'
+            echo '  --force  Overwrite an existing installed plugin (default: false)' ;;
+        noop_upper)
+            echo 'Usage: openclaw plugins install [options] <path>'
+            echo 'Options:'
+            echo "  --accept-capabilities  Accept the plugin's declared capabilities (default: false)"
+            echo '  --dangerously-force-unsafe-install  Deprecated NO-OP; security.installPolicy may still block'
+            echo '  --force  Overwrite an existing installed plugin (default: false)' ;;
+        # Near-miss only: the unsafe whole-token match must not fire here.
+        unsafe_near)
+            echo 'Usage: openclaw plugins install [options] <path>'
+            echo 'Options:'
+            echo "  --accept-capabilities  Accept the plugin's declared capabilities (default: false)"
+            echo '  --dangerously-force-unsafe-install-only  Unrelated near-match option'
+            echo '  --force  Overwrite an existing installed plugin (default: false)' ;;
+        # Verbatim captures from real hosts, commander's line wrapping included.
+        real_2026_5_22) cat "$TEST_REAL_HELP_2026_5_22" ;;
+        real_2026_8_1)  cat "$TEST_REAL_HELP_2026_8_1" ;;
         colon)
             echo '  --accept-capabilities: accept declared capabilities' ;;
         paren)
@@ -57,8 +82,10 @@ fi
 [ "$1" = plugins ] && [ "$2" = install ]
 [ "$3" = "$ANOLISA_ADAPTER_DIR/openclaw" ]
 accepted=0
+unsafe=0
 for arg in "$@"; do
     [ "$arg" != --accept-capabilities ] || accepted=1
+    [ "$arg" != --dangerously-force-unsafe-install ] || unsafe=1
 done
 if [ "${TEST_GATE:?}" = new ]; then
     [ "$accepted" = 1 ] || {
@@ -78,6 +105,25 @@ elif [ "$TEST_GATE" = unrelated ]; then
 else
     [ "$accepted" = 0 ] || { echo 'OpenClaw does not recognize option "--accept-capabilities".' >&2; exit 1; }
 fi
+# The unsafe-install gate is a third independent knob, like TEST_HELP and
+# TEST_GATE: `required` models a host whose install-time scan still runs
+# (omitting the bypass is fatal), `rejected` a host that has dropped the token
+# (passing it is fatal). Unset models no enforcement, so the consent and
+# help-layout scenarios above stay focused on the argv they pin.
+case "${TEST_UNSAFE:-}" in
+    '') ;;
+    required)
+        [ "$unsafe" = 1 ] || {
+            echo 'install safety scan blocks child_process plugins' >&2; exit 4; } ;;
+    rejected)
+        [ "$unsafe" = 0 ] || {
+            echo 'OpenClaw does not recognize option "--dangerously-force-unsafe-install".' >&2; exit 5; } ;;
+    *) echo "stub: TEST_UNSAFE='${TEST_UNSAFE}' is neither required nor rejected" >&2; exit 9 ;;
+esac
+# security.installPolicy is operator-owned and orthogonal to both flags.
+if [ "${TEST_POLICY_REJECT:-0}" = 1 ]; then
+    echo 'install blocked by security.installPolicy' >&2; exit 6
+fi
 : > "$TEST_INSTALLED"
 STUB
 chmod +x "$SANDBOX/openclaw"
@@ -89,6 +135,15 @@ export OPENCLAW_HOME="$SANDBOX/ignored home"
 export TEST_STATE_DIR="$OPENCLAW_STATE_DIR"
 export TEST_ARGV_LOG="$SANDBOX/argv"
 export TEST_INSTALLED="$SANDBOX/installed"
+# `openclaw plugins install --help` captured verbatim from real releases, so the
+# unsafe-install classifier is pinned against how commander actually renders and
+# wraps the option descriptions rather than against hand-written help text.
+#   2026.5.22 — bypass still effective, no capability-consent gate.
+#   2026.8.1  — bypass advertised as "Deprecated no-op", consent gate present.
+#               2026.9.2 renders the same help apart from its version banner
+#               (verified), so one no-op fixture stands in for both.
+export TEST_REAL_HELP_2026_5_22="$SCRIPT_DIR/fixtures/openclaw-2026.5.22-plugins-install-help.txt"
+export TEST_REAL_HELP_2026_8_1="$SCRIPT_DIR/fixtures/openclaw-2026.8.1-plugins-install-help.txt"
 
 fail() {
     echo "FAIL: $1" >&2
@@ -96,11 +151,13 @@ fail() {
     exit 1
 }
 
-# Full expected install argv for the given flag combination.
+# Full expected install argv for the given flag combination, in the order
+# install.sh appends them: capability consent is negotiated first, the legacy
+# unsafe-install bypass second.
 argv() {
     local a="plugins install $ANOLISA_ADAPTER_DIR/openclaw --force"
-    if [ "$1" = yes ]; then a="$a --dangerously-force-unsafe-install"; fi
     if [ "$2" = yes ]; then a="$a --accept-capabilities"; fi
+    if [ "$1" = yes ]; then a="$a --dangerously-force-unsafe-install"; fi
     printf '%s' "$a"
 }
 
@@ -182,15 +239,19 @@ channel_dump() {
     sed 's/^/    /' "$SANDBOX/err" >&2
 }
 
+# The "modern" help advertises no unsafe-install option at all, so every
+# scenario below expects the bypass to be omitted — that is the negotiation
+# this suite pins, not a side effect of the consent gate.
 export TEST_HELP=modern TEST_GATE=new
-scenario 'modern host, default' 0 "$(argv yes yes)"
+scenario 'modern host, default' 0 "$(argv no yes)"
 expect_log 'Passing --accept-capabilities'
+expect_no_log '] Passing --dangerously-force-unsafe-install'
 scenario 'modern host, safe install' 0 "$(argv no yes)" AGENT_MEMORY_SAFE_INSTALL=1
-scenario 'modern host, explicit opt-in' 0 "$(argv yes yes)" AGENT_MEMORY_ACCEPT_CAPABILITIES=1
+scenario 'modern host, explicit opt-in' 0 "$(argv no yes)" AGENT_MEMORY_ACCEPT_CAPABILITIES=1
 # Opting out must be a visible refusal: no flag, no consent log, and the
 # gated install fails with the refusal conclusion (rc=3) instead of
 # silently succeeding.
-scenario 'modern host, consent opt-out' 3 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
+scenario 'modern host, consent opt-out' 3 "$(argv no no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
 expect_log 'AGENT_MEMORY_ACCEPT_CAPABILITIES=0'
 expect_no_log 'Passing --accept-capabilities'
 expect_log 'install failed with consent withheld'
@@ -198,21 +259,21 @@ expect_log 'install failed with consent withheld'
 # visible in the script's output (streamed live via tee).
 expect_log 'requires capability consent'
 # The token table accepts the full boolean vocabulary, not just literal 0.
-scenario 'modern host, consent opt-out via false' 3 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=false
-scenario 'modern host, consent opt-in via TRUE' 0 "$(argv yes yes)" AGENT_MEMORY_ACCEPT_CAPABILITIES=TRUE
+scenario 'modern host, consent opt-out via false' 3 "$(argv no no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=false
+scenario 'modern host, consent opt-in via TRUE' 0 "$(argv no yes)" AGENT_MEMORY_ACCEPT_CAPABILITIES=TRUE
 # Leading/trailing whitespace is trimmed, matching Rust env_bool().
-scenario 'modern host, consent opt-out with padding' 3 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=' 0 '
+scenario 'modern host, consent opt-out with padding' 3 "$(argv no no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=' 0 '
 # A consent rejection buried in large CLI output must still be attributed
 # (rc=3): the signal check must never be a short-circuit pipe.
 export TEST_INSTALL_BIG=1
-scenario 'consent rejection with large install output' 3 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
+scenario 'consent rejection with large install output' 3 "$(argv no no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
 expect_log 'install failed with consent withheld'
 unset TEST_INSTALL_BIG
 # An install failure under opt-out that does not carry the consent-rejection
 # phrase must stay a generic rc=1 failure with an opt-out note — never a
 # misattributed policy refusal.
 export TEST_GATE=unrelated
-scenario 'opt-out with unrelated install error' 1 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
+scenario 'opt-out with unrelated install error' 1 "$(argv no no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
 expect_log 'does not look like a consent rejection'
 expect_log 'EACCES'
 expect_no_log 'install failed with consent withheld'
@@ -221,28 +282,87 @@ export TEST_GATE=new
 export TEST_HELP=legacy TEST_GATE=old
 scenario 'legacy host, default' 0 "$(argv yes no)"
 expect_log 'did not advertise --accept-capabilities'
-scenario 'legacy host, safe install' 0 "$(argv no no)" AGENT_MEMORY_SAFE_INSTALL=1
+expect_log '] Passing --dangerously-force-unsafe-install'
+# Declining the bypass on a host whose install-time scan still runs is a real
+# choice with a real consequence: the scan blocks the plugin, and the failure
+# conclusion names the switch that caused it.
+scenario 'legacy host, safe install' 1 "$(argv no no)" \
+    AGENT_MEMORY_SAFE_INSTALL=1 TEST_UNSAFE=required
+expect_log 'declining --dangerously-force-unsafe-install'
+expect_log 'AGENT_MEMORY_SAFE_INSTALL=1 declined the unsafe-install bypass'
 # Nothing to refuse when the host does not gate consent.
 scenario 'legacy host, consent opt-out' 0 "$(argv yes no)" AGENT_MEMORY_ACCEPT_CAPABILITIES=0
 
 export TEST_HELP=near_match
-scenario 'near-miss options only' 0 "$(argv yes no)"
+scenario 'near-miss options only' 0 "$(argv no no)"
 expect_log 'did not advertise --accept-capabilities'
 
 # Alternate help layouts pin the whole-token match: a prefix-only regex
 # misses these, a substring regex over-matches near-miss options.
 export TEST_HELP=colon TEST_GATE=new
-scenario 'colon help style' 0 "$(argv yes yes)"
+scenario 'colon help style' 0 "$(argv no yes)"
 export TEST_HELP=paren
-scenario 'paren help style' 0 "$(argv yes yes)"
+scenario 'paren help style' 0 "$(argv no yes)"
 export TEST_HELP=big
-scenario 'large help output' 0 "$(argv yes yes)"
+scenario 'large help output' 0 "$(argv no yes)"
 
-# A failing probe whose error text names the flag must not be mistaken for
-# an advertised option; the install degrades to base flags with a WARNING.
+# --- Unsafe-install negotiation ----------------------------------------------
+# A host that advertises the token as a deprecated no-op must not receive it,
+# and the log must say why instead of staying silent about the omission.
+export TEST_HELP=noop TEST_GATE=new
+scenario 'no-op host omits the deprecated bypass' 0 "$(argv no yes)" TEST_UNSAFE=rejected
+expect_log 'Not passing --dangerously-force-unsafe-install'
+expect_log 'deprecated no-op'
+expect_log 'security.installPolicy'
+# The marker is matched case-insensitively: commander's rendering is not
+# something this repo controls.
+export TEST_HELP=noop_upper
+scenario 'uppercase NO-OP marker is classified too' 0 "$(argv no yes)" TEST_UNSAFE=rejected
+expect_log 'deprecated no-op'
+# Whole-token match on the unsafe side as well: a near-miss option must not be
+# read as the bypass.
+export TEST_HELP=unsafe_near
+scenario 'unsafe near-miss option only' 0 "$(argv no yes)" TEST_UNSAFE=rejected
+expect_log 'does not'
+expect_log 'advertise the option'
+
+# Real captures pin the classifier against commander's actual rendering — the
+# 2026.8.1 help wraps "may still block" onto a continuation line — and pin the
+# resulting argv byte for byte, so 2026.5.22 keeps exactly what it got before
+# the negotiation landed while 2026.8.1 drops the no-op token.
+export TEST_HELP=real_2026_5_22 TEST_GATE=old
+scenario 'real OpenClaw 2026.5.22 keeps the legacy argv' 0 \
+    "plugins install $ANOLISA_ADAPTER_DIR/openclaw --force --dangerously-force-unsafe-install" \
+    TEST_UNSAFE=required
+expect_log '] Passing --dangerously-force-unsafe-install'
+expect_log 'did not advertise --accept-capabilities'
+export TEST_HELP=real_2026_8_1 TEST_GATE=new
+scenario 'real OpenClaw 2026.8.1 drops the no-op bypass' 0 \
+    "plugins install $ANOLISA_ADAPTER_DIR/openclaw --force --accept-capabilities" \
+    TEST_UNSAFE=rejected
+expect_log 'Not passing --dangerously-force-unsafe-install'
+expect_log 'deprecated no-op'
+expect_log 'Passing --accept-capabilities'
+
+# On a no-op host the bypass is omitted either way, so AGENT_MEMORY_SAFE_INSTALL
+# is not a choice there — the script says so rather than implying two paths.
+export TEST_HELP=noop
+scenario 'no-op host, safe install changes nothing' 0 "$(argv no yes)" \
+    AGENT_MEMORY_SAFE_INSTALL=1 TEST_UNSAFE=rejected
+expect_log 'changes nothing on this host'
+# A no-op host that rejects on policy points the operator at the policy they
+# own; neither re-running the script nor the switch can override it.
+scenario 'no-op host blocked by install policy' 1 "$(argv no yes)" \
+    TEST_UNSAFE=rejected TEST_POLICY_REJECT=1
+expect_log 'security.installPolicy'
+expect_log 'deprecated no-op'
+
+# A failing probe whose error text names the flag must not be mistaken for an
+# advertised option; the install degrades to base flags with a WARNING.
 export TEST_HELP=failed TEST_GATE=old
 scenario 'failed help probe' 0 "$(argv yes no)"
 expect_log 'WARNING: cannot inspect OpenClaw installer options (rc=3)'
+expect_log 'legacy bypass is kept'
 expect_no_log 'did not advertise --accept-capabilities'
 # The same probe failure with the opt-out active must surface the switch —
 # the advertised branch (and its refusal line) never runs. On a gating host
@@ -256,6 +376,13 @@ scenario 'failed probe with opt-out, gating host' 1 "$(argv yes no)" AGENT_MEMOR
 expect_log 'AGENT_MEMORY_ACCEPT_CAPABILITIES=0 is active'
 expect_no_log 'install failed with consent withheld'
 export TEST_GATE=old
+# An unclassified host still honours AGENT_MEMORY_SAFE_INSTALL=1: declining a
+# bypass whose effect is unknown is exactly what the opt-out is for.
+scenario 'failed probe, safe install' 1 "$(argv no no)" \
+    AGENT_MEMORY_SAFE_INSTALL=1 TEST_UNSAFE=required
+expect_log 'WARNING: cannot inspect OpenClaw installer options (rc=3)'
+expect_log 'declining --dangerously-force-unsafe-install'
+expect_log 'AGENT_MEMORY_SAFE_INSTALL=1 declined the unsafe-install bypass'
 
 # Stream contract under separated capture: a default (consent-granted)
 # install keeps the CLI's own stderr text on stderr — identical to base —
