@@ -15,6 +15,7 @@ import { McpStdioClient } from "./mcp-client.js";
 import { resolveConfig, type AgentMemoryConfig } from "./config.js";
 import { looksLikePromptInjection, wrapMemoryResultsForPrompt } from "./safety.js";
 import { buildRecallQueries, MAX_RESULTS, RRF_K } from "./keyword-extract.js";
+import { sliceCorpusWindow } from "./corpus.js";
 
 // Module-scoped singleton client. OpenClaw may call register() again
 // during a plugin hot-reload without firing gateway_stop for the old
@@ -521,16 +522,16 @@ export default definePluginEntry({
           const text = await client.callTool("memory_get", {
             path: input.lookup,
           });
-          const lines = text.split("\n");
-          const start = (input.fromLine ?? 1) - 1;
-          const end = input.lineCount
-            ? start + input.lineCount
-            : lines.length;
+          // MemoryCorpusGetResult requires the window actually returned, not
+          // the one requested — clamping and accounting live in corpus.ts.
+          const slice = sliceCorpusWindow(text, input.fromLine, input.lineCount);
           return {
             corpus: "memory",
             path: input.lookup,
             title: input.lookup,
-            content: lines.slice(start, end).join("\n"),
+            content: slice.content,
+            fromLine: slice.fromLine,
+            lineCount: slice.lineCount,
           };
         } catch {
           return null;
