@@ -201,6 +201,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Sep 09 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.7-1
+- Negotiate OpenClaw capability consent and effective installer flags
+- Fix corpus read routing and returned line-window metadata
+- Report invalid plugin configuration before probing for the binary
+- Declare RPM component identity for ANOLISA discovery
+- Detect Node.js and npm prerequisites in the unified source-build workflow
+
 * Thu Jul 30 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.6-1
 - fix(memory): recall partial short-token matches with OR fallback (#2040)
 
