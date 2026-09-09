@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.24.1] — 2026-09-09
+
+### Fixed
+- LLM token recording via agentsight broke silently when the Rust compiler version changed after the TLS library switch: cosh-core now exports a named probe symbol that agentsight attaches to by name, so capture stays stable across compiler upgrades (#3156)
+
 ## [0.24.0] — 2026-09-08
 
 ### Added
