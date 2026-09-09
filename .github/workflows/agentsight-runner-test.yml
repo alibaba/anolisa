@@ -126,6 +126,14 @@ jobs:
           echo "BPF sysctls:"
           cat /proc/sys/kernel/unprivileged_bpf_disabled
           cat /proc/sys/kernel/perf_event_paranoid
+          echo "LSM modules:"
+          if [ -r /sys/kernel/security/lsm ]; then
+            cat /sys/kernel/security/lsm
+            grep -q bpf /sys/kernel/security/lsm || \
+              echo "::warning::BPF-LSM is not active on this runner; enforcement e2e tests will be skipped"
+          else
+            echo "::warning::securityfs not mounted; cannot determine LSM status"
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
