@@ -474,15 +474,6 @@ impl SslSniff {
         self.stale_reattachs
     }
 
-    /// How many rustls gather writes (`OutboundChunks::Multiple`) were observed
-    /// and skipped because chunk reassembly is not implemented yet.
-    ///
-    /// A non-zero value means part of the request side of a rustls process was
-    /// not captured, so this is a coverage gap indicator rather than an error.
-    pub fn rustls_gather_skips(&self) -> u64 {
-        self.skel.bss().rustls_gather_skips
-    }
-
     /// Record a successful attach for `inode`, replacing any prior entry
     /// (whose links are dropped, detaching the old probes).
     fn record_attach(&mut self, inode: u64, links: Vec<Link>) {
@@ -507,24 +498,29 @@ impl SslSniff {
             SslLibKind::OpenSsl => attach_openssl(&mut self.skel, path, -1),
             SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
             SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
-            SslLibKind::Rustls => match find_rustls_offsets(path) {
-                Some(off) => {
-                    log::info!(
-                        "[attach_process] pid={pid}: rustls plaintext probes on {path} \
-                         (write={:x?}, read={:x?})",
-                        off.write,
-                        off.read
-                    );
-                    attach_rustls(&mut self.skel, path, &off, -1)
-                }
-                None => {
-                    log::warn!(
-                        "[attach_process] pid={pid}: rustls detection failed for {path} \
-                         (neither plaintext prologue matched -- rustls or the toolchain likely moved), skipping"
-                    );
+            SslLibKind::ExplicitTap => {
+                if !cosh_tap_present(path) {
+                    // A pre-tap cosh-ng can be deployed alongside an upgraded
+                    // AgentSight, and then its LLM calls are simply not
+                    // capturable: there is no TLS-layer API to fall back to.
+                    // Say so once per inode instead of staying silent, which
+                    // would be indistinguishable from a probe bug.
+                    if missing_tap_is_a_coverage_gap(path) {
+                        log::warn!(
+                            "[attach_process] pid={pid}: {path} exports no {COSH_TAP_SYMBOL}; \
+                             this cosh-ng predates the plaintext tap, so its LLM traffic \
+                             cannot be captured -- upgrade cosh-ng to restore coverage"
+                        );
+                    } else {
+                        log::debug!(
+                            "[attach_process] pid={pid}: {path} exports no {COSH_TAP_SYMBOL}; \
+                             only the LLM-issuing binary carries the tap"
+                        );
+                    }
                     return AttachOutcome::Untraceable;
                 }
-            },
+                attach_cosh_tap(&mut self.skel, path, -1)
+            }
             SslLibKind::Static => {
                 match attach_static_ssl_by_symbol(&mut self.skel, path, -1) {
                     Ok(ls) => Ok(ls),
@@ -970,91 +966,42 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     })
 }
 
-/// Offsets of rustls' two plaintext chokepoints inside a stripped binary.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RustlsOffsets {
-    /// `CommonState::buffer_plaintext` — outbound application data.
-    write: Option<usize>,
-    /// `CommonState::take_received_plaintext` — inbound application data.
-    read: Option<usize>,
+/// Symbol cosh-ng exports as its plaintext observability attach point.
+///
+/// Defined by `cosh-core`'s `provider::observe` module. Resolving it by name is
+/// what makes this robust: an earlier attempt located rustls' own plaintext
+/// functions by byte pattern, which broke as soon as the release build moved to
+/// a different rustc (#3115), because those patterns encode register allocation.
+/// A symbol address is resolved by libbpf at attach time, so the same name keeps
+/// working across toolchains.
+const COSH_TAP_SYMBOL: &str = "cosh_llm_plaintext_tap";
+
+/// Whether `path` exports the plaintext tap at all.
+///
+/// Only `cosh-core` issues LLM requests; `cosh-shell`, `cosh-cli` and
+/// `cosh-gateway` match the same name rule but carry no tap. Attaching to them
+/// would fail on every discovery sweep and be retried forever, so they are
+/// recognised as legitimately untraceable instead.
+///
+/// The check looks for the symbol name in the file rather than parsing
+/// `.dynsym`: the streaming scan is bounded and already available, and a name
+/// that appears nowhere in the binary certainly is not in its symbol table. A
+/// false positive merely lets the attach proceed and report the real error.
+fn cosh_tap_present(path: &str) -> bool {
+    scan_file_patterns(path, &[COSH_TAP_SYMBOL.as_bytes()])
+        .is_some_and(|hits| hits.first().is_some_and(|h| !h.is_empty()))
 }
 
-impl RustlsOffsets {
-    /// Whether anything worth attaching was found.
-    ///
-    /// One direction alone is still attached, but it degrades HTTP/2: the
-    /// aggregator pairs a request with its response inside one connection, so a
-    /// half-captured connection never completes. `attach_rustls` warns about it.
-    fn is_usable(&self) -> bool {
-        self.write.is_some() || self.read.is_some()
-    }
-}
-
-/// Locate rustls' plaintext chokepoints in `path` by function-prologue matching.
+/// Whether a missing tap on this binary means lost LLM coverage.
 ///
-/// `CommonState::buffer_plaintext` and `CommonState::take_received_plaintext` are
-/// the narrowest pair of functions that (a) survive cosh-ng's `lto = true` build
-/// and (b) share one `&mut CommonState`, which is what keeps both directions of a
-/// connection under a single `ssl_ptr`. The obvious `Writer::write` /
-/// `Reader::read` plaintext API is inlined away and leaves no symbol, and release
-/// binaries are fully stripped, so a prologue scan is the only handle left.
-///
-/// Each pattern is the first 24 bytes of the function: the callee-saved register
-/// block, the frame setup, and the argument shuffle. The length is not arbitrary
-/// — the register-save prefix these functions share also matches dozens of
-/// unrelated Rust functions (40 hits for one of them in a real binary), while 24
-/// bytes was verified to match exactly once. A pattern hitting more than once is
-/// discarded rather than guessed at, because attaching a uprobe to the wrong
-/// function would sample unrelated memory.
-///
-/// Because these bytes encode rustc's register allocation and frame sizes, they
-/// are tied to a given rustls + toolchain combination and must be re-verified
-/// when either moves. A miss is safe: the caller reports the binary as
-/// untraceable, which is exactly the behaviour before rustls was supported.
-fn find_rustls_offsets(path: &str) -> Option<RustlsOffsets> {
-    /// `CommonState::buffer_plaintext`: push block, `sub $0x78,%rsp`, then
-    /// `mov %rdx,%r15; mov %rsi,%r14; mov 0x308(%rdi),%rbp` — the tail also
-    /// pins rdi as the `&mut CommonState` this probe reports as the connection.
-    const WRITE_PAT: &[u8] = &[
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x78, 0x49,
-        0x89, 0xd7, 0x49, 0x89, 0xf6, 0x48, 0x8b, 0xaf, 0x08,
-    ];
-    /// `CommonState::take_received_plaintext`: push block, `mov %rdi,%r14`, the
-    /// inlined `temper_counters.received_app_data()` store `movb $0x20,0x32e(%rdi)`,
-    /// then `mov (%rsi),%r12` loading the first eightbyte of the `Payload`.
-    const READ_PAT: &[u8] = &[
-        0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x50, 0x49, 0x89, 0xfe, 0xc6, 0x87, 0x2e, 0x03,
-        0x00, 0x00, 0x20, 0x4c, 0x8b, 0x26, 0x48, 0x8b, 0x5e,
-    ];
-
-    let mut hits = scan_file_patterns(path, &[WRITE_PAT, READ_PAT])?;
-    // scan_file_patterns returns one Vec<usize> per pattern, in order.
-    let read_hits = hits.pop().unwrap_or_default();
-    let write_hits = hits.pop().unwrap_or_default();
-    let mut found = RustlsOffsets::default();
-
-    for (label, offsets, is_write) in [
-        ("CommonState::buffer_plaintext", &write_hits, true),
-        ("CommonState::take_received_plaintext", &read_hits, false),
-    ] {
-        match offsets.len() {
-            0 => log::debug!("rustls: {label} pattern not found in {path}"),
-            1 => {
-                log::debug!("rustls: {label} at {:#x} in {path}", offsets[0]);
-                if is_write {
-                    found.write = Some(offsets[0]);
-                } else {
-                    found.read = Some(offsets[0]);
-                }
-            }
-            n => log::debug!("rustls: {label} pattern has {n} matches in {path}, skipping"),
-        }
-    }
-
-    if !found.is_usable() {
-        return None;
-    }
-    Some(found)
+/// Only `cosh-core` issues LLM calls, so only there does an absent symbol mean
+/// a pre-tap build whose traffic goes unseen. The sibling binaries are mapped
+/// in the same process and never carry the tap, so their absence is expected
+/// and must not be reported as a problem.
+fn missing_tap_is_a_coverage_gap(path: &str) -> bool {
+    Path::new(path.strip_suffix(" (deleted)").unwrap_or(path))
+        .file_name()
+        .is_some_and(|name| name == "cosh-core")
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1070,10 +1017,11 @@ enum SslLibKind {
     Nss,
     /// Statically-linked SSL (BoringSSL or OpenSSL, e.g. Node.js, Chrome, Codex CLI)
     Static,
-    /// Statically-linked rustls (pure Rust TLS, e.g. cosh-ng). Distinct from
-    /// `Static` because there is no SSL_* API to hook at all: the probes go on
-    /// rustls' AEAD layer instead, with a different calling convention.
-    Rustls,
+    /// A binary that carries an explicit observability tap and therefore needs
+    /// no TLS-layer probe at all (cosh-ng today, via cosh-core's
+    /// `cosh_llm_plaintext_tap`). Distinct from `Static` because there is no
+    /// SSL_* API to hook: the uprobe goes on the exported tap symbol instead.
+    ExplicitTap,
 }
 
 /// Classify a mapped file path into an `SslLibKind`, if it is an SSL library.
@@ -1118,7 +1066,7 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
         name.as_ref(),
         "cosh-core" | "cosh-shell" | "cosh-cli" | "cosh-gateway"
     ) {
-        return Some(SslLibKind::Rustls);
+        return Some(SslLibKind::ExplicitTap);
     }
     // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
     // SSL_write/SSL_read/SSL_do_handshake as LOCAL symbols, so attach_openssl()
@@ -1199,7 +1147,7 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             // `<pid>` entry itself comes from a bind-mounted host procfs.
             let attach_path = if path_str.ends_with(" (deleted)") {
                 proc_pid_entry(pid, "exe")
-            } else if matches!(kind, SslLibKind::Static | SslLibKind::Rustls) {
+            } else if matches!(kind, SslLibKind::Static | SslLibKind::ExplicitTap) {
                 // Statically-linked SSL binary (codex, node, cosh-core, etc).
                 // <pid>/exe is a kernel-maintained symlink that stays valid
                 // even when the backing file has been replaced or unlinked,
@@ -1466,46 +1414,26 @@ fn attach_static_ssl_by_offset(
     Ok(links)
 }
 
-/// Attach the rustls plaintext probes at the offsets found by
-/// `find_rustls_offsets`.
+/// Attach the plaintext tap cosh-ng exports for observability.
 ///
-/// Both probes fire at function entry, where the plaintext is an argument, so
-/// neither direction needs a uretprobe. There is no handshake probe either:
-/// these hooks sit above the record layer and only ever see application data,
-/// so a rustls process reports no handshake timings.
-fn attach_rustls(
-    skel: &mut SslsniffSkel<'_>,
-    lib: &str,
-    off: &RustlsOffsets,
-    pid: i32,
-) -> Result<Vec<Link>> {
-    // A one-sided attach still yields data, but HTTP/2 request/response
-    // correlation needs both halves of the connection, so say so loudly.
-    if off.write.is_none() || off.read.is_none() {
-        log::warn!(
-            "rustls: only the {} direction was located in {lib}; HTTP/2 streams will not complete",
-            if off.write.is_some() { "write" } else { "read" }
-        );
-    }
-
-    let mut links = Vec::new();
-    if let Some(w) = off.write {
-        links.push(up_off!(
-            skel.progs_mut().probe_rustls_write_plaintext(),
-            pid,
-            lib,
-            w
-        )?);
-    }
-    if let Some(r) = off.read {
-        links.push(up_off!(
-            skel.progs_mut().probe_rustls_read_plaintext(),
-            pid,
-            lib,
-            r
-        )?);
-    }
-    Ok(links)
+/// One uprobe covers both directions: the tap's first argument says which way
+/// the payload is going. It fires at function entry, where the buffer is already
+/// an argument, so no uretprobe is needed. There is no handshake probe either —
+/// the tap sits at the application layer and never sees TLS records, so a
+/// cosh-ng process reports no handshake timings.
+///
+/// # Errors
+///
+/// Fails when the symbol is absent, which means the binary was built without
+/// `-Wl,--export-dynamic`: `strip = true` erases `.symtab`, so only `.dynsym`
+/// survives, and the symbol has to be promoted there deliberately.
+fn attach_cosh_tap(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<Vec<Link>> {
+    Ok(vec![up!(
+        skel.progs_mut().probe_cosh_plaintext_tap(),
+        pid,
+        lib,
+        COSH_TAP_SYMBOL
+    )?])
 }
 
 // ─── Codex offset table (Tier 3) ────────────────────────────────────────────
@@ -1927,28 +1855,7 @@ mod tests {
         assert_eq!(parse_maps_line(""), None);
     }
 
-    // ─── rustls detection tests (#3042) ─────────────────────────────────────
-    // Prologue literals mirror the ones inside find_rustls_offsets, for the same
-    // reason as the static-SSL fixtures above: editing a production pattern
-    // without updating these makes detection on the synthetic image fail.
-    const RUSTLS_WRITE_PAT: &[u8] = &[
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x78, 0x49,
-        0x89, 0xd7, 0x49, 0x89, 0xf6, 0x48, 0x8b, 0xaf, 0x08,
-    ];
-    const RUSTLS_READ_PAT: &[u8] = &[
-        0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x50, 0x49, 0x89, 0xfe, 0xc6, 0x87, 0x2e, 0x03,
-        0x00, 0x00, 0x20, 0x4c, 0x8b, 0x26, 0x48, 0x8b, 0x5e,
-    ];
-
-    /// Zero-filled synthetic binary with rustls prologues planted at the given
-    /// file offsets; zeros cannot match a pattern, so matches are unambiguous.
-    fn build_rustls_image(planted: &[(usize, &[u8])]) -> Vec<u8> {
-        let mut img = vec![0u8; 0x5000];
-        for (off, pat) in planted {
-            img[*off..*off + pat.len()].copy_from_slice(pat);
-        }
-        img
-    }
+    // ─── cosh-ng tap detection tests (#3042, #3115) ──────────────────────
 
     #[test]
     fn classify_recognises_cosh_binaries_as_rustls() {
@@ -1960,8 +1867,8 @@ mod tests {
         ] {
             assert_eq!(
                 classify_ssl_lib(path),
-                Some(SslLibKind::Rustls),
-                "{path} must be probed through rustls' plaintext chokepoints"
+                Some(SslLibKind::ExplicitTap),
+                "{path} must be probed through its exported plaintext tap"
             );
         }
     }
@@ -1986,58 +1893,36 @@ mod tests {
     }
 
     #[test]
-    fn rustls_offsets_locates_both_directions() {
-        let img = build_rustls_image(&[(0x400, RUSTLS_WRITE_PAT), (0x1200, RUSTLS_READ_PAT)]);
-        with_static_ssl_fixture("rustls-both", &img, |path| {
-            let off = find_rustls_offsets(path).expect("planted prologues must be detected");
-            assert_eq!(off.write, Some(0x400));
-            assert_eq!(off.read, Some(0x1200));
-        });
+    fn cosh_tap_symbol_matches_the_exported_contract() {
+        // The name is a cross-component contract with cosh-core's
+        // `provider::observe`; renaming either side silently stops capture, so
+        // pin the literal here rather than only in the attach call.
+        assert_eq!(COSH_TAP_SYMBOL, "cosh_llm_plaintext_tap");
     }
 
+    /// A pre-tap cosh-ng deployed under an upgraded AgentSight loses coverage
+    /// with no TLS-layer fallback available, so only `cosh-core` may report the
+    /// missing symbol as a problem. Warning for the siblings, which never carry
+    /// the tap, would emit a line per process start on every healthy host.
     #[test]
-    fn rustls_offsets_usable_with_one_direction() {
-        // Half a connection is still attached (and warned about): losing it
-        // outright would mean capturing nothing at all from the process.
-        let img = build_rustls_image(&[(0x800, RUSTLS_READ_PAT)]);
-        with_static_ssl_fixture("rustls-read-only", &img, |path| {
-            let off = find_rustls_offsets(path).expect("read-only image must be usable");
-            assert_eq!(off.read, Some(0x800));
-            assert!(off.write.is_none());
-            assert!(off.is_usable());
-        });
-    }
-
-    #[test]
-    fn rustls_offsets_discards_ambiguous_pattern() {
-        // Two hits for one function means the prologue is no longer unique after
-        // a toolchain change. Guessing could point a uprobe at unrelated code and
-        // sample arbitrary memory as if it were plaintext, so the pattern is
-        // dropped instead of resolved by heuristic.
-        let img = build_rustls_image(&[
-            (0x400, RUSTLS_READ_PAT),
-            (0x2400, RUSTLS_READ_PAT),
-            (0x3000, RUSTLS_WRITE_PAT),
-        ]);
-        with_static_ssl_fixture("rustls-ambiguous", &img, |path| {
-            let off = find_rustls_offsets(path).expect("the unique write match still stands");
+    fn only_the_llm_binary_treats_a_missing_tap_as_a_coverage_gap() {
+        assert!(missing_tap_is_a_coverage_gap(
+            "/usr/libexec/anolisa/cosh-ng/cosh-core"
+        ));
+        // Still the LLM binary once its file has been unlinked mid-run.
+        assert!(missing_tap_is_a_coverage_gap(
+            "/usr/libexec/anolisa/cosh-ng/cosh-core (deleted)"
+        ));
+        for sibling in [
+            "/usr/libexec/anolisa/cosh-ng/cosh-shell",
+            "/usr/bin/cosh-cli",
+            "/usr/libexec/anolisa/cosh-ng/cosh-gateway",
+        ] {
             assert!(
-                off.read.is_none(),
-                "ambiguous read pattern must be discarded, got {:x?}",
-                off.read
+                !missing_tap_is_a_coverage_gap(sibling),
+                "{sibling} never carries the tap; a missing symbol is expected there"
             );
-            assert_eq!(off.write, Some(0x3000));
-        });
-    }
-
-    #[test]
-    fn rustls_offsets_absent_yields_none() {
-        // A non-rustls binary must report nothing so the caller marks it
-        // untraceable instead of attaching probes to arbitrary offsets.
-        let img = vec![0u8; 0x5000];
-        with_static_ssl_fixture("rustls-absent", &img, |path| {
-            assert!(find_rustls_offsets(path).is_none());
-        });
+        }
     }
 
     /// The default re-attach TTL must cover short-lived processes (#3034).
