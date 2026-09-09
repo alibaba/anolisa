@@ -49,5 +49,7 @@ tempfile = "3"
 [profile.release]
 opt-level = 3
 lto = true
-strip = true
+# Keep .symtab so agentsight can resolve rustls function offsets by symbol name
+# instead of fragile prologue byte patterns. Only DWARF debug info is stripped.
+strip = "debuginfo"
 codegen-units = 1

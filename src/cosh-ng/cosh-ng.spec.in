@@ -1,5 +1,9 @@
 %define anolis_release 2
 %global debug_package %{nil}
+# Keep .symtab so agentsight can resolve rustls offsets by symbol name.
+# RPM's brp-strip would remove it even when cargo keeps it.
+%global __strip /bin/true
+%global __objdump /bin/true
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
 %define cosh_replacement_ready ( [ -x "%{_bindir}/cosh" ] && rpm -q --qf '%%{NAME}\\n' -f "%{_bindir}/cosh" 2>/dev/null | awk '$0 == "copilot-shell" { found=1 } END { exit found ? 0 : 1 }' )
 
