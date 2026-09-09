@@ -351,11 +351,24 @@ scenario 'no-op host, safe install changes nothing' 0 "$(argv no yes)" \
     AGENT_MEMORY_SAFE_INSTALL=1 TEST_UNSAFE=rejected
 expect_log 'changes nothing on this host'
 # A no-op host that rejects on policy points the operator at the policy they
-# own; neither re-running the script nor the switch can override it.
+# own — conditionally, because the script cannot see why OpenClaw refused.
 scenario 'no-op host blocked by install policy' 1 "$(argv no yes)" \
     TEST_UNSAFE=rejected TEST_POLICY_REJECT=1
 expect_log 'security.installPolicy'
 expect_log 'deprecated no-op'
+expect_log 'if it names security.installPolicy'
+# The reviewer's repro: a no-op host whose install dies on an unrelated error is
+# not a policy rejection. Asserting that security.installPolicy caused it sends
+# the operator to weaken a policy that had nothing to do with the failure, so the
+# note must stay conditional and point at the CLI output they can already read.
+export TEST_GATE=unrelated
+scenario 'no-op host, unrelated install error' 1 "$(argv no yes)" TEST_UNSAFE=rejected
+expect_log 'EACCES'
+expect_log 'deprecated no-op'
+expect_log 'Read the CLI output above for the actual cause'
+expect_no_log 'the rejection comes from'
+expect_no_log 'relax that policy, not this script'
+export TEST_GATE=new
 
 # A failing probe whose error text names the flag must not be mistaken for an
 # advertised option; the install degrades to base flags with a WARNING.

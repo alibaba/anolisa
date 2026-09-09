@@ -215,13 +215,22 @@ if [ "$INSTALL_RC" -ne 0 ]; then
         echo "[${COMPONENT}] Note: AGENT_MEMORY_ACCEPT_CAPABILITIES=0 is active, but this failure does not look like a consent rejection." >&2
     fi
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
+    # What the script itself did is knowable here; why OpenClaw rejected the
+    # install is not. Neither note may assert a cause: 2388b370 attributes the
+    # consent opt-out only when the captured output carries the documented
+    # rejection phrase, and no equivalent phrase is documented for
+    # security.installPolicy — so both stay conditional on the CLI output,
+    # which this default path leaves on the operator's own terminal.
     if [ "$UNSAFE_SUPPORT" = "noop" ]; then
-        echo "[${COMPONENT}]       this OpenClaw treats --dangerously-force-unsafe-install as a deprecated" >&2
-        echo "[${COMPONENT}]       no-op, so the rejection comes from the operator-owned" >&2
-        echo "[${COMPONENT}]       security.installPolicy — relax that policy, not this script." >&2
+        echo "[${COMPONENT}]       note: this OpenClaw advertises --dangerously-force-unsafe-install as a" >&2
+        echo "[${COMPONENT}]       deprecated no-op, so the script sent no bypass and cannot shape install-time" >&2
+        echo "[${COMPONENT}]       safety on this host. Read the CLI output above for the actual cause; only" >&2
+        echo "[${COMPONENT}]       if it names security.installPolicy is that operator-owned policy what to" >&2
+        echo "[${COMPONENT}]       relax — not this script." >&2
     elif [ "$UNSAFE_DECLINED" = "1" ]; then
-        echo "[${COMPONENT}]       AGENT_MEMORY_SAFE_INSTALL=1 declined the unsafe-install bypass; unset it" >&2
-        echo "[${COMPONENT}]       to let the script pass the bypass this host still honors." >&2
+        echo "[${COMPONENT}]       note: AGENT_MEMORY_SAFE_INSTALL=1 declined the unsafe-install bypass. If the" >&2
+        echo "[${COMPONENT}]       CLI output above blames the install-time safety scan, unset the variable to" >&2
+        echo "[${COMPONENT}]       let the script pass the bypass this host still honors." >&2
     fi
     exit 1
 fi
