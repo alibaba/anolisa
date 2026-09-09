@@ -15,7 +15,13 @@ import { McpStdioClient } from "./mcp-client.js";
 import { resolveConfig, type AgentMemoryConfig } from "./config.js";
 import { looksLikePromptInjection, wrapMemoryResultsForPrompt } from "./safety.js";
 import { buildRecallQueries, MAX_RESULTS, RRF_K } from "./keyword-extract.js";
-import { sliceCorpusWindow } from "./corpus.js";
+import {
+  AGENT_MEMORY_CORPUS,
+  fromCorpusReadHandle,
+  sliceCorpusWindow,
+  toCorpusSearchResult,
+  type CorpusSearchHit,
+} from "./corpus.js";
 
 // Module-scoped singleton client. OpenClaw may call register() again
 // during a plugin hot-reload without firing gateway_stop for the old
@@ -498,17 +504,14 @@ export default definePluginEntry({
             top_k: input.maxResults ?? 5,
             mode: "hybrid",
           });
-          const hits = JSON.parse(text) as Array<{
-            path: string;
-            snippet: string;
-            score: number;
-          }>;
-          return hits.map((h) => ({
-            corpus: "memory",
-            path: h.path,
-            snippet: h.snippet,
-            score: h.score,
-          }));
+          const hits = JSON.parse(text) as CorpusSearchHit[];
+          // Labelled with this plugin's own corpus id, never the host's
+          // "memory": the label is what the model echoes back to memory_get,
+          // and only a supplement corpus routes there. The path each hit
+          // advertises is namespaced when the host's builtin reader would
+          // otherwise answer it itself, so that the echoed read really does
+          // fall through to get() below (see corpus.ts).
+          return hits.map(toCorpusSearchResult);
         } catch {
           return [];
         }
@@ -518,15 +521,23 @@ export default definePluginEntry({
         fromLine?: number;
         lineCount?: number;
       }) {
+        // The lookup is the read handle search() advertised; the store is
+        // addressed by the path underneath it. Identity for a lookup that
+        // arrives un-namespaced (see corpus.ts).
+        const storePath = fromCorpusReadHandle(input.lookup);
         try {
           const text = await client.callTool("memory_get", {
-            path: input.lookup,
+            path: storePath,
           });
           // MemoryCorpusGetResult requires the window actually returned, not
           // the one requested — clamping and accounting live in corpus.ts.
           const slice = sliceCorpusWindow(text, input.fromLine, input.lineCount);
           return {
-            corpus: "memory",
+            corpus: AGENT_MEMORY_CORPUS,
+            // Echo the handle rather than the store path: the handle is what
+            // routes here, so it is what a follow-up windowed read must keep
+            // using. Answering with the bare store path would hand the model a
+            // path whose next read the host answers itself.
             path: input.lookup,
             title: input.lookup,
             content: slice.content,
