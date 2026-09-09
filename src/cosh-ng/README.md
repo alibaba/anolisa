@@ -97,6 +97,10 @@ or insights:
 COSH_SHELL_INTEGRATION=native cosh
 ```
 
+Enhanced does not preserve exported Bash `PROMPT_COMMAND` values in child
+processes. See [Bash prompt compatibility](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/overview.md#bash-prompt-compatibility)
+for the version-specific attribute limits and Native alternative.
+
 ```text
 $ hello
 bash: hello: command not found
