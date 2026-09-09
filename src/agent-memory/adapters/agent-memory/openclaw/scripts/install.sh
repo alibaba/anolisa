@@ -121,6 +121,13 @@ fi
 # bash 3.2 has no case-conversion expansion.
 UNSAFE_SUPPORT=absent
 [ "$PROBE_RC" -eq 0 ] || UNSAFE_SUPPORT=unknown
+# grep narrows the capture to candidate lines before bash reads them: scanning
+# a very large help one loop iteration at a time costs seconds, while grep
+# reads the whole capture (no -q/-m early exit, so nothing SIGPIPEs the
+# producer under pipefail) in milliseconds. The decision itself is unchanged —
+# whole-token match on the option's own line, then the no-op read below.
+UNSAFE_HELP_LINES="$(printf '%s\n' "$INSTALL_HELP" \
+    | grep -F -- '--dangerously-force-unsafe-install' || true)"
 while IFS= read -r help_line; do
     if [[ "$help_line" =~ (^|[^[:alnum:]_.-])--dangerously-force-unsafe-install([^[:alnum:]_.-]|$) ]]; then
         help_line_lc="$(printf '%s' "$help_line" | tr '[:upper:]' '[:lower:]')"
@@ -130,7 +137,7 @@ while IFS= read -r help_line; do
         esac
         break
     fi
-done <<< "$INSTALL_HELP"
+done <<< "$UNSAFE_HELP_LINES"
 
 # AGENT_MEMORY_SAFE_INSTALL=1 declines the bypass. That is a real choice only
 # where the bypass still does something; on a no-op host both paths are
@@ -179,12 +186,29 @@ case "$UNSAFE_SUPPORT" in
         ;;
 esac
 
+# One install-failure cause the script can establish without any transcript.
+# OpenClaw materialises the plugin under ${OPENCLAW_STATE_DIR}/extensions/ (the
+# memory-anolisa directory uninstall.sh removes), so an unwritable state
+# directory fails the install on its own, whatever the host's install policy
+# says. Probing that path leaves the CLI's streams exactly as they were.
+install_target_writable() {
+    local probe="${OPENCLAW_STATE_DIR}/extensions/memory-anolisa"
+    # Nearest existing ancestor — OpenClaw creates the rest of the path.
+    while [ ! -e "$probe" ]; do
+        probe="$(dirname -- "$probe")"
+    done
+    [ -w "$probe" ]
+}
+
 # The transcript (tee into a log file, then grep the file — never a
 # short-circuit pipe, whose early match would SIGPIPE the producer under
 # pipefail) exists only for the consent-withheld path, the sole consumer of
 # the consent-rejection signal; every other install runs the CLI exactly as
 # before — stderr stays stderr, stdout stays the operator's terminal, so
 # TTY-gated colour/prompts survive on the SAFE_INSTALL blocking-scan path.
+# The install-target check below is transcript-free for the same reason: it
+# reports only what this script can verify for itself and otherwise defers to
+# the CLI's own message, which the operator can already read on the terminal.
 # The merged 2>&1 on the withheld path is deliberate for a non-interactive
 # refusal transcript: the CLI's stderr surfaces on this script's stdout.
 INSTALL_CMD=(env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" \
@@ -220,8 +244,19 @@ if [ "$INSTALL_RC" -ne 0 ]; then
     # consent opt-out only when the captured output carries the documented
     # rejection phrase, and no equivalent phrase is documented for
     # security.installPolicy — so both stay conditional on the CLI output,
-    # which this default path leaves on the operator's own terminal.
-    if [ "$UNSAFE_SUPPORT" = "noop" ]; then
+    # which this default path leaves on the operator's own terminal. One cause
+    # is exempt because the script can verify it itself, so it ranks first: an
+    # install target the current user cannot write fails the install whatever
+    # else is true, and sending that operator off to reason about
+    # security.installPolicy is the misattribution the review objected to.
+    if ! install_target_writable; then
+        echo "[${COMPONENT}]       the install target ${OPENCLAW_STATE_DIR}/extensions/memory-anolisa is not" >&2
+        echo "[${COMPONENT}]       writable by the user running this script, which on its own fails the install with a" >&2
+        echo "[${COMPONENT}]       filesystem-permission error (EACCES). Fix that directory's ownership/permissions — or" >&2
+        echo "[${COMPONENT}]       point OPENCLAW_STATE_DIR at a writable state directory — and re-run before drawing any" >&2
+        echo "[${COMPONENT}]       conclusion about security.installPolicy: an unwritable target is not a policy refusal," >&2
+        echo "[${COMPONENT}]       so do not relax that policy for it." >&2
+    elif [ "$UNSAFE_SUPPORT" = "noop" ]; then
         echo "[${COMPONENT}]       note: this OpenClaw advertises --dangerously-force-unsafe-install as a" >&2
         echo "[${COMPONENT}]       deprecated no-op, so the script sent no bypass and cannot shape install-time" >&2
         echo "[${COMPONENT}]       safety on this host. Read the CLI output above for the actual cause; only" >&2

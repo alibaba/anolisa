@@ -101,7 +101,7 @@ elif [ "$TEST_GATE" = unrelated ]; then
     # Unconditional: an environment failure (e.g. EACCES) hits regardless
     # of whether the consent flag was passed, so the stream contract is
     # observable on the default path too.
-    echo 'EACCES: permission denied, open plugin manifest' >&2; exit 1
+    echo 'EACCES: permission denied, mkdir extensions/memory-anolisa' >&2; exit 1
 else
     [ "$accepted" = 0 ] || { echo 'OpenClaw does not recognize option "--accept-capabilities".' >&2; exit 1; }
 fi
@@ -239,6 +239,21 @@ channel_dump() {
     sed 's/^/    /' "$SANDBOX/err" >&2
 }
 
+# Make the plugin's install target unwritable, reproducing the EACCES host the
+# failure attribution must recognise: OpenClaw materialises the plugin under
+# ${OPENCLAW_STATE_DIR}/extensions/, so a read-only extensions/ directory is
+# enough. chmod rather than a read-only mount, so the scenario needs no
+# privileges and the sandbox cleanup still works.
+lock_install_target() {
+    mkdir -p -- "$OPENCLAW_STATE_DIR/extensions"
+    chmod 500 -- "$OPENCLAW_STATE_DIR/extensions"
+}
+
+unlock_install_target() {
+    chmod 700 -- "$OPENCLAW_STATE_DIR/extensions" 2>/dev/null || true
+    rm -rf -- "$OPENCLAW_STATE_DIR" 2>/dev/null || true
+}
+
 # The "modern" help advertises no unsafe-install option at all, so every
 # scenario below expects the bypass to be omitted — that is the negotiation
 # this suite pins, not a side effect of the consent gate.
@@ -368,6 +383,38 @@ expect_log 'deprecated no-op'
 expect_log 'Read the CLI output above for the actual cause'
 expect_no_log 'the rejection comes from'
 expect_no_log 'relax that policy, not this script'
+# The permission verdict must not be invented either: the script reports an
+# unwritable install target only after verifying one, so a writable sandbox
+# keeps the conditional note above.
+expect_no_log 'writable by the user running this script'
+# With the target genuinely unwritable the script can verify the cause itself
+# and must report the filesystem failure it is — explicitly not a policy
+# refusal to relax. Root is exempt: W_OK is granted to it regardless of mode.
+if [ "$(id -u)" = 0 ]; then
+    echo 'SKIP: unwritable install target (running as root; W_OK is always granted)'
+else
+    lock_install_target
+    scenario 'no-op host, EACCES with unwritable target' 1 "$(argv no yes)" TEST_UNSAFE=rejected
+    expect_log 'EACCES'
+    expect_log 'writable by the user running this script'
+    expect_log 'an unwritable target is not a policy refusal'
+    expect_no_log 'Read the CLI output above for the actual cause'
+    # The verified verdict outranks the policy note even when OpenClaw itself
+    # reports a policy block: an unwritable target fails the install either way,
+    # so fixing it is the step that can actually make progress.
+    scenario 'unwritable target outranks the policy note' 1 "$(argv no yes)" \
+        TEST_UNSAFE=rejected TEST_POLICY_REJECT=1
+    expect_log 'writable by the user running this script'
+    expect_no_log 'Read the CLI output above for the actual cause'
+    # ... and outranks the declined-bypass note, so no operator is sent to unset
+    # AGENT_MEMORY_SAFE_INSTALL for what is a permission failure.
+    export TEST_HELP=legacy TEST_GATE=old
+    scenario 'unwritable target outranks the safe-install note' 1 "$(argv no no)" \
+        AGENT_MEMORY_SAFE_INSTALL=1 TEST_UNSAFE=required
+    expect_log 'writable by the user running this script'
+    expect_no_log 'declined the unsafe-install bypass'
+    unlock_install_target
+fi
 export TEST_GATE=new
 
 # A failing probe whose error text names the flag must not be mistaken for an
@@ -406,6 +453,13 @@ export TEST_HELP=modern TEST_GATE=unrelated
 channel_scenario 'default path keeps CLI stderr on stderr' 1 split 'EACCES'
 export TEST_GATE=new
 channel_scenario 'withheld path merges transcript into stdout' 3 merged 'requires capability consent' AGENT_MEMORY_ACCEPT_CAPABILITIES=0
+# The install-target diagnosis captures no transcript either: a no-op host's
+# failure keeps the CLI's streams apart exactly like the base behavior. The
+# marker is CLI-authored text — the script's own stdout note names
+# security.installPolicy too, so that string cannot tell the channels apart.
+export TEST_HELP=noop TEST_GATE=new
+channel_scenario 'no-op host failure keeps CLI stderr on stderr' 1 split \
+    'install blocked by security.installPolicy' TEST_UNSAFE=rejected TEST_POLICY_REJECT=1
 
 # An unparseable switch value aborts before any OpenClaw invocation —
 # including on hosts without the CLI at all (the validation precedes the
