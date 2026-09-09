@@ -1982,6 +1982,70 @@ fn routing_c3_typed_passthrough_keeps_cjk_shell_owned() {
 }
 
 #[test]
+fn raw_relay_bash_ctrl_u_and_multiline_paste_execute_only_retained_input() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash is unavailable");
+        return;
+    }
+
+    for integration in [ShellIntegration::Native, ShellIntegration::Enhanced] {
+        let root = tempfile::Builder::new()
+            .prefix("cosh-shell-edit-paste-")
+            .tempdir()
+            .expect("editing root");
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::write(home.join(".bashrc"), "PS1='editing$ '\n").expect("bashrc");
+        let config = ShellHostConfig::new("edit-paste", root.path().join("work"))
+            .with_integration(integration)
+            .with_env("HOME", home.display().to_string())
+            .with_env("LANG", "C.UTF-8")
+            .with_env("LC_ALL", "C.UTF-8");
+        let mut config = with_bracketed_paste_readline(config, true);
+        config.raw_action_watchdog = Duration::from_secs(2);
+        let mut rendered = Vec::new();
+        let output = run_raw_relay_bash_with_actions(
+            &config,
+            vec![
+                RawRelayAction::wait(Duration::from_millis(100)),
+                RawRelayAction::write(b"touch \"$HOME/discarded-command\"".to_vec()),
+                RawRelayAction::write(vec![0x15]),
+                RawRelayAction::line("printf 'retained\\n' > \"$HOME/edit-result\""),
+                RawRelayAction::wait(Duration::from_millis(100)),
+                RawRelayAction::write(
+                    "\x1b[200~printf '第一行\\n' >> \"$HOME/edit-result\"\nprintf '第二行\\n' >> \"$HOME/edit-result\"\x1b[201~"
+                        .as_bytes()
+                        .to_vec(),
+                ),
+                RawRelayAction::line(""),
+                RawRelayAction::line("exit"),
+            ],
+            &mut rendered,
+        )
+        .unwrap_or_else(|error| panic!("{integration:?}: {error}"));
+        let terminal = String::from_utf8_lossy(&rendered);
+        assert_eq!(output.exit_status, Some(0), "{integration:?}: {terminal}");
+        assert!(
+            !home.join("discarded-command").exists(),
+            "{integration:?}: {terminal}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("edit-result"))
+                .unwrap_or_else(|error| panic!("{integration:?}: {error}: {terminal}")),
+            "retained\n第一行\n第二行\n",
+            "{integration:?}: {terminal}"
+        );
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.component.as_deref() == Some("natural_language")
+            }),
+            "{integration:?}: {terminal}"
+        );
+    }
+}
+
+#[test]
 fn routing_c3_wrapped_paste_stays_shell_owned() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-c3-wrapped-{}-{}",

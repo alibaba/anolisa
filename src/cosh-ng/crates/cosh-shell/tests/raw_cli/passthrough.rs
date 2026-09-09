@@ -1330,3 +1330,153 @@ fn raw_cli_interactive_dash_c_passthrough_transports_env_ps1() {
         "stdout={stdout}\nstderr={stderr}"
     );
 }
+
+struct InteractivePtyChild(std::process::Child);
+
+impl Drop for InteractivePtyChild {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            unsafe { nix::libc::kill(-(self.0.id() as i32), nix::libc::SIGKILL) };
+            self.0.wait().expect("reap explicit interactive shell");
+        }
+    }
+}
+
+fn interactive_pty_probe(
+    program: &str,
+    args: &[&str],
+    home: &Path,
+    ready: &str,
+    done: &str,
+) -> String {
+    use std::fs::File;
+    use std::io::{self, Read};
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    use nix::libc;
+
+    let pty = nix::pty::openpty(None, None).expect("open explicit interactive PTY");
+    let mut master = File::from(pty.master);
+    let slave = File::from(pty.slave);
+    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0, "read PTY flags");
+    assert_eq!(
+        unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0,
+        "make PTY reads nonblocking"
+    );
+    let mut command = Command::new(program);
+    command
+        .arg0("cosh")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home)
+        .env("TMPDIR", home)
+        .env("PS1", "__ENV_READY__ ")
+        .env("INPUTRC", "/dev/null")
+        .env("HISTFILE", "/dev/null")
+        .env("TERM", "xterm-256color")
+        .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
+        .env("COSH_SHELL_STARTUP_BANNER", "0")
+        .env("COSH_SHELL_HEALTH_SCAN", "disabled")
+        .env("COSH_RECOMMENDATIONS_ENABLED", "0")
+        .env("LC_ALL", "C")
+        .env("COSH_SHELL_DEFAULT_SHELL", "bash")
+        .current_dir(home)
+        .stdin(Stdio::from(slave.try_clone().expect("clone PTY stdin")))
+        .stdout(Stdio::from(slave.try_clone().expect("clone PTY stdout")))
+        .stderr(Stdio::from(slave));
+    command.args(args);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = InteractivePtyChild(command.spawn().expect("spawn interactive shell"));
+    let mut output = Vec::new();
+    let mut wait_for = |master: &mut File, marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !String::from_utf8_lossy(&output).contains(marker) {
+            assert!(
+                Instant::now() < deadline,
+                "{program}, args={args:?}: timed out before {marker:?}: {output:?}"
+            );
+            let mut bytes = [0; 4096];
+            match master.read(&mut bytes) {
+                Ok(0) => panic!("PTY closed before {marker:?}: {output:?}"),
+                Ok(count) => output.extend_from_slice(&bytes[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("PTY read before {marker:?}: {error}; {output:?}"),
+            }
+        }
+    };
+    wait_for(&mut master, ready);
+    // The command is delivered only after Bash actually renders its first PS1.
+    master
+        .write_all(b"printf '__DONE__<%s>\\n' \"${COSH_RC_PROBE-unset}\"\nexit\n")
+        .expect("write prompt-gated probe");
+    wait_for(&mut master, done);
+    let status = child
+        .0
+        .wait_timeout(Duration::from_secs(10))
+        .expect("wait interactive shell")
+        .expect("interactive shell exit timeout");
+    assert!(status.success(), "{program}, args={args:?}: {status:?}");
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[test]
+fn raw_cli_explicit_interactive_norc_preserves_prompt_readiness() {
+    for program in ["bash", env!("CARGO_BIN_EXE_cosh-shell")] {
+        for norc in [false, true] {
+            let home = tempfile::Builder::new()
+                .prefix("cosh-explicit-interactive-")
+                .tempdir()
+                .expect("isolated interactive HOME");
+            fs::write(
+                home.path().join(".bashrc"),
+                "printf '__RC_READ__\\n'\nCOSH_RC_PROBE=loaded\nPS1='__RC_READY__ '\n",
+            )
+            .expect("write startup sentinel");
+            let (args, ready, done): (&[&str], _, _) = if norc {
+                (&["--norc", "-i"], "__ENV_READY__ ", "__DONE__<unset>")
+            } else {
+                (&["-i"], "__RC_READY__ ", "__DONE__<loaded>")
+            };
+            let output = interactive_pty_probe(program, args, home.path(), ready, done);
+            assert_eq!(output.contains("__RC_READ__"), !norc, "{output}");
+            assert_eq!(output.contains("__RC_READY__"), !norc, "{output}");
+            assert_eq!(output.contains("__ENV_READY__"), norc, "{output}");
+        }
+    }
+}
+
+#[test]
+fn raw_cli_cosh_entry_default_enhanced_reaches_user_prompt() {
+    let home = tempfile::Builder::new()
+        .prefix("cosh-default-interactive-")
+        .tempdir()
+        .expect("isolated default interactive HOME");
+    write_cosh_config(home.path(), "[shell]\nadapter_default = 'fake'\n");
+    fs::write(
+        home.path().join(".bashrc"),
+        "COSH_RC_PROBE=loaded\nPS1='__RC_READY__ '\n",
+    )
+    .expect("write user prompt");
+    let output = interactive_pty_probe(
+        env!("CARGO_BIN_EXE_cosh-shell"),
+        &[],
+        home.path(),
+        "__RC_READY__ ",
+        "__DONE__<loaded>",
+    );
+    let visible = strip_ansi_escape(&output);
+    assert!(visible.contains("◇ __RC_READY__ "), "{output}");
+    assert_ordered(&visible, &["__RC_READY__ ", "__DONE__<loaded>"]);
+}
