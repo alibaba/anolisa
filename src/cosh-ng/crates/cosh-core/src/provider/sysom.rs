@@ -47,6 +47,37 @@ const METADATA_READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// measured at 61 seconds from an ECS with no public egress.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Inactivity timeout for the SysOM API response.
+///
+/// A *total* request timeout is the wrong instrument: the response is a
+/// Server-Sent Events stream whose length belongs to the model, so a deadline
+/// would truncate healthy long completions. A read timeout applies per read and
+/// resets after each successful one, so it bounds a server that accepts the
+/// connection and then goes silent while leaving a steadily streaming response
+/// untouched.
+///
+/// Deliberately generous: the largest legitimate gap is time-to-first-token
+/// while the model is queued, and the goal is to turn an unbounded hang into a
+/// bounded failure rather than to police latency.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Build the HTTP client for the streaming API.
+///
+/// Both bounds are parameters so a test can assert the stalled-connection
+/// behaviour without waiting the production read timeout.
+fn build_streaming_client(
+    endpoint: &endpoint::ResolvedEndpoint,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    endpoint
+        .configure_client(reqwest::Client::builder())
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .build()
+        .map_err(|err| format!("failed to build HTTP client: {err}"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcsAuthChallenge {
     pub instance_id: String,
@@ -282,6 +313,7 @@ impl SysomProvider {
             "sysom endpoint"
         );
         let url = format!("{}{}", resolved.base_url(), API_PATH);
+        let client = build_streaming_client(&resolved, CONNECT_TIMEOUT, READ_TIMEOUT)?;
         let host = resolved.host;
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let nonce = Uuid::new_v4().to_string();
@@ -314,13 +346,6 @@ impl SysomProvider {
         let authorization =
             self.sign_request("POST", API_PATH, &sign_headers, &hashed_payload, &creds);
 
-        // Bound connection setup only. No total request timeout: this is a
-        // Server-Sent Events stream whose lifetime is the model's, so a total
-        // timeout would truncate healthy long completions.
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(|err| format!("failed to build HTTP client: {err}"))?;
         let mut req = client
             .post(&url)
             .header("host", &host)
