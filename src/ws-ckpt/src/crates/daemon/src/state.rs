@@ -13,8 +13,9 @@ use ws_ckpt_common::persist::{
     self, BackendIdentity, BackendPaths, DaemonStateFile, WorkspaceEntry, DAEMON_STATE_VERSION,
 };
 use ws_ckpt_common::{
-    load_workspace_policy, load_workspace_policy_with_failsafe, DaemonConfig, LoadPolicyOutcome,
-    ResolveError, SnapshotIndex, WorkspaceInfo, WorkspacePolicy, INDEXES_DIR, INDEX_FILE,
+    load_workspace_policy, load_workspace_policy_with_failsafe, DaemonConfig, ErrorCode,
+    LoadPolicyOutcome, ResolveError, Response, SnapshotIndex, WorkspaceInfo, WorkspacePolicy,
+    INDEXES_DIR, INDEX_FILE,
 };
 
 use crate::fs_watcher::WorkspaceWatcher;
@@ -392,6 +393,88 @@ impl DaemonState {
             return Some(arc);
         }
         None
+    }
+
+    /// True iff `registration_path` still resolves to the workspace's live
+    /// subvolume (`data_root/ws_id`).
+    ///
+    /// Canonicalize-equality rather than `read_link`-equality: registration
+    /// paths may reach the subvolume through symlink chains, relative
+    /// symlinks, or directly through the backend mount (init's bind-mount
+    /// adoption case), and only canonicalization follows every hop. Any
+    /// resolution failure (path missing, broken symlink) counts as detached.
+    pub(crate) async fn registration_is_live(&self, ws_id: &str, registration_path: &Path) -> bool {
+        let live_path = self.backend.data_root().join(ws_id);
+        match tokio::try_join!(
+            tokio::fs::canonicalize(registration_path),
+            tokio::fs::canonicalize(live_path)
+        ) {
+            Ok((registration_target, live_target)) => registration_target == live_target,
+            Err(_) => false,
+        }
+    }
+
+    /// V1 detached-registration guard: `Some(Error)` when the registered path
+    /// no longer resolves to the workspace's live subvolume, `None` when the
+    /// registration is healthy and the caller may proceed.
+    ///
+    /// When a workspace symlink is deleted and the path recreated as a plain
+    /// directory, V1 path-addressed ops would otherwise resolve the stale
+    /// registry binding and silently operate on the old subvolume while the
+    /// user reads/writes the replacement directory — snapshots containing
+    /// none of the user's data, "successful" rollbacks the user never sees.
+    /// Guarded (V2) requests enforce the same liveness contract via
+    /// [`Self::registration_is_live`]. `recover_workspace` must not use this
+    /// guard: it is the repair path this error points the operator at.
+    pub(crate) async fn detached_registration_error(
+        &self,
+        workspace: &Arc<RwLock<WorkspaceState>>,
+    ) -> Option<Response> {
+        // The read guard must span the liveness probe: rollback swaps the live
+        // subvolume (rename to `<ws_id>.rollback-tmp`, then create the
+        // replacement) while holding the workspace write lock, so probing
+        // unlocked can observe the transient gap and refuse a healthy
+        // workspace. Callers invoke this guard before taking any lock
+        // themselves, so extending the hold here cannot deadlock; V2's
+        // guarded checkpoint already enforces the same contract by probing
+        // under the write lock.
+        let ws = workspace.read().await;
+        let ws_id = ws.ws_id.clone();
+        let registration_path = ws.path.clone();
+        if self.registration_is_live(&ws_id, &registration_path).await {
+            return None;
+        }
+        drop(ws);
+        warn!(
+            "workspace {} registration detached at {:?}; refusing operation — \
+             run 'ws-ckpt recover -w {:?}' to restore",
+            ws_id, registration_path, registration_path
+        );
+        // Distinguish the detach states so the operator knows whether
+        // recover is safe or would clobber a replacement directory.
+        let (cause, hint) = match tokio::fs::symlink_metadata(&registration_path).await {
+            Err(_) => ("the registered path no longer exists", ""),
+            Ok(meta) if !meta.file_type().is_symlink() => (
+                "the registered path is no longer a workspace symlink",
+                "\n  note: path is currently a regular directory — \
+                 move or rename it before running recover to avoid data loss",
+            ),
+            Ok(_) => (
+                "the registered symlink no longer points at the live workspace subvolume",
+                "",
+            ),
+        };
+        Some(Response::Error {
+            code: ErrorCode::InternalError,
+            message: format!(
+                "workspace registered (ws_id={}) but {}; \
+                 run 'ws-ckpt recover -w {}' to restore, then re-init{}",
+                ws_id,
+                cause,
+                registration_path.display(),
+                hint
+            ),
+        })
     }
 
     pub fn register_workspace(&self, ws_id: String, path: PathBuf, index: SnapshotIndex) {
