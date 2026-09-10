@@ -167,6 +167,11 @@ pub async fn checkpoint(
         None => return Ok(workspace_not_found(workspace)),
     };
 
+    // 1a. Detached-registration guard: refuse before snapshotting the stale subvolume.
+    if let Some(resp) = state.detached_registration_error(&arc).await {
+        return Ok(resp);
+    }
+
     // 2. Acquire write lock
     let mut ws = arc.write().await;
 
@@ -271,6 +276,12 @@ pub async fn rollback(
         None => return Ok(workspace_not_found(workspace)),
     };
 
+    // 1a. Detached-registration guard: without it a rollback "succeeds" on the
+    // stale subvolume while the user's replacement directory never changes.
+    if let Some(resp) = state.detached_registration_error(&arc).await {
+        return Ok(resp);
+    }
+
     // 2. Read lock: grab workspace path for /proc scan
     let ws_path_str = {
         let ws = arc.read().await;
@@ -337,6 +348,11 @@ pub async fn rollback_preview(
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
     };
+
+    // Detached-registration guard: a preview of a rollback the user will never see.
+    if let Some(resp) = state.detached_registration_error(&arc).await {
+        return Ok(resp);
+    }
 
     let (ws_id, resolved_id) = {
         let ws = arc.read().await;
@@ -414,6 +430,12 @@ pub async fn list_snapshots(state: &Arc<DaemonState>, workspace: &str) -> anyhow
         None => return Ok(workspace_not_found(workspace)),
     };
 
+    // Detached-registration guard: the listed snapshots belong to a subvolume
+    // the registered path no longer exposes to the user.
+    if let Some(resp) = state.detached_registration_error(&arc).await {
+        return Ok(resp);
+    }
+
     let ws = arc.read().await;
     let ws_path = ws.index.workspace_path.to_string_lossy().to_string();
     let mut snapshots: Vec<(String, SnapshotMeta)> = ws
@@ -476,6 +498,12 @@ pub async fn diff_snapshots(
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
     };
+
+    // Detached-registration guard: the diff would describe a subvolume the
+    // registered path no longer exposes to the user.
+    if let Some(resp) = state.detached_registration_error(&arc).await {
+        return Ok(resp);
+    }
 
     let ws = arc.read().await;
 
@@ -540,6 +568,14 @@ pub async fn cleanup_snapshots(
         Some(a) => a,
         None => return Ok(workspace_not_found(workspace)),
     };
+
+    // Detached-registration guard: refuse before mutating the stale subvolume's
+    // snapshot set. The scheduler's auto-cleanup path bypasses this guard via
+    // `delete_snapshots_locked` — background deletion of already-recorded
+    // snapshots must keep working even while the registration is detached.
+    if let Some(resp) = state.detached_registration_error(&arc).await {
+        return Ok(resp);
+    }
 
     // P1: plan under read lock — pure in-memory work, no fs I/O.
     let (ws_id, to_remove_ids, snap_dir) = {
@@ -656,6 +692,346 @@ mod tests {
         }
     }
 
+    // ── Detached-registration guard fixtures ──
+    //
+    // Real topology: a tempdir doubles as the backend data root
+    // (BtrfsLoopBackend::data_root() is exactly its mount path), `<root>/ws-<id>`
+    // stands in for the live subvolume, and a workspace symlink points at it.
+    // Registering fake paths like `/home/user/ws` no longer works: the guard
+    // (correctly) treats them as detached.
+
+    /// How a registration got detached from its live subvolume.
+    enum DetachMode {
+        /// Registered path replaced by a plain directory (issue #3059 repro).
+        ReplacedByDir,
+        /// Registered path removed entirely.
+        Missing,
+        /// Registered symlink repointed at another directory.
+        Repointed,
+    }
+
+    struct GuardFixture {
+        _temp: tempfile::TempDir,
+        state: Arc<DaemonState>,
+        ws_id: String,
+        ws_link: PathBuf,
+    }
+
+    impl GuardFixture {
+        fn new(ws_id: &str) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let backend: Arc<dyn StorageBackend> =
+                Arc::new(crate::backends::btrfs_loop::BtrfsLoopBackend::new(
+                    temp.path().to_path_buf(),
+                    temp.path().join("test.img"),
+                ));
+            let state = Arc::new(DaemonState::new(
+                test_config(),
+                backend,
+                temp.path().join("state"),
+            ));
+            let subvol = temp.path().join(ws_id);
+            std::fs::create_dir_all(&subvol).unwrap();
+            let ws_link = temp.path().join("ws-link");
+            std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
+            state.register_workspace(
+                ws_id.to_string(),
+                ws_link.clone(),
+                SnapshotIndex::new(ws_link.clone()),
+            );
+            Self {
+                _temp: temp,
+                state,
+                ws_id: ws_id.to_string(),
+                ws_link,
+            }
+        }
+
+        /// Break the registration the way an external `rm -rf $W; mkdir $W` does.
+        fn detach(&self, mode: DetachMode) {
+            std::fs::remove_file(&self.ws_link).unwrap();
+            match mode {
+                DetachMode::ReplacedByDir => {
+                    std::fs::create_dir(&self.ws_link).unwrap();
+                }
+                DetachMode::Missing => {}
+                DetachMode::Repointed => {
+                    let other = self._temp.path().join("other-target");
+                    std::fs::create_dir(&other).unwrap();
+                    std::os::unix::fs::symlink(&other, &self.ws_link).unwrap();
+                }
+            }
+        }
+
+        /// Insert a snapshot record so post-guard resolution stages are meaningful.
+        async fn add_snapshot(&self, snapshot_id: &str) {
+            let arc = self.state.get_by_wsid(&self.ws_id).unwrap();
+            arc.write()
+                .await
+                .index
+                .snapshots
+                .insert(snapshot_id.to_string(), make_snapshot_meta(false));
+        }
+    }
+
+    /// The detach error is uniform across ops: InternalError, points at recover.
+    /// The data-loss note must appear only for the replaced-by-directory case.
+    fn assert_detach_error(resp: Response, op: &str, expect_dir_note: bool) {
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InternalError, "{op}: {message}");
+                assert!(message.contains("recover"), "{op}: {message}");
+                assert!(message.contains("re-init"), "{op}: {message}");
+                assert_eq!(
+                    message.contains("regular directory"),
+                    expect_dir_note,
+                    "{op}: {message}"
+                );
+            }
+            other => panic!("{op}: expected detach error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_snapshot_ops_refuse_detached_registration() {
+        for mode in [
+            DetachMode::ReplacedByDir,
+            DetachMode::Missing,
+            DetachMode::Repointed,
+        ] {
+            let expect_dir_note = matches!(mode, DetachMode::ReplacedByDir);
+            let fx = GuardFixture::new("ws-guard");
+            fx.add_snapshot("snap-1").await;
+            fx.detach(mode);
+            let ws_ref = fx.ws_link.to_string_lossy().to_string();
+
+            let resp = checkpoint(&fx.state, &ws_ref, "snap-1", None, None, false)
+                .await
+                .unwrap();
+            assert_detach_error(resp, "checkpoint", expect_dir_note);
+
+            let resp = rollback(&fx.state, &ws_ref, Some("snap-1"), None)
+                .await
+                .unwrap();
+            assert_detach_error(resp, "rollback", expect_dir_note);
+
+            let resp = rollback_preview(&fx.state, &ws_ref, Some("snap-1"), None)
+                .await
+                .unwrap();
+            assert_detach_error(resp, "rollback_preview", expect_dir_note);
+
+            let resp = list_snapshots(&fx.state, &ws_ref).await.unwrap();
+            assert_detach_error(resp, "list_snapshots", expect_dir_note);
+
+            let resp = diff_snapshots(&fx.state, &ws_ref, "snap-1", None)
+                .await
+                .unwrap();
+            assert_detach_error(resp, "diff_snapshots", expect_dir_note);
+
+            let resp = cleanup_snapshots(&fx.state, &ws_ref, None).await.unwrap();
+            assert_detach_error(resp, "cleanup_snapshots", expect_dir_note);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_snapshot_ops_proceed_past_guard_on_healthy_registration() {
+        let fx = GuardFixture::new("ws-live");
+        fx.add_snapshot("snap-1").await;
+        let ws_ref = fx.ws_link.to_string_lossy().to_string();
+
+        // Every op must reach a stage after the guard (or fully succeed);
+        // none may return the detach error.
+        match checkpoint(&fx.state, &ws_ref, "snap-1", None, None, false)
+            .await
+            .unwrap()
+        {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::SnapshotAlreadyExists),
+            other => panic!("checkpoint: {other:?}"),
+        }
+
+        match rollback(&fx.state, &ws_ref, Some("no-such"), None)
+            .await
+            .unwrap()
+        {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotNotFound);
+                assert!(message.contains("no-such"), "{message}");
+            }
+            other => panic!("rollback: {other:?}"),
+        }
+
+        match rollback_preview(&fx.state, &ws_ref, Some("no-such"), None)
+            .await
+            .unwrap()
+        {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotNotFound);
+                assert!(message.contains("no-such"), "{message}");
+            }
+            other => panic!("rollback_preview: {other:?}"),
+        }
+
+        assert!(matches!(
+            list_snapshots(&fx.state, &ws_ref).await.unwrap(),
+            Response::ListOk { .. }
+        ));
+
+        match diff_snapshots(&fx.state, &ws_ref, "no-such", None)
+            .await
+            .unwrap()
+        {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotNotFound);
+                assert!(message.contains("no-such"), "{message}");
+            }
+            other => panic!("diff_snapshots: {other:?}"),
+        }
+
+        assert!(matches!(
+            cleanup_snapshots(&fx.state, &ws_ref, Some(20))
+                .await
+                .unwrap(),
+            Response::CleanupOk { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn guard_parks_on_lock_while_writer_swaps_subvolume() {
+        // The read guard held across the probe must not deadlock against a
+        // writer: a guard that starts while rollback holds the write lock
+        // parks on read acquisition, then probes only after the swap
+        // completed — and must report the registration live.
+        let fx = GuardFixture::new("ws-swap");
+        let arc = fx.state.get_by_wsid(&fx.ws_id).unwrap();
+        let live = fx._temp.path().join(&fx.ws_id);
+        let tmp = fx._temp.path().join(format!("{}.rollback-tmp", fx.ws_id));
+
+        let (mid_swap, swapped) = tokio::sync::oneshot::channel::<()>();
+        let writer_arc = arc.clone();
+        let writer = tokio::spawn(async move {
+            let _ws = writer_arc.write().await;
+            std::fs::rename(&live, &tmp).unwrap();
+            let _ = mid_swap.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            std::fs::rename(&tmp, &live).unwrap();
+        });
+        swapped.await.unwrap(); // registered path currently resolves nowhere
+
+        let state = fx.state.clone();
+        let mut guard = tokio::spawn(async move { state.detached_registration_error(&arc).await });
+
+        // While the writer holds the lock mid-swap the guard must be parked
+        // on the read lock — it may not conclude "detached" from the
+        // transiently missing path.
+        match tokio::time::timeout(std::time::Duration::from_millis(50), &mut guard).await {
+            Ok(Ok(resp)) => panic!("guard concluded during subvolume swap: {resp:?}"),
+            Ok(Err(e)) => panic!("guard task failed: {e}"),
+            Err(_) => {}
+        }
+
+        let resp = guard.await.unwrap();
+        writer.await.unwrap();
+        assert!(
+            resp.is_none(),
+            "guard must report the registration live once the swap completes: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_probe_spans_read_lock_across_subvolume_swap() {
+        // The discriminating race from review: the probe must hold the
+        // workspace read lock across its await points. A probe that released
+        // the lock first would let a concurrent rollback (write lock + rename
+        // of the live subvolume to `.rollback-tmp`) open its swap window
+        // while the probe is still in flight, making a healthy workspace look
+        // detached.
+        //
+        // Fixture: the backend data root is a 300-deep directory chain, so
+        // the real canonicalize() inside registration_is_live walks ~300
+        // components (~hundreds of microseconds). That widens the probe's
+        // in-flight window enough to observe lock ownership deterministically:
+        // acquiring the write lock implies the read lock was released, and
+        // under the fix that can only happen after the probe finished.
+        let temp = tempfile::tempdir().unwrap();
+        let mut deep = temp.path().to_path_buf();
+        for i in 0..300 {
+            deep = deep.join(format!("d{i}"));
+            std::fs::create_dir(&deep).unwrap();
+        }
+        let backend: Arc<dyn StorageBackend> = Arc::new(
+            crate::backends::btrfs_loop::BtrfsLoopBackend::new(deep.clone(), deep.join("test.img")),
+        );
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend,
+            temp.path().join("state"),
+        ));
+        let ws_id = "ws-deep";
+        let subvol = deep.join(ws_id);
+        std::fs::create_dir(&subvol).unwrap();
+        let ws_link = temp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
+        state.register_workspace(
+            ws_id.to_string(),
+            ws_link.clone(),
+            SnapshotIndex::new(ws_link),
+        );
+        let arc = state.get_by_wsid(ws_id).unwrap();
+
+        let probe_state = state.clone();
+        let probe_arc = arc.clone();
+        let guard =
+            tokio::spawn(async move { probe_state.detached_registration_error(&probe_arc).await });
+        // Run the guard to its first await: the probe is now in flight.
+        tokio::task::yield_now().await;
+
+        // Acquire the write lock as soon as the read lock frees up.
+        // Buggy (probe outside the lock): this succeeds while the probe is
+        // still resolving the 300-deep chain, so the rename below lands
+        // inside the probe's window and the guard misjudges the workspace.
+        // Fixed: the read lock spans the probe, so acquisition here implies
+        // the guard already computed its verdict on the pre-swap state.
+        let write = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(g) = arc.try_write() {
+                    return g;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("write lock must become acquirable while the guard runs");
+
+        let tmp = deep.join(format!("{ws_id}.rollback-tmp"));
+        std::fs::rename(&subvol, &tmp).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        std::fs::rename(&tmp, &subvol).unwrap();
+        drop(write);
+
+        let resp = guard.await.unwrap();
+        assert!(
+            resp.is_none(),
+            "guard misjudged a healthy workspace as detached across a subvolume swap: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_applies_when_workspace_addressed_by_ws_id() {
+        let fx = GuardFixture::new("ws-byid");
+        fx.add_snapshot("snap-1").await;
+        fx.detach(DetachMode::ReplacedByDir);
+
+        let resp = checkpoint(&fx.state, &fx.ws_id, "snap-1", None, None, false)
+            .await
+            .unwrap();
+        assert_detach_error(resp, "checkpoint by ws_id", true);
+
+        let resp = rollback(&fx.state, &fx.ws_id, Some("snap-1"), None)
+            .await
+            .unwrap();
+        assert_detach_error(resp, "rollback by ws_id", true);
+    }
+
     // ── Duplicate snapshot ID tests ──
 
     #[test]
@@ -730,19 +1106,11 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_duplicate_id_returns_already_exists() {
-        let state = Arc::new(crate::state::DaemonState::new(
-            test_config(),
-            test_backend(),
-            test_state_dir(),
-        ));
+        let fx = GuardFixture::new("ws-dup");
         // Register a workspace with an existing snapshot
-        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
-        index
-            .snapshots
-            .insert("existing-id".to_string(), make_snapshot_meta(false));
-        state.register_workspace("ws-dup".to_string(), PathBuf::from("/home/user/ws"), index);
+        fx.add_snapshot("existing-id").await;
 
-        let resp = checkpoint(&state, "ws-dup", "existing-id", None, None, false)
+        let resp = checkpoint(&fx.state, &fx.ws_id, "existing-id", None, None, false)
             .await
             .unwrap();
         match resp {
@@ -756,37 +1124,27 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_cannot_reuse_id_reserved_by_guarded_evidence() {
-        use ws_ckpt_common::{
-            GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, WorkspaceGenerationTokenV2,
-        };
-
-        let state = Arc::new(crate::state::DaemonState::new(
-            test_config(),
-            test_backend(),
-            test_state_dir(),
-        ));
-        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
-        index.governed_evidence.insert(
-            "reserved-id".to_string(),
-            GuardedCheckpointEvidenceV2 {
-                ws_id: "ws-abcdef".to_string(),
-                registered_path: "/home/user/ws".to_string(),
-                generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
-                checkpoint_id: "reserved-id".to_string(),
-                operation_digest: [2; 32],
-                caller_uid: 1000,
-                outcome: GuardedCheckpointOutcomeV2::Created {
-                    snapshot_id: "reserved-id".to_string(),
+        let fx = GuardFixture::new("ws-abcdef");
+        let arc = fx.state.get_by_wsid(&fx.ws_id).unwrap();
+        {
+            let mut ws = arc.write().await;
+            ws.index.governed_evidence.insert(
+                "reserved-id".to_string(),
+                GuardedCheckpointEvidenceV2 {
+                    ws_id: fx.ws_id.clone(),
+                    registered_path: fx.ws_link.to_string_lossy().into_owned(),
+                    generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    checkpoint_id: "reserved-id".to_string(),
+                    operation_digest: [2; 32],
+                    caller_uid: 1000,
+                    outcome: GuardedCheckpointOutcomeV2::Created {
+                        snapshot_id: "reserved-id".to_string(),
+                    },
                 },
-            },
-        );
-        state.register_workspace(
-            "ws-abcdef".to_string(),
-            PathBuf::from("/home/user/ws"),
-            index,
-        );
+            );
+        }
 
-        let response = checkpoint(&state, "ws-abcdef", "reserved-id", None, None, false)
+        let response = checkpoint(&fx.state, &fx.ws_id, "reserved-id", None, None, false)
             .await
             .unwrap();
         match response {
@@ -1133,18 +1491,10 @@ mod tests {
     /// `SnapshotNotFound`, not as `InternalError` via the dispatcher fallback.
     #[tokio::test]
     async fn diff_snapshots_missing_id_returns_snapshot_not_found() {
-        let state = Arc::new(crate::state::DaemonState::new(
-            test_config(),
-            test_backend(),
-            test_state_dir(),
-        ));
-        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
-        index
-            .snapshots
-            .insert("real-id".to_string(), make_snapshot_meta(false));
-        state.register_workspace("ws-diff".to_string(), PathBuf::from("/home/user/ws"), index);
+        let fx = GuardFixture::new("ws-diff");
+        fx.add_snapshot("real-id").await;
 
-        let resp = diff_snapshots(&state, "ws-diff", "does-not-exist", Some("real-id"))
+        let resp = diff_snapshots(&fx.state, &fx.ws_id, "does-not-exist", Some("real-id"))
             .await
             .unwrap();
         match resp {
@@ -1156,7 +1506,7 @@ mod tests {
         }
 
         // Also covers the `to`-side branch.
-        let resp = diff_snapshots(&state, "ws-diff", "real-id", Some("missing-to"))
+        let resp = diff_snapshots(&fx.state, &fx.ws_id, "real-id", Some("missing-to"))
             .await
             .unwrap();
         match resp {
@@ -1172,7 +1522,9 @@ mod tests {
     async fn diff_and_rollback_preview_reach_live_diff_backend() {
         use ws_ckpt_common::DiffEntry;
 
-        struct DiffStubBackend;
+        struct DiffStubBackend {
+            data_root: PathBuf,
+        }
 
         #[async_trait::async_trait]
         impl StorageBackend for DiffStubBackend {
@@ -1180,7 +1532,7 @@ mod tests {
                 ws_ckpt_common::backend::BackendType::BtrfsBase
             }
             fn data_root(&self) -> &std::path::Path {
-                std::path::Path::new("/tmp/stub")
+                &self.data_root
             }
             fn snapshots_root(&self) -> &std::path::Path {
                 std::path::Path::new("/tmp/stub-snaps")
@@ -1245,20 +1597,27 @@ mod tests {
             }
         }
 
+        // Real registration topology: subvolume stand-in under the stub's
+        // data root, workspace symlink pointing at it.
+        let tmp = tempfile::tempdir().unwrap();
+        let data_root = tmp.path().join("stub-data");
+        let subvol = data_root.join("ws-diff-live");
+        std::fs::create_dir_all(&subvol).unwrap();
+        let ws_link = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
+
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
-            Arc::new(DiffStubBackend),
+            Arc::new(DiffStubBackend {
+                data_root: data_root.clone(),
+            }),
             test_state_dir(),
         ));
-        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
+        let mut index = SnapshotIndex::new(ws_link.clone());
         index
             .snapshots
             .insert("snap-from".to_string(), make_snapshot_meta(false));
-        state.register_workspace(
-            "ws-diff-live".to_string(),
-            PathBuf::from("/home/user/ws"),
-            index,
-        );
+        state.register_workspace("ws-diff-live".to_string(), ws_link.clone(), index);
 
         let resp = diff_snapshots(&state, "ws-diff-live", "snap-from", None)
             .await
@@ -1306,18 +1665,9 @@ mod tests {
 
     #[tokio::test]
     async fn rollback_preview_snapshot_not_found() {
-        let state = Arc::new(crate::state::DaemonState::new(
-            test_config(),
-            test_backend(),
-            test_state_dir(),
-        ));
-        state.register_workspace(
-            "ws-preview".to_string(),
-            PathBuf::from("/home/user/ws"),
-            SnapshotIndex::new(PathBuf::from("/home/user/ws")),
-        );
+        let fx = GuardFixture::new("ws-preview");
 
-        let resp = rollback_preview(&state, "ws-preview", Some("missing-snapshot"), None)
+        let resp = rollback_preview(&fx.state, &fx.ws_id, Some("missing-snapshot"), None)
             .await
             .unwrap();
         match resp {
@@ -1346,10 +1696,10 @@ mod tests {
     }
 
     impl PartialFailBackend {
-        fn new(fail_ids: impl IntoIterator<Item = String>) -> Self {
+        fn new(data_root: PathBuf, fail_ids: impl IntoIterator<Item = String>) -> Self {
             Self {
-                data_root: PathBuf::from("/tmp/pfb-data"),
-                snapshots_root: PathBuf::from("/tmp/pfb-snaps"),
+                snapshots_root: data_root.join("snapshots"),
+                data_root,
                 fail_ids: fail_ids.into_iter().collect(),
             }
         }
@@ -1435,14 +1785,24 @@ mod tests {
         //   - in-memory index keeps only snap-3 (others removed)
         //   - failed snap meta is re-inserted (no detach drift)
         let tmp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(PartialFailBackend::new(["snap-3".to_string()]));
+        let data_root = tmp.path().join("pfb-data");
+        let backend = Arc::new(PartialFailBackend::new(
+            data_root.clone(),
+            ["snap-3".to_string()],
+        ));
         let state = Arc::new(crate::state::DaemonState::new(
             test_config(),
             backend as Arc<dyn StorageBackend>,
             tmp.path().to_path_buf(),
         ));
 
-        let ws_path = PathBuf::from("/ws/partial-fail");
+        // Real registration topology: subvolume stand-in under the stub's
+        // data root, workspace symlink pointing at it, registered by that path.
+        let subvol = data_root.join("ws-partial");
+        std::fs::create_dir_all(&subvol).unwrap();
+        let ws_path = tmp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_path).unwrap();
+
         let mut idx = SnapshotIndex::new(ws_path.clone());
         let now = Utc::now();
         for (i, off) in [0i64, 1, 2, 3, 4].iter().enumerate() {

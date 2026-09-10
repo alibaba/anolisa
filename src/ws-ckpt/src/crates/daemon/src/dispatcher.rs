@@ -337,6 +337,13 @@ async fn handle_status(
                 });
             }
         };
+        // Detached-registration guard: reporting snapshot counts for a stale
+        // subvolume would look healthy while the user's directory is not the
+        // one being described. Global status stays unguarded so `recover
+        // --all` can still enumerate detached workspaces to repair them.
+        if let Some(resp) = state.detached_registration_error(&arc).await {
+            return Ok(resp);
+        }
 
         let ws = arc.read().await;
         vec![WorkspaceInfo {
@@ -1116,6 +1123,135 @@ mod tests {
         match resp {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::WorkspaceNotFound),
             _ => panic!("expected WorkspaceNotFound error from Cleanup"),
+        }
+    }
+
+    // ── Detached-registration guard at the dispatch layer ──
+    //
+    // Real topology: BtrfsBaseBackend on a tempdir (data_root =
+    // `<tmp>/ws-ckpt-data`), a `ws-<id>` directory inside it as the
+    // live-subvolume stand-in, and a workspace symlink pointing at it.
+
+    /// Returns (state, ws_id, workspace symlink, tempdir to keep alive).
+    fn live_topology(ws_id: &str) -> (Arc<DaemonState>, String, PathBuf, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn StorageBackend> =
+            Arc::new(crate::backends::btrfs_base::BtrfsBaseBackend::new(
+                temp.path().to_path_buf(),
+                crate::backends::btrfs_base::BtrfsBaseScenario::InPlace,
+            ));
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            backend,
+            temp.path().join("state"),
+        ));
+        let subvol = temp.path().join("ws-ckpt-data").join(ws_id);
+        std::fs::create_dir_all(&subvol).unwrap();
+        let ws_link = temp.path().join("ws-link");
+        std::os::unix::fs::symlink(&subvol, &ws_link).unwrap();
+        state.register_workspace(
+            ws_id.to_string(),
+            ws_link.clone(),
+            ws_ckpt_common::SnapshotIndex::new(ws_link.clone()),
+        );
+        (state, ws_id.to_string(), ws_link, temp)
+    }
+
+    fn assert_detach_hint(resp: Response, op: &str) {
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InternalError, "{op}: {message}");
+                assert!(message.contains("recover"), "{op}: {message}");
+                assert!(message.contains("regular directory"), "{op}: {message}");
+            }
+            other => panic!("{op}: expected detach error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_checkpoint_refuses_detached_registration() {
+        let (state, _ws_id, ws_link, _temp) = live_topology("ws-dispatch");
+        // Detach: replace the symlink with a plain directory (issue #3059 repro).
+        std::fs::remove_file(&ws_link).unwrap();
+        std::fs::create_dir(&ws_link).unwrap();
+
+        let resp = dispatch(
+            &state,
+            Request::Checkpoint {
+                workspace: ws_link.to_string_lossy().to_string(),
+                id: "snap-1".to_string(),
+                message: None,
+                metadata: None,
+                pin: false,
+            },
+        )
+        .await;
+        // The checkpoint path must fail loudly instead of auto-initing over
+        // the replacement directory or snapshotting the stale subvolume.
+        assert_detach_hint(resp, "dispatch checkpoint");
+    }
+
+    #[tokio::test]
+    async fn dispatch_checkpoint_healthy_registration_proceeds_past_guard() {
+        let (state, _ws_id, _ws_link, _temp) = live_topology("ws-dispatch-live");
+        let empty_ws = tempfile::tempdir().unwrap();
+        let resp = dispatch(
+            &state,
+            Request::Checkpoint {
+                workspace: empty_ws.path().to_string_lossy().to_string(),
+                id: "snap-1".to_string(),
+                message: None,
+                metadata: None,
+                pin: false,
+            },
+        )
+        .await;
+        // Auto-init on an unregistered directory must still be attempted: it
+        // reaches the real backend (which fails outside btrfs, legitimately as
+        // InternalError), never the detach guard.
+        match resp {
+            Response::Error { code, message } => {
+                assert_ne!(code, ErrorCode::WorkspaceNotFound, "{message}");
+                assert!(
+                    !message.contains("ws-ckpt recover"),
+                    "must not look like a detach error: {message}"
+                );
+            }
+            other => panic!("expected an error from the backend, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_status_single_workspace_refuses_detached_registration() {
+        let (state, _ws_id, ws_link, _temp) = live_topology("ws-status");
+        std::fs::remove_file(&ws_link).unwrap();
+        std::fs::create_dir(&ws_link).unwrap();
+
+        let resp = dispatch(
+            &state,
+            Request::Status {
+                workspace: Some(ws_link.to_string_lossy().to_string()),
+            },
+        )
+        .await;
+        assert_detach_hint(resp, "dispatch status -w");
+    }
+
+    #[tokio::test]
+    async fn dispatch_status_global_stays_unguarded() {
+        let (state, _ws_id, ws_link, _temp) = live_topology("ws-global");
+        std::fs::remove_file(&ws_link).unwrap();
+        std::fs::create_dir(&ws_link).unwrap();
+
+        // Global status must keep listing detached workspaces: `recover --all`
+        // uses it to enumerate the workspaces it repairs.
+        let resp = dispatch(&state, Request::Status { workspace: None }).await;
+        match resp {
+            Response::StatusOk { report } => {
+                assert_eq!(report.workspaces.len(), 1);
+                assert_eq!(report.workspaces[0].ws_id, "ws-global");
+            }
+            other => panic!("expected StatusOk, got {other:?}"),
         }
     }
 
