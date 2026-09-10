@@ -1,8 +1,8 @@
 //! OpenClaw framework driver.
 //!
 //! OpenClaw plugin adapters use the CLI-managed registry: `enable` runs
-//! `openclaw plugins install <resource_root>` and `disable` runs
-//! `openclaw plugins uninstall <plugin_id>`. Skill-only adapters
+//! `openclaw plugins install <resource_root>` then `plugins enable <plugin_id>`;
+//! `disable` runs `openclaw plugins uninstall <plugin_id>`. Skill-only adapters
 //! (`adapter_type = "skill_bundle"`) skip registry operations and only
 //! copy declared skills into the OpenClaw skills directory. Status is the
 //! read-only `openclaw plugins list` for plugin adapters. All CLI and
@@ -16,12 +16,11 @@
 //!
 //! Before the first framework mutation — during `prepare_enable` (and, for
 //! `--dry-run`, `plan_enable`) — `enable` builds a read-only
-//! `OpenClawHostProfile` from all three probes (`openclaw --version`,
-//! `plugins install --help`, `plugins inspect --help`). From it the driver
-//! gates on the adapter's declared framework version, chooses
-//! version-conditioned config, decides the install argv (`--force`, and
-//! `--accept-capabilities` when advertised, because enable consents to the
-//! plugin's declared capabilities), adds
+//! `OpenClawHostProfile` from read-only probes (`openclaw --version`,
+//! `plugins install --help`, `plugins enable --help`, `plugins inspect --help`).
+//! From it the driver gates on the adapter's declared framework version, chooses
+//! version-conditioned config, requires install `--force`, and accepts declared
+//! capabilities when each subcommand advertises `--accept-capabilities`. It adds
 //! `--dangerously-force-unsafe-install` only when both authorized and
 //! advertised as effective by the host, and records the inspect capabilities.
 //! The install/verify capabilities flow to `apply_enable` as typed
@@ -156,6 +155,7 @@ impl FrameworkDriver for OpenClawDriver {
         let home = require_home(ctx)?;
         let mut actions = Vec::new();
         let mut register_command = None;
+        let mut enable_command = None;
         // Plugin adapters resolve a read-only host profile so the dry-run
         // plan shows the exact install command (including whether the
         // authorized unsafe flag is used) and only the config the host
@@ -168,6 +168,12 @@ impl FrameworkDriver for OpenClawDriver {
             let plugin_id = require_plugin_id(bundle)?;
             validate_plugin_id(&plugin_id)?;
             let preflight = self.plugin_preflight(&bundle.resource_root, ctx)?;
+            enable_command = Some(display_command(&build_enable_cmd(
+                &plugin_id,
+                &home,
+                ctx.user_home.as_deref(),
+                preflight.supports_enable_accept_capabilities,
+            )));
             selected_config = preflight.selected_config;
             register_command = Some(display_command(&preflight.install_cmd));
             actions.push(format!(
@@ -195,6 +201,10 @@ impl FrameworkDriver for OpenClawDriver {
                 cfg.key,
                 config_value_display(&cfg.value)
             ));
+        }
+
+        if let Some(command) = enable_command {
+            actions.push(format!("enable openclaw plugin: {command}"));
         }
 
         Ok(DriverPlan {
@@ -264,6 +274,7 @@ impl FrameworkDriver for OpenClawDriver {
             let preflight = self.plugin_preflight(&bundle.resource_root, ctx)?;
             PreparedEnable::OpenClaw {
                 supports_accept_capabilities: preflight.supports_accept_capabilities,
+                supports_enable_accept_capabilities: preflight.supports_enable_accept_capabilities,
                 supports_unsafe_install: preflight.supports_unsafe_install,
                 supports_inspect_json: preflight.supports_inspect_json,
                 supports_inspect_runtime: preflight.supports_inspect_runtime,
@@ -423,8 +434,8 @@ impl FrameworkDriver for OpenClawDriver {
         // rebuilt from the typed `ctx` and prepared consent support; the unsafe
         // flag still requires explicit authorization. Config selection comes from
         // prepared state, and runtime verification uses the prepared
-        // `--runtime` capability. Each probe (`--version`, install `--help`,
-        // inspect `--help`) thus runs exactly once per enable, all in prepare,
+        // `--runtime` capability. Each probe (`--version`, install/enable/inspect
+        // `--help`) thus runs exactly once per enable, all in prepare,
         // and no two probe generations are ever mixed.
         //
         // Defense in depth: `PreparedEnable` and this trait are public, so a
@@ -435,6 +446,7 @@ impl FrameworkDriver for OpenClawDriver {
         // `--runtime`, or add the unsafe flag on an unverified host).
         let (
             accept_capabilities,
+            enable_accept_capabilities,
             host_supports_unsafe,
             verify_with_runtime,
             selected_config_indices,
@@ -446,11 +458,12 @@ impl FrameworkDriver for OpenClawDriver {
             }
             // Skill bundles run no plugin install and no runtime verification;
             // these values are unused for them.
-            (false, false, false, Vec::new())
+            (false, false, false, false, Vec::new())
         } else {
             match prepared {
                 PreparedEnable::OpenClaw {
                     supports_accept_capabilities,
+                    supports_enable_accept_capabilities,
                     supports_unsafe_install,
                     supports_inspect_json,
                     supports_inspect_runtime,
@@ -475,6 +488,7 @@ impl FrameworkDriver for OpenClawDriver {
                     validate_prepared_config_indices(selected_config_indices, ctx)?;
                     (
                         *supports_accept_capabilities,
+                        *supports_enable_accept_capabilities,
                         *supports_unsafe_install,
                         *supports_inspect_runtime,
                         selected_config_indices.clone(),
@@ -574,7 +588,18 @@ impl FrameworkDriver for OpenClawDriver {
                 progress.persist_claim(claim)?;
             }
 
-            // Post-install runtime verification: the plugin must report
+            // Install preserves an explicit disabled entry left by uninstall.
+            let cmd = build_enable_cmd(plugin_id, &home, user_home, enable_accept_capabilities);
+            let program = cmd.program.clone();
+            let output = ctx.ops.run_framework_cli(cmd)?;
+            if !output.success() {
+                return Err(AdapterError::FrameworkCli {
+                    program,
+                    reason: full_failure_reason("plugins enable", &output),
+                });
+            }
+
+            // Post-enable runtime verification: the plugin must report
             // loaded. A non-loaded status surfaces the framework diagnostics
             // and, via the Manager's receipt-first model, leaves a
             // cleanup_failed receipt for later disable.
@@ -866,9 +891,8 @@ impl OpenClawDriver {
 // ---------------------------------------------------------------------------
 
 /// Read-only pre-install facts about the installed OpenClaw CLI, gathered by
-/// [`OpenClawDriver::host_profile`] from all three probes (`openclaw
-/// --version`, `plugins install --help`, `plugins inspect --help`) before the
-/// first mutation. Private typed data — never persisted into a receipt.
+/// [`OpenClawDriver::host_profile`] from version and install/enable/inspect
+/// help probes before the first mutation. Never persisted into a receipt.
 #[derive(Debug, Clone)]
 struct OpenClawHostProfile {
     /// Parsed `openclaw --version`, when the output was recognizable.
@@ -879,6 +903,8 @@ struct OpenClawHostProfile {
     supports_install_force: bool,
     /// `openclaw plugins install --help` exposes `--accept-capabilities`.
     supports_accept_capabilities: bool,
+    /// `plugins enable --help` exposes `--accept-capabilities`.
+    supports_enable_accept_capabilities: bool,
     /// `openclaw plugins install --help` exposes
     /// `--dangerously-force-unsafe-install`, including whether the advertised
     /// option is still effective or has become a deprecated no-op.
@@ -910,6 +936,8 @@ impl UnsafeInstallSupport {
 struct PluginPreflight<'a> {
     /// The host's installer supports accepting declared plugin capabilities.
     supports_accept_capabilities: bool,
+    /// `plugins enable --help` exposes `--accept-capabilities`.
+    supports_enable_accept_capabilities: bool,
     /// The host's `plugins install --help` exposes the unsafe flag.
     supports_unsafe_install: bool,
     /// The host's `plugins inspect --help` exposes `--json`.
@@ -978,7 +1006,7 @@ impl OpenClawDriver {
     }
 
     /// Probe the host CLI read-only for every pre-install fact: version,
-    /// `plugins install --help`, and `plugins inspect --help`. All probing
+    /// `plugins install/enable/inspect --help`. All probing
     /// happens here — before the first mutation — and the inspect
     /// capabilities are carried forward to `apply_enable` as
     /// [`PreparedEnable`] so apply never re-probes. Fails closed when a probe
@@ -1003,6 +1031,14 @@ impl OpenClawDriver {
         let supports_accept_capabilities = help_lists_flag(&install_help, "--accept-capabilities");
         let unsafe_install_support = unsafe_install_support(&install_help);
 
+        let enable_help = self.run_read_probe(
+            ctx,
+            build_enable_cmd("--help", &home, user_home, false),
+            "openclaw plugins enable --help",
+        )?;
+        let supports_enable_accept_capabilities =
+            help_lists_flag(&enable_help, "--accept-capabilities");
+
         let inspect_help = self.run_read_probe(
             ctx,
             build_inspect_help_cmd(&home, user_home),
@@ -1016,6 +1052,7 @@ impl OpenClawDriver {
             version_display,
             supports_install_force,
             supports_accept_capabilities,
+            supports_enable_accept_capabilities,
             unsafe_install_support,
             supports_inspect_json,
             supports_inspect_runtime,
@@ -1094,7 +1131,7 @@ impl OpenClawDriver {
     }
 
     /// Resolve the full plugin preflight before any mutation: profile (all
-    /// three probes), version precondition, `--json` inspect precondition,
+    /// read-only probes), version precondition, `--json` inspect precondition,
     /// version gate, install command, and selected config. Fails closed — the
     /// version must be parseable, the host must expose machine-readable
     /// (`--json`) inspect output for verification, and the `--force` /
@@ -1145,6 +1182,7 @@ impl OpenClawDriver {
         let selected_config = self.select_config(ctx, &profile)?;
         Ok(PluginPreflight {
             supports_accept_capabilities: profile.supports_accept_capabilities,
+            supports_enable_accept_capabilities: profile.supports_enable_accept_capabilities,
             supports_unsafe_install: profile.unsafe_install_support.is_effective(),
             supports_inspect_json: profile.supports_inspect_json,
             supports_inspect_runtime: profile.supports_inspect_runtime,
@@ -2331,6 +2369,24 @@ fn install_argv(
     args
 }
 
+/// Build explicit activation, or its read-only `--help` probe.
+fn build_enable_cmd(
+    plugin_id: &str,
+    home: &Path,
+    user_home: Option<&Path>,
+    accept_capabilities: bool,
+) -> FrameworkCommand {
+    let mut args = vec![
+        "plugins".to_string(),
+        "enable".to_string(),
+        plugin_id.to_string(),
+    ];
+    if accept_capabilities {
+        args.push("--accept-capabilities".to_string());
+    }
+    base_cmd(args, home, user_home)
+}
+
 /// Whether `help` lists `flag` as a standalone option token — not merely as a
 /// prefix of a longer flag. A flag token continues through any character that
 /// can appear inside an option name (ASCII alphanumeric, `-`, `_`, `.`), so a
@@ -3292,6 +3348,7 @@ mod tests {
             version_display: "2026.4.14".to_string(),
             supports_install_force: force,
             supports_accept_capabilities: false,
+            supports_enable_accept_capabilities: false,
             unsafe_install_support: if unsafe_install {
                 UnsafeInstallSupport::Effective
             } else {
@@ -4029,6 +4086,7 @@ mod tests {
                 &mut skill_claim,
                 &PreparedEnable::OpenClaw {
                     supports_accept_capabilities: false,
+                    supports_enable_accept_capabilities: false,
                     supports_unsafe_install: true,
                     supports_inspect_json: true,
                     supports_inspect_runtime: true,
@@ -4046,6 +4104,7 @@ mod tests {
                 &mut plugin_claim,
                 &PreparedEnable::OpenClaw {
                     supports_accept_capabilities: false,
+                    supports_enable_accept_capabilities: false,
                     supports_unsafe_install: true,
                     supports_inspect_json: false,
                     supports_inspect_runtime: false,
@@ -4064,6 +4123,7 @@ mod tests {
                 &mut plugin_claim,
                 &PreparedEnable::OpenClaw {
                     supports_accept_capabilities: false,
+                    supports_enable_accept_capabilities: false,
                     supports_unsafe_install: false,
                     supports_inspect_json: true,
                     supports_inspect_runtime: false,

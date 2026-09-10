@@ -157,6 +157,8 @@ pub enum PreparedEnable {
     OpenClaw {
         /// The host's installer supports accepting the plugin's declared capabilities.
         supports_accept_capabilities: bool,
+        /// The host's enable command supports accepting declared capabilities.
+        supports_enable_accept_capabilities: bool,
         /// The host's `plugins install --help` exposes the unsafe flag.
         supports_unsafe_install: bool,
         /// The host's `plugins inspect --help` exposes `--json`.
