@@ -66,6 +66,16 @@ from testdata.scan_test_data import SCAN_TEST_CASES  # noqa: E402
 
 _CLI_BIN = shutil.which("agent-sec-cli")
 _CLI_MODE = "binary" if _CLI_BIN else "python -m"
+_SKIP_TELEMETRY_ENV = "CODE_SCANNER_E2E_SKIP_TELEMETRY"
+
+
+def _telemetry_is_explicitly_skipped() -> bool:
+    """Returns whether this environment excludes the unported telemetry contract."""
+    return os.environ.get(_SKIP_TELEMETRY_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _run_scan(
@@ -150,6 +160,8 @@ class TestBasicScan:
         assert len(result["findings"]) > 0
 
     def test_scan_code_cli_writes_telemetry(self, tmp_path: pathlib.Path) -> None:
+        if _telemetry_is_explicitly_skipped():
+            pytest.skip("code-scan telemetry is not implemented in this runtime")
         if not is_l1_telemetry_allowed():
             pytest.skip("system telemetry is disabled or its sentinel is unreadable")
         telemetry_path = tmp_path / "agent-sec-core.jsonl"

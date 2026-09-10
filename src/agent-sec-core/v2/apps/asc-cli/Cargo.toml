@@ -1,6 +1,6 @@
 [package]
 name = "asc-cli"
-description = "Daemon-only AgentSecCore CLI with Policy, Scope and Binding CRUD"
+description = "Daemon-only AgentSecCore CLI with Policy, Scope, Binding, and code scanning"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

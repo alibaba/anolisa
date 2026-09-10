@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -158,6 +159,80 @@ async fn real_cli_processes_execute_the_complete_frozen_pap_crud_scenario() {
     shutdown.request();
     task.await.unwrap();
     assert!(!socket.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_cli_processes_code_scan_through_the_daemon() {
+    let directory = common::Directory::new();
+    let socket = directory.0.join("daemon.sock");
+    let (shutdown, task, requests) = start(&socket, PrincipalRole::LocalUser).await;
+    let scan_args = vec![
+        OsString::from("--socket"),
+        socket.into_os_string(),
+        OsString::from("scan-code"),
+        OsString::from("--code"),
+        OsString::from("rm -rf /tmp/test"),
+    ];
+    let output = tokio::task::spawn_blocking(move || common::run(&scan_args))
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["verdict"], "warn");
+    assert_eq!(result["language"], "bash");
+    assert_eq!(
+        *requests.lock().unwrap(),
+        vec![json!({
+            "method": "action.code_scan",
+            "params": {
+                "code": "rm -rf /tmp/test",
+                "language": "bash",
+                "rules": null,
+                "mode": "regex"
+            }
+        })]
+    );
+
+    let bad_language = vec![
+        OsString::from("--socket"),
+        directory.0.join("daemon.sock").into_os_string(),
+        OsString::from("scan-code"),
+        OsString::from("--code"),
+        OsString::from("puts 1"),
+        OsString::from("--language"),
+        OsString::from("ruby"),
+    ];
+    let output = tokio::task::spawn_blocking(move || common::run(&bad_language))
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"scan error: unsupported language: ruby\n");
+
+    let empty = vec![
+        OsString::from("--socket"),
+        directory.0.join("daemon.sock").into_os_string(),
+        OsString::from("scan-code"),
+    ];
+    let output = tokio::task::spawn_blocking(move || common::run(&empty))
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"Error: --code is required (use --code '<source>')\n"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    shutdown.request();
+    task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

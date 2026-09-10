@@ -105,7 +105,10 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
 	@command -v agent-sec-daemon >/dev/null 2>&1 || { echo "ERROR: agent-sec-daemon not found on PATH"; exit 1; }
 	@command -v pytest >/dev/null 2>&1 || pip3 install --quiet pytest
-	python3 -m pytest tests/e2e/ tests/v2/e2e/ \
+	@# The shared code-scanner E2E imports rule metadata before it can decide
+	@# whether source-only inventory assertions apply to this installed V2 RPM.
+	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
+	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 python3 -m pytest tests/e2e/ tests/v2/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/cli/test_capabilities_e2e.py \
 		--ignore=tests/e2e/cli/test_events_e2e.py \
@@ -114,7 +117,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/cli/test_scan_pii_e2e.py \
 		--ignore=tests/e2e/cli/test_session_report_e2e.py \
 		--ignore=tests/e2e/cli/test_skill_ledger_analyze_e2e.py \
-		--ignore=tests/e2e/code-scanner/e2e_test.py \
 		--ignore=tests/e2e/codex-hooks/test_codex_hooks_e2e.py \
 		--ignore=tests/e2e/daemon/test_daemon_e2e.py \
 		--ignore=tests/e2e/prompt-scanner/test_prompt_scanner_e2e.py \
@@ -131,7 +133,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@#   cli/test_scan_pii_e2e.py                 -> PII scanning
 	@#   cli/test_session_report_e2e.py           -> session report
 	@#   cli/test_skill_ledger_analyze_e2e.py     -> skill ledger analyze
-	@#   code-scanner/e2e_test.py                 -> code scanning
 	@#   codex|qoder|qwen hook tests              -> hooks calling the V2 CLI
 	@#   daemon/test_daemon_e2e.py                -> V1 daemon wire protocol
 	@#   prompt-scanner/test_prompt_scanner_e2e.py -> prompt scanning

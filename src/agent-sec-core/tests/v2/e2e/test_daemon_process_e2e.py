@@ -2,8 +2,8 @@
 
 These checks are about the ``agent-sec-daemon`` process itself rather than the PAP
 methods it serves: the bound socket must be private (0600), SIGTERM must trigger
-a cooperative exit that unlinks the socket, and the V1 systemd invocation must
-resolve its socket below ``XDG_RUNTIME_DIR``.
+a cooperative exit that unlinks the socket, and deployment configuration must
+provide its endpoint through ``AGENT_SEC_DAEMON_SOCKET``.
 """
 
 import os
@@ -32,12 +32,11 @@ def test_sigterm_cooperatively_exits_and_removes_socket(start_daemon):
     assert not socket_path.exists(), f"socket inode {socket_inode} was left behind"
 
 
-def test_v1_service_invocation_uses_runtime_socket(daemon_bin, tmp_path):
-    runtime_dir = tmp_path / "runtime"
-    socket_path = runtime_dir / "agent-sec-core" / "daemon.sock"
-    socket_path.parent.mkdir(parents=True)
+def test_service_invocation_uses_environment_socket(daemon_bin, tmp_path):
+    socket_path = tmp_path / "daemon.sock"
     environment = os.environ.copy()
-    environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    environment["AGENT_SEC_DAEMON_SOCKET"] = str(socket_path)
+    environment.pop("XDG_RUNTIME_DIR", None)
     process = subprocess.Popen(
         [daemon_bin, "serve", "--policy-admin-uid", str(os.getuid())],
         env=environment,
@@ -59,8 +58,9 @@ def test_v1_service_invocation_uses_runtime_socket(daemon_bin, tmp_path):
     assert not socket_path.exists()
 
 
-def test_missing_socket_and_runtime_directory_fails(daemon_bin):
+def test_missing_socket_environment_fails(daemon_bin):
     environment = os.environ.copy()
+    environment.pop("AGENT_SEC_DAEMON_SOCKET", None)
     environment.pop("XDG_RUNTIME_DIR", None)
     result = subprocess.run(
         [daemon_bin],

