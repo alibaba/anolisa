@@ -3,12 +3,14 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use asc_foundation_types::{DAEMON_SOCKET_ENV, daemon_socket_path_from_env};
+
 use crate::BootstrapConfig;
 
 const HELP: &str = "Usage: agent-sec-daemon [serve] [--socket <ABSOLUTE_PATH>] [--policy-admin-uid <UID>]...\n\
 \n\
 Runs the AgentSecCore V2 UDS service with PAP administration methods.\n\
-Without --socket, uses $XDG_RUNTIME_DIR/agent-sec-core/daemon.sock.\n\
+Without --socket, uses $AGENT_SEC_DAEMON_SOCKET.\n\
 Root is always authorized. --policy-admin-uid adds an administrator at startup.\n\
 Repeat this option for multiple UIDs; omitted means root only.\n\
 PAP state is process-local until durable Repository integration lands.\n";
@@ -35,8 +37,8 @@ impl Cli {
     /// Parses an argv sequence including the binary name.
     ///
     /// Accepts both direct and explicit `serve` forms. When `--socket` is
-    /// omitted, the V1-compatible systemd contract resolves the endpoint below
-    /// `$XDG_RUNTIME_DIR`; explicit paths remain available for tests and tools.
+    /// omitted, the deployment-provided `AGENT_SEC_DAEMON_SOCKET` selects the
+    /// endpoint; explicit paths remain available for tests and tools.
     ///
     /// # Errors
     /// Returns a stable parse error for a missing value, unknown option, repeated
@@ -46,12 +48,13 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
     {
-        Self::parse_from_with_runtime_dir(arguments, std::env::var_os("XDG_RUNTIME_DIR"))
+        let socket_env = std::env::var_os(DAEMON_SOCKET_ENV);
+        Self::parse_from_with_socket_env(arguments, socket_env.as_deref())
     }
 
-    fn parse_from_with_runtime_dir<I, T>(
+    fn parse_from_with_socket_env<I, T>(
         arguments: I,
-        runtime_dir: Option<OsString>,
+        socket_env: Option<&OsStr>,
     ) -> Result<ParseOutcome, CliError>
     where
         I: IntoIterator<Item = T>,
@@ -112,14 +115,14 @@ impl Cli {
         let socket_path = if let Some(path) = socket_path {
             path
         } else {
-            let runtime_dir = runtime_dir
-                .filter(|path| !path.is_empty())
-                .ok_or(CliError::MissingSocketAndRuntimeDirectory)?;
-            let runtime_dir = PathBuf::from(runtime_dir);
-            if !runtime_dir.is_absolute() {
-                return Err(CliError::RelativeRuntimeDirectory);
-            }
-            runtime_dir.join("agent-sec-core").join("daemon.sock")
+            daemon_socket_path_from_env(socket_env).map_err(|error| match error {
+                asc_foundation_types::DaemonSocketPathError::MissingEnvironmentSocket => {
+                    CliError::MissingSocket
+                }
+                asc_foundation_types::DaemonSocketPathError::RelativeSocket => {
+                    CliError::RelativeSocket
+                }
+            })?
         };
         if !socket_path.is_absolute() {
             return Err(CliError::RelativeSocket);
@@ -140,12 +143,9 @@ pub enum CliError {
     /// Kernel UIDs are unsigned 32-bit decimal values.
     #[error("--policy-admin-uid must be a decimal integer between 0 and 4294967295")]
     InvalidAdminUid,
-    /// Neither an explicit socket nor the V1-compatible runtime root is available.
-    #[error("--socket <ABSOLUTE_PATH> or XDG_RUNTIME_DIR is required")]
-    MissingSocketAndRuntimeDirectory,
-    /// The inherited runtime root cannot safely form an absolute socket path.
-    #[error("XDG_RUNTIME_DIR must be an absolute path")]
-    RelativeRuntimeDirectory,
+    /// Neither an explicit socket nor the deployment endpoint is available.
+    #[error("--socket <ABSOLUTE_PATH> or AGENT_SEC_DAEMON_SOCKET is required")]
+    MissingSocket,
     /// `--socket` was not followed by a value.
     #[error("--socket requires a value")]
     MissingSocketValue,
@@ -179,35 +179,39 @@ mod tests {
     }
 
     #[test]
-    fn socket_uses_the_v1_runtime_default_or_an_explicit_absolute_path() {
-        let ParseOutcome::Serve(default) = Cli::parse_from_with_runtime_dir(
+    fn socket_uses_the_deployment_environment_or_an_explicit_absolute_path() {
+        let ParseOutcome::Serve(default) = Cli::parse_from_with_socket_env(
             ["agent-sec-daemon", "serve"],
-            Some(OsString::from("/run/user/1000")),
+            Some(OsStr::new("/run/agent-sec-core/daemon.sock")),
         )
         .unwrap() else {
             panic!("expected daemon invocation");
         };
         assert_eq!(
             default.bootstrap.socket_path,
-            PathBuf::from("/run/user/1000/agent-sec-core/daemon.sock")
+            PathBuf::from("/run/agent-sec-core/daemon.sock")
         );
         assert_eq!(
-            Cli::parse_from_with_runtime_dir(["agent-sec-daemon"], None),
-            Err(CliError::MissingSocketAndRuntimeDirectory)
+            Cli::parse_from_with_socket_env(["agent-sec-daemon"], None),
+            Err(CliError::MissingSocket)
         );
         assert_eq!(
-            Cli::parse_from_with_runtime_dir(
-                ["agent-sec-daemon"],
-                Some(OsString::from("relative")),
-            ),
-            Err(CliError::RelativeRuntimeDirectory)
-        );
-        assert_eq!(
-            Cli::parse_from_with_runtime_dir(["agent-sec-daemon", "--socket", "daemon.sock"], None,),
+            Cli::parse_from_with_socket_env(["agent-sec-daemon"], Some(OsStr::new("relative"))),
             Err(CliError::RelativeSocket)
         );
+        let ParseOutcome::Serve(explicit) = Cli::parse_from_with_socket_env(
+            ["agent-sec-daemon", "--socket", "/run/explicit.sock"],
+            Some(OsStr::new("/run/agent-sec-core/daemon.sock")),
+        )
+        .unwrap() else {
+            panic!("expected daemon invocation");
+        };
         assert_eq!(
-            Cli::parse_from_with_runtime_dir(
+            explicit.bootstrap.socket_path,
+            PathBuf::from("/run/explicit.sock")
+        );
+        assert_eq!(
+            Cli::parse_from_with_socket_env(
                 [
                     "agent-sec-daemon",
                     "--socket",

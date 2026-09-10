@@ -3,6 +3,31 @@
 use std::io::{self, Write};
 
 use asc_daemon_protocol::DaemonResponse;
+use serde::{Deserialize, Serialize};
+
+/// V1-compatible code-scan result ordered for CLI JSON output.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScanCodeOutput {
+    ok: bool,
+    verdict: String,
+    summary: String,
+    findings: Vec<ScanFindingOutput>,
+    language: String,
+    engine_version: String,
+    elapsed_ms: u64,
+}
+
+/// V1-compatible finding ordered for CLI JSON output.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScanFindingOutput {
+    rule_id: String,
+    severity: String,
+    desc_zh: String,
+    desc_en: String,
+    evidence: Vec<String>,
+}
 
 /// Prints a Policy result to stdout or the complete daemon error to stderr.
 ///
@@ -22,6 +47,44 @@ pub fn render_policy(
         DaemonResponse::Error(error) => {
             serde_json::to_writer(&mut *stderr, error)?;
             writeln!(stderr)?;
+            Ok(1)
+        }
+    }
+}
+
+/// Renders a V1-compatible scan result rather than the daemon envelope.
+///
+/// Action failures are complete scan results and remain parseable on stdout;
+/// method and parameter failures are written to stderr as V1 scan errors.
+///
+/// # Errors
+///
+/// Returns an error if the daemon result lacks a boolean `ok` field or either
+/// output stream rejects the rendered result.
+pub fn render_scan_code(
+    response: &DaemonResponse,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<u8> {
+    match response {
+        DaemonResponse::Success(success) => {
+            // The daemon envelope stores `result` as Value, whose default map
+            // representation sorts keys. Deserialize and serialize through the
+            // V1 field order so CLI output remains byte-compatible.
+            let result: ScanCodeOutput =
+                serde_json::from_value(success.result.clone()).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid code scan result: {error}"),
+                    )
+                })?;
+            let exit_code = u8::from(!result.ok);
+            serde_json::to_writer_pretty(&mut *stdout, &result)?;
+            writeln!(stdout)?;
+            Ok(exit_code)
+        }
+        DaemonResponse::Error(error) => {
+            writeln!(stderr, "scan error: {}", error.error.message())?;
             Ok(1)
         }
     }

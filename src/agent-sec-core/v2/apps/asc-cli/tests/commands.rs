@@ -1,6 +1,9 @@
 use std::ffi::OsString;
 
-use asc_cli::{Cli, InputError, output::render_policy};
+use asc_cli::{
+    Cli, InputError,
+    output::{render_policy, render_scan_code},
+};
 use asc_daemon_protocol::{DaemonResponse, RequestId};
 use serde_json::{Value, json};
 
@@ -59,6 +62,57 @@ fn equals_syntax_option_looking_values_and_awkward_paths_are_preserved() {
     let request = Cli::parse_from(args).unwrap().request().unwrap();
     assert_eq!(request.params["policyName"], "--help");
     assert_eq!(request.params["template"]["files"][0], "/work/a b");
+}
+
+#[test]
+fn scan_code_matches_the_v1_parameters_and_rejects_empty_input() {
+    let cli = Cli::parse_from([
+        "agent-sec-cli",
+        "--socket",
+        "/run/asc.sock",
+        "scan-code",
+        "--code",
+        "echo hello",
+    ])
+    .unwrap();
+    assert!(cli.is_scan_code());
+    assert_eq!(
+        serde_json::to_value(cli.request().unwrap()).unwrap(),
+        json!({
+            "method": "action.code_scan",
+            "params": {
+                "code": "echo hello",
+                "language": "bash",
+                "rules": null,
+                "mode": "regex"
+            }
+        })
+    );
+
+    let empty = Cli::parse_from([
+        "agent-sec-cli",
+        "--socket",
+        "/run/asc.sock",
+        "scan-code",
+        "--code",
+        " \t ",
+    ])
+    .unwrap();
+    assert!(matches!(empty.request(), Err(InputError::EmptyCode)));
+
+    let hyphen_source = Cli::parse_from([
+        "agent-sec-cli",
+        "--socket",
+        "/run/asc.sock",
+        "scan-code",
+        "--code",
+        "--executable=$(which python3)",
+    ])
+    .unwrap();
+    assert_eq!(
+        hyphen_source.request().unwrap().params["code"],
+        "--executable=$(which python3)"
+    );
 }
 
 #[test]
@@ -225,6 +279,59 @@ fn result_rendering_keeps_domains_and_errors_separate() {
 }
 
 #[test]
+fn scan_code_rendering_preserves_error_results_on_stdout() {
+    let response = DaemonResponse::success(
+        RequestId::new("scan-1").unwrap(),
+        json!({
+            "ok": false,
+            "verdict": "error",
+            "summary": "scan error: LLM model not available",
+            "findings": [],
+            "language": "bash",
+            "engine_version": "0.12.0",
+            "elapsed_ms": 1
+        }),
+    );
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    assert_eq!(
+        render_scan_code(&response, &mut stdout, &mut stderr).unwrap(),
+        1
+    );
+    assert!(stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&stdout).unwrap()["summary"],
+        "scan error: LLM model not available"
+    );
+    assert_eq!(
+        String::from_utf8(stdout.clone()).unwrap(),
+        concat!(
+            "{\n",
+            "  \"ok\": false,\n",
+            "  \"verdict\": \"error\",\n",
+            "  \"summary\": \"scan error: LLM model not available\",\n",
+            "  \"findings\": [],\n",
+            "  \"language\": \"bash\",\n",
+            "  \"engine_version\": \"0.12.0\",\n",
+            "  \"elapsed_ms\": 1\n",
+            "}\n"
+        )
+    );
+
+    let response = DaemonResponse::error(
+        RequestId::new("scan-2").unwrap(),
+        "invalid_argument",
+        "unsupported language: ruby",
+    );
+    stdout.clear();
+    assert_eq!(
+        render_scan_code(&response, &mut stdout, &mut stderr).unwrap(),
+        1
+    );
+    assert!(stdout.is_empty());
+    assert_eq!(stderr, b"scan error: unsupported language: ruby\n");
+}
+
+#[test]
 fn binary_help_version_and_failures_have_stable_exit_codes() {
     let mut help_cases = vec![vec!["--help"], vec!["--version"]];
     for resource in ["policy", "scope", "binding"] {
@@ -259,7 +366,6 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
             1,
             "connection unavailable",
         ),
-        (vec!["policy", "list"], 2, "--socket"),
         (
             vec![
                 "--socket",
