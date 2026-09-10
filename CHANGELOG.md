@@ -7,6 +7,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4] - 2026-09-10
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.12.0 |
+| agentsight | 0.12.1 |
+| tokenless | 0.8.1 |
+| agent-memory | 0.2.7 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.11 |
+| skillfs | 0.4.2 |
+| ws-ckpt | 0.4.5 |
+| cosh-ng | 0.24.1 |
+
+> **Note:** copilot-shell, os-skills, skillfs, and ws-ckpt are unchanged
+> since v1.3; they are listed to show the complete stack composition.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.24.1, routes natural-language and path-like input to the Agent in Enhanced Assisted Zsh while preserving ordinary Shell behavior and the user's terminal customizations, users get a more natural Zsh experience without rebuilding their existing setup (#3004, #3156)
+- **agent-sec-core**: Updated to v0.12.0, applies configured policy checks consistently to legacy cosh and cosh-ng Skill calls while reducing false positives, users get consistent Skill enforcement and fewer incorrect security findings across both shells (#2871, #2928)
+- **agentsight**: Updated to v0.12.1, adds collection without eBPF, native DashScope support, Kubernetes packaging, and more resilient long-running capture, operators can retain accurate observability in restricted and production environments (#2954, #2976, #3135, #3147)
+- **tokenless**: Updated to v0.8.1, adds QwenPaw support and reversible compression for large JSON payloads, build logs, and CSV/TSV data, agents can reduce more kinds of context and retrieve omitted content precisely when needed (#3047, #3052, #3067, #3075, #3089)
+- **anolisa**: Updated to v0.3.11, adds QwenPaw adapter management and ktuner discovery when the configured repository provides it while improving install, recovery, and audit behavior, administrators get more trustworthy lifecycle status and component-index previews without requiring root (#2084, #3075, #3127, #3141, #3142, #3158)
+- **agent-memory**: Updated to v0.2.7, improves OpenClaw installation, corpus retrieval, configuration validation, and source-build setup, agents can share persistent memory with more reliable setup and recall (#2560, #3149, #3155, #3177, #3187)
+
+### Updated
+
+- **cosh-ng**: Updated to v0.24.1, improves prompt routing, terminal redraws, history recall, custom Tab behavior, login-profile PATH loading, credential redaction, and Hook trust visibility while removing the system OpenSSL requirement, users can keep their existing shell configuration and receive reliable Agent assistance without losing commands, output, or sensitive-history protection (#2967, #2983, #2996, #2999, #3004, #3030, #3050, #3058, #3156)
+- **agent-sec-core**: Updated to v0.12.0, applies the same Skill policies across legacy cosh and cosh-ng, reduces scanner false positives, reports every integrity outcome through `skill-ledger` and `check`, and speeds up container health checks, users get consistent enforcement, clearer verification results, and faster readiness checks (#2707, #2871, #2879, #2928)
+- **agentsight**: Updated to v0.12.1, adds collection without eBPF, native DashScope and Kubernetes deployment support, Agent resource monitoring, and cosh-ng traffic capture while improving attribution accuracy, tool-result retention, enforcement synchronization, Token accounting, stream completion, duplicate suppression, startup recovery, and automatic capture recovery, operators can trust timelines and usage totals while keeping monitoring and protection running through long-lived workloads and transient failures (#2916, #2954, #2976, #2979, #3005, #3011, #3016, #3081, #3087, #3135, #3147, #3191)
+- **tokenless**: Updated to v0.8.1, adds QwenPaw integration, reversible reduction for large JSON collections, build logs, and CSV/TSV output, omitted-content retrieval through existing Shell tools, and trace correlation while fixing installation and compatibility issues across supported hosts, agents can use less context across more tool results and recover the exact omitted data when needed (#2249, #3009, #3047, #3052, #3067, #3068, #3075, #3085, #3089, #3094)
+- **anolisa**: Updated to v0.3.11, adds QwenPaw adapter lifecycle management and ktuner discovery from configured repositories, permits declared config edits without false corruption reports, records hook-modified files correctly, avoids false pending operations after package conflicts, enables component-index previews without root, and improves cleanup, logs, dry-run, and audit guidance, administrators can inspect and recover installations with state that better reflects the actual system (#2084, #2618, #2922, #2926, #2994, #3075, #3118, #3127, #3141, #3142, #3158)
+- **agent-memory**: Updated to v0.2.7, negotiates OpenClaw installation capabilities, distinguishes permission and configuration failures, returns readable and accurately windowed corpus results, validates configuration before binary discovery, and prepares Node.js and npm dependencies for source builds, agents and operators get more reliable installation, diagnosis, and memory recall (#2560, #3149, #3155, #3177, #3187)
+
+### Compatibility
+
+- **Tokenless Protocol v2**: `tokenless compress` now accepts only `before_model`, `pre_tool`, `post_tool`, and `retrieve` lifecycle requests; Protocol v1 and `tokenless mcp serve` have been removed. Upgrade Tokenless Core, CLI, SDKs, and adapters together and declare recovery capability explicitly to avoid protocol or retrieval mismatches (#2978, #3068).
+- **Tokenless Rust APIs**: Replace `TokenlessRuntime::compress` with the Runtime lifecycle methods. Direct response-compression callers must migrate from the removed `tokenless-pipeline` crate and `tokenless_schema::ResponseCompressor` to the Runtime or `tokenless-compressors` APIs (#2974, #2978).
+- **Tokenless Python and AgentScope APIs**: Replace the removed `ModelRequest`, `ToolCall`, `ToolResult`, and `ToolResponseCompressor` types with typed `before_model`, `pre_tool`, `post_tool`, and `retrieve` lifecycle requests. AgentScope integrations must add `ToolContract` metadata for custom tools and expose one static retrieval tool (#2986, #3029).
+- **Tokenless retrieval configuration**: Custom `retrieve_tool_name` values must satisfy the tool-name rules. Lifecycle schema compression now requires an authorized static retrieval tool and an available Stash; without both, hooks preserve the original schemas. Recovering omitted content also requires a reachable CLI or static tool and a host that can replace the current tool result, including Claude Code 2.1.121 or newer. Existing `<<tokenless:HASH>>` markers remain readable (#2978, #2995, #3029, #3052, #3068).
+- **Tokenless adapter configuration**: OpenClaw now uses `post_tool_enabled` for PostTool optimization; its former response, TOON, skip-tool, and shell-tool policy settings have been removed and no longer control compression. Remove those obsolete settings and configure `post_tool_enabled` when upgrading. DeepSeek Harness users must also remove adapter-specific thresholds and tool lists and use the shared compression policy. OpenClaw remains limited to lossless transcript updates without same-turn replacement or retrieval (#3009, #3036).
+- **Tokenless statistics fields**: Dashboards and integrations must replace `seam` and `compressor_chain` with `content_origin`, `applied_operations`, and `recoverability`. The legacy SQLite columns remain for compatibility, but new records no longer populate them, so queries that keep using the old fields can return empty or incorrect reports after upgrading (#2978).
+- **AgentSight timestamps**: Kernel event timestamps are now calibrated to host wall-clock time instead of container uptime. If NTP or an administrator steps the host wall clock while kernel events are queued, affected historical wall-clock timestamps cannot be reconstructed; persisted records are unaffected. Mark each wall-clock adjustment when analyzing timelines across it (#3128).
+- **agent-sec-core Python dependency**: Python deployments and source builds now require `cryptography` 50.0.1 or newer. Refresh the environment from the exported requirements before upgrading custom installations (#3015).
+- **agent-memory source builds**: Building the OpenClaw adapter from source now requires Node.js 20 or newer and npm. The unified user-mode build provisions them automatically; system-mode builds report missing tools during preflight (#3187).
+- **anolisa RPM previews**: On DNF 4 systems, RPM install `--dry-run` requires `sudo` and may refresh repository metadata while checking solver conflicts. The check now runs before recovery journals are created (#3158).
+- **anolisa editable configs and state format**: Allowing content edits to raw-installed `type = "config"` files does not change update or uninstall semantics, so back up customized configs before either operation. The new `kind = "config"` state records are unreadable by older CLI versions; before downgrading, also back up state and convert affected owned-file entries to `kind = "file"` to restore content-digest validation (#3142).
+
 ## [1.3] - 2026-08-31
 
 ### Component Versions

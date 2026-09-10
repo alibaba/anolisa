@@ -6,6 +6,57 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [1.4] - 2026-09-10
+
+### 组件版本
+
+| 组件 | 版本 |
+|------|------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.12.0 |
+| agentsight | 0.12.1 |
+| tokenless | 0.8.1 |
+| agent-memory | 0.2.7 |
+| os-skills | 0.6.3 |
+| anolisa | 0.3.11 |
+| skillfs | 0.4.2 |
+| ws-ckpt | 0.4.5 |
+| cosh-ng | 0.24.1 |
+
+> **说明：** copilot-shell、os-skills、skillfs 与 ws-ckpt 自 v1.3 起未更新；版本表保留这些组件以展示完整组件组合。
+
+### 重点特性
+
+- **cosh-ng**：更新到 v0.24.1，在 Enhanced Assisted Zsh 中将自然语言和路径类输入交给 Agent，同时保留普通 Shell 行为与用户的终端定制，用户无需重建现有配置即可获得更自然的 Zsh 交互（#3004、#3156）
+- **agent-sec-core**：更新到 v0.12.0，使 legacy cosh 与 cosh-ng 的 Skill 调用一致接受已配置策略校验，并降低误报，用户可在两种 Shell 中获得一致的 Skill 策略执行与更少的错误安全告警（#2871、#2928）
+- **agentsight**：更新到 v0.12.1，新增无 eBPF 采集、DashScope 原生支持、Kubernetes 打包和更可靠的长期采集，运维人员可在受限环境与生产环境中持续获得准确的可观测数据（#2954、#2976、#3135、#3147）
+- **tokenless**：更新到 v0.8.1，新增 QwenPaw 支持，以及大型 JSON、构建日志和 CSV/TSV 的可恢复压缩，Agent 可压缩更多类型的上下文并按需精确取回省略内容（#3047、#3052、#3067、#3075、#3089）
+- **anolisa**：更新到 v0.3.11，新增 QwenPaw Adapter 管理，并可在已配置仓库提供 ktuner 时发现该组件，同时改进安装、恢复和审计行为，管理员可获得更可信的生命周期状态，并可在无需 root 的情况下预览组件索引（#2084、#3075、#3127、#3141、#3142、#3158）
+- **agent-memory**：更新到 v0.2.7，改进 OpenClaw 安装、语料检索、配置校验和源码构建准备，Agent 可通过更可靠的安装和召回能力共享持久化记忆（#2560、#3149、#3155、#3177、#3187）
+
+### 组件更新
+
+- **cosh-ng**：更新到 v0.24.1，改进提示词路由、终端重绘、历史召回、自定义 Tab 行为、登录 profile PATH 加载、凭据脱敏和 Hook 信任信息，并移除系统 OpenSSL 依赖，用户可保留现有 Shell 配置并稳定使用 Agent 协助，不会丢失命令、输出或敏感历史保护（#2967、#2983、#2996、#2999、#3004、#3030、#3050、#3058、#3156）
+- **agent-sec-core**：更新到 v0.12.0，在 legacy cosh 与 cosh-ng 中执行相同的 Skill 策略，降低扫描误报，通过 `skill-ledger` 与 `check` 报告全部完整性结果，并加快容器健康检查，用户可获得一致执行、更清晰的校验结论和更快的就绪检查（#2707、#2871、#2879、#2928）
+- **agentsight**：更新到 v0.12.1，新增无 eBPF 采集、DashScope 原生与 Kubernetes 部署支持、Agent 资源监控和 cosh-ng 流量采集，并改进归因准确性、工具结果保留、策略同步、Token 计量、流式请求收尾、重复记录抑制、启动恢复和采集自动恢复，运维人员可信任时间线与用量统计，并让监控和防护在长期负载及短暂故障后持续运行（#2916、#2954、#2976、#2979、#3005、#3011、#3016、#3081、#3087、#3135、#3147、#3191）
+- **tokenless**：更新到 v0.8.1，新增 QwenPaw 集成、大型 JSON 集合、构建日志和 CSV/TSV 输出的可恢复缩减、通过现有 Shell 工具取回省略内容以及 Trace 关联，并修复各支持宿主的安装与兼容问题，Agent 可对更多工具结果减少上下文占用，并在需要时恢复精确原文（#2249、#3009、#3047、#3052、#3067、#3068、#3075、#3085、#3089、#3094）
+- **anolisa**：更新到 v0.3.11，新增 QwenPaw Adapter 生命周期管理和从已配置仓库发现 ktuner，允许已声明 config 文件修改而不产生错误损坏告警，正确记录 Hook 修改后的文件，避免包冲突后产生虚假 pending 操作，支持无需 root 的组件索引预览，并改进清理、日志、dry-run 和审计指引，管理员可依据更贴近系统实际状态的信息检查和恢复安装（#2084、#2618、#2922、#2926、#2994、#3075、#3118、#3127、#3141、#3142、#3158）
+- **agent-memory**：更新到 v0.2.7，协商 OpenClaw 安装能力，区分权限与配置故障，返回可读取且窗口范围准确的语料结果，在查找二进制前校验配置，并为源码构建准备 Node.js 与 npm 依赖，Agent 与运维人员可获得更可靠的安装、诊断和记忆召回（#2560、#3149、#3155、#3177、#3187）
+
+### 兼容性
+
+- **Tokenless Protocol v2**：`tokenless compress` 现在仅接受 `before_model`、`pre_tool`、`post_tool` 和 `retrieve` 生命周期请求；Protocol v1 与 `tokenless mcp serve` 已移除。应同步升级 Tokenless Core、CLI、SDK 与 Adapter，并显式声明恢复能力，避免协议或检索能力不匹配（#2978、#3068）。
+- **Tokenless Rust API**：使用 Runtime 生命周期方法替代 `TokenlessRuntime::compress`。直接调用响应压缩的代码须从已移除的 `tokenless-pipeline` Crate 和 `tokenless_schema::ResponseCompressor` 迁移至 Runtime 或 `tokenless-compressors` API（#2974、#2978）。
+- **Tokenless Python 与 AgentScope API**：使用类型化的 `before_model`、`pre_tool`、`post_tool` 和 `retrieve` 生命周期请求，替代已移除的 `ModelRequest`、`ToolCall`、`ToolResult` 和 `ToolResponseCompressor` 类型。AgentScope 集成须为自定义工具补充 `ToolContract` 元数据，并暴露一个静态恢复工具（#2986、#3029）。
+- **Tokenless 恢复配置**：自定义 `retrieve_tool_name` 必须符合工具名规则。生命周期 Schema 压缩现在要求具备已授权的静态恢复工具和可用 Stash；缺少任一条件时，Hook 会保留原始 Schema。取回省略内容还要求 CLI 或静态工具可访问，且宿主能够替换当前工具结果，其中 Claude Code 要求 2.1.121 或更新版本。已有 `<<tokenless:HASH>>` 标记仍可读取（#2978、#2995、#3029、#3052、#3068）。
+- **Tokenless Adapter 配置**：OpenClaw 现在使用 `post_tool_enabled` 控制 PostTool 优化；原有的响应、TOON、skip-tool 和 shell-tool 策略设置已移除，不再控制压缩行为。升级时应删除这些废弃设置，并按需配置 `post_tool_enabled`。DeepSeek Harness 用户也须移除 Adapter 专用阈值和工具列表，改用共享压缩策略。OpenClaw 仍仅支持无损 transcript 更新，不支持同轮替换或检索（#3009、#3036）。
+- **Tokenless 统计字段**：Dashboard 和集成须使用 `content_origin`、`applied_operations` 与 `recoverability` 替代 `seam` 和 `compressor_chain`。旧 SQLite 列仍为兼容性保留，但新记录不再写入这些列；升级后继续查询旧字段可能得到空值或错误报表（#2978）。
+- **AgentSight 时间戳**：内核事件时间戳改为校准至主机墙钟时间，不再基于容器 uptime 计算。若内核事件仍在队列中时 NTP 或管理员跳变主机墙钟，受影响事件的历史墙钟时间将无法重建；已持久化记录不受影响。跨越墙钟调整分析时间线时，应标记每次调整点（#3128）。
+- **agent-sec-core Python 依赖**：Python 部署和源码构建现在要求 `cryptography` 50.0.1 或更新版本。自定义安装在升级前应根据导出的 requirements 刷新环境（#3015）。
+- **agent-memory 源码构建**：从源码构建 OpenClaw Adapter 现在要求 Node.js 20 或更新版本以及 npm。统一用户模式构建会自动准备这些工具；系统模式构建会在预检时报告缺失工具（#3187）。
+- **anolisa RPM 预览**：在 DNF 4 系统上，RPM 安装的 `--dry-run` 需要使用 `sudo`，并可能在检查依赖冲突时刷新仓库元数据。该检查现在会在创建恢复日志前完成（#3158）。
+- **anolisa 可编辑 config 与状态格式**：允许修改 raw 安装的 `type = "config"` 文件内容不会改变 update 或 uninstall 语义，因此执行任一操作前都应备份已定制配置。新的 `kind = "config"` 状态记录无法由旧版 CLI 读取；降级前还应备份状态，并将相关自有文件条目改回 `kind = "file"`，以恢复内容摘要校验（#3142）。
+
 ## [1.3] - 2026-08-31
 
 ### 组件版本
