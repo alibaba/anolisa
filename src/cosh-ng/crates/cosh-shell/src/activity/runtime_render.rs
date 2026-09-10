@@ -528,7 +528,7 @@ fn should_render_activity_row_with_state(row: &RuntimeActivityRow, state: &Inlin
     if activity_row_has_visible_tool_card_owner(row, state) {
         return false;
     }
-    should_render_activity_row(row, state.approval_mode)
+    should_render_activity_row(row, state.effective_approval_mode())
 }
 
 fn activity_row_has_visible_tool_card_owner(row: &RuntimeActivityRow, state: &InlineState) -> bool {

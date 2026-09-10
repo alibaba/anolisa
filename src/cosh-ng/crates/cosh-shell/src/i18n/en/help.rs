@@ -61,6 +61,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeRouting => {
             "choose whether unknown natural-language input may route to Agent"
         }
+        MessageId::HelpSummaryModePlan => {
+            "toggle plan mode (research only, no side effects)"
+        }
+        MessageId::HelpSummaryPlan => {
+            "toggle plan mode: agent researches and plans only; no side-effecting tool calls run"
+        }
         MessageId::HelpSummaryAgent => "compose a one-shot Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",
         MessageId::HelpSummaryCancel => "cancel active Agent work",
@@ -135,7 +141,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SlashStatusSessionLine => "Session: {session}",
         MessageId::SlashStatusOsLine => "OS: {os}",
         MessageId::SlashStatusModesLine => {
-            "Modes: approval={approval}, analysis={analysis}"
+            "Modes: approval={approval}, analysis={analysis}, plan={plan}"
         }
         MessageId::SlashStatusProviderUnavailableLine => {
             "Provider details: unavailable from the current backend"

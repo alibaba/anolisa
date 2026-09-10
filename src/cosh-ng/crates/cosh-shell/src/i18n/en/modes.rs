@@ -9,8 +9,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeApprovalLine => "approval: {mode}",
         MessageId::ModeAnalysisLine => "analysis: {mode}",
         MessageId::ModeRoutingLine => "routing: {mode}",
+        MessageId::ModePlanLine => "plan: {mode}",
         MessageId::ModeSummaryFooter => {
-            "Use /mode approval, /mode analysis, or /mode routing for details."
+            "Use /mode approval, /mode analysis, /mode routing, or /mode plan for details."
         }
         MessageId::RoutingModeTitle => "Input routing",
         MessageId::RoutingModeCurrentBody => "Current: {mode}",
@@ -35,7 +36,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeLanguageFooter => "Use /config language [auto|en-US|zh-CN].",
         MessageId::ModeUnknownBody => "Unknown mode: {mode}",
         MessageId::ModeUnknownFooter => {
-            "Use /mode approval, /mode analysis, or /mode routing."
+            "Use /mode approval, /mode analysis, /mode routing, or /mode plan."
         }
         MessageId::ApprovalModeTitle => "Approval mode",
         MessageId::ApprovalModeSetBody => "Mode set to {mode}.",
@@ -104,6 +105,21 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AnalysisModeRemainsBody => "Mode remains {mode}.",
         MessageId::AnalysisModeCancelBody => "Mode unchanged: {mode}.",
         MessageId::AnalysisModeCancelFooter => "No shell command ran.",
+        MessageId::PlanModeTitle => "Plan mode",
+        MessageId::PlanModeEnabledBody => "plan mode: ON",
+        MessageId::PlanModeDisabledBody => "plan mode: OFF",
+        MessageId::PlanModeStatusOnBody => "plan mode is ON (approval mode {mode} is paused).",
+        MessageId::PlanModeStatusOffBody => "plan mode is OFF (approval mode: {mode}).",
+        MessageId::PlanModeEnabledFooter => {
+            "Agent researches and plans only; no side-effecting tool calls run. Use /plan or /mode plan off to exit."
+        }
+        MessageId::PlanModeDisabledFooter => {
+            "Agent resumes normal execution under the configured approval mode."
+        }
+        MessageId::PlanModeAlreadyOnBody => "plan mode is already ON.",
+        MessageId::PlanModeAlreadyOffBody => "plan mode is already OFF.",
+        MessageId::PlanModeUnknownBody => "Unknown plan mode option: {mode}",
+        MessageId::PlanModeUsageFooter => "Use /plan or /mode plan [on|off|status].",
         _ => return None,
     })
 }

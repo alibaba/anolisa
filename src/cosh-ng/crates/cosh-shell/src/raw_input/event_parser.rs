@@ -412,9 +412,10 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
     let token = parts.next().unwrap_or_default();
     match token {
         "/" => None,
-        "/mode" if parts.next().is_none() => {
-            Some("approval [recommend|auto|trust] | analysis [smart|auto|manual]".to_string())
-        }
+        "/mode" if parts.next().is_none() => Some(
+            "approval [recommend|auto|trust] | analysis [smart|auto|manual] | plan [on|off|status]"
+                .to_string(),
+        ),
         "/details" if parts.next().is_none() => Some("<id>".to_string()),
         _ => {
             // List every matching command: returning only the first prefix

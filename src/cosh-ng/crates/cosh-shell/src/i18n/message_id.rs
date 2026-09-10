@@ -111,4 +111,5 @@ collect_message_ids!([
     approval_trust_catalog_ids,
     hook_action_ids,
     enhanced_routing_mode_ids,
+    plan_mode_ids,
 ],);

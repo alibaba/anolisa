@@ -21,6 +21,7 @@ pub(crate) mod insight;
 pub(crate) mod invocation;
 pub(crate) mod logging;
 pub(crate) mod mode;
+pub(crate) mod mode_plan;
 #[cfg(test)]
 mod mode_tests;
 #[cfg(test)]
