@@ -991,6 +991,10 @@ jobs:
           cd src/ws-ckpt/src
           cargo test --workspace
 
+      - name: Run openclaw install script tests
+        working-directory: src/ws-ckpt
+        run: make test-openclaw-install
+
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
         run: |
