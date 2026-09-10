@@ -60,14 +60,23 @@ fn quoted_safe_output_sink_redirection_is_null_suppression() {
     // V-TOK, asserted at the assessment layer: `parse_command` and
     // `ParsedCommand` are `pub(super)`, unreachable from a lib-root
     // module, so the no-leak guarantee (the fd word and the quoted
-    // target never enter argv; the sink is counted as a null
+    // target never enter argv; the sink is recorded as a null
     // redirection) is pinned through its observable effects instead —
-    // `output-suppressed` present proves the null-redirection count,
+    // `output-suppressed` present proves the null-redirection record,
     // and any argv leak would leave a plain auto-allowable command and
-    // flip the V-M10 boundary assertion below.
-    let auto_policy = auto("ps aux 2>\"/dev/null\"");
-    assert_eq!(auto_policy.execution, ExecutionDecision::AskUser);
-    assert!(auto_policy.auto_allow.is_none());
+    // flip the boundary assertions below.
+    //
+    // Issue #1752 Layer 2: quote removal makes the quoted form the same
+    // literal sink, so it is classified by the same fd rule — a quoted
+    // stderr suppression keeps the shape verdict together with its
+    // auto-allow evidence, while a quoted stdout suppression holds the
+    // AskUser boundary.
+    let stderr_policy = auto("ps aux 2>\"/dev/null\"");
+    assert_eq!(stderr_policy.execution, ExecutionDecision::AutoAllow);
+    assert!(stderr_policy.auto_allow.is_some());
+    let stdout_policy = auto("ls >\"/dev/null\"");
+    assert_eq!(stdout_policy.execution, ExecutionDecision::AskUser);
+    assert!(stdout_policy.auto_allow.is_none());
 }
 
 #[test]

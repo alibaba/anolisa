@@ -19,6 +19,46 @@ use super::command_risk::CommandShape;
 /// in `command_risk_tests.rs`.
 const SAFE_OUTPUT_SINKS: &[&str] = &["/dev/null"];
 
+/// Which stream one stripped output suppression discards (issue #1752
+/// Layer 2 decision). Auto-allow is restored only when every suppression
+/// in a command leaves stdout reachable: a discarded stdout means an
+/// auto-approved run leaves nothing reviewable in the transcript, so the
+/// audit trail would be broken by the very decision that skipped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SuppressedStream {
+    /// `2>` / `2>>` onto a `SAFE_OUTPUT_SINKS` target (quoted or not), and
+    /// any auxiliary fd (`10>`): stdout still reaches the transcript.
+    KeepsStdout,
+    /// The default fd (`>/dev/null`, `ls>/dev/null`) or fd 1 (`1>`) onto a
+    /// safe sink: stdout is discarded, so the boundary stays AskUser.
+    DiscardsStdout,
+    /// `[N]>&-` close of an output stream (default / fd 1 / fd 2). Close
+    /// forms are never auto-allowed (V-F5, issue #2054), so they hold the
+    /// AskUser boundary together with `DiscardsStdout`.
+    OutputClose,
+}
+
+impl SuppressedStream {
+    /// Issue #1752: a command whose every stripped suppression keeps
+    /// stdout preserves the shape verdict (and its auto-allow evidence).
+    /// Any other mix — including `2>/dev/null >/dev/null` — falls back to
+    /// AskUser. The fd is read from the parser's own record here and is
+    /// never re-derived downstream.
+    pub(super) fn preserves_verdict(suppressed: &[Self]) -> bool {
+        !suppressed.is_empty() && suppressed.iter().all(|stream| *stream == Self::KeepsStdout)
+    }
+}
+
+/// Channel of a safe-sink suppression. Only the default fd (no IO_NUMBER
+/// prefix) and fd 1 discard stdout; fd 2 and auxiliary fds do not.
+fn suppressed_stream(fd_candidate: bool, fd_word: &str) -> SuppressedStream {
+    if fd_candidate && fd_word != "1" {
+        SuppressedStream::KeepsStdout
+    } else {
+        SuppressedStream::DiscardsStdout
+    }
+}
+
 /// Segment separator kind recorded at each `&&`/`||`/`;`/newline break.
 /// A single `&` also records a mark (background list separator) but the
 /// shape escalates to Complex, so its connector is never consumed by the
@@ -34,12 +74,16 @@ pub(crate) enum SegmentConnector {
 pub(super) struct ParsedCommand {
     pub(super) shape: CommandShape,
     pub(super) stages: Vec<Vec<String>>,
-    pub(super) null_redirections: usize,
+    /// One entry per stripped output suppression, in source order. The
+    /// issue #1752 Layer 2 decision routes on this channel record instead
+    /// of a bare count, so the fd observed by the parser is the fd the
+    /// policy acts on.
+    pub(super) null_redirections: Vec<SuppressedStream>,
     /// Byte ranges `(start, end)` of elidable output-redirection syntax
     /// in the original command text: null-sink redirections (fd prefix,
     /// `>` / `>>` operator, any whitespace, and the target path) plus the
     /// exempted duplication words `[N]>&1` / `[N]>&2`. Close forms
-    /// (`[N]>&-`) are counted in `null_redirections` but carry no span:
+    /// (`[N]>&-`) are recorded in `null_redirections` but carry no span:
     /// they are never auto-allowed, so they must stay visible in the
     /// stripped text. Spans are recorded in source order and never
     /// overlap. Used by `strip_null_redirections()` in `command_risk.rs`
@@ -63,7 +107,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Empty,
             stages: Vec::new(),
-            null_redirections: 0,
+            null_redirections: Vec::new(),
             null_redirection_spans: Vec::new(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
@@ -73,7 +117,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
-            null_redirections: 0,
+            null_redirections: Vec::new(),
             null_redirection_spans: Vec::new(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
@@ -85,7 +129,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     let mut stages: Vec<Vec<String>> = Vec::new();
     let mut shape = CommandShape::Simple;
     let mut quote: Option<char> = None;
-    let mut null_redirections = 0usize;
+    let mut null_redirections: Vec<SuppressedStream> = Vec::new();
     let mut amp_redirect_guard = false;
     // Segment breaks recorded as (stage index, token offset, connector)
     // at each `&&`/`||`/`;`/newline, resolved into `segments` after
@@ -289,10 +333,11 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                             token_quoted = false;
                         }
                         // Output-closing forms join the issue #1667
-                        // null-sink channel (`output-suppressed` reason +
-                        // auto-allow fallback).
+                        // null-sink channel (`output-suppressed` reason)
+                        // but hold the AskUser boundary: closing a stream
+                        // is never auto-allowed (V-F5, issue #2054).
                         if closes_output_stream {
-                            null_redirections += 1;
+                            null_redirections.push(SuppressedStream::OutputClose);
                         }
                         continue;
                     }
@@ -373,14 +418,32 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                                     )
                                 });
                             if word_ends && SAFE_OUTPUT_SINKS.contains(&quoted_target.as_str()) {
+                                // The quoted form joins the same channel as the
+                                // unquoted one, so it also records a byte-exact
+                                // span: without one the stripped text keeps the
+                                // `>` and the readonly validators reject it, and
+                                // `byte_pos` desyncs by every consumed byte so
+                                // each later span cuts the wrong slice.
+                                let stream = suppressed_stream(fd_candidate, &token);
+                                let span_start = if fd_candidate {
+                                    let fd_bytes: usize = token.chars().map(|c| c.len_utf8()).sum();
+                                    byte_pos.saturating_sub(1 + fd_bytes)
+                                } else {
+                                    byte_pos - 1
+                                };
+                                let quoted_total = consumed + quoted_consumed;
+                                let consumed_bytes: usize =
+                                    chars.clone().take(quoted_total).map(|c| c.len_utf8()).sum();
                                 if fd_candidate {
                                     token.clear();
                                     token_quoted = false;
                                 }
-                                for _ in 0..consumed + quoted_consumed {
+                                for _ in 0..quoted_total {
                                     chars.next();
                                 }
-                                null_redirections += 1;
+                                byte_pos += consumed_bytes;
+                                null_redirection_spans.push((span_start, byte_pos));
+                                null_redirections.push(stream);
                                 continue;
                             }
                         }
@@ -406,7 +469,9 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 if !guarded && literal && SAFE_OUTPUT_SINKS.contains(&target.as_str()) {
                     // Record the byte span of this null redirection for
                     // precise stripping (SunnyQjm review: avoids ad-hoc
-                    // regex reconstruction that loses quotes/escaping).
+                    // regex reconstruction that loses quotes/escaping),
+                    // plus the channel the issue #1752 policy routes on.
+                    let stream = suppressed_stream(fd_candidate, &token);
                     let span_start = if fd_candidate {
                         let fd_bytes: usize = token.chars().map(|c| c.len_utf8()).sum();
                         byte_pos.saturating_sub(1 + fd_bytes)
@@ -427,7 +492,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     }
                     byte_pos += consumed_bytes;
                     null_redirection_spans.push((span_start, byte_pos));
-                    null_redirections += 1;
+                    null_redirections.push(stream);
                 } else {
                     if fd_candidate {
                         push_token(&mut tokens, &mut token, &mut token_quoted);
@@ -472,7 +537,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
-            null_redirections: 0,
+            null_redirections: Vec::new(),
             null_redirection_spans: Vec::new(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),

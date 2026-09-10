@@ -98,8 +98,11 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
         return high_shell_syntax(policy.source, command, parsed.shape, "redirection-write");
     }
 
-    let null_redirections = parsed.null_redirections;
-    if null_redirections > 0 && parsed.shape == CommandShape::Complex {
+    // Cloned out before the shape paths consume `parsed` by value; the
+    // record is empty for every command without output suppression, so
+    // the common case clones without allocating.
+    let null_redirections = parsed.null_redirections.clone();
+    if !null_redirections.is_empty() && parsed.shape == CommandShape::Complex {
         // Subshells, brace groups, and background syntax cannot be
         // reliably segmented; keep the pre-fix fail-closed classification
         // for redirection-carrying complex commands.
@@ -118,7 +121,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
     } else {
         match parsed.shape {
             CommandShape::Simple | CommandShape::EnvSimple => {
-                let effective = if parsed.null_redirections > 0 {
+                let effective = if !parsed.null_redirections.is_empty() {
                     strip_null_redirections(command, &parsed.null_redirection_spans)
                 } else {
                     command.to_string()
@@ -126,7 +129,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
                 assess_simple_command(&effective, parsed, policy)
             }
             CommandShape::Pipeline => {
-                let effective = if parsed.null_redirections > 0 {
+                let effective = if !parsed.null_redirections.is_empty() {
                     strip_null_redirections(command, &parsed.null_redirection_spans)
                 } else {
                     command.to_string()
@@ -161,8 +164,8 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             | CommandShape::RedirectionWrite => unreachable!("handled above"),
         }
     };
-    if null_redirections > 0 {
-        apply_null_redirection_policy(&mut result);
+    if !null_redirections.is_empty() {
+        apply_null_redirection_policy(&mut result, &null_redirections);
         result.command = command.to_string();
     }
     result
@@ -314,7 +317,7 @@ fn assess_first_stage(
             CommandShape::Simple
         },
         stages: parsed.stages.first().cloned().into_iter().collect(),
-        null_redirections: 0,
+        null_redirections: Vec::new(),
         null_redirection_spans: Vec::new(),
         segments: Vec::new(),
         segment_connectors: Vec::new(),

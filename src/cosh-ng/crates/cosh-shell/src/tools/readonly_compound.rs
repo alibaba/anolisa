@@ -79,7 +79,7 @@ pub(crate) fn build_readonly_compound_plan(command: &str) -> Option<ReadonlyComp
     ) {
         return None;
     }
-    if parsed.null_redirections > 0 {
+    if !parsed.null_redirections.is_empty() {
         return None;
     }
     if parsed.segments.len() < 2 {

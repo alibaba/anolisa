@@ -3,7 +3,7 @@ use super::command_risk::{
     ExecutionDecision, InteractionRequirement, OutputExposure, OutputStability, RiskImpact,
     SideEffectClass,
 };
-use super::command_risk_parser::is_env_assignment;
+use super::command_risk_parser::{is_env_assignment, SuppressedStream};
 
 pub(super) fn has_interpreter_inline_code(program: &str, tokens: &[String]) -> bool {
     interpreter_program_source(program, tokens) == Some(InterpreterProgramSource::Inline)
@@ -504,24 +504,28 @@ pub(super) fn basename(program: &str) -> &str {
 }
 
 /// Post-processing for assessments whose command carried stripped
-/// null-suppression redirections to safe output sinks (issue #1667, #1752):
-/// append the informational reason without changing the execution boundary.
-/// Redirections to `/dev/null` are output-suppression, not filesystem writes,
-/// so the auto-allow decision is preserved. Risk itself is fully decided by
-/// the shape/segment assessment paths.
-///
-/// # Safety boundary
-///
-/// This function is only called when `parsed.null_redirections > 0`, which
-/// the parser sets exclusively for targets in the `SAFE_OUTPUT_SINKS`
-/// allowlist (`command_risk_parser.rs`). Any future extension of that
-/// allowlist (e.g. adding `/dev/random` or custom device nodes) must
-/// revisit the issue #1667 boundaries and the decision-matrix tests in
-/// `command_risk_tests.rs` — the auto-allow preservation here is safe
-/// only because the parser enforces the whitelist upstream.
-pub(super) fn apply_null_redirection_policy(result: &mut CommandAssessment) {
+/// null-suppression redirections (issues #1667, #1752): append the
+/// informational reason, then route the execution boundary on the parser's
+/// channel record. Stderr-only suppression keeps the shape verdict (stdout
+/// still reaches the transcript); any stdout suppression or `[N]>&-` close
+/// falls back to AskUser with the evidence cleared (V-F5, issue #2054).
+pub(super) fn apply_null_redirection_policy(
+    result: &mut CommandAssessment,
+    suppressed: &[SuppressedStream],
+) {
     result.reasons.push("output-suppressed");
     result.reasons = dedupe_reasons(std::mem::take(&mut result.reasons));
+    // An AutoAllow verdict without evidence is unrouteable, so it never
+    // survives this policy (`AutoExecutionPolicy::route` keys off it).
+    let evidence_less =
+        result.execution == ExecutionDecision::AutoAllow && result.auto_allow.is_none();
+    if SuppressedStream::preserves_verdict(suppressed) && !evidence_less {
+        return;
+    }
+    if result.execution == ExecutionDecision::AutoAllow {
+        result.execution = ExecutionDecision::AskUser;
+    }
+    result.auto_allow = None;
 }
 
 pub(super) fn high_risk_program(

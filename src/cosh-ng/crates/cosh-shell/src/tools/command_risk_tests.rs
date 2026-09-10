@@ -1,3 +1,4 @@
+use super::command_risk_parser::SuppressedStream;
 use super::*;
 
 fn auto(command: &str) -> CommandAssessment {
@@ -550,6 +551,25 @@ fn null_redirection_suppression_is_not_filesystem_write() {
         parsed.stages,
         vec![vec!["ps".to_string(), "aux".to_string()]]
     );
+
+    // Issue #1752 channel split: the fd the parser saw decides the Layer 2
+    // boundary, and the default/fd-1 forms discard stdout.
+    assert_eq!(
+        parsed.null_redirections,
+        vec![SuppressedStream::KeepsStdout]
+    );
+    for (command, expected) in [
+        ("ls > /dev/null", SuppressedStream::DiscardsStdout),
+        ("ls>/dev/null", SuppressedStream::DiscardsStdout),
+        ("ls 1>/dev/null", SuppressedStream::DiscardsStdout),
+        ("cat x 2>>/dev/null", SuppressedStream::KeepsStdout),
+        ("ls 2>&-", SuppressedStream::OutputClose),
+        ("ls 1>&-", SuppressedStream::OutputClose),
+        ("ls >&-", SuppressedStream::OutputClose),
+    ] {
+        let parsed = super::command_risk_parser::parse_command(command);
+        assert_eq!(parsed.null_redirections, vec![expected], "{command}");
+    }
 }
 
 #[test]
@@ -666,7 +686,10 @@ fn dup_fd_consumption_keeps_safe_sink_spans_aligned() {
     let parsed = super::command_risk_parser::parse_command(command);
     assert_eq!(parsed.shape, CommandShape::Simple);
     assert_eq!(parsed.stages, vec![vec!["ls".to_string()]]);
-    assert_eq!(parsed.null_redirections, 1);
+    assert_eq!(
+        parsed.null_redirections,
+        vec![SuppressedStream::KeepsStdout]
+    );
     assert_eq!(parsed.null_redirection_spans, vec![(3, 7), (8, 19)]);
     // Span slices must reproduce the exact exempted syntax in order.
     let slices: Vec<&str> = parsed
@@ -684,7 +707,13 @@ fn dup_fd_consumption_keeps_safe_sink_spans_aligned() {
     let close = super::command_risk_parser::parse_command(close_command);
     assert_eq!(close.shape, CommandShape::Simple);
     assert_eq!(close.stages, vec![vec!["ls".to_string()]]);
-    assert_eq!(close.null_redirections, 2);
+    assert_eq!(
+        close.null_redirections,
+        vec![
+            SuppressedStream::OutputClose,
+            SuppressedStream::DiscardsStdout
+        ]
+    );
     assert_eq!(close.null_redirection_spans, vec![(8, 18)]);
     assert_eq!(&close_command[8..18], ">/dev/null");
 
@@ -692,14 +721,50 @@ fn dup_fd_consumption_keeps_safe_sink_spans_aligned() {
     let pipeline_command = "ls 2>&1 | tail -5 2>/dev/null";
     let pipeline = super::command_risk_parser::parse_command(pipeline_command);
     assert_eq!(pipeline.shape, CommandShape::Pipeline);
-    assert_eq!(pipeline.null_redirections, 1);
+    assert_eq!(
+        pipeline.null_redirections,
+        vec![SuppressedStream::KeepsStdout]
+    );
     assert_eq!(pipeline.null_redirection_spans, vec![(3, 7), (18, 29)]);
 
     // Dup form followed by a multi-digit fd safe sink.
     let multi_command = "ls 2>&1 10>/dev/null";
     let multi = super::command_risk_parser::parse_command(multi_command);
-    assert_eq!(multi.null_redirections, 1);
+    assert_eq!(multi.null_redirections, vec![SuppressedStream::KeepsStdout]);
     assert_eq!(multi.null_redirection_spans, vec![(3, 7), (8, 20)]);
+
+    // Quoted safe sinks (issue #1752) are consumed from the iterator too,
+    // so they must record their own byte-exact span: without one the
+    // stripped text keeps the `>` (the readonly broker rejects it) and
+    // `byte_pos` desyncs by every consumed byte, cutting each later span
+    // from the wrong offset.
+    let quoted_command = r#"ls 2>"/dev/null" >/dev/null"#;
+    let quoted = super::command_risk_parser::parse_command(quoted_command);
+    assert_eq!(
+        quoted.null_redirections,
+        vec![
+            SuppressedStream::KeepsStdout,
+            SuppressedStream::DiscardsStdout
+        ]
+    );
+    assert_eq!(quoted.null_redirection_spans, vec![(3, 16), (17, 27)]);
+    let quoted_slices: Vec<&str> = quoted
+        .null_redirection_spans
+        .iter()
+        .map(|&(start, end)| &quoted_command[start..end])
+        .collect();
+    assert_eq!(quoted_slices, vec![r#"2>"/dev/null""#, ">/dev/null"]);
+
+    // A quoted stderr suppression alone keeps stdout, and the whitespace
+    // form (`2> '/dev/null'`) consumes the gap inside the same span.
+    let spaced_command = "ls 2> '/dev/null'";
+    let spaced = super::command_risk_parser::parse_command(spaced_command);
+    assert_eq!(
+        spaced.null_redirections,
+        vec![SuppressedStream::KeepsStdout]
+    );
+    assert_eq!(spaced.null_redirection_spans, vec![(3, 17)]);
+    assert_eq!(&spaced_command[3..17], "2> '/dev/null'");
 }
 
 #[test]
@@ -782,7 +847,7 @@ fn multi_digit_fd_prefix_spans_cover_full_prefix() {
     let ps = super::command_risk_parser::parse_command(ps_command);
     assert_eq!(ps.shape, CommandShape::Simple);
     assert_eq!(ps.stages, vec![vec!["ps".to_string()]]);
-    assert_eq!(ps.null_redirections, 1);
+    assert_eq!(ps.null_redirections, vec![SuppressedStream::KeepsStdout]);
     assert_eq!(ps.null_redirection_spans, vec![(3, 15)]);
     assert_eq!(&ps_command[3..15], "10>/dev/null");
 
@@ -792,7 +857,7 @@ fn multi_digit_fd_prefix_spans_cover_full_prefix() {
         echo.stages,
         vec![vec!["echo".to_string(), "hi".to_string()]]
     );
-    assert_eq!(echo.null_redirections, 1);
+    assert_eq!(echo.null_redirections, vec![SuppressedStream::KeepsStdout]);
     assert_eq!(echo.null_redirection_spans, vec![(8, 20)]);
     assert_eq!(&echo_command[8..20], "10>/dev/null");
 
@@ -842,7 +907,10 @@ fn escaped_arguments_keep_null_redirection_spans_aligned() {
     let command = r"ls foo\ bar 2>/dev/null";
     let parsed = super::command_risk_parser::parse_command(command);
     assert_eq!(parsed.shape, CommandShape::Simple);
-    assert_eq!(parsed.null_redirections, 1);
+    assert_eq!(
+        parsed.null_redirections,
+        vec![SuppressedStream::KeepsStdout]
+    );
     assert_eq!(parsed.null_redirection_spans, vec![(12, 23)]);
     assert_eq!(&command[12..23], "2>/dev/null");
 }
