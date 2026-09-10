@@ -458,14 +458,26 @@ fn unique_directory() -> PathBuf {
     ))
 }
 
+/// Waits until the endpoint accepts a connection, not merely until it appears.
+///
+/// Binding publishes the socket file slightly before the listener starts
+/// accepting, so a path that already exists can still refuse connections. The
+/// window was measured at roughly 10ms on macOS and is narrower but present on
+/// Linux, which made the first request after startup fail intermittently. A
+/// successful probe connect is the only signal that proves reachability; it is
+/// closed at once and costs one of the 64 default connection slots.
 async fn wait_for_socket(path: &Path) {
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !path.exists() {
-            tokio::task::yield_now().await;
+        loop {
+            if let Ok(probe) = UnixStream::connect(path).await {
+                drop(probe);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("daemon should bind its socket");
+    .expect("daemon should accept connections on its socket");
 }
 
 async fn uds_request(path: &Path, payload: &[u8]) -> Value {
