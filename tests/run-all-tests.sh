@@ -61,7 +61,12 @@ run_agent_memory() {
         echo "agent-memory is Linux-only; skipping on $(uname -s)."
         return 0
     fi
-    if command -v cargo >/dev/null 2>&1; then
+    # `make test` also runs the bash-only adapter install-script test, which
+    # cargo cannot cover; fall back to cargo when make is unavailable.
+    if command -v make >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+        make test
+    elif command -v cargo >/dev/null 2>&1; then
+        echo "make not found, using cargo directly"
         cargo test --locked
     else
         echo "cargo not found, skipping agent-memory tests."

@@ -112,7 +112,10 @@ jq -n \
 - 成功 JSON 使用 `JsonCompressor`，并可能选择 Compact JSON 或 TOON。
 - 已识别的成功构建/测试命令输出使用 `BuildLogCompressor`，可选择 Terminal Cleanup 和可恢复的
   Routine Progress Reduction。
-- 在对应领域 Compressor 接入前，其他非 JSON 内容类型都原样透传。
+- 成功 CSV/TSV 在宿主支持任意文本替换时使用 `TabularCompressor`，可选择保留全部单元格的
+  全量压紧或可恢复的行筛选。文件来源结果透传。行筛选要求列名证据，且精确源行号范围列表
+  不超过 1 KiB；见[CSV/TSV 视图](user-manual.md#csvtsv-视图可能不完整)。
+- 其他内容类型在对应领域 Compressor 接入前原样透传。
 
 只有 `disposition: "applied"` 表示 `output` 与原文不同。`dry_run`、`passthrough`、
 `no_savings`、`recoverability_unavailable`、`timeout` 和 `tool_error` 都携带原始内容。

@@ -213,6 +213,9 @@ fn mount_inner(
 
     let mut fuse_opts: Vec<fuser::MountOption> = vec![];
     fuse_opts.push(fuser::MountOption::NoAtime);
+    if options.read_only {
+        fuse_opts.push(fuser::MountOption::RO);
+    }
     if options.allow_other {
         fuse_opts.push(fuser::MountOption::AllowOther);
     }

@@ -7,6 +7,16 @@
 本文档格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 项目遵循[语义化版本](https://semver.org/lang/zh-CN/spec/v2.0.0.html)。
 
+## [0.2.7] - 2026-09-09
+
+### 修复
+
+- **agent-memory**：根据宿主帮助信息选择 OpenClaw 安装参数并默认授予插件声明的能力，用户可在要求授权的宿主上安装，也可通过 `AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 拒绝授权；不再传递已弃用且无效的 unsafe-install 参数，并区分授权拒绝与安装目录不可写的问题（#3149）
+- **agent-memory**：将 corpus 命中标记为 `agent-memory` 并提供适用于 `memory_get corpus=all` 的读取路径，Agent 可读取与 OpenClaw 工作区记忆路径重叠的存储记忆，并在分段读取时获得准确的 `fromLine` / `lineCount`（#3177）
+- **agent-memory**：在查找二进制前校验插件配置，即使尚未安装 `agent-memory`，用户也能看到无效 `userId` / `sessionId` 的具体错误（#3155）
+- **agent-memory**：声明 RPM 组件标识，ANOLISA 可将已安装的软件包识别为 `agent-memory` 组件（#2560）
+- **agent-memory**：在统一构建流程中声明 Node.js >= 20 和 npm 为源码构建依赖，用户模式自动准备构建 OpenClaw 适配器所需的工具，系统模式则在构建前提示缺失工具（#3187）
+
 ## [0.2.6] - 2026-07-30
 
 ### 修复

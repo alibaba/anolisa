@@ -70,6 +70,10 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_record_reduction_operation_uses_the_core_wire_value(self) -> None:
+        self.assertEqual(AppliedOperation("tabular_compaction"), AppliedOperation.TABULAR_COMPACTION)
+        self.assertEqual(
+            AppliedOperation("tabular_row_reduction"), AppliedOperation.TABULAR_ROW_REDUCTION
+        )
         self.assertEqual(
             AppliedOperation("json_record_reduction"),
             AppliedOperation.JSON_RECORD_REDUCTION,
@@ -126,12 +130,12 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TokenlessError, "not authorized"):
             await sdk.retrieve(RetrieveRequest(marker.group(1), frozenset(), self.attribution))
 
-    def test_config_contains_only_runtime_resources(self) -> None:
+    def test_config_contains_runtime_resources_and_search_control(self) -> None:
         with self.assertRaisesRegex(ValueError, "absolute path"):
             TokenlessConfig(data_dir="relative")
         self.assertEqual(
             {field.name for field in fields(TokenlessConfig)},
-            {"data_dir", "retrieve_tool_name", "rtk_enabled"},
+            {"data_dir", "retrieve_tool_name", "rtk_enabled", "search_path_sharing_enabled"},
         )
 
     def test_config_identifies_invalid_retrieve_tool_names(self) -> None:
@@ -304,6 +308,53 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(json.loads(restored.payload), records)
 
+    async def test_search_path_sharing_exposes_the_typed_operation(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        self.assertTrue(sdk.config.search_path_sharing_enabled)
+        original = "crates/long_directory/src/file.rs:42:  matching text  \r\n" * 12
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="Grep",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.API_RESPONSE,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(
+                    replace_output=True, recovery=RecoveryMethod(), replace_with_text=True
+                ),
+                attribution=Attribution("sdk-agent", "sdk-session", "search-1"),
+            )
+        )
+        self.assertEqual(result.applied_operations, (AppliedOperation.SEARCH_PATH_SHARING,))
+        self.assertEqual(result.content_type.value, "search_results")
+        self.assertEqual(result.recoverability.value, "lossless")
+        self.assertEqual(result.stash_keys, ())
+        self.assertEqual(result.output.count("42:  matching text  \r\n"), 12)
+        self.assertLess(len(result.output), len(original))
+
+    async def test_search_path_sharing_can_be_disabled(self) -> None:
+        sdk = self.sdk(rtk_enabled=False, search_path_sharing_enabled=False)
+        original = "crates/long_directory/src/file.rs:42:matching text\n" * 12
+        result = await sdk.post_tool(
+            PostToolRequest(
+                result_kind=ResultKind.TOOL,
+                tool_name="SearchFiles",
+                content=original,
+                status=ToolResultStatus.SUCCESS,
+                content_origin=ContentOrigin.API_RESPONSE,
+                output_optimization=OutputOptimization.NONE,
+                capabilities=PostToolCapabilities(
+                    replace_output=True, recovery=RecoveryMethod(), replace_with_text=True
+                ),
+                attribution=Attribution("sdk-agent", "sdk-session", "search-disabled"),
+            )
+        )
+        self.assertFalse(sdk.config.search_path_sharing_enabled)
+        self.assertEqual(result.output, original)
+        self.assertEqual(result.applied_operations, ())
+        self.assertEqual(result.stash_keys, ())
+
     def test_stats_client_is_lazy_and_uses_runtime_data_dir(self) -> None:
         sdk = self.sdk(rtk_enabled=False)
         self.assertIsNone(sdk._stats)
@@ -311,6 +362,58 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         stats = sdk.stats
         self.assertIs(stats, sdk.stats)
         self.assertEqual(stats.status.data_dir, sdk.runtime.data_dir)
+
+    async def test_tabular_pipeline_preserves_raw_recovery_and_bypasses_retrieved_output(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        for delimiter in (",", "\t"):
+            with self.subTest(delimiter=delimiter):
+                original = f"id{delimiter}message\r\n" + "".join(
+                    f"{index:04}{delimiter}record-{index}-{'payload ' * 12}\r\n"
+                    for index in range(100)
+                )
+                capabilities = PostToolCapabilities(
+                    replace_output=True,
+                    recovery=RecoveryMethod.tool("tokenless_retrieve"),
+                    replace_with_text=True,
+                )
+                result = await sdk.post_tool(
+                    PostToolRequest(
+                        result_kind=ResultKind.TOOL,
+                        tool_name="table_query",
+                        content=original,
+                        status=ToolResultStatus.SUCCESS,
+                        content_origin=ContentOrigin.API_RESPONSE,
+                        output_optimization=OutputOptimization.NONE,
+                        capabilities=capabilities,
+                        attribution=Attribution("sdk-agent", "table-session", "table-call"),
+                    )
+                )
+                self.assertEqual(result.applied_operations, (AppliedOperation.TABULAR_ROW_REDUCTION,))
+                self.assertEqual(result.content_type.value, "tabular")
+                self.assertEqual(result.recoverability.value, "retrievable")
+                self.assertIn("Incomplete table", result.output)
+                restored = await sdk.retrieve(
+                    RetrieveRequest(result.stash_keys[0], frozenset(result.stash_keys), self.attribution)
+                )
+                self.assertEqual(restored.payload.encode(), original.encode())
+                for kind, optimization in (
+                    (ResultKind.RETRIEVE, OutputOptimization.NONE),
+                    (ResultKind.TOOL, OutputOptimization.RTK),
+                ):
+                    bypass = await sdk.post_tool(
+                        PostToolRequest(
+                            result_kind=kind,
+                            tool_name="tokenless_retrieve",
+                            content=restored.payload,
+                            status=ToolResultStatus.SUCCESS,
+                            content_origin=ContentOrigin.API_RESPONSE,
+                            output_optimization=optimization,
+                            capabilities=capabilities,
+                            attribution=Attribution("sdk-agent", "table-session", "table-bypass"),
+                        )
+                    )
+                    self.assertEqual(bypass.output, original)
+                    self.assertEqual(bypass.applied_operations, ())
 
 
 if __name__ == "__main__":

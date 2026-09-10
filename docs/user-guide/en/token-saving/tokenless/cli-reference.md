@@ -116,7 +116,11 @@ Operations:
 - Successful JSON uses `JsonCompressor`; compact JSON or TOON may be selected.
 - Recognized successful build/test command output uses `BuildLogCompressor`; terminal cleanup and
   recoverable routine-progress reduction may be selected.
-- Every other non-JSON content type passes through until its domain compressor is connected.
+- Successful CSV/TSV uses `TabularCompressor` when the host supports arbitrary text replacement;
+  cell-preserving compaction or recoverable row reduction may be selected. File-origin results
+  pass through. Row reduction requires column-label evidence and an exact source-range list
+  no larger than 1 KiB; see [CSV/TSV views](user-manual.md#csvtsv-views-can-be-incomplete).
+- Other content types pass through until their domain compressor is connected.
 
 Only `disposition: "applied"` means `output` differs from the original. `dry_run`, `passthrough`,
 `no_savings`, `recoverability_unavailable`, `timeout`, and `tool_error` carry the original content.

@@ -899,6 +899,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn journal_without_installation_reports_repair_before_nothing_to_forget() {
+        for dry_run in [false, true] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().to_path_buf(), InstallMode::System, dry_run);
+            seed(&c, Vec::new(), Vec::new());
+            let layout = common::resolve_layout(&c);
+            let journal = Transaction::begin_with_subject(
+                "install",
+                Some("cosh"),
+                layout.state_dir.join("installed.toml"),
+                &rpm_install::journal_dir(&layout),
+            )
+            .expect("pending journal");
+            let err = handle(
+                ForgetArgs {
+                    component: "cosh".to_string(),
+                },
+                &c,
+            )
+            .expect_err("forget must preserve pending evidence");
+            assert!(err.reason().contains("anolisa repair cosh"), "{err}");
+            assert!(!err.reason().contains("nothing to forget"));
+            assert!(
+                Transaction::load_journal(&journal.journal_path)
+                    .unwrap()
+                    .is_pending()
+            );
+        }
+    }
+
     /// Dry-run leaves the state record in place.
     #[test]
     fn forget_dry_run_leaves_state_untouched() {

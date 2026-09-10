@@ -79,7 +79,7 @@ pub fn inventory_for_installation(
             .iter()
             .filter(|file| file.owner == FileOwner::Anolisa)
             .map(|file| match file.kind {
-                OwnedFileKind::File => ManagedFile {
+                OwnedFileKind::File | OwnedFileKind::Config => ManagedFile {
                     path: file.path.clone(),
                     kind: ManagedInventoryKind::File,
                     sha256: file.sha256.clone(),

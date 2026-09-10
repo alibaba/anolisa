@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, anolisa, cosh-ng
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, ktuner, anolisa, cosh-ng
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -27,6 +27,7 @@ SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
+KTUNER_DIR="${ROOT_DIR}/src/ktuner"
 COSH_DIR="${ROOT_DIR}/src/cosh-ng"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
 
@@ -183,6 +184,64 @@ build_copilot_shell() {
 }
 
 # =============================================================================
+# agent-sec-core: payload shared by the V1 and V2 source tarballs
+#
+# Args: <pkg_dir>  destination staging directory (must already exist)
+#
+# Only the CLI/daemon layer differs between V1 and V2, so both callers stage the
+# same component payload here and then add their own layer. Keeping the trees
+# separate matters: the V1 tarball must keep its original payload inventory, so
+# nothing V2-specific may leak into this helper.
+#
+# Note: rust-toolchain.toml is intentionally excluded from the tarball. The
+# source file pins a Rust version that rpmbuild environments may not have, so by
+# omitting it cargo falls back to whatever Rust the build environment provides.
+# =============================================================================
+stage_sec_core_payload() {
+    local pkg_dir="$1"
+
+    mkdir -p "$pkg_dir"/{skills,linux-sandbox,cosh-extension,openclaw-plugin,hermes-plugin,qwen-code-extension,qoder-plugin,tools}
+
+    # skills: use cp -rp dir/. to include hidden files/directories
+    cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
+    cp -rp "${SEC_DIR}/linux-sandbox/"* "$pkg_dir/linux-sandbox/"
+    rm -f "$pkg_dir/linux-sandbox/rust-toolchain.toml"
+    cp -rp "${SEC_DIR}/cosh-extension/"* "$pkg_dir/cosh-extension/"
+    cp -p "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
+    cp "${SEC_DIR}/Makefile" "$pkg_dir/"
+    tar -cf - -C "${SEC_DIR}" \
+        .anolisa/ packaging/systemd/ | tar -xf - -C "$pkg_dir/"
+    [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
+    [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
+
+    # openclaw-plugin (exclude node_modules and dev artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='node_modules' \
+        --exclude='.tsbuildinfo' \
+        openclaw-plugin/ | tar -xf - -C "$pkg_dir/"
+
+    # hermes-plugin (exclude __pycache__ and dev artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        hermes-plugin/src hermes-plugin/scripts | tar -xf - -C "$pkg_dir/"
+
+    # qwen-code-extension (exclude Python cache artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        qwen-code-extension/ | tar -xf - -C "$pkg_dir/"
+
+    # codex-plugin (hooks + install script + .agents registry, exclude __pycache__)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        codex-plugin/hooks-plugin codex-plugin/install.sh codex-plugin/.agents | tar -xf - -C "$pkg_dir/"
+
+    # qoder-plugin (hooks + install script, exclude __pycache__)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        qoder-plugin/ | tar -xf - -C "$pkg_dir/"
+}
+
+# =============================================================================
 # agent-sec-core
 # =============================================================================
 build_agent_sec_core() {
@@ -216,56 +275,15 @@ build_agent_sec_core() {
     spec_file=$(process_spec_template "$spec_in" "$version")
 
     # Step 2: Create source tarball
-    # Note: rust-toolchain.toml is intentionally excluded from the tarball.
-    # The source file requires Rust 1.93.0, but rpmbuild environments may only
-    # have an older Rust available (BuildRequires: rust >= 1.70). By omitting
-    # rust-toolchain.toml, cargo falls back to whatever system Rust is present.
     log "Step 2/3: Creating source tarball ${tarball_name}..."
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,hermes-plugin,qwen-code-extension,qoder-plugin,scripts,tools}
+    mkdir -p "$pkg_dir"/{agent-sec-cli,scripts}
+    stage_sec_core_payload "$pkg_dir"
 
-    # skills: use cp -rp dir/. to include hidden files/directories
-    cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
-    cp -rp "${SEC_DIR}/linux-sandbox/"* "$pkg_dir/linux-sandbox/"
-    rm -f "$pkg_dir/linux-sandbox/rust-toolchain.toml"
-    cp -rp "${SEC_DIR}/cosh-extension/"* "$pkg_dir/cosh-extension/"
     cp -p "${SEC_DIR}/scripts/agent-sec-cli-wrapper.sh" "$pkg_dir/scripts/"
     cp -p "${SEC_DIR}/scripts/agent-sec-daemon-wrapper.sh" "$pkg_dir/scripts/"
-    cp -p "${SEC_DIR}/tools/sign-skill.sh" "$pkg_dir/tools/"
-    cp "${SEC_DIR}/Makefile" "$pkg_dir/"
-    tar -cf - -C "${SEC_DIR}" \
-        .anolisa/ packaging/systemd/ | tar -xf - -C "$pkg_dir/"
-    [ -f "${SEC_DIR}/LICENSE" ] && cp "${SEC_DIR}/LICENSE" "$pkg_dir/"
-    [ -f "${SEC_DIR}/README.md" ] && cp "${SEC_DIR}/README.md" "$pkg_dir/"
-
-    # openclaw-plugin (exclude node_modules and dev artifacts)
-    tar -cf - -C "${SEC_DIR}" \
-        --exclude='node_modules' \
-        --exclude='.tsbuildinfo' \
-        openclaw-plugin/ | tar -xf - -C "$pkg_dir/"
-
-    # hermes-plugin (exclude __pycache__ and dev artifacts)
-    tar -cf - -C "${SEC_DIR}" \
-        --exclude='__pycache__' \
-        hermes-plugin/src hermes-plugin/scripts | tar -xf - -C "$pkg_dir/"
-
-    # qwen-code-extension (exclude Python cache artifacts)
-    tar -cf - -C "${SEC_DIR}" \
-        --exclude='__pycache__' \
-        qwen-code-extension/ | tar -xf - -C "$pkg_dir/"
-
-    # codex-plugin (hooks + install script + .agents registry, exclude __pycache__)
-    tar -cf - -C "${SEC_DIR}" \
-        --exclude='__pycache__' \
-        codex-plugin/hooks-plugin codex-plugin/install.sh codex-plugin/.agents | tar -xf - -C "$pkg_dir/"
-
-    # qoder-plugin (hooks + install script, exclude __pycache__)
-    tar -cf - -C "${SEC_DIR}" \
-        --exclude='__pycache__' \
-        qoder-plugin/ | tar -xf - -C "$pkg_dir/"
-
 
     # Include agent-sec-cli source for maturin wheel build
     # Exclude development artifacts (.venv, target, __pycache__, .egg-info, dist)
@@ -288,6 +306,88 @@ build_agent_sec_core() {
         "$spec_file"
 
     ok "agent-sec-core RPM built successfully"
+}
+
+# =============================================================================
+# agent-sec-core-v2 (V2 Rust CLI/daemon instead of the Python wheel)
+# =============================================================================
+build_agent_sec_core_v2() {
+    log "=========================================="
+    log "Building RPM: agent-sec-core (V2)"
+    log "=========================================="
+
+    local spec_in="${SEC_DIR}/agent-sec-core.spec.v2.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    # Version: prefer $VERSION env, otherwise the V2 workspace owns its version.
+    # V2 deliberately does not read agent-sec-cli/pyproject.toml: the Rust tree
+    # must stand on its own once the Python CLI is retired.
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(awk '
+            $0 == "[workspace.package]" { in_section = 1; next }
+            in_section && /^\[/ { exit }
+            in_section && /^version = / {
+                value = $0
+                sub(/^version = "/, "", value)
+                sub(/"$/, "", value)
+                print value
+                exit
+            }
+        ' "${SEC_DIR}/v2/Cargo.toml")
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine agent-sec-core V2 version. Set VERSION env or ensure v2/Cargo.toml has [workspace.package] version."
+        return 1
+    fi
+
+    # Both versions are bumped together by scripts/bump-version.sh; warn (do not
+    # fail) on drift, because V1 is on its way out and must not gate a V2 build.
+    local v1_version
+    v1_version=$(grep -m1 '^version' "${SEC_DIR}/agent-sec-cli/pyproject.toml" 2>/dev/null | sed 's/.*"\(.*\)"/\1/')
+    if [ -n "$v1_version" ] && [ "$v1_version" != "$version" ]; then
+        warn "V1 version ($v1_version) differs from V2 version ($version); bump-version.sh may have missed a file"
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+
+    # Step 1: Process spec template. The generated name is explicit instead of
+    # derived, so the template suffix does not produce agent-sec-core.spec.v2.
+    log "Step 1/3: Preparing spec file..."
+    local spec_file="${BUILD_DIR}/SPECS/${pkg_name}-v2.spec"
+    log "Processing template: $(basename "$spec_in") -> $(basename "$spec_file") (version=${version})"
+    sed "s/@VERSION@/${version}/g" "$spec_in" > "$spec_file"
+
+    # Step 2: Create source tarball. Same top-level directory as V1 because the
+    # spec still unpacks %{name}-%{version} via `%setup -q`.
+    log "Step 2/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+    stage_sec_core_payload "$pkg_dir"
+
+    # V2 layer: the Rust workspace replaces agent-sec-cli/ and the two Python
+    # wrapper scripts, which are therefore absent from this tarball.
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='target' \
+        v2/ | tar -xf - -C "$pkg_dir/"
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    # Step 3: rpmbuild (--nodeps: BuildRequires are handled by yum-builddep in CI)
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "agent-sec-core V2 RPM built successfully"
 }
 
 # =============================================================================
@@ -780,6 +880,85 @@ EOF
 }
 
 # =============================================================================
+# ktuner
+# =============================================================================
+build_ktuner() {
+    log "=========================================="
+    log "Building RPM: ktuner"
+    log "=========================================="
+
+    local spec_in="${KTUNER_DIR}/ktuner.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version = ' "${KTUNER_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine ktuner version. Set VERSION env or ensure Cargo.toml/spec exists."
+        return 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+    local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+
+    tar -cf - -C "$KTUNER_DIR" \
+        --exclude='target' \
+        --exclude='vendor' \
+        --exclude='.cargo' \
+        . | tar -xf - -C "$pkg_dir"
+
+    if [ -L "${pkg_dir}/LICENSE" ] && [ -f "${ROOT_DIR}/LICENSE" ]; then
+        rm -f "${pkg_dir}/LICENSE"
+        cp -p "${ROOT_DIR}/LICENSE" "${pkg_dir}/LICENSE"
+    fi
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/3: Creating vendor tarball ${vendor_tarball_name}..."
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    mkdir -p "${vendor_tmp}/.cargo"
+    (
+        cd "$KTUNER_DIR"
+        cargo vendor --locked "${vendor_tmp}/vendor" >/dev/null
+    )
+    cat > "${vendor_tmp}/.cargo/config.toml" <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
+    tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor .cargo
+    rm -rf "$vendor_tmp"
+
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "ktuner RPM built successfully"
+}
+
+# =============================================================================
 # cosh-ng
 # =============================================================================
 build_cosh_ng() {
@@ -1141,11 +1320,13 @@ usage() {
     echo "Packages:"
     echo "  copilot-shell             Build copilot-shell RPM"
     echo "  agent-sec-core            Build agent-sec-core RPM"
+    echo "  agent-sec-core-v2         Build agent-sec-core RPM with the V2 Rust CLI/daemon"
     echo "  os-skills                 Build os-skills RPM"
     echo "  agentsight                Build agentsight RPM"
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
     echo "  skillfs                   Build skillfs RPM"
+    echo "  ktuner                    Build ktuner RPM"
     echo "  anolisa                   Build anolisa RPM"
     echo "  cosh-ng                   Build cosh-ng RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
@@ -1189,6 +1370,9 @@ case "$TARGET" in
     agent-sec-core)
         build_agent_sec_core
         ;;
+    agent-sec-core-v2)
+        build_agent_sec_core_v2
+        ;;
     os-skills)
         build_agentic_os_skills
         ;;
@@ -1203,6 +1387,9 @@ case "$TARGET" in
         ;;
     skillfs)
         build_skillfs
+        ;;
+    ktuner)
+        build_ktuner
         ;;
     anolisa)
         build_anolisa
@@ -1236,6 +1423,7 @@ case "$TARGET" in
         build_tokenless
         build_agent_memory
         build_skillfs
+        build_ktuner
         build_anolisa
         build_cosh_ng
         ;;

@@ -116,6 +116,32 @@ impl Aggregator {
             self.last_eviction = now;
         }
 
+        // One SSL read may yield several SSE messages (including a synthetic
+        // chunk terminator). Feed its original, longest source buffer only once
+        // when HTTP response framing owns the connection.
+        let response_event = result
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ParsedMessage::Request(r) => Some(r.source_event.as_ref()),
+                ParsedMessage::Response(r) => Some(r.source_event.as_ref()),
+                ParsedMessage::RawData(event) => Some(event.as_ref()),
+                ParsedMessage::SseEvent(event) => Some(event.source_event()),
+                ParsedMessage::Http2Frames(frames) => {
+                    frames.first().map(|f| f.source_event.as_ref())
+                }
+                ParsedMessage::ProcEvent(_) => None,
+            })
+            .max_by_key(|event| event.buf_size());
+        if let Some(event) = response_event.filter(|event| self.http.accepts_response_bytes(event))
+        {
+            let results: Vec<_> = self.http.process_raw_body_data(event).into_iter().collect();
+            for result in &results {
+                export_trace_events(result);
+            }
+            return results;
+        }
+
         let results: Vec<AggregatedResult> = result
             .messages
             .into_iter()

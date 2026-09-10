@@ -47,9 +47,9 @@ COMPONENT_CONTRACT := .anolisa/component.toml
 RPMBUILD_DIR ?= $(HOME)/rpmbuild
 SPEC_FILE := $(NAME).spec
 
-.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test lint fmt clean install \
+.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test test-openclaw-install lint fmt clean install \
         install-adapter-resources uninstall dist spec rpm srpm \
-        smoke help
+        test-openclaw-plugin smoke help
 
 all: build
 
@@ -130,15 +130,33 @@ build-debug: ## Build debug binary
 # TEST
 # =============================================================================
 
-test: ## Run all tests (Linux only — use `make remote-test` on macOS/Windows)
+test: test-openclaw-install ## Run all tests (Linux only — use `make remote-test` on macOS/Windows)
 	@echo "==> Running tests..."
 	cargo test --locked
+
+# Bash-only flag-negotiation test for the OpenClaw installer (no Node):
+# capability consent plus the legacy unsafe-install bypass.
+# A future npm/tsx-based plugin unit-test target is a separate entry point
+# and deliberately not part of `make test`.
+test-openclaw-install: ## Run the OpenClaw adapter installer flag-negotiation test
+	@echo "==> Testing OpenClaw adapter installer..."
+	bash tests/test-openclaw-adapter-install.sh
 
 test-mcp: ## Run MCP integration tests only
 	cargo test --test mcp_integration_test
 
 test-tools: ## Run Tier A file-tool integration tests only
 	cargo test --test file_tools_test
+
+# The openclaw adapter ships TS unit tests (tests/unit/*-test.ts) that `npm test`
+# runs through tsx. They are deliberately not a prerequisite of `test:` above —
+# that target is cargo-only and must stay runnable without a Node toolchain or
+# registry access. Use this target to exercise the adapter suite (see #3134 for
+# wiring it into the `Test agent-memory` CI job, which has no Node step today).
+test-openclaw-plugin: ## Run openclaw adapter TS unit tests (needs npm registry)
+	@echo "==> Running openclaw adapter unit tests..."
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm test
 
 # =============================================================================
 # REMOTE Linux build/test (for cross-platform development)
@@ -164,7 +182,7 @@ remote-build: remote-push ## Push + ssh $(REMOTE_HOST): pull + cargo build --rel
 
 remote-test: remote-push ## Push + ssh $(REMOTE_HOST): full test + clippy
 	@echo "==> Testing on $(REMOTE_HOST):$(REMOTE_PATH)..."
-	ssh $(REMOTE_HOST) 'cd $(REMOTE_PATH) && $(REMOTE_RESET_GUARD) git fetch $(REMOTE_REPO) $(REMOTE_BRANCH) && git reset --hard $(REMOTE_REPO)/$(REMOTE_BRANCH) && cd src/agent-memory && cargo test --release | grep "test result" && cargo clippy --release --all-targets -- -D warnings | tail -3'
+	ssh $(REMOTE_HOST) 'cd $(REMOTE_PATH) && $(REMOTE_RESET_GUARD) git fetch $(REMOTE_REPO) $(REMOTE_BRANCH) && git reset --hard $(REMOTE_REPO)/$(REMOTE_BRANCH) && cd src/agent-memory && bash tests/test-openclaw-adapter-install.sh && cargo test --release | grep "test result" && cargo clippy --release --all-targets -- -D warnings | tail -3'
 
 # =============================================================================
 # CODE QUALITY

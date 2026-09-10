@@ -13,6 +13,7 @@ pub mod record;
 pub mod recorder;
 pub mod sls;
 pub mod tokenizer;
+pub mod trace;
 
 pub use record::{CompressionMode, OperationType, StatsRecord};
 
@@ -39,6 +40,8 @@ pub use path_policy::{
 };
 
 pub use sls::{SlsRecord, SlsWriter};
+
+pub use trace::TraceContext;
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -12,7 +12,6 @@ publish.workspace = true
 asc-foundation-types = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

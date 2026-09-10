@@ -275,9 +275,26 @@ def main() -> None:
     # instead of log-blind JSON; ensure_ascii=False matches the entry
     # point's normalization, so size gates measure Unicode characters on
     # both sides.
-    shell_field = _shell_text_field(tool_name, model_visible_before)
-    if shell_field is not None:
-        content = shell_field[1]
+    text_field = _shell_text_field(tool_name, model_visible_before)
+    tool_input = input_data.get("tool_input", {})
+    grep_content = (
+        agent_id == _CLAUDE_AGENT_ID
+        and tool_name == "Grep"
+        and isinstance(model_visible_before, dict)
+        and model_visible_before.get("mode") == "content"
+        and isinstance(model_visible_before.get("content"), str)
+        and isinstance(tool_input, dict)
+        and not any(
+            tool_input.get(flag)
+            for flag in ("-A", "-B", "-C", "context")
+        )
+    )
+    if grep_content:
+        # Native Grep has a text slot inside its schema-checked output object.
+        # Context queries retain their existing route until that format is supported.
+        text_field = ("content", model_visible_before["content"])
+    if text_field is not None:
+        content = text_field[1]
     elif isinstance(model_visible_before, str):
         content = model_visible_before
     elif isinstance(model_visible_before, (dict, list)):
@@ -292,12 +309,12 @@ def main() -> None:
     elif agent_id in {_QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
         can_replace = True
         # An unwrapped shell field is plain text regardless of its envelope.
-        replace_with_text = shell_field is not None or not isinstance(
+        replace_with_text = text_field is not None or not isinstance(
             tool_response_raw, (dict, list)
         )
     elif agent_id == _CLAUDE_AGENT_ID:
         can_replace = _claude_supports_replacement()
-        replace_with_text = shell_field is not None or not isinstance(
+        replace_with_text = text_field is not None or not isinstance(
             tool_response_raw, (dict, list)
         )
         if not can_replace:
@@ -312,7 +329,10 @@ def main() -> None:
         replace_with_text = True
 
     # 9. Map host facts into the required lifecycle fields.
-    if tool_name in SKIP_TOOLS:
+    if grep_content:
+        # A filtered match listing is a tool response, not an authoritative file copy.
+        content_origin = "api_response"
+    elif tool_name in SKIP_TOOLS:
         content_origin = "file_content"
     elif tool_name in SHELL_TOOLS:
         content_origin = "command_output"
@@ -395,13 +415,13 @@ def main() -> None:
         _emit_attribution_or_skip(env_attribution)
 
     # 11. Envelope construction — dispatch by agent runtime. An unwrapped
-    # shell field is re-injected into a same-shaped envelope: the compressed
+    # text field is re-injected into a same-shaped envelope: the compressed
     # text replaces exactly the field that was sent, every other field stays
     # byte-identical.
     rewrapped = None
-    if shell_field is not None:
+    if text_field is not None:
         rewrapped = dict(model_visible_before)
-        rewrapped[shell_field[0]] = output_text
+        rewrapped[text_field[0]] = output_text
 
     if cosh_ng_detected:
         hook_specific = {

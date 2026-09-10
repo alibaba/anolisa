@@ -39,6 +39,14 @@ systemd **user** unit) provides health, SkillFS notification, and security-query
 RPCs. Prompt scanning runs in-process through the Rust extension; the daemon does
 not preload Prompt Scanner models or serve scan RPCs.
 
+## V2 Policy CLI
+
+The source-built Rust `agent-sec-cli` provides all 15 Policy, Scope and Binding CRUD
+commands through `asc-daemon`. See the [command reference](../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+and [V2 workspace](v2/README.md). PAP state is currently process-local; Binding
+acceptance does not imply enforcement. For non-root development and E2E, configure
+the daemon with `--policy-admin-uid <UID>`; default authorization remains root-only.
+
 ## Security Architecture
 
 ```

@@ -134,6 +134,10 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
+    fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        panic!("this path must not preflight an install")
+    }
+
     // Calls record the full package set per invocation
     // (`verb:pkg-a,pkg-b`), so tests can pin that a merged transaction
     // really shared one dnf run. A transaction fails as a whole when any of

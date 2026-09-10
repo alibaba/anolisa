@@ -59,7 +59,7 @@ Rust-specific execution、lifecycle 和 observability 的候选实现架构见
 ### 2.2 **[TARGET V2]** Rust 执行路径
 
 1. asc-daemon、Job 和其它正式入口通过 asc-daemon-core 调用同一 asc-action-runtime。
-2. asc-cli 是 daemon client；daemon 不可用时不使用 PyO3、Python backend 或通用本地 fallback。
+2. agent-sec-cli 是 daemon client；daemon 不可用时不使用 PyO3、Python backend 或通用本地 fallback。
 3. Rust panic、V1 Python traceback 或底层任意异常不得穿过进程/protocol boundary 成为未结构化输出。
 4. adapter 只能投影 Action Runtime result，不得复制或重新解释 CapabilityExecutor、lifecycle、event 和
    redaction 语义。
@@ -543,7 +543,7 @@ boundary failure 才返回 `ok=false`。需要 product error type 的新 wire co
 | SMC-012 | 当前 Python oracle 与 Rust action-runtime 对同 fixture 的六字段 ActionResult、core error、event 和副作用等价 |
 | SMC-013 | daemon、Job 和其它入口调用同一 lifecycle owner，每次 invocation 最多一条 event |
 | SMC-014 | panic/traceback/secret 不跨 process 或 protocol boundary 泄露 |
-| SMC-015 | daemon 不存在时 asc-cli 返回稳定 unavailable，不启动用户 daemon、不使用 PyO3 或本地业务 fallback |
+| SMC-015 | daemon 不存在时 agent-sec-cli 返回稳定 unavailable，不启动用户 daemon、不使用 PyO3 或本地业务 fallback |
 | SMC-016 | V1 daemon adapter 只比较 `data/stdout/stderr/exit_code` projection 与 `ok` response layer；内部 action-runtime 比较完整六字段 ActionResult |
 | SMC-017 | V2 ingress 只使用 `traceparent/tracestate`，不存在 AgentSec 自定义 trace ID 生成、fallback、hash 或格式转换 |
 | SMC-018 | 合法上游 carrier 在 daemon request、action invocation 和 CapabilityExecutor 间保持同一 TraceId，并形成可验证的父子 SpanId |

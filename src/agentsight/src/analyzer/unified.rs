@@ -1760,6 +1760,74 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Regression for #3129: a native DashScope streaming call carries its
+    /// streaming switch in the `X-DashScope-SSE` request header, not the body
+    /// "stream" field, so the pending row is inserted with is_sse=0. The
+    /// observed value must be backfilled by `complete_pending`, otherwise
+    /// `streaming_call_count` misses every native streaming call.
+    #[test]
+    fn native_dashscope_sse_backfills_is_sse_end_to_end() {
+        use crate::genai::{GenAIBuilder, GenAISemanticEvent};
+        use crate::response_map::ResponseSessionMapper;
+        use std::collections::HashMap;
+
+        let analyzer = Analyzer::new();
+        // Native DashScope body: no top-level "stream" field.
+        let request_body = br#"{"model":"qwen-flash","input":{"messages":[{"role":"user","content":"hi"}]},"parameters":{"incremental_output":true,"result_format":"message"}}"#;
+        let chunk = serde_json::json!({
+            "output": {"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]},
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            "request_id": "native-sse-e2e"
+        });
+        let stream = build_sse_http2_stream(
+            "/api/v1/services/aigc/text-generation/generation",
+            request_body,
+            Some(&chunk),
+        );
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+        let http = results
+            .iter()
+            .find_map(|result| match result {
+                AnalysisResult::Http(record) => Some(record),
+                _ => None,
+            })
+            .expect("Analyzer must emit HttpRecord");
+        assert!(http.is_sse, "native SSE response must be observed");
+
+        let builder = GenAIBuilder::new();
+        let mapper = ResponseSessionMapper::new();
+        let cache = HashMap::<u32, String>::new();
+        let (built, pending) = builder.build_with_pending(&results, &mapper, &cache);
+        // The request body has no "stream" field — the pending row captures
+        // the request-side view (is_sse=false), the #3129 starting state.
+        assert_eq!(pending.as_ref().map(|p| p.is_sse), Some(false));
+
+        let event = built
+            .events
+            .into_iter()
+            .find(|event| matches!(event, GenAISemanticEvent::LLMCall(_)))
+            .expect("GenAIBuilder must emit LLMCall");
+
+        let path =
+            std::env::temp_dir().join(format!("agentsight_native_sse_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        if let Some(info) = pending.as_ref() {
+            store.insert_pending(info).unwrap();
+        }
+        store.complete_pending(&event).unwrap();
+
+        let metrics = store.get_latency_metrics(0, 2_000_000_000, None).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(
+            metrics[0].streaming_call_count, 1,
+            "native streaming call must be counted after is_sse backfill (#3129)"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn test_extract_message_from_http_parses_openai_sse_request() {
         // SSE-shaped OpenAI response: branch A now delegates to parse_by_path

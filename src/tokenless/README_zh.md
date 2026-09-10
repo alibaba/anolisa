@@ -11,6 +11,8 @@ LLM Token 优化工具包——content-aware 压缩 + 命令重写 + 环境失�
 | Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
 | Content-aware 响应压缩 | JSON 参考 fixture 无损节省 36.3% | 把成功 JSON 路由给 `JsonCompressor`；达到 15% 的无损候选优先，可恢复的 Record Array 使用 32 条基础预算 |
 | Build Log 压缩 | 取决于具体负载 | 清理终端控制输出，并缩减已识别 Cargo、pytest、npm/Jest、Go、Make/C 和通用命令日志中的重复常规进度，同时保留诊断、摘要、阶段和 Stack Trace |
+| 搜索路径共享 | 取决于工作负载 | API 搜索列表（含 Claude 原生 Grep）可共享连续记录的文件路径并保留全部已收到命中；默认开启，通过 `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` 或 SDK `search_path_sharing_enabled=False` 关闭；命令输出保持原路由 |
+| CSV/TSV 表格压缩 | 取决于具体负载 | 压紧引号和记录分隔符时保留全部单元格；较大的表格可保留选定行，明确提示表格不完整，并支持取回字节一致的原文。需要文本替换能力；文件读取透传 |
 | TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
@@ -163,7 +165,7 @@ dsh --profile <profile>
 ### `compress` 压缩入口
 
 共享 Agent Hook 会向 `tokenless compress` 发送生命周期请求；只有成功且未旁路的
-PostTool JSON 和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
+PostTool JSON、CSV/TSV 表格和符合条件的命令输出 Build Log 会进入 Runtime 内部 Pipeline。Tool Error
 旁路压缩、保留原始输出，再由 Core 追加环境诊断信息。
 
 PreTool 会保持已识别的 Cargo、pytest、npm/Jest、Go 和 Make 构建/测试命令不变，使其原生
@@ -484,6 +486,23 @@ active 阶段的输出与输入内容完全一致时才会串成一条链，从�
 阶段的 Token。完整选项和度量限制见
 [Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
 
+## Trace 关联
+
+导出的 SLS 记录会带上产生它的宿主 span 的 trace 标识，AgentLoop
+这类可观测后端因此可以把 Token 节省量归因到具体 trace。两个可选
+环境变量负责传入该标识：
+
+- `TOKENLESS_TRACEPARENT` —— 面向 Adapter 的覆盖项，优先读取。
+- `TRACEPARENT` —— 标准 W3C 变量，覆盖项缺失、为空或无法解析时使用。
+
+注入是启动方的责任：OpenTelemetry 只在进程内 carrier 中保存 active
+span，不会导出到子进程，因此需要关联能力的宿主或 Adapter 必须
+在启动 Tokenless 前写入其中一个。没有可用上下文时记录结构不变，
+且该标识只写入 SLS JSONL，不会写入本地 `stats.db`。详见
+[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)
+与
+[配置与数据隐私](../../docs/user-guide/zh/token-saving/tokenless/configuration-and-privacy.md)。
+
 ## 数据库位置
 
 Tokenless 默认将统计数据和可逆压缩数据分别存储在
@@ -542,7 +561,7 @@ tokenless env-check --tool Shell --fix
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-runtime/` — 生命周期 API 与 Runtime 内部的 `PostToolPipeline`
 - `crates/tokenless-protocol/` — 版本化 Adapter 契约与共享 `heuristic-v1` Token Estimator
-- `crates/tokenless-compressors/` — 已接入 PostTool 的 `JsonCompressor` 与 `BuildLogCompressor`
+- `crates/tokenless-compressors/` — 已接入 PostTool 的 `JsonCompressor`、`TabularCompressor` 与 `BuildLogCompressor`
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据

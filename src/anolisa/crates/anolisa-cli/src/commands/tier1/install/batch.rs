@@ -451,17 +451,17 @@ fn execute_merged_group_with_deps(
                 return all_failed(&group, &format!("failed to load installed state: {err}"));
             }
         };
+    let provider = DelegatedProvider::new(query, txn);
     let evidence = JournalEvidence::new(&journal_dir, &store.operations);
     let mut journal_gate = match LockedJournalGate::load(&_lock, evidence, BATCH_COMMAND) {
         Ok(gate) => gate,
         Err(err) => return all_failed(&group, &err.reason()),
     };
-    let provider = DelegatedProvider::new(query, txn);
 
-    // Re-validate each slot under the lock and open its journal, mirroring
-    // the single-component race check.
+    // Settle membership before solving: a stale slot must not prevent the
+    // remaining packages from installing or create a recovery journal.
     let mut items: Vec<BatchMemberOutcome> = Vec::with_capacity(group.len());
-    let mut active: Vec<(MergedItem, Transaction)> = Vec::with_capacity(group.len());
+    let mut eligible: Vec<MergedItem> = Vec::with_capacity(group.len());
     for item in group {
         let target = &item.planned.component;
         if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
@@ -484,6 +484,23 @@ fn execute_merged_group_with_deps(
             items.push(failed_item(&item.name, err.reason().to_string()));
             continue;
         }
+        match journal_gate.ensure_clear(target, BATCH_COMMAND) {
+            Ok(()) => eligible.push(item),
+            Err(err) => items.push(failed_item(&item.name, err.reason().to_string())),
+        }
+    }
+    if eligible.is_empty() {
+        return BatchEffectOutcome { items };
+    }
+    let packages: Vec<&str> = eligible.iter().map(|item| item.package.as_str()).collect();
+    if let Err(err) = super::check_rpm_install(&provider, &packages, BATCH_COMMAND) {
+        items.extend(all_failed(&eligible, &err.reason()).items);
+        return BatchEffectOutcome { items };
+    }
+
+    let mut active: Vec<(MergedItem, Transaction)> = Vec::with_capacity(eligible.len());
+    for item in eligible {
+        let target = &item.planned.component;
         match journal_gate.begin(COMMAND, target, state_path.clone(), BATCH_COMMAND) {
             Ok(journal) => active.push((item, journal)),
             Err(err) => items.push(failed_item(&item.name, err.reason().to_string())),
@@ -837,6 +854,8 @@ mod tests {
     struct BatchTxn {
         calls: RefCell<Vec<(String, Vec<String>)>>,
         fail_install: bool,
+        fail_preflight: bool,
+        preflight_calls: RefCell<Vec<Vec<String>>>,
         attempted: Rc<Cell<bool>>,
     }
 
@@ -845,6 +864,8 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 fail_install,
+                fail_preflight: false,
+                preflight_calls: RefCell::new(Vec::new()),
                 attempted: Rc::new(Cell::new(false)),
             }
         }
@@ -883,6 +904,24 @@ mod tests {
     }
 
     impl PackageTransaction for BatchTxn {
+        fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+            self.preflight_calls.borrow_mut().push(
+                packages
+                    .iter()
+                    .map(|package| (*package).to_string())
+                    .collect(),
+            );
+            if self.fail_preflight && packages.contains(&"pkg-a") {
+                return Err(PackageTransactionError::TransactionFailed {
+                    command: "dnf".to_string(),
+                    operation: "install preflight".to_string(),
+                    code: Some(1),
+                    stderr: "pkg-a conflicts with pkg-b".to_string(),
+                });
+            }
+            Ok(())
+        }
+
         fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
             self.attempted.set(true);
             self.calls.borrow_mut().push((
@@ -1053,6 +1092,33 @@ mod tests {
         let mut noop = i2_planned("a", "pkg-a");
         noop.route = PlannedRoute::AlreadyInstalled { version: None };
         assert!(merged_package(&noop).is_none());
+    }
+
+    #[test]
+    fn merged_solver_conflict_leaves_no_pending_members() {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+        let mut txn = BatchTxn::new(false);
+        txn.fail_preflight = true;
+        let effect = execute_merged_group_with_deps(
+            vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
+            &batch_args(),
+            &ctx,
+            &FakeQuery::default(),
+            &txn,
+            true,
+            &mut |_| panic!("a solver refusal must not retry through apply"),
+            &mut |_| {},
+        );
+        assert_eq!(effect.items.len(), 2);
+        for item in effect.items {
+            assert_eq!(item.status, BatchMemberStatus::Failed);
+            assert!(item.reason.unwrap().contains("pkg-a conflicts with pkg-b"));
+        }
+        assert!(txn.calls.borrow().is_empty());
+        let layout = common::resolve_layout(&ctx);
+        let journals = rpm_install::journal_dir(&layout);
+        assert!(!journals.exists());
+        assert!(load_store(&ctx).find(ObjectKind::Component, "a").is_none());
     }
 
     #[test]
@@ -1416,7 +1482,8 @@ mod tests {
         // A second merged run over the same members must notice the records
         // that appeared since its (stale) planning and refuse each slot —
         // without running dnf again.
-        let txn = BatchTxn::new(false);
+        let mut txn = BatchTxn::new(false);
+        txn.fail_preflight = true;
         let effect = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
@@ -1429,6 +1496,7 @@ mod tests {
         );
         let items = effect.items;
         assert!(txn.calls.borrow().is_empty(), "dnf must not run twice");
+        assert!(txn.preflight_calls.borrow().is_empty());
         for component in ["a", "b"] {
             let item = item_status(&items, component);
             assert_eq!(item.status, BatchMemberStatus::Failed);
@@ -1437,6 +1505,84 @@ mod tests {
                     .as_deref()
                     .unwrap()
                     .contains("appeared while this install was resolving")
+            );
+        }
+    }
+
+    #[test]
+    fn merged_preflight_excludes_members_with_new_records_or_pending_journals() {
+        for pending in [false, true] {
+            let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+            let layout = common::resolve_layout(&ctx);
+            let state_path = layout.state_dir.join("installed.toml");
+            let journal_dir = rpm_install::journal_dir(&layout);
+            if pending {
+                Transaction::begin_with_subject(COMMAND, Some("a"), state_path, &journal_dir)
+                    .expect("inject a pending operation after planning");
+            } else {
+                let txn = BatchTxn::new(false);
+                let query = txn.query_after_attempt(vec![(
+                    "pkg-a".to_string(),
+                    pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
+                )]);
+                let installed = execute_merged_group_with_deps(
+                    vec![i2_item("a", "pkg-a")],
+                    &batch_args(),
+                    &ctx,
+                    &query,
+                    &txn,
+                    true,
+                    &mut |_| panic!("initial install must succeed"),
+                    &mut |_| {},
+                );
+                assert_eq!(installed.items[0].status, BatchMemberStatus::Installed);
+            }
+            let mut txn = BatchTxn::new(false);
+            txn.fail_preflight = true;
+            let query = txn.query_after_attempt(vec![(
+                "pkg-b".to_string(),
+                pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
+            )]);
+            let outcome = execute_merged_group_with_deps(
+                vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
+                &batch_args(),
+                &ctx,
+                &query,
+                &txn,
+                true,
+                &mut |_| panic!("eligible member must not degrade"),
+                &mut |_| {},
+            );
+            let rejected = item_status(&outcome.items, "a");
+            assert_eq!(rejected.status, BatchMemberStatus::Failed);
+            assert!(rejected.reason.as_deref().unwrap().contains(if pending {
+                "anolisa repair a"
+            } else {
+                "appeared while this install was resolving"
+            }));
+            assert_eq!(
+                item_status(&outcome.items, "b").status,
+                BatchMemberStatus::Installed
+            );
+            assert_eq!(
+                *txn.preflight_calls.borrow(),
+                vec![vec!["pkg-b".to_string()]]
+            );
+            assert_eq!(
+                *txn.calls.borrow(),
+                vec![("install".to_string(), vec!["pkg-b".to_string()])]
+            );
+            assert!(load_store(&ctx).find(ObjectKind::Component, "b").is_some());
+            assert_eq!(
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "a")
+                    .expect("inspect a's journal")
+                    .is_some(),
+                pending
+            );
+            assert!(
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "b")
+                    .expect("inspect b's journal")
+                    .is_none()
             );
         }
     }

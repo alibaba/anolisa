@@ -82,7 +82,9 @@ impl VariableEvent {
 
         // Convert ktime to Unix timestamp
         let mut header = *raw_header;
-        header.timestamp_ns = config::ktime_to_unix_ns(raw_header.timestamp_ns);
+        header.timestamp_ns = config::ktime_to_unix_ns(raw_header.timestamp_ns)
+            .inspect_err(|error| config::report_clock_error("proctrace", error))
+            .ok()?;
 
         match header.event_type {
             PROCTRACE_EVENT_EXEC => Self::parse_exec(&header, data),
@@ -659,6 +661,7 @@ impl ProcTrace {
     /// Spawn a background thread that polls the BPF ring buffer
     /// Uses variable-length event parsing for efficiency
     pub fn run(&self) -> Result<ProcPoller> {
+        config::initialize_event_clock().context("failed to initialize event clock")?;
         let min_sz = std::mem::size_of::<ProcEventHeader>();
         let tx = self.tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));

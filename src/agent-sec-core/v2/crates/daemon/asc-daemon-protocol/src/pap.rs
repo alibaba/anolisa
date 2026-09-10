@@ -30,7 +30,7 @@ pub struct UpdatePolicyParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateScopeParams {
-    /// New authored selector; compatibility-only selectors are rejected.
+    /// Authored selector with a positive PID or cgroup ID.
     #[serde(
         deserialize_with = "deserialize_authored_selector",
         serialize_with = "serialize_authored_selector"
@@ -44,7 +44,7 @@ pub struct CreateScopeParams {
 pub struct UpdateScopeParams {
     /// Existing Scope identity.
     pub scope_id: ResourceId,
-    /// New authored selector; compatibility-only selectors are rejected.
+    /// Authored selector with a positive PID or cgroup ID.
     #[serde(
         deserialize_with = "deserialize_authored_selector",
         serialize_with = "serialize_authored_selector"
@@ -103,9 +103,6 @@ where
 }
 
 fn validate_authored_selector(selector: &ScopeSelector) -> Result<(), String> {
-    if matches!(selector, ScopeSelector::LegacyExecutionDomain { .. }) {
-        return Err("legacy execution-domain selectors cannot be authored".to_owned());
-    }
     selector
         .validate()
         .map_err(|error| format!("invalid selector at {}: {}", error.path, error.message))

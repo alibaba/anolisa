@@ -1,5 +1,106 @@
 use super::*;
 
+#[test]
+fn bash_startup_files_reach_user_prompt_in_native_and_enhanced_sessions() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        eprintln!("SKIP: bash is unavailable");
+        return;
+    }
+
+    for (case, login, first_profile, syntax_error, expected_trace) in [
+        ("bashrc", false, 0, false, "rc"),
+        ("bash-profile", true, 0, false, "profile:rc"),
+        ("bash-login", true, 1, false, "login:rc"),
+        ("profile", true, 2, false, "fallback:rc"),
+        ("bashrc-error", false, 0, true, "rc"),
+        ("profile-error", true, 0, true, "profile:rc"),
+    ] {
+        for integration in [ShellIntegration::Native, ShellIntegration::Enhanced] {
+            let context = format!("{case}/{integration:?}");
+            let root = tempfile::Builder::new()
+                .prefix("cosh-shell-startup-readiness-")
+                .tempdir()
+                .expect("startup readiness root");
+            let home = root.path().join("home");
+            std::fs::create_dir_all(&home).expect("home");
+            let mut rc = "STARTUP_TRACE+=rc\nPS1='__STARTUP_READY__ '\n".to_string();
+            if syntax_error && !login {
+                rc.push_str("if ; then\n");
+            }
+            std::fs::write(home.join(".bashrc"), rc).expect("bashrc");
+            for (index, (file, tag)) in [
+                (".bash_profile", "profile"),
+                (".bash_login", "login"),
+                (".profile", "fallback"),
+            ]
+            .into_iter()
+            .enumerate()
+            .skip(first_profile)
+            {
+                let mut profile = format!("STARTUP_TRACE+={tag}:\nsource \"$HOME/.bashrc\"\n");
+                if syntax_error && login && index == first_profile {
+                    profile.push_str("if ; then\n");
+                }
+                std::fs::write(home.join(file), profile).expect("profile");
+            }
+
+            let mut config = ShellHostConfig::new("startup-readiness", root.path().join("work"))
+                .with_integration(integration)
+                .with_env("HOME", home.display().to_string())
+                .with_env("STARTUP_TRACE", "")
+                .with_env("LANG", "C")
+                .with_env("LC_ALL", "C");
+            config.login_shell = login;
+            config.raw_action_watchdog = Duration::from_secs(2);
+            let mut rendered = Vec::new();
+            let output = run_raw_relay_bash_with_actions(
+                &config,
+                vec![
+                    RawRelayAction::wait(Duration::from_millis(100)),
+                    RawRelayAction::line(
+                        "printf '%s' \"$STARTUP_TRACE\" > \"$HOME/startup-observed\"; \
+                         printf '__READY_%s__=%s\\n' RESULT \"$STARTUP_TRACE\"",
+                    ),
+                    RawRelayAction::line("exit"),
+                ],
+                &mut rendered,
+            )
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+            let terminal = without_readline_mode_controls(&String::from_utf8_lossy(&rendered));
+            assert_eq!(output.exit_status, Some(0), "{context}: {terminal}");
+            assert_eq!(
+                std::fs::read_to_string(home.join("startup-observed"))
+                    .unwrap_or_else(|error| panic!("{context}: {error}: {terminal}")),
+                expected_trace,
+                "{context}"
+            );
+            let prompts = terminal
+                .match_indices("__STARTUP_READY__ ")
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let result = terminal
+                .find(&format!("__READY_RESULT__={expected_trace}"))
+                .unwrap_or_else(|| panic!("{context}: missing command output: {terminal}"));
+            assert_eq!(prompts.len(), 2, "{context}: {terminal}");
+            assert!(
+                prompts[0] < result && result < prompts[1],
+                "{context}: {terminal}"
+            );
+            assert_eq!(
+                terminal.contains("syntax error"),
+                syntax_error,
+                "{context}: {terminal}"
+            );
+            if syntax_error {
+                assert!(
+                    terminal.find("syntax error").expect("syntax diagnostic") < prompts[0],
+                    "{context}: {terminal}"
+                );
+            }
+        }
+    }
+}
+
 fn assert_debug_log_has_only_bounded_cosh_capture(debug_log: &str) {
     for line in debug_log
         .lines()

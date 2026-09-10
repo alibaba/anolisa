@@ -26,6 +26,35 @@ anolisa install agent-memory
 sudo yum install agent-memory
 ```
 
+### OpenClaw adapter
+
+The bundled plugin (`memory-anolisa`) is deployed by
+`/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh`, which
+grants the plugin's declared capabilities by default. Set
+`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` to withhold consent — on hosts that gate
+consent the install then fails until consent is granted interactively. Set
+`AGENT_MEMORY_SAFE_INSTALL=1` to decline the unsafe-install bypass on hosts
+that would still receive one. Full reference:
+[user guide](../../docs/user-guide/en/token-saving/agent-memory.md).
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw gateway restart
+```
+
+Both optional installer flags are negotiated from `openclaw plugins install
+--help`, but the two switches are not symmetric. `--accept-capabilities` is
+passed only when the host advertises that exact option — current hosts do, so
+`AGENT_MEMORY_ACCEPT_CAPABILITIES` still shapes the argv there: `1` appends
+`--accept-capabilities` to `openclaw plugins install <dir> --force`, while `0`
+omits it and a host that gates consent then rejects the install.
+`--dangerously-force-unsafe-install` is passed only while the host still
+advertises the bypass as effective (OpenClaw 2026.6.1 and earlier). Current
+hosts list it as a deprecated no-op and never receive it under either setting,
+so `AGENT_MEMORY_SAFE_INSTALL` changes nothing there and install-time safety
+follows the operator-owned `security.installPolicy`. The install log states
+which case applied.
+
 ### Integration (MCP client)
 
 Add to your MCP config (Claude Code, Cursor, etc.):
@@ -81,6 +110,7 @@ Profile gating (basic/advanced/expert) controls tool visibility per deployment.
 
 - Linux (x86_64 / aarch64)
 - Rust ≥ 1.85 (for source build)
+- Node.js ≥ 20 and npm (for source build — bundles the OpenClaw adapter)
 - Optional: embedding provider (OpenAI or Ollama) for vector search
 
 ## License

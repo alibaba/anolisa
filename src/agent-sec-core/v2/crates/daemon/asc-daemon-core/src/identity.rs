@@ -52,17 +52,28 @@ pub trait PrincipalPolicy: Send + Sync {
     fn role_for(&self, peer: PeerCredentials) -> PrincipalRole;
 }
 
-/// Root-owned Policy-administrator allowlist.
+/// Deployment-configured Policy-administrator allowlist with root-only delegation.
 ///
-/// UID 0 is always a Policy administrator. Other UIDs are denied until root
-/// adds them. The allowlist is process-local in this slice; loading and
-/// persisting it belongs to the later daemon configuration/state integration.
+/// UID 0 is always a Policy administrator. Other UIDs must be configured by the
+/// deployment operator at startup or added by root at runtime. The allowlist is
+/// process-local; configuration-file loading and persistence remain separate work.
 #[derive(Debug, Default)]
 pub struct RootManagedPrincipalPolicy {
     allowed_uids: RwLock<BTreeSet<u32>>,
 }
 
 impl RootManagedPrincipalPolicy {
+    /// Initializes additional administrators from trusted deployment configuration.
+    ///
+    /// Use only at daemon composition, never with request-supplied identity data.
+    /// An operator controlling startup already controls the daemon's process and
+    /// resources. Configured administrators do not gain runtime delegation rights.
+    pub fn with_admin_uids(uids: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            allowed_uids: RwLock::new(uids.into_iter().collect()),
+        }
+    }
+
     /// Adds one UID to the Policy-administrator allowlist.
     ///
     /// The acting peer must be the kernel-authenticated root peer. Merely being
@@ -172,5 +183,29 @@ mod tests {
             Err(PrincipalPolicyError::RootRequired)
         );
         assert_eq!(policy.role_for(other), PrincipalRole::LocalUser);
+    }
+
+    #[test]
+    fn startup_administrators_are_explicit_and_cannot_delegate() {
+        let configured = PeerCredentials::new(1000, 100, 2);
+        let other = PeerCredentials::new(2000, 100, 3);
+        let root = PeerCredentials::new(0, 0, 1);
+        let policy = RootManagedPrincipalPolicy::with_admin_uids([1000, 1000]);
+        assert_eq!(
+            policy.role_for(configured),
+            PrincipalRole::PolicyAdministrator
+        );
+        assert_eq!(policy.role_for(root), PrincipalRole::PolicyAdministrator);
+        assert_eq!(policy.role_for(other), PrincipalRole::LocalUser);
+        assert_eq!(
+            policy.allow_uid(configured, 2000),
+            Err(PrincipalPolicyError::RootRequired)
+        );
+        assert_eq!(policy.role_for(other), PrincipalRole::LocalUser);
+        // Startup configuration does not become global or persistent state.
+        assert_eq!(
+            RootManagedPrincipalPolicy::default().role_for(configured),
+            PrincipalRole::LocalUser
+        );
     }
 }

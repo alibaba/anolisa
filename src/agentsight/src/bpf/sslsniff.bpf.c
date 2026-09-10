@@ -390,4 +390,56 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     return 0;
 }
 
+/* ─── cosh-ng plaintext tap (#3042, #3115) ──────────────────────────────
+ *
+ * cosh-ng links rustls, which exports no SSL_read/SSL_write, so none of the
+ * probes above can attach to it. Rather than locate rustls' internal plaintext
+ * functions, this hooks an attach point the process exports on purpose:
+ *
+ *   void cosh_llm_plaintext_tap(u32 dir, const u8 *buf, usize len)
+ *     rdi = dir (1 = request, 0 = response), rsi = buf, rdx = len
+ *
+ * Byte-pattern matching on rustls internals was tried first and withdrawn
+ * (#3115): the prologue bytes encode rustc's register allocation, and the
+ * release RPM is built with whatever system Rust the build host provides, so a
+ * compiler bump silently reduced capture to zero. An exported symbol is immune
+ * to that -- libbpf resolves the address at attach time, so the same name works
+ * across toolchains even though the address moves.
+ *
+ * Everything the old approach needed to reconstruct is now given directly: the
+ * payload is one contiguous buffer, so there is no gather-write reassembly, no
+ * struct layout to decode, and no cipher-suite variants.
+ */
+
+/* Direction values are fixed by the tap's contract, not by this file. */
+#define COSH_TAP_DIR_RESPONSE 0
+#define COSH_TAP_DIR_REQUEST 1
+
+SEC("uprobe/cosh_llm_plaintext_tap")
+int BPF_UPROBE(probe_cosh_plaintext_tap, u32 dir, const char *buf, u64 len) {
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
+    u32 uid = bpf_get_current_uid_gid();
+    u64 ts = bpf_ktime_get_ns();
+
+    u32 ns_pid = trace_allowed(uid, pid);
+    if (!ns_pid)
+        return 0;
+    if (!buf || len == 0 || len > MAX_BUF_SIZE)
+        return 0;
+
+    /* The tap reports whole request bodies and whole response chunks, so a
+     * process-wide identity is enough to group them: unlike the SSL_* probes
+     * there is no per-connection handle to key on, and cosh-core issues one LLM
+     * call at a time. Using the pid keeps both directions on one connection,
+     * which is what the HTTP aggregator needs to pair them.
+     *
+     * Captured at function entry, so there is no paired uretprobe and hence no
+     * measurable duration. */
+    int rw = (dir == COSH_TAP_DIR_REQUEST) ? 1 : 0;
+    SSL_EMIT_TIERED(buf, len, rw, ts, 0, ns_pid, tid, uid, (u64)ns_pid, 0);
+    return 0;
+}
+
 char LICENSE[] SEC("license") = "GPL";

@@ -14,7 +14,22 @@ It is designed to be driven by cosh and other ANOLISA-compatible agents as a too
 
 ## Installation
 
-ktuner ships with the ANOLISA source tree under `src/ktuner/`. Build it from source:
+ktuner ships as an RPM for Linux x86_64 (system mode only). Install it with
+the ANOLISA component manager, selecting the RPM backend — ktuner has no raw
+release and there is no cross-backend fallback:
+
+```bash
+sudo anolisa install ktuner --backend rpm
+```
+
+Or install the RPM directly and let ANOLISA track it:
+
+```bash
+sudo yum install ktuner
+sudo anolisa --install-mode system adopt ktuner
+```
+
+To build from source instead:
 
 ```bash
 cd src/ktuner
@@ -29,8 +44,6 @@ sudo install -o root -g root -m 755 target/release/ktuner /usr/local/bin/ktuner
 ```
 
 The examples below assume `ktuner` is on your `PATH`.
-
-> Packaged distribution (`anolisa install ktuner` / RPM) is still being planned with the maintainers; until then, build from source.
 
 ---
 

@@ -83,11 +83,15 @@ tokenless stats disable
 | `TOKENLESS_AGENT_ID` | Adapter 注入的 Agent 标识 |
 | `TOKENLESS_SESSION_ID` | Adapter 注入的 Session 标识 |
 | `TOKENLESS_TOOL_USE_ID` | Adapter 注入的工具调用标识 |
+| `TOKENLESS_TRACEPARENT` | 覆盖写入 SLS 记录的 W3C trace context |
+| `TRACEPARENT` | 标准 W3C trace context 变量，由启动方宿主或 Adapter 注入 |
 | `TOKENLESS_TOOL_READY_SPEC` | 覆盖 Tool Ready 依赖规范路径 |
 | `TOKENLESS_ENV_FIX_SCRIPT` | 覆盖环境修复脚本路径 |
 | `TOKENLESS_PACKAGE_MANAGER` | 覆盖包管理器探测，主要用于测试 |
 
 当前构建已硬关闭 Tool Ready。依赖规范和修复脚本覆盖仅为休眠的旧版实现保留，运行时不会生效；这些路径会经过信任校验，也不建议普通用户修改。
+
+`TOKENLESS_TRACEPARENT` 与标准变量 `TRACEPARENT` 用于为 SLS 记录提供 W3C trace context。注入是启动方的责任：OpenTelemetry 通过进程内 carrier 传播 W3C context，不会把 active span 导出为进程环境变量，因此需要关联能力的宿主或 Adapter 必须在启动 Tokenless 的环境中显式写入这两个变量之一，Tokenless 只负责读取：先看覆盖项，覆盖项为空或无法解析时回退到标准变量，因此一次拼写错误不会让整个会话失去关联能力。两者都是可选的：两个变量都没有可用上下文时，记录结构与之前完全一致，即以未关联形式写出；该标识只写入 SLS JSONL，本地统计数据库不保存。
 
 数据库路径优先级如下：
 
@@ -141,7 +145,7 @@ TTL 表示条目超过一小时后不能再通过 `retrieve` 返回。过期行�
 
 ### SLS 不包含原文
 
-Tokenless 的 SLS JSONL 只写入组件、Operation、Session/Tool Use 标识和字符/Token 度量，不写 `before_text` 或 `after_text`。但标识字段本身仍可能属于组织的运行元数据，应按照平台日志策略管理。
+Tokenless 的 SLS JSONL 只写入组件、Operation、Session/Tool Use 标识、宿主传入的 trace 标识（若存在）和字符/Token 度量，不写 `before_text` 或 `after_text`。但标识字段本身仍可能属于组织的运行元数据，应按照平台日志策略管理。
 
 ## 敏感工作负载建议
 

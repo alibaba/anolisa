@@ -425,6 +425,17 @@ SkillFS can expose its FUSE view to a non-privileged workload from a privileged
 sidecar. This requires Kubernetes 1.29+, `/dev/fuse`, and permission to run the
 sidecar as privileged.
 
+The sidecar supervisor detects failed FUSE reads and remounts inside the
+container. Its recovery budget is configurable through `SKILLFS_SUPERVISOR_*`;
+see the sidecar guide below for defaults and recovery limits.
+
+For read-only installed skills, the guide also provides a Ledger profile that
+seeds a private writable source, scans before mounting, and masks installed
+copies from Cosh. Missing or invalid activation remains hidden.
+The profile uses `skillfs mount --read-only` to reject FUSE writes at the kernel
+boundary while Ledger keeps writing the separate private source.
+Ledger RPC probes gate startup and readiness and restart an unresponsive daemon.
+
 ```bash
 cd src/skillfs
 IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)

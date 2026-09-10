@@ -19,7 +19,7 @@
 - Linux system-scope systemd；
 - Kubernetes 每 Node 一个 DaemonSet；
 - system-owned runtime/state；
-- Rust asc-cli 仅作为 daemon client；
+- Rust agent-sec-cli 仅作为 daemon client；
 - 不保留 Python CLI、PyO3 local fallback 或 per-user daemon。
 
 socket 生命周期见
@@ -93,7 +93,7 @@ kernel/control-group protection、RestrictSUIDSGID 和 LockPersonality。V2 应�
 hardening；需要放宽时提供 syscall/filesystem 证据、最小例外和测试。
 
 上述 user unit、XDG path 和用户级 singleton 只属于 V1。V2 交付物不得继续安装 user-scope
-unit，也不得让 asc-cli 自动创建用户 daemon。
+unit，也不得让 agent-sec-cli 自动创建用户 daemon。
 
 ### 3.3 active 不等于 ready
 
@@ -128,7 +128,7 @@ V1 Type=simple 的 active 不证明 socket 已 bind、Job 已启动或 daemon.he
 
 ### 4.3 CLI 与进程所有权
 
-asc-cli 是 Rust daemon client：
+agent-sec-cli 是 Rust daemon client：
 
 - 不执行 systemctl start；
 - 不创建用户 socket、lock 或 daemon；
@@ -205,7 +205,7 @@ operator-visible semantics 必须进入 compatibility/change record。journald �
 
 ## 8. **[TARGET V2]** Rust 交付要求
 
-1. asc-daemon、asc-cli 和 asc-state-migrator 都是 Rust binary；
+1. asc-daemon、agent-sec-cli 和 asc-state-migrator 都是 Rust binary；
 2. V2 runtime 不依赖 Python interpreter、site-packages、PyO3 extension 或 wheel；
 3. raw/RPM/container/systemd/Helm 安装相互一致；
 4. Linux 只交付 system-scope unit；Kubernetes 交付每 Node 一个 DaemonSet；
@@ -217,11 +217,12 @@ operator-visible semantics 必须进入 compatibility/change record。journald �
 
 ### 8.1 **[TARGET V2][PARTIAL]** 当前 Rust transport bring-up
 
-`v2/apps/asc-daemon` 当前提供可执行的前台 Rust binary 和 composition bootstrap。它接受
-无子命令或显式 `serve` 两种形式，要求通过 `--socket` 提供绝对路径，安装 SIGTERM/SIGINT
-cooperative shutdown，并消费 SIGHUP 而不 reload。bootstrap 使用
-`asc-daemon-service` 完成真实 UDS bind、bounded admission、单请求 frame 读取、drain 和同
-inode socket cleanup。
+`v2/apps/asc-daemon` 当前提供对外名为 `agent-sec-daemon` 的前台 Rust binary 和
+composition bootstrap。它接受无子命令或显式 `serve` 两种形式；`--socket` 可提供显式绝对
+路径，省略时沿用 V1 service 契约，从 `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` 解析
+兼容路径。进程安装 SIGTERM/SIGINT cooperative shutdown，并消费 SIGHUP 而不 reload。
+bootstrap 使用 `asc-daemon-service` 完成真实 UDS bind、bounded admission、单请求 frame
+读取、drain 和同 inode socket cleanup。
 
 transport 对 frame read、application dispatch、transport rejection encode、response
 write 和 drain 分别设置显式 deadline。dispatch deadline 到期会释放 connection admission
@@ -233,8 +234,12 @@ runtime shutdown timeout，避免残留 `spawn_blocking` 让前台进程永久�
 但尚未注册 `daemon.health`。dispatcher 完成 envelope decode、request ID、kernel peer
 credentials 到 trusted Principal 的绑定、method allowlist、authorization 和 response
 encode；PAP 是其中一组显式注册的方法，不增加第二个 service dispatch 层。当前 composition
-root 使用 `RootManagedPrincipalPolicy`：UID 0 默认具有 PAP 管理权限，其它 UID 在未加载
-root-owned delegation 前返回 `permission_denied`，caller-supplied identity 不能覆盖该判断。
+root 使用 `RootManagedPrincipalPolicy`：UID 0 始终具有 PAP 管理权限。部署者可用
+可重复的 `--policy-admin-uid <UID>` 在启动时配置额外管理员；省略时其它 UID 返回
+`permission_denied`。值为十进制 u32，非法值启动失败；重复 UID 去重。启动配置由服务端
+部署者控制，匹配的是内核 peer UID，caller-supplied identity 不能覆盖该判断。名单每次
+启动重新构造，不带参数重启恢复 root-only。被配置的管理员没有继续委派权限；运行中的
+`allow_uid` API 仍要求 root。该选项不改变 OS 权限、socket mode 或 system-level 部署形态。
 
 当前 PAP 由 `PolicyTemplateCompiler` 和过渡性的 process-local Repository 组成。Policy、Scope
 和 Binding CRUD 可在同一 daemon 生命周期内经真实 UDS 执行，但所有状态在进程重启后丢失，
@@ -245,11 +250,39 @@ Busy、timeout、shutdown 等 transport failure 由独立且有短 deadline 的
 framework 不能证明具体 PAP/Repository 内部没有全局 mutex、长 transaction 或其它共享阻塞
 点；该项必须由 PAP direct-consumer concurrency fixture 在集成时验收。
 
-当前还未实现 packaging-owned system socket 默认值、runtime directory hardening、Host
-singleton/stale-socket 判定、日志/OTel 和 health readiness。因此这一 slice 提供
+当前仅实现了兼容 V1 user service 的 `$XDG_RUNTIME_DIR` socket 默认值，尚未实现目标态的
+packaging-owned system socket 默认值、runtime directory hardening、Host singleton/stale-socket
+判定、日志/OTel 和 health readiness。因此这一 slice 提供
 DPROC-002/DPROC-003 的 focused process evidence，以及 DPROC-013 中 binary + UDS protocol
 注册、server-side permission 和 signal cleanup 的部分证据；它不能宣称 DPROC-012、完整
 DPROC-013、DPROC-014 或 production process gate 已完成。
+
+### 8.2 **[TARGET V2][PARTIAL]** Rust Policy CLI
+
+`v2/apps/asc-cli` 构建产物为 `agent-sec-cli`（crate 名仍为 `asc-cli`），提供 `policy`、`scope`、`binding` 三组各五条 CRUD 命令，通过
+`asc-daemon-client` 调用现有 15 个 PAP method。它要求显式绝对 `--socket`，不启动或
+重启 daemon，不解析 HOME socket，不读取 Repository，也不执行本地业务 fallback。
+`--help` 和 `--version` 不连接 daemon。
+
+`--timeout-ms` 为正 u32，默认 5000；一次客户端 deadline 覆盖 connect/write/read，
+不向现有 wire envelope 添加 timeout 字段。请求和响应上限均为 4,194,304 字节，包含
+LF；完整 LF response 立即完成读取，也接受非空 EOF frame。客户端保留完整
+`DaemonResponse`；Policy 输出层将 success 的领域 result 输出到 stdout、退出 0，
+daemon error 的 `{requestId,error}` 输出到 stderr、退出 1。本地文件、transport、
+response 和 output failure 退出 1，参数用法错误退出 2。
+
+请求发送后的超时或协议失败不证明业务未执行；CLI 不自动重试，也不把 Binding
+`PENDING_APPLY`/`PENDING_DELETE` 表述为目标生效或删除完成。CREATE identity、current
+revision、授权和领域语义继续由 daemon/PAP 所有。该 Rust binary 与 V1 Python CLI 同名；当前命令范围仅覆盖本节的 PAP
+命令，不代表已替代 V1 全量能力或提供 V1 wire adapter。
+
+DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的 binary
+失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
+依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
+共同运行的双进程 E2E 暂缓接入。
+`asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_runs_full_crud_without_root`
+同时为常规 Cargo 测试提供真实 daemon binary 成功场景。完整范围与命令见
+[`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
 
 ## 9. 验收矩阵
 
@@ -274,7 +307,7 @@ DPROC-013、DPROC-014 或 production process gate 已完成。
 | ID | 必须验证的 V2 行为 |
 | --- | --- |
 | DPROC-010 | Rust binaries 不装载 Python/PyO3，supported V1 命令具有兼容或版本化路径 |
-| DPROC-011 | daemon unavailable 时 asc-cli 返回稳定错误，不启动 user daemon、不 local fallback |
+| DPROC-011 | daemon unavailable 时 agent-sec-cli 返回稳定错误，不启动 user daemon、不 local fallback |
 | DPROC-012 | Host lock/socket 拒绝 symlink、非 regular、错误 owner/mode 和 reopen TOCTOU |
 | DPROC-013 | system-scope restart、signal、readiness、permission 和 log 黑盒测试通过 |
 | DPROC-014 | 不安装 user unit；Host 第二实例被拒绝 |

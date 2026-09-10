@@ -11,9 +11,10 @@ use asc_daemon_core::{
 use asc_daemon_handler::{DaemonDispatcher, JsonRejectionEncoder};
 use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_foundation_types::{ResourceId, Revision};
-use asc_pap::{PapRepository, PapService};
+use asc_pap::PapService;
 use asc_pap_repository_memory::ProcessLocalPapRepository;
 use asc_policy_engine::PolicyTemplateCompiler;
+use asc_policy_repository::{BindingStateRepository, BindingStateWrite, WriteResult};
 use asc_policy_types::authoring::PolicyTemplate;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
@@ -26,6 +27,21 @@ use uuid::Uuid;
 mod support;
 
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+fn transition_binding(
+    repository: &ProcessLocalPapRepository,
+    id: &ResourceId,
+    status: BindingStatus,
+) {
+    let current = repository.get_binding_state(id).unwrap().unwrap();
+    current.binding.status.validate_successor(status).unwrap();
+    let mut next = current.clone();
+    next.binding.status = status;
+    assert_eq!(
+        repository.compare_exchange_binding_state(&current, &BindingStateWrite::new(next)),
+        Ok(WriteResult::Applied)
+    );
+}
 
 struct RunningPapDaemon {
     directory: PathBuf,
@@ -1333,7 +1349,6 @@ async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
         .unwrap()
         .to_owned();
     let binding_resource_id = ResourceId::new(binding_id.clone()).unwrap();
-    let binding_revision = Revision::new(1).unwrap();
 
     for (name, request, expected) in [
         (
@@ -1363,14 +1378,7 @@ async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
         record_error_response(&mut failures, name, &response, &expected);
     }
 
-    repository
-        .update_binding_status(
-            &binding_resource_id,
-            binding_revision,
-            BindingStatus::PendingApply,
-            BindingStatus::Applying,
-        )
-        .unwrap();
+    transition_binding(&repository, &binding_resource_id, BindingStatus::Applying);
     let identical_apply = support::request_json(
         &daemon.socket_path,
         &json!({"method": "policy.bindings.update", "params": {
@@ -1389,34 +1397,21 @@ async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
         "code": "conflict",
         "message": "binding reconciliation operation is in progress"
     });
-    for (name, request) in [
-        (
-            "changed binding update while apply is running",
-            json!({"method": "policy.bindings.update", "params": {
-                "bindingId": binding_id,
-                "policyId": policy_id,
-                "policyRevision": 1,
-                "scopeId": scope_id,
-                "scopeRevision": 2
-            }}),
-        ),
-        (
-            "binding delete while apply is running",
-            json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
-        ),
-    ] {
-        let response = support::request_json(&daemon.socket_path, &request).await;
-        record_error_response(&mut failures, name, &response, &conflict);
-    }
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "policy.bindings.update", "params": {
+            "bindingId": binding_id, "policyId": policy_id, "policyRevision": 1,
+            "scopeId": scope_id, "scopeRevision": 2
+        }}),
+    )
+    .await;
+    record_error_response(
+        &mut failures,
+        "changed binding update while apply is running",
+        &response,
+        &conflict,
+    );
 
-    repository
-        .update_binding_status(
-            &binding_resource_id,
-            binding_revision,
-            BindingStatus::Applying,
-            BindingStatus::Ready,
-        )
-        .unwrap();
     let deletion = support::request_json(
         &daemon.socket_path,
         &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
@@ -1434,17 +1429,27 @@ async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
     );
     assert_eq!(
         repeated_pending_deletion["result"]["spec"]["bindingRevision"],
-        2
+        1
     );
-    let deletion_revision = Revision::new(2).unwrap();
-    repository
-        .update_binding_status(
-            &binding_resource_id,
-            deletion_revision,
-            BindingStatus::PendingDelete,
-            BindingStatus::Deleting,
-        )
-        .unwrap();
+    assert_eq!(
+        deletion["result"]["spec"],
+        identical_apply["result"]["spec"]
+    );
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "policy.bindings.update", "params": {
+            "bindingId": binding_id, "policyId": policy_id, "policyRevision": 2,
+            "scopeId": scope_id, "scopeRevision": 2
+        }}),
+    )
+    .await;
+    record_error_response(
+        &mut failures,
+        "pending delete cannot be cancelled",
+        &response,
+        &conflict,
+    );
+    transition_binding(&repository, &binding_resource_id, BindingStatus::Deleting);
     let repeated_running_deletion = support::request_json(
         &daemon.socket_path,
         &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
@@ -1453,7 +1458,7 @@ async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
     assert_eq!(repeated_running_deletion["result"]["status"], "DELETING");
     assert_eq!(
         repeated_running_deletion["result"]["spec"]["bindingRevision"],
-        2
+        1
     );
     let response = support::request_json(
         &daemon.socket_path,
@@ -1472,6 +1477,32 @@ async fn real_uds_distinguishes_stale_references_and_binding_state_conflicts() {
         &response,
         &conflict,
     );
+
+    transition_binding(
+        &repository,
+        &binding_resource_id,
+        BindingStatus::DeleteFailed,
+    );
+    let response = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "policy.bindings.update", "params": {
+            "bindingId": binding_id, "policyId": policy_id, "policyRevision": 2,
+            "scopeId": scope_id, "scopeRevision": 2
+        }}),
+    )
+    .await;
+    record_error_response(
+        &mut failures,
+        "failed delete cannot be cancelled",
+        &response,
+        &conflict,
+    );
+    let retried = support::request_json(
+        &daemon.socket_path,
+        &json!({"method": "policy.bindings.delete", "params": {"id": binding_id}}),
+    )
+    .await;
+    assert_eq!(retried["result"], deletion["result"]);
 
     daemon.stop().await;
     assert_error_matrix(&failures);

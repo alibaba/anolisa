@@ -26,7 +26,7 @@ async fn run() -> ExitCode {
     let outcome = match Cli::parse_from(std::env::args_os()) {
         Ok(outcome) => outcome,
         Err(problem) => {
-            eprintln!("asc-daemon: {problem}");
+            eprintln!("agent-sec-daemon: {problem}");
             return ExitCode::from(2);
         }
     };
@@ -41,16 +41,18 @@ async fn run() -> ExitCode {
     let signals = match ProcessSignals::install() {
         Ok(signals) => signals,
         Err(problem) => {
-            eprintln!("asc-daemon: {problem}");
+            eprintln!("agent-sec-daemon: {problem}");
             return ExitCode::FAILURE;
         }
     };
     let repository = Arc::new(ProcessLocalPapRepository::default());
     let pap = PapService::new(repository, Arc::new(PolicyTemplateCompiler));
-    let principal_policy = Arc::new(RootManagedPrincipalPolicy::default());
+    let principal_policy = Arc::new(RootManagedPrincipalPolicy::with_admin_uids(
+        cli.policy_admin_uids,
+    ));
     let policy_for_handler: Arc<dyn PrincipalPolicy> = principal_policy.clone();
     let dispatcher = Arc::new(DaemonDispatcher::new(pap, policy_for_handler));
-    eprintln!("asc-daemon: warning: PAP state is process-local and is lost on restart");
+    eprintln!("agent-sec-daemon: warning: PAP state is process-local and is lost on restart");
 
     let shutdown = ShutdownToken::new();
     let signal_task = tokio::spawn(signals.request_shutdown(shutdown.clone()));
@@ -73,7 +75,7 @@ async fn run() -> ExitCode {
 }
 
 fn report_error(problem: &dyn std::error::Error) {
-    eprintln!("asc-daemon: {problem}");
+    eprintln!("agent-sec-daemon: {problem}");
     let mut source = problem.source();
     while let Some(cause) = source {
         eprintln!("  caused by: {cause}");

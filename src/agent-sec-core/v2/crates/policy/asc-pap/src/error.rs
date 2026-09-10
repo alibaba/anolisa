@@ -39,9 +39,6 @@ pub enum PapError {
     /// No further positive `u32` revision can be allocated.
     #[error("revision space exhausted")]
     RevisionExhausted,
-    /// JSON serialization failed while computing canonical content identity.
-    #[error("serialization failed")]
-    Serialization,
     /// Persistence failed without exposing implementation details.
     #[error("persistence failed")]
     Persistence,

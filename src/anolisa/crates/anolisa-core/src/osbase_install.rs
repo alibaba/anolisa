@@ -13,9 +13,8 @@
 //! Currently serves the "beginner" scenario only: zero optional
 //! parameters, full-stack install from manifest.
 
-use std::process::Command;
-
 use anolisa_env::EnvFacts;
+use anolisa_platform::command::{CommandRunner, InheritedLocaleCommandRunner};
 use anolisa_platform::fs_layout::FsLayout;
 use chrono::{SecondsFormat, Utc};
 
@@ -181,7 +180,15 @@ pub fn list_scenarios() -> Result<Vec<String>, OsbaseInstallError> {
 /// - Otherwise → `dnf remove -y <packages>`
 pub fn execute_uninstall(scenario: &str, dry_run: bool) -> Result<String, OsbaseInstallError> {
     let manifest = SandboxManifest::load()?;
+    execute_uninstall_with(scenario, dry_run, &manifest, &InheritedLocaleCommandRunner)
+}
 
+fn execute_uninstall_with(
+    scenario: &str,
+    dry_run: bool,
+    manifest: &SandboxManifest,
+    runner: &impl CommandRunner,
+) -> Result<String, OsbaseInstallError> {
     let config = manifest.find_scenario(scenario).ok_or_else(|| {
         let available = manifest.scenario_names().join(", ");
         OsbaseInstallError::InvalidRequest {
@@ -207,7 +214,7 @@ pub fn execute_uninstall(scenario: &str, dry_run: bool) -> Result<String, Osbase
 
     eprintln!("[osbase] removing packages: {pkg_list}");
 
-    match run_dnf_remove(&config.packages) {
+    match run_dnf_remove(&config.packages, runner) {
         Ok(msg) => {
             eprintln!("[osbase] dnf remove completed (exit_code=0)");
             eprintln!("[osbase] removed successfully");
@@ -224,22 +231,18 @@ pub fn execute_uninstall(scenario: &str, dry_run: bool) -> Result<String, Osbase
 }
 
 /// Execute `dnf remove -y -q <packages>`.
-fn run_dnf_remove(packages: &[String]) -> Result<String, String> {
-    let mut cmd = Command::new("dnf");
-    cmd.arg("remove").arg("-y").arg("-q");
-    for pkg in packages {
-        cmd.arg(pkg);
-    }
-
-    let output = cmd
-        .output()
+fn run_dnf_remove(packages: &[String], runner: &impl CommandRunner) -> Result<String, String> {
+    let mut args = vec!["remove", "-y", "-q"];
+    args.extend(packages.iter().map(String::as_str));
+    let output = runner
+        .run("dnf", &args)
         .map_err(|e| format!("failed to execute dnf: {e}"))?;
 
-    if output.status.success() {
+    if output.code == Some(0) {
         Ok(format!("uninstalled: {}", packages.join(" ")))
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = output.stderr;
+        let stdout = output.stdout;
         let combined = format!("{stdout}\n{stderr}");
         // "No match" or already not installed is not a real failure
         if combined.contains("No packages marked for removal")
@@ -254,7 +257,7 @@ fn run_dnf_remove(packages: &[String]) -> Result<String, String> {
             }
             Err(format!(
                 "dnf remove failed (exit={}): {}",
-                output.status.code().unwrap_or(-1),
+                output.code.unwrap_or(-1),
                 stderr.lines().take(5).collect::<Vec<_>>().join("\n")
             ))
         }
@@ -297,8 +300,10 @@ fn sandbox_dispatch(
     env: &EnvFacts,
 ) -> Result<OsbaseInstallOutcome, OsbaseInstallError> {
     let layout = FsLayout::system(None);
-    let runtime = HostManifestInstallRuntime;
-    sandbox_dispatch_with(request, env, &layout, &runtime)
+    let runner = InheritedLocaleCommandRunner;
+    let runtime = HostManifestInstallRuntime { runner: &runner };
+    let manifest = SandboxManifest::load()?;
+    sandbox_dispatch_with(request, env, &layout, &runtime, &manifest)
 }
 
 fn sandbox_dispatch_with(
@@ -306,9 +311,8 @@ fn sandbox_dispatch_with(
     env: &EnvFacts,
     layout: &FsLayout,
     runtime: &impl ManifestInstallRuntime,
+    manifest: &SandboxManifest,
 ) -> Result<OsbaseInstallOutcome, OsbaseInstallError> {
-    let manifest = SandboxManifest::load()?;
-
     let scenario = manifest.find_scenario(&request.target).ok_or_else(|| {
         let available = manifest.scenario_names().join(", ");
         OsbaseInstallError::InvalidRequest {
@@ -428,18 +432,17 @@ fn build_dry_run_outcome(
 }
 
 /// Enable and start systemd services.
-fn run_enable_services(services: &[String]) -> Result<String, String> {
+fn run_enable_services(services: &[String], runner: &impl CommandRunner) -> Result<String, String> {
     let mut enabled = Vec::new();
     for svc in services {
-        let output = Command::new("systemctl")
-            .args(["enable", "--now", svc])
-            .output()
+        let output = runner
+            .run("systemctl", &["enable", "--now", svc])
             .map_err(|e| format!("failed to run systemctl: {e}"))?;
-        if output.status.success() {
+        if output.code == Some(0) {
             eprintln!("[osbase] services: {svc}.service active \u{2713}");
             enabled.push(svc.clone());
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = output.stderr;
             return Err(format!(
                 "systemctl enable --now {svc} failed: {}",
                 stderr.trim()
@@ -465,19 +468,21 @@ trait ManifestInstallRuntime {
     fn verify(&self, scenario: &ScenarioConfig) -> VerifyOutcome;
 }
 
-struct HostManifestInstallRuntime;
+struct HostManifestInstallRuntime<'a, R> {
+    runner: &'a R,
+}
 
-impl ManifestInstallRuntime for HostManifestInstallRuntime {
+impl<R: CommandRunner> ManifestInstallRuntime for HostManifestInstallRuntime<'_, R> {
     fn install_packages(&self, packages: &[String]) -> Result<String, String> {
-        run_dnf_install(packages)
+        run_dnf_install(packages, self.runner)
     }
 
     fn enable_services(&self, services: &[String]) -> Result<String, String> {
-        run_enable_services(services)
+        run_enable_services(services, self.runner)
     }
 
     fn verify(&self, scenario: &ScenarioConfig) -> VerifyOutcome {
-        run_post_verify(scenario)
+        run_post_verify(scenario, self.runner)
     }
 }
 
@@ -486,7 +491,7 @@ impl ManifestInstallRuntime for HostManifestInstallRuntime {
 /// If `scenario.verify_commands` is non-empty, each entry is executed as a
 /// shell-style command (split on whitespace). Otherwise, falls back to
 /// `systemctl is-active` for each service declared in the scenario.
-fn run_post_verify(scenario: &ScenarioConfig) -> VerifyOutcome {
+fn run_post_verify(scenario: &ScenarioConfig, runner: &impl CommandRunner) -> VerifyOutcome {
     let mut checks = Vec::new();
 
     if !scenario.verify_commands.is_empty() {
@@ -497,7 +502,7 @@ fn run_post_verify(scenario: &ScenarioConfig) -> VerifyOutcome {
                 continue;
             }
             let (bin, args) = (parts[0], &parts[1..]);
-            if let Err(e) = run_verify_cmd(bin, args, cmd_str) {
+            if let Err(e) = run_verify_cmd(bin, args, cmd_str, runner) {
                 return VerifyOutcome::Failed(e);
             }
             checks.push(cmd_str.as_str());
@@ -505,9 +510,12 @@ fn run_post_verify(scenario: &ScenarioConfig) -> VerifyOutcome {
     } else if !scenario.services.is_empty() {
         // Fallback: check each service is active.
         for svc in &scenario.services {
-            if let Err(e) =
-                run_verify_cmd("systemctl", &["is-active", svc], &format!("{svc} active"))
-            {
+            if let Err(e) = run_verify_cmd(
+                "systemctl",
+                &["is-active", svc],
+                &format!("{svc} active"),
+                runner,
+            ) {
                 return VerifyOutcome::Failed(e);
             }
             checks.push(svc.as_str());
@@ -521,28 +529,32 @@ fn run_post_verify(scenario: &ScenarioConfig) -> VerifyOutcome {
 }
 
 /// Run a single verification command and report result.
-fn run_verify_cmd(cmd: &str, args: &[&str], label: &str) -> Result<(), String> {
-    let output = Command::new(cmd)
-        .args(args)
-        .output()
+fn run_verify_cmd(
+    cmd: &str,
+    args: &[&str],
+    label: &str,
+    runner: &impl CommandRunner,
+) -> Result<(), String> {
+    let output = runner
+        .run(cmd, args)
         .map_err(|e| format!("{label}: command not found — is the package installed? ({e})"))?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if output.code == Some(0) {
+        let stdout = output.stdout;
         let first_line = stdout.lines().next().unwrap_or("");
         eprintln!("[osbase] verify: {label} \u{2713} {first_line}");
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = output.stderr;
         let hint = stderr.lines().next().unwrap_or("").trim();
         if hint.is_empty() {
             Err(format!(
                 "{label} failed (exit {})",
-                output.status.code().unwrap_or(-1)
+                output.code.unwrap_or(-1)
             ))
         } else {
             Err(format!(
                 "{label} failed (exit {}): {hint}",
-                output.status.code().unwrap_or(-1)
+                output.code.unwrap_or(-1)
             ))
         }
     }
@@ -911,22 +923,18 @@ fn run_preflight(env: &EnvFacts, scenario: &ScenarioConfig, force: bool) -> Resu
 }
 
 /// Execute `dnf install -y -q <packages>`.
-fn run_dnf_install(packages: &[String]) -> Result<String, String> {
-    let mut cmd = Command::new("dnf");
-    cmd.arg("install").arg("-y").arg("-q");
-    for pkg in packages {
-        cmd.arg(pkg);
-    }
-
-    let output = cmd
-        .output()
+fn run_dnf_install(packages: &[String], runner: &impl CommandRunner) -> Result<String, String> {
+    let mut args = vec!["install", "-y", "-q"];
+    args.extend(packages.iter().map(String::as_str));
+    let output = runner
+        .run("dnf", &args)
         .map_err(|e| format!("failed to execute dnf: {e}"))?;
 
-    if output.status.success() {
+    if output.code == Some(0) {
         Ok(format!("installed: {}", packages.join(" ")))
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = output.stderr;
+        let stdout = output.stdout;
         // Check if packages are already installed (dnf exits 0 for already-installed,
         // but let's handle the "nothing to do" case gracefully)
         let combined = format!("{stdout}\n{stderr}");
@@ -943,7 +951,7 @@ fn run_dnf_install(packages: &[String]) -> Result<String, String> {
             }
             Err(format!(
                 "dnf install failed (exit={}): {}",
-                output.status.code().unwrap_or(-1),
+                output.code.unwrap_or(-1),
                 stderr.lines().take(5).collect::<Vec<_>>().join("\n")
             ))
         }
@@ -956,7 +964,11 @@ fn run_dnf_install(packages: &[String]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::io;
+
+    use anolisa_platform::command::CommandOutput;
 
     use super::*;
     use crate::state::OperationRecord;
@@ -1076,7 +1088,16 @@ mod tests {
     fn unknown_sandbox_scenario_is_invalid_request() {
         let r = req(OsbaseDomain::Sandbox, "nope-not-a-scenario");
         let env = root_env();
-        let err = execute_install(&r, &env).expect_err("unknown scenario");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let err = sandbox_dispatch_with(
+            &r,
+            &env,
+            &layout,
+            &CountingRuntime::default(),
+            &builtin_manifest(),
+        )
+        .expect_err("unknown scenario");
         match err {
             OsbaseInstallError::InvalidRequest { reason } => {
                 assert!(reason.contains("nope-not-a-scenario"));
@@ -1094,7 +1115,7 @@ mod tests {
         let runtime = CountingRuntime::default();
         for s in ["runc", "rund", "firecracker", "gvisor", "landlock"] {
             let r = req(OsbaseDomain::Sandbox, s);
-            let outcome = sandbox_dispatch_with(&r, &env, &layout, &runtime)
+            let outcome = sandbox_dispatch_with(&r, &env, &layout, &runtime, &builtin_manifest())
                 .unwrap_or_else(|_| panic!("scenario '{s}' should work"));
             assert_eq!(outcome.exit_code, 0);
             assert_eq!(outcome.target, s);
@@ -1131,6 +1152,7 @@ mod tests {
             &root_env(),
             &layout,
             &runtime,
+            &builtin_manifest(),
         )
         .expect_err("dry-run must validate the executable state scope");
 
@@ -1152,8 +1174,14 @@ mod tests {
         let mut request = req(OsbaseDomain::Sandbox, "runc");
         request.dry_run = false;
 
-        let err = sandbox_dispatch_with(&request, &root_env(), &layout, &runtime)
-            .expect_err("state mismatch must stop the install");
+        let err = sandbox_dispatch_with(
+            &request,
+            &root_env(),
+            &layout,
+            &runtime,
+            &builtin_manifest(),
+        )
+        .expect_err("state mismatch must stop the install");
 
         assert!(matches!(
             err,
@@ -1166,10 +1194,581 @@ mod tests {
 
     #[test]
     fn list_scenarios_returns_all() {
-        let names = list_scenarios().expect("should load");
-        assert!(names.contains(&"runc".to_string()));
-        assert!(names.contains(&"gvisor".to_string()));
-        assert!(names.contains(&"landlock".to_string()));
+        let manifest = builtin_manifest();
+        let names = manifest.scenario_names();
+        assert!(names.contains(&"runc"));
+        assert!(names.contains(&"gvisor"));
+        assert!(names.contains(&"landlock"));
+    }
+
+    fn builtin_manifest() -> SandboxManifest {
+        SandboxManifest::load_with_search_paths(&[]).expect("builtin manifest")
+    }
+
+    const OUTPUT_CHILD: &str = "osbase_install::tests::command_output_child";
+    const OUTPUT_ENV: &str = "ANOLISA_TEST_OSBASE_COMMAND_OUTPUT";
+
+    #[test]
+    fn command_output_child() {
+        let expected_args = ["--exact", OUTPUT_CHILD, "--nocapture"];
+        if std::env::args().skip(1).collect::<Vec<_>>() != expected_args
+            || std::env::var(OUTPUT_ENV).as_deref() != Ok("capture")
+        {
+            return;
+        }
+
+        install_real_runtime_orders_effects_and_persists_degraded_verification();
+        let manifest = fixture_manifest();
+        let runner = ScriptedRunner::new([
+            ScriptedCommand::new(
+                "probe-a",
+                &["--version"],
+                output(Some(0), "v1\nhidden second line", ""),
+            ),
+            ScriptedCommand::new(
+                "dnf",
+                &["remove", "-y", "-q", "pkg-a", "pkg-b"],
+                output(Some(1), "ignored stdout", "  failure detail\n \n"),
+            ),
+            ScriptedCommand::new(
+                "dnf",
+                &["remove", "-y", "-q", "pkg-a", "pkg-b"],
+                output(Some(0), "", ""),
+            ),
+        ]);
+        run_verify_cmd("probe-a", &["--version"], "probe-a --version", &runner).unwrap();
+        let error = execute_uninstall_with("fixture", false, &manifest, &runner).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "phase 'uninstall' failed: dnf remove failed (exit=1):   failure detail\n "
+        );
+        execute_uninstall_with("fixture", false, &manifest, &runner).unwrap();
+        execute_uninstall_with("fixture", true, &manifest, &runner).unwrap();
+        runner.assert_finished();
+    }
+
+    #[test]
+    fn command_stderr_preserves_diagnostics_and_order() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", OUTPUT_CHILD, "--nocapture"])
+            .env(OUTPUT_ENV, "capture")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        let mut rest = stderr.as_str();
+        for expected in [
+            "[osbase] installing packages: pkg-a pkg-b",
+            "[osbase] dnf install completed (exit_code=0)",
+            "[osbase] services: svc-a.service active ✓",
+            "[osbase] services: svc-b.service active ✓",
+            "[osbase] verify: probe-a --version ✓ v1",
+            "[osbase] installed successfully",
+            "[osbase] dnf install failed",
+            "[osbase] service enablement failed: systemctl enable --now svc-b failed: service error",
+            "[osbase] verify degraded: probe-a --version failed (exit 1): verify error",
+            "[osbase] verify: skipped (--no-verify)",
+            "[osbase] verify: probe-a --version ✓ v1",
+            "[osbase] dnf stderr:\nfailure detail\n",
+            "[osbase] dnf remove failed",
+            "[osbase] dnf remove completed (exit_code=0)",
+            "[osbase] removed successfully",
+            "[osbase] [dry-run] would remove packages: pkg-a pkg-b",
+            "[osbase] [dry-run] no packages will be removed in dry-run mode",
+        ] {
+            let index = rest.find(expected).unwrap_or_else(|| {
+                panic!("missing or out-of-order diagnostic: {expected}\n{stderr}")
+            });
+            rest = &rest[index + expected.len()..];
+        }
+        assert!(!stderr.contains("hidden second line"));
+        assert!(!stderr.contains("ignored stdout"));
+    }
+
+    #[test]
+    fn preset_output_environment_does_not_enter_child_without_exact_args() {
+        for value in ["capture", "invalid"] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([OUTPUT_CHILD, "--nocapture"])
+                .env(OUTPUT_ENV, value)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert!(out.stderr.is_empty());
+            assert!(String::from_utf8(out.stdout).unwrap().contains("1 passed"));
+        }
+    }
+
+    struct ScriptedCommand {
+        program: &'static str,
+        args: Vec<String>,
+        result: io::Result<CommandOutput>,
+    }
+
+    impl ScriptedCommand {
+        fn new(program: &'static str, args: &[&str], result: io::Result<CommandOutput>) -> Self {
+            Self {
+                program,
+                args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                result,
+            }
+        }
+    }
+
+    struct ScriptedRunner(RefCell<VecDeque<ScriptedCommand>>);
+
+    impl ScriptedRunner {
+        fn new(commands: impl IntoIterator<Item = ScriptedCommand>) -> Self {
+            Self(RefCell::new(commands.into_iter().collect()))
+        }
+
+        fn assert_finished(&self) {
+            assert!(self.0.borrow().is_empty(), "expected commands were not run");
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            let expected = self.0.borrow_mut().pop_front().expect("unexpected command");
+            assert_eq!(program, expected.program);
+            assert_eq!(args, expected.args);
+            expected.result
+        }
+    }
+
+    fn output(code: Option<i32>, stdout: &str, stderr: &str) -> io::Result<CommandOutput> {
+        Ok(CommandOutput {
+            code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        })
+    }
+
+    fn fixture_manifest() -> SandboxManifest {
+        SandboxManifest::parse(
+            r#"
+            [[scenario]]
+            name = "fixture"
+            packages = ["pkg-a", "pkg-b"]
+            services = ["svc-a", "svc-b"]
+            verify_commands = ["  ", "probe-a --version", "probe-b check"]
+        "#,
+        )
+        .expect("fixture manifest")
+    }
+
+    #[test]
+    fn dnf_results_preserve_legacy_classification_and_diagnostics() {
+        for action in ["install", "remove"] {
+            let success = if action == "install" {
+                "installed: pkg-a pkg-b"
+            } else {
+                "uninstalled: pkg-a pkg-b"
+            };
+            let cases = [
+                (
+                    output(Some(0), "ignored stdout", "ignored stderr"),
+                    Ok(success.to_string()),
+                ),
+                (
+                    Err(io::Error::new(io::ErrorKind::NotFound, "missing dnf")),
+                    Err("failed to execute dnf: missing dnf".into()),
+                ),
+                (
+                    output(Some(7), "stdout only", ""),
+                    Err(format!("dnf {action} failed (exit=7): ")),
+                ),
+                (
+                    output(None, "", " \n first\nsecond\nthird\nfourth\nfifth"),
+                    Err(format!(
+                        "dnf {action} failed (exit=-1):  \n first\nsecond\nthird\nfourth"
+                    )),
+                ),
+            ];
+            for (result, expected) in cases {
+                let runner = ScriptedRunner::new([ScriptedCommand::new(
+                    "dnf",
+                    &[action, "-y", "-q", "pkg-a", "pkg-b"],
+                    result,
+                )]);
+                let packages = vec!["pkg-a".into(), "pkg-b".into()];
+                let actual = if action == "install" {
+                    run_dnf_install(&packages, &runner)
+                } else {
+                    run_dnf_remove(&packages, &runner)
+                };
+                assert_eq!(actual, expected);
+                runner.assert_finished();
+            }
+
+            // Characterize existing nonzero-success behavior; tightening it is a separate fix.
+            let markers = if action == "install" {
+                ["Nothing to do", "already installed"]
+            } else {
+                ["No packages marked for removal", "No match for argument"]
+            };
+            for marker in markers {
+                for code in [Some(1), None] {
+                    for marker_in_stdout in [false, true] {
+                        let (stdout, stderr) = if marker_in_stdout {
+                            (marker, "another package failed")
+                        } else {
+                            ("another package failed", marker)
+                        };
+                        let runner = ScriptedRunner::new([ScriptedCommand::new(
+                            "dnf",
+                            &[action, "-y", "-q", "pkg-a", "pkg-b"],
+                            output(code, stdout, stderr),
+                        )]);
+                        let packages = vec!["pkg-a".into(), "pkg-b".into()];
+                        let (actual, state) = if action == "install" {
+                            (run_dnf_install(&packages, &runner), "installed")
+                        } else {
+                            (run_dnf_remove(&packages, &runner), "absent")
+                        };
+                        assert_eq!(
+                            actual.unwrap(),
+                            format!("packages already {state}: pkg-a pkg-b")
+                        );
+                        runner.assert_finished();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn services_fail_fast_with_unchanged_errors() {
+        for (result, expected) in [
+            (
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                "failed to run systemctl: denied",
+            ),
+            (
+                output(Some(3), "ignored", "  failed\n "),
+                "systemctl enable --now svc-a failed: failed",
+            ),
+            (
+                output(None, "ignored", " \n "),
+                "systemctl enable --now svc-a failed: ",
+            ),
+        ] {
+            let runner = ScriptedRunner::new([ScriptedCommand::new(
+                "systemctl",
+                &["enable", "--now", "svc-a"],
+                result,
+            )]);
+            let runtime = HostManifestInstallRuntime { runner: &runner };
+            assert_eq!(
+                runtime
+                    .enable_services(&["svc-a".into(), "svc-b".into()])
+                    .unwrap_err(),
+                expected
+            );
+            runner.assert_finished();
+        }
+        let runner = ScriptedRunner::new([]);
+        assert_eq!(run_enable_services(&[], &runner).unwrap(), "enabled: ");
+        runner.assert_finished();
+    }
+
+    #[test]
+    fn verify_failures_preserve_first_line_and_stop_checks() {
+        for (result, expected) in [
+            (
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+                "probe-a --version: command not found — is the package installed? (denied)",
+            ),
+            (
+                output(Some(9), "ignored", "  first  \nsecond"),
+                "probe-a --version failed (exit 9): first",
+            ),
+            (
+                output(None, "ignored", " \nsecond"),
+                "probe-a --version failed (exit -1)",
+            ),
+            (
+                output(Some(1), "stdout only", ""),
+                "probe-a --version failed (exit 1)",
+            ),
+        ] {
+            let runner =
+                ScriptedRunner::new([ScriptedCommand::new("probe-a", &["--version"], result)]);
+            let manifest = fixture_manifest();
+            let runtime = HostManifestInstallRuntime { runner: &runner };
+            match runtime.verify(&manifest.scenarios[0]) {
+                VerifyOutcome::Failed(reason) => assert_eq!(reason, expected),
+                _ => panic!("expected failed verification"),
+            }
+            runner.assert_finished();
+        }
+    }
+
+    #[test]
+    fn verify_fallback_and_empty_checks_keep_existing_semantics() {
+        let mut scenario = fixture_manifest().scenarios.remove(0);
+        scenario.verify_commands.clear();
+        let runner = ScriptedRunner::new([
+            ScriptedCommand::new(
+                "systemctl",
+                &["is-active", "svc-a"],
+                output(Some(0), "active\n", ""),
+            ),
+            ScriptedCommand::new(
+                "systemctl",
+                &["is-active", "svc-b"],
+                output(Some(0), "active\n", ""),
+            ),
+        ]);
+        assert!(
+            matches!(run_post_verify(&scenario, &runner), VerifyOutcome::Passed(msg) if msg == "all checks passed: svc-a, svc-b")
+        );
+        runner.assert_finished();
+        let runner = ScriptedRunner::new([ScriptedCommand::new(
+            "systemctl",
+            &["is-active", "svc-a"],
+            output(Some(3), "inactive", ""),
+        )]);
+        assert!(
+            matches!(run_post_verify(&scenario, &runner), VerifyOutcome::Failed(msg) if msg == "svc-a active failed (exit 3)")
+        );
+        runner.assert_finished();
+        scenario.services.clear();
+        let runner = ScriptedRunner::new([]);
+        assert!(matches!(
+            run_post_verify(&scenario, &runner),
+            VerifyOutcome::NothingToVerify
+        ));
+        scenario.verify_commands.push(" \t ".into());
+        scenario.services.push("must-not-probe".into());
+        assert!(
+            matches!(run_post_verify(&scenario, &runner), VerifyOutcome::Passed(msg) if msg == "all checks passed: ")
+        );
+        runner.assert_finished();
+    }
+
+    #[test]
+    fn install_real_runtime_orders_effects_and_persists_degraded_verification() {
+        for terminal in ["complete", "packages", "services", "verify", "skip-verify"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let layout = FsLayout::system(Some(tmp.path().join("system")));
+            let manifest = fixture_manifest();
+            let mut request = req(OsbaseDomain::Sandbox, "fixture");
+            request.dry_run = false;
+            request.skip_verify = terminal == "skip-verify";
+            let mut commands = vec![ScriptedCommand::new(
+                "dnf",
+                &["install", "-y", "-q", "pkg-a", "pkg-b"],
+                output(
+                    Some(if terminal == "packages" { 1 } else { 0 }),
+                    "",
+                    "package error",
+                ),
+            )];
+            if terminal != "packages" {
+                commands.push(ScriptedCommand::new(
+                    "systemctl",
+                    &["enable", "--now", "svc-a"],
+                    output(Some(0), "", ""),
+                ));
+                commands.push(ScriptedCommand::new(
+                    "systemctl",
+                    &["enable", "--now", "svc-b"],
+                    output(
+                        Some(if terminal == "services" { 1 } else { 0 }),
+                        "",
+                        "service error",
+                    ),
+                ));
+                if terminal != "services" && !request.skip_verify {
+                    commands.push(ScriptedCommand::new(
+                        "probe-a",
+                        &["--version"],
+                        output(
+                            Some(if terminal == "verify" { 1 } else { 0 }),
+                            "v1\nsecond",
+                            "verify error",
+                        ),
+                    ));
+                    if terminal != "verify" {
+                        commands.push(ScriptedCommand::new(
+                            "probe-b",
+                            &["check"],
+                            output(Some(0), "", ""),
+                        ));
+                    }
+                }
+            }
+            let runner = ScriptedRunner::new(commands);
+            let runtime = HostManifestInstallRuntime { runner: &runner };
+            let outcome =
+                sandbox_dispatch_with(&request, &root_env(), &layout, &runtime, &manifest).unwrap();
+            runner.assert_finished();
+            assert!(layout.lock_file.exists());
+            let state_path = layout.state_dir.join("installed.toml");
+            if matches!(terminal, "packages" | "services") {
+                assert_eq!(outcome.exit_code, 1);
+                assert_eq!(outcome.phases.last().unwrap().name, terminal);
+                assert_eq!(outcome.phases.last().unwrap().status, PhaseStatus::Failed);
+                assert!(!state_path.exists());
+                assert!(outcome.warnings.is_empty());
+            } else {
+                assert_eq!(outcome.exit_code, if terminal == "verify" { 2 } else { 0 });
+                assert_eq!(
+                    outcome
+                        .phases
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>(),
+                    ["preflight", "packages", "services", "verify", "state"]
+                );
+                let expected = match terminal {
+                    "verify" => PhaseStatus::Degraded,
+                    "skip-verify" => PhaseStatus::Skipped,
+                    _ => PhaseStatus::Success,
+                };
+                assert_eq!(outcome.phases[3].status, expected);
+                assert_eq!(outcome.phases[4].status, PhaseStatus::Success);
+                if terminal == "verify" {
+                    assert_eq!(
+                        outcome.warnings,
+                        ["verify degraded: probe-a --version failed (exit 1): verify error"]
+                    );
+                } else {
+                    assert!(outcome.warnings.is_empty());
+                }
+                let state = std::fs::read_to_string(&state_path).unwrap();
+                assert!(state.contains("sandbox-fixture"));
+                load_state_for_layout(&layout).expect("persisted state is readable");
+            }
+        }
+    }
+
+    #[test]
+    fn install_preview_and_pre_effect_rejections_never_run_commands() {
+        for case in ["preview", "unknown", "preflight", "state"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let layout = FsLayout::system(Some(tmp.path().join("system")));
+            let runner = ScriptedRunner::new([]);
+            let runtime = HostManifestInstallRuntime { runner: &runner };
+            let mut manifest = fixture_manifest();
+            let mut request = req(
+                OsbaseDomain::Sandbox,
+                if case == "unknown" {
+                    "missing"
+                } else {
+                    "fixture"
+                },
+            );
+            request.dry_run = case == "preview";
+            if case == "preflight" {
+                manifest.scenarios[0].requires_kernel = ">=999.0".into();
+            }
+            if case == "state" {
+                write_operation_only_user_state(&layout, &tmp.path().join("home"));
+            }
+            let state_path = layout.state_dir.join("installed.toml");
+            let before = std::fs::read(&state_path).ok();
+            let result = sandbox_dispatch_with(&request, &root_env(), &layout, &runtime, &manifest);
+            match case {
+                "preview" => assert_eq!(result.unwrap().exit_code, 0),
+                "preflight" => assert_eq!(result.unwrap().phases[0].status, PhaseStatus::Failed),
+                "unknown" => assert!(matches!(
+                    result,
+                    Err(OsbaseInstallError::InvalidRequest { .. })
+                )),
+                "state" => assert!(
+                    matches!(result, Err(OsbaseInstallError::PhaseFailed { phase, .. }) if phase == "state")
+                ),
+                _ => unreachable!(),
+            }
+            assert_eq!(layout.lock_file.exists(), case == "state");
+            assert_eq!(std::fs::read(state_path).ok(), before);
+            runner.assert_finished();
+        }
+    }
+
+    #[test]
+    fn install_empty_phases_do_not_run_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let mut manifest = fixture_manifest();
+        let scenario = &mut manifest.scenarios[0];
+        scenario.packages.clear();
+        scenario.services.clear();
+        scenario.verify_commands.clear();
+        let runner = ScriptedRunner::new([]);
+        let mut request = req(OsbaseDomain::Sandbox, "fixture");
+        request.dry_run = false;
+        let outcome = sandbox_dispatch_with(
+            &request,
+            &root_env(),
+            &layout,
+            &HostManifestInstallRuntime { runner: &runner },
+            &manifest,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        for phase in &outcome.phases[1..4] {
+            assert_eq!(phase.status, PhaseStatus::Skipped);
+        }
+        assert!(layout.state_dir.join("installed.toml").exists());
+        runner.assert_finished();
+    }
+
+    #[test]
+    fn uninstall_uses_injected_runner_only_for_nonempty_apply() {
+        let manifest = fixture_manifest();
+        let runner = ScriptedRunner::new([]);
+        assert_eq!(
+            execute_uninstall_with("fixture", true, &manifest, &runner).unwrap(),
+            "dry-run: would uninstall: pkg-a pkg-b"
+        );
+        assert!(
+            matches!(execute_uninstall_with("missing", false, &manifest, &runner), Err(OsbaseInstallError::InvalidRequest { reason }) if reason == "unknown sandbox scenario 'missing'; available: [fixture]")
+        );
+        let mut empty = manifest.clone();
+        empty.scenarios[0].packages.clear();
+        for dry_run in [false, true] {
+            assert_eq!(
+                execute_uninstall_with("fixture", dry_run, &empty, &runner).unwrap(),
+                "scenario 'fixture': nothing to uninstall (no packages defined)"
+            );
+        }
+        runner.assert_finished();
+        for result in [
+            output(Some(0), "", ""),
+            output(Some(5), "", "remove failed"),
+            output(None, "", ""),
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing dnf")),
+        ] {
+            let expected = match &result {
+                Ok(out) if out.code == Some(0) => None,
+                Ok(out) => Some(format!(
+                    "dnf remove failed (exit={}): {}",
+                    out.code.unwrap_or(-1),
+                    out.stderr
+                )),
+                Err(_) => Some("failed to execute dnf: missing dnf".into()),
+            };
+            let runner = ScriptedRunner::new([ScriptedCommand::new(
+                "dnf",
+                &["remove", "-y", "-q", "pkg-a", "pkg-b"],
+                result,
+            )]);
+            let actual = execute_uninstall_with("fixture", false, &manifest, &runner);
+            match expected {
+                None => assert_eq!(actual.unwrap(), "uninstalled: pkg-a pkg-b"),
+                Some(expected) => assert!(
+                    matches!(actual, Err(OsbaseInstallError::PhaseFailed { phase, message }) if phase == "uninstall" && message == expected)
+                ),
+            }
+            runner.assert_finished();
+        }
     }
 
     fn test_env() -> EnvFacts {

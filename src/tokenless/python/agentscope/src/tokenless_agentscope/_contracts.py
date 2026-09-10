@@ -102,6 +102,8 @@ _API_TOOLS = frozenset(
         "search_file",
         "list_directory",
         "list_dir",
+        # Core reserves this exact name for complete search listings, even
+        # with path sharing disabled; JSON/table/log compression is excluded.
         "Grep",
         "grep",
         "grep_code",

@@ -2170,6 +2170,10 @@ pub(crate) mod tests {
     }
 
     impl PackageTransaction for FakeSelfTxn {
+        fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+            panic!("this path must not preflight an install")
+        }
+
         fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             panic!("self-update must not run dnf install");
         }
@@ -2750,6 +2754,10 @@ pub(crate) mod tests {
     }
 
     impl PackageTransaction for FakeRpm {
+        fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+            panic!("this path must not preflight an install")
+        }
+
         fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
             // The update flow never installs; a call here is a routing bug.
             panic!("update path must not delegate a dnf install");

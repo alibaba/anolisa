@@ -102,10 +102,14 @@ pub struct DistributionEntry {
     /// External signature URL (e.g. `*.sig` companion file).
     #[serde(default)]
     pub signature_url: Option<String>,
-    /// OS version constraint (e.g. `">=4"`, `"22.04"`).
+    /// Metadata retained for compatibility with existing indexes; not used
+    /// to filter or select artifact versions.
     #[serde(default)]
     pub os_version: Option<String>,
-    /// Sibling components this artifact depends on (by component name).
+    /// Dependency metadata retained for compatibility with existing indexes;
+    /// not used by dependency resolution or installation. Raw runtime
+    /// dependencies belong in `[[component.dependencies]]` in the artifact's
+    /// `component.toml`.
     #[serde(default)]
     pub dependencies: Vec<String>,
 }
@@ -405,6 +409,10 @@ impl DistributionIndex {
     }
 
     /// Resolve a query to a single matching entry.
+    ///
+    /// `os_version` is compatibility metadata and does not participate in
+    /// matching. Raw runtime dependencies are declared in the artifact's
+    /// `component.toml` and handled by the install workflow.
     ///
     /// Filter rules (in order):
     ///   1. `component` exact match.

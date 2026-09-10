@@ -247,6 +247,7 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OPENCLAW_FAIL",
     "FAKE_OC_VERSION",
     "FAKE_OC_INSTALL_FORCE",
+    "FAKE_OC_INSTALL_ACCEPT",
     "FAKE_OC_INSTALL_UNSAFE",
     "FAKE_OC_INSTALL_UNSAFE_NOOP",
     "FAKE_OC_INSPECT_JSON",
@@ -255,6 +256,7 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OC_INSPECT_DIAG",
     "FAKE_OC_ARGV_LOG",
     "FAKE_OC_PROBE_FAIL",
+    "FAKE_OC_LIST_JSON",
     "FAKE_OC_VERSION_PREAMBLE",
     "FAKE_OC_CONFIG_FAIL_KEY",
     "FAKE_OC_CONFIG_FAIL_AFTER_KEY",
@@ -412,6 +414,9 @@ fn stage() -> World {
 ///   `loaded`).
 /// - `plugins uninstall <id> ...` removes the marker; `plugins list` prints
 ///   markers; `config set` echoes.
+/// - `FAKE_OPENCLAW_FAIL=untracked` refuses uninstall without changing the
+///   registry; `FAKE_OC_LIST_JSON` overrides JSON listing, and
+///   `FAKE_OC_PROBE_FAIL=list` makes listing fail.
 /// - `FAKE_OPENCLAW_FAIL=install|install_after_register|uninstall` forces that
 ///   verb to exit non-zero; `FAKE_OC_CONFIG_FAIL_KEY` fails `config set`
 ///   before mutation, while `FAKE_OC_CONFIG_FAIL_AFTER_KEY` fails after
@@ -454,6 +459,8 @@ case "$action" in
     if [ "$arg3" = "--help" ]; then
       echo "Usage: openclaw plugins install <path> [options]"
       [ "${FAKE_OC_INSTALL_FORCE:-1}" = "1" ] && echo "  --force                             overwrite an existing plugin"
+      [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "1" ] && echo "  --accept-capabilities               accept declared capabilities"
+      [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "near_match" ] && echo "  --accept-capabilities-only          unrelated option"
       if [ "${FAKE_OC_INSTALL_UNSAFE:-0}" = "1" ]; then
         if [ "${FAKE_OC_INSTALL_UNSAFE_NOOP:-0}" = "1" ]; then
           echo "  --dangerously-force-unsafe-install  Deprecated no-op; security.installPolicy may still block"
@@ -466,6 +473,19 @@ case "$action" in
     fi
     reg="$OPENCLAW_STATE_DIR/registry"; mkdir -p "$reg" 2>/dev/null
     if [ "${FAKE_OPENCLAW_FAIL:-}" = "install" ]; then echo "boom-install" >&2; exit 7; fi
+    case "${FAKE_OPENCLAW_FAIL:-}" in
+      install_consent*)
+        [ "$FAKE_OPENCLAW_FAIL" = "install_consent_warning" ] && echo "--dangerously-force-unsafe-install is deprecated and no longer affects plugin installs"
+        echo 'Plugin requires capability consent. Use --accept-capabilities, then retry.' >&2
+        exit 15 ;;
+    esac
+    accepted=0
+    for option in "$@"; do [ "$option" = "--accept-capabilities" ] && accepted=1; done
+    if [ "${FAKE_OC_INSTALL_ACCEPT:-0}" = "1" ]; then
+      if [ "$accepted" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
+    elif [ "$accepted" = 1 ]; then
+      echo "unknown option --accept-capabilities" >&2; exit 2
+    fi
     if [ "${FAKE_OPENCLAW_FAIL:-}" = "install_unsafe_policy" ]; then
       echo "refusing install: plugin failed safety checks (pass --dangerously-force-unsafe-install to override)" >&2
       exit 11
@@ -495,12 +515,29 @@ case "$action" in
   uninstall)
     reg="$OPENCLAW_STATE_DIR/registry"; mkdir -p "$reg" 2>/dev/null
     if [ "${FAKE_OPENCLAW_FAIL:-}" = "uninstall" ]; then echo "boom-uninstall" >&2; exit 8; fi
+    if [ "${FAKE_OPENCLAW_FAIL:-}" = "untracked" ]; then
+      echo "Plugin \"$arg3\" is not associated with a tracked package install. Refresh the plugin registry, then reinstall the package or run openclaw doctor before retrying." >&2
+      exit 1
+    fi
     if [ ! -e "$reg/$arg3" ]; then echo "Plugin not found: $arg3" >&2; exit 1; fi
     rm -f "$reg/$arg3"
     echo "uninstalled $arg3"
     ;;
   list)
     reg="$OPENCLAW_STATE_DIR/registry"
+    if [ "${FAKE_OC_PROBE_FAIL:-}" = "list" ]; then echo "boom-list" >&2; exit 6; fi
+    if [ "$arg3" = "--json" ]; then
+      if [ "${FAKE_OC_LIST_JSON+x}" = x ]; then printf '%s\n' "$FAKE_OC_LIST_JSON"; exit 0; fi
+      printf '{"plugins":['
+      sep=""
+      for plugin in "$reg"/*; do
+        [ -f "$plugin" ] || continue
+        printf '%s{"id":"%s"}' "$sep" "${plugin##*/}"
+        sep=,
+      done
+      printf '],"diagnostics":[]}\n'
+      exit 0
+    fi
     ls "$reg" 2>/dev/null || true
     ;;
   *)
@@ -1501,6 +1538,171 @@ fn disable_keeps_receipt_when_uninstall_fails() {
         .find_adapter_claim(COMPONENT, FRAMEWORK)
         .expect("receipt kept");
     assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn disable_untracked_plugin_requires_verified_absence_in_recorded_state_dir() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+    // Include the persisted anchor used by externally rooted receipts.
+    let mut state = world.load_state();
+    state.upsert_adapter_trust_root(COMPONENT, FRAMEWORK, world.resource_root.clone());
+    state
+        .save(&world.layout.state_dir.join("installed.toml"))
+        .expect("persist trust anchor");
+    let skill = world.openclaw_home.join("skills/sec-audit");
+    guard.set("FAKE_OPENCLAW_FAIL", "untracked");
+
+    // An empty active instance must not hide the recorded instance's plugin.
+    let active_home = world._root.path().join("other-openclaw");
+    guard.set("OPENCLAW_STATE_DIR", &active_home);
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable untracked but registered plugin");
+    assert!(!disabled.report.cleanup_complete);
+    assert!(!disabled.claim_removed);
+    assert!(world.registry_marker_exists());
+    assert!(skill.is_dir());
+
+    std::fs::remove_file(world.openclaw_home.join("registry").join(COMPONENT))
+        .expect("remove plugin out of band");
+    guard.set("FAKE_OC_PROBE_FAIL", "list");
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("failed list probe");
+    assert!(!disabled.report.cleanup_complete);
+    assert!(!disabled.claim_removed);
+    guard.unset("FAKE_OC_PROBE_FAIL");
+
+    for json in [
+        "",
+        "No plugins found",
+        "{}",
+        r#"{"plugins":[{}],"diagnostics":[]}"#,
+        r#"{"plugins":[{"id":"tokenless","status":"disabled"}],"diagnostics":[]}"#,
+        r#"{"plugins":[],"diagnostics":[{"level":"error","message":"discovery failed"}]}"#,
+        r#"{"plugins":[],"diagnostics":[],"registry":{"diagnostics":[{"level":"warn","message":"stale registry"}]}}"#,
+    ] {
+        guard.set("FAKE_OC_LIST_JSON", json);
+        let disabled = manager
+            .disable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("uncertain absence keeps receipt");
+        assert!(!disabled.report.cleanup_complete, "list output: {json}");
+        assert!(!disabled.claim_removed, "list output: {json}");
+        let state = world.load_state();
+        assert_eq!(
+            state
+                .find_adapter_claim(COMPONENT, FRAMEWORK)
+                .unwrap()
+                .status,
+            ClaimStatus::CleanupFailed
+        );
+        assert!(
+            state
+                .find_adapter_trust_root(COMPONENT, FRAMEWORK)
+                .is_some()
+        );
+        assert!(skill.is_dir());
+    }
+    guard.unset("FAKE_OC_LIST_JSON");
+
+    // A similar ID in the recorded instance and the exact ID in another
+    // instance must not prevent recovery of this receipt.
+    std::fs::write(world.openclaw_home.join("registry/tokenless-other"), b"")
+        .expect("other plugin");
+    std::fs::create_dir_all(active_home.join("registry")).expect("active registry");
+    let active_marker = active_home.join("registry").join(COMPONENT);
+    std::fs::write(&active_marker, b"").expect("active instance plugin");
+
+    let argv_log = world.argv_log();
+    guard.set("FAKE_OC_ARGV_LOG", &argv_log);
+    let preview = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("preview recovery");
+    assert!(!preview.claim_removed);
+    assert!(!argv_log.exists(), "dry-run must not invoke the CLI");
+    assert!(world.has_claim());
+
+    // An unexpected file at a managed directory makes remove_tree fail.
+    std::fs::remove_dir_all(&skill).expect("replace skill directory");
+    std::fs::write(&skill, b"unexpected file").expect("block directory cleanup");
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("skill cleanup failure");
+    assert!(!disabled.report.cleanup_complete);
+    assert!(!disabled.claim_removed);
+    assert!(
+        disabled
+            .report
+            .messages
+            .iter()
+            .any(|message| message.contains("failed to remove skill dir"))
+    );
+    std::fs::remove_file(&skill).expect("repair skill path");
+    std::fs::create_dir(&skill).expect("restore skill directory");
+
+    let disabled = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("recover missing plugin");
+    assert!(disabled.report.cleanup_complete, "{:?}", disabled.report);
+    assert!(disabled.claim_removed);
+    assert!(!world.has_claim());
+    assert!(
+        world
+            .load_state()
+            .find_adapter_trust_root(COMPONENT, FRAMEWORK)
+            .is_none()
+    );
+    assert!(!skill.exists());
+    assert!(active_marker.exists());
+    assert!(
+        manager
+            .disable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("repeated disable")
+            .report
+            .cleanup_complete
+    );
+}
+
+#[test]
+fn disable_untracked_plugin_verifies_large_json_inventory() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+    guard.set("FAKE_OPENCLAW_FAIL", "untracked");
+
+    for registered in [true, false] {
+        let mut plugins = vec![serde_json::json!({
+            "id": "other-plugin",
+            "description": "x".repeat(80 * 1024),
+        })];
+        if registered {
+            plugins.push(serde_json::json!({"id": COMPONENT}));
+        } else {
+            std::fs::remove_file(world.openclaw_home.join("registry").join(COMPONENT))
+                .expect("remove plugin out of band");
+        }
+        let json = serde_json::json!({"plugins": plugins, "diagnostics": []}).to_string();
+        assert!(json.len() > 64 * 1024);
+        guard.set("FAKE_OC_LIST_JSON", json);
+
+        let disabled = manager
+            .disable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("disable with a large inventory");
+        assert_eq!(disabled.report.cleanup_complete, !registered);
+        assert_eq!(disabled.claim_removed, !registered);
+        assert_eq!(world.has_claim(), registered);
+    }
 }
 
 #[test]
@@ -3070,6 +3272,79 @@ fn each_probe_runs_exactly_once_per_enable() {
         1,
         "one inspect --help probe: {lines:?}"
     );
+}
+
+#[test]
+fn enable_accepts_capabilities_only_when_install_help_supports_it() {
+    let guard = OpenClawEnvGuard::acquire();
+    for support in ["1", "0", "near_match"] {
+        let world = stage();
+        world.apply_env(&guard, None);
+        guard.set("FAKE_OC_INSTALL_ACCEPT", support);
+        let argv_log = world.argv_log();
+        guard.set("FAKE_OC_ARGV_LOG", &argv_log);
+        let manager = world.manager();
+        let preview = manager
+            .enable(COMPONENT, Some(FRAMEWORK), true)
+            .expect("preview");
+        let EnableOutcome::Planned { plan, .. } = preview else {
+            panic!("expected preview")
+        };
+        assert_eq!(
+            plan.register_command
+                .unwrap()
+                .contains("--accept-capabilities"),
+            support == "1"
+        );
+        assert!(!world.has_claim());
+        assert!(!world.registry_marker_exists());
+        std::fs::write(&argv_log, "").expect("reset probe log");
+        manager
+            .enable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("enable");
+        let log = std::fs::read_to_string(&argv_log).expect("argv log");
+        assert_eq!(
+            log.lines()
+                .filter(|line| *line == "plugins install --help")
+                .count(),
+            1
+        );
+        let install = log
+            .lines()
+            .find(|line| line.starts_with("plugins install ") && !line.ends_with("--help"))
+            .expect("install argv");
+        assert_eq!(install.contains("--accept-capabilities"), support == "1");
+        assert!(!install.contains("--dangerously-force-unsafe-install"));
+        assert!(world.registry_marker_exists());
+    }
+}
+
+#[test]
+fn capability_consent_failure_takes_precedence_over_safety_warning() {
+    let guard = OpenClawEnvGuard::acquire();
+    for failure in ["install_consent", "install_consent_warning"] {
+        let world = stage();
+        world.apply_env(&guard, Some(failure));
+        guard.set("FAKE_OC_INSTALL_UNSAFE", "1");
+        let err = world
+            .manager()
+            .enable(COMPONENT, Some(FRAMEWORK), false)
+            .expect_err("consent rejection");
+        let reason = err.to_string();
+        assert!(reason.contains("OpenClaw capability consent"), "{reason}");
+        assert!(
+            !reason.contains("--allow-unsafe-plugin-install"),
+            "{reason}"
+        );
+        assert_eq!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, FRAMEWORK)
+                .unwrap()
+                .status,
+            ClaimStatus::CleanupFailed
+        );
+    }
 }
 
 /// P2 (negative): when the host does NOT expose the unsafe flag, a plain

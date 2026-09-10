@@ -38,3 +38,24 @@ def get_config_dir() -> Path:
     if not base:
         base = str(Path.home() / ".config")
     return Path(base) / _APP_NAME
+
+
+def valid_anolisa_data_home(value: str | None) -> bool:
+    """Match ANOLISA's absolute data-root syntax without resolving the filesystem."""
+    return (
+        bool(value)
+        and Path(value).is_absolute()
+        and not any(segment in (".", "..") for segment in value.split("/"))
+    )
+
+
+def get_anolisa_skill_dir() -> Path:
+    """Return the raw user skill root using ANOLISA's XDG fallback rules."""
+    value = os.environ.get("XDG_DATA_HOME")
+    # Match ANOLISA's root spelling; pathlib otherwise preserves exactly two slashes.
+    data_home = (
+        Path("/" + value.lstrip("/"))
+        if valid_anolisa_data_home(value)
+        else Path.home() / ".local/share"
+    )
+    return data_home / "anolisa/skills"

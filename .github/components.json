@@ -64,7 +64,7 @@
       "release_tag_prefix": "cosh-ng/v",
       "ci_key": "cosh_ng",
       "issue_triagers": [
-        "KaiLongZhou",
+        "zkl123",
         "SunnyQjm"
       ],
       "status": "active"
@@ -153,7 +153,6 @@
       "ci_key": "tokenless",
       "issue_triagers": [
         "Forrest-ly",
-        "shiloong",
         "ikunkun-sys"
       ],
       "status": "active"
@@ -176,7 +175,7 @@
       "release_tag_prefix": "ckpt/v",
       "ci_key": "ws_ckpt",
       "issue_triagers": [
-        "Ziqi002"
+        "yummypeng"
       ],
       "status": "active"
     },
@@ -198,7 +197,6 @@
       "release_tag_prefix": "memory/v",
       "ci_key": "agent_memory",
       "issue_triagers": [
-        "shiloong",
         "ikunkun-sys"
       ],
       "status": "active"
@@ -232,7 +230,7 @@
       "label": "component:ktuner",
       "commit_scope": "ktuner",
       "commit_scope_aliases": [],
-      "release_tag_prefix": null,
+      "release_tag_prefix": "ktuner/v",
       "ci_key": "ktuner",
       "issue_triagers": [],
       "status": "incubating"

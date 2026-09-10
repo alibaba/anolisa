@@ -291,7 +291,7 @@ pub(super) fn projection_for_index(
         .iter()
         .find(|entry| entry.name == component)
         .unwrap();
-    state_view::project_component(entry, state, Some(query))
+    state_view::project_component(entry, index, state, Some(query))
 }
 
 /// A component whose RPM backend package name differs from the component name,

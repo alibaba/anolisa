@@ -390,6 +390,7 @@ pub struct PostToolRequest {
     /// Whether this is an ordinary tool or Retrieve result.
     pub result_kind: ResultKind,
     /// Name of the tool that produced the result.
+    /// The exact name `Grep` restricts Core to search path sharing.
     pub tool_name: String,
     /// Model-visible result content.
     pub content: String,
@@ -494,6 +495,12 @@ pub enum AppliedOperation {
     TerminalCleanup,
     /// Repeated build/test progress was reduced behind retrieval markers.
     BuildLogReduction,
+    /// CSV/TSV quoting and record terminators changed with all cells retained.
+    TabularCompaction,
+    /// CSV/TSV rows were omitted behind a reference to the original text.
+    TabularRowReduction,
+    /// Consecutive search records share a full path without removing source text.
+    SearchPathSharing,
     /// Empty and diagnostic JSON fields were removed.
     JsonCleanup,
     /// A JSON record collection was reduced with retrievable omissions.
@@ -512,6 +519,9 @@ impl AppliedOperation {
             Self::SchemaCompression => "schema_compression",
             Self::TerminalCleanup => "terminal_cleanup",
             Self::BuildLogReduction => "build_log_reduction",
+            Self::TabularCompaction => "tabular_compaction",
+            Self::TabularRowReduction => "tabular_row_reduction",
+            Self::SearchPathSharing => "search_path_sharing",
             Self::JsonCleanup => "json_cleanup",
             Self::JsonRecordReduction => "json_record_reduction",
             Self::JsonTruncation => "json_truncation",

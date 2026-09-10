@@ -31,8 +31,8 @@ use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, Servi
 use anolisa_core::state_store::StateStore;
 use anolisa_core::transaction::restore_backup_file;
 use anolisa_core::{
-    CapabilityRequest, FileKind, ResolvedInstallFile, ResolvedLifecycleHooks, ServiceActivation,
-    ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
+    CapabilityRequest, FileKind, ResolvedLifecycleHooks, ServiceActivation, ServiceRequest,
+    ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
     capability_for_install_mode, deactivate_services, run_hooks, service_for_install_mode,
     user_service_for_install_mode,
 };
@@ -67,7 +67,7 @@ fn rollback_capability_requests(
         .iter()
         .filter(|file| {
             file.owner == FileOwner::Anolisa
-                && file.kind == OwnedFileKind::File
+                && file.kind != OwnedFileKind::Symlink
                 && !file.capabilities.is_empty()
                 && backups.iter().any(|backup| backup.dest == file.path)
         })
@@ -440,7 +440,6 @@ impl OwnedOps for RawReplayOps<'_> {
                 &self.placed,
                 &manifest_path,
                 &prepared.manifest_toml,
-                &prepared.files,
                 &self.applied_capabilities,
             ),
             services: self.service_refs(&prepared.services),
@@ -1337,6 +1336,22 @@ impl OwnedOps for RawInstallOps<'_> {
                 write.label()
             )));
         }
+        let hooks = self.hooks()?;
+        if !hooks.post_install.is_empty() || !hooks.post_enable.is_empty() {
+            // Installation hooks may rewrite payload bytes. Capture their final
+            // content while retaining the declared modes and symlink referents.
+            for file in &mut self.placed {
+                if file.referent.is_none() {
+                    file.sha256 =
+                        installed_file_digest(self.layout, &file.path).map_err(|err| {
+                            OwnedOpError(format!(
+                                "failed to record post-hook digest for {}: {err}",
+                                file.path.display()
+                            ))
+                        })?;
+                }
+            }
+        }
         let prepared = self.prepared()?;
         let manifest_path = self.manifest_path.clone().ok_or_else(|| {
             OwnedOpError("internal: record commit ran before files were placed".to_string())
@@ -1357,7 +1372,6 @@ impl OwnedOps for RawInstallOps<'_> {
                 &self.placed,
                 &manifest_path,
                 &prepared.manifest_toml,
-                &prepared.files,
                 &self.applied_capabilities,
             ),
             services: prepared
@@ -1454,7 +1468,6 @@ fn owned_file_rows(
     placed: &[InstalledFile],
     manifest_path: &Path,
     manifest_toml: &str,
-    contract_files: &[ResolvedInstallFile],
     applied_capabilities: &[CapabilityRequest],
 ) -> Vec<OwnedFile> {
     let mut files: Vec<OwnedFile> = placed
@@ -1469,15 +1482,13 @@ fn owned_file_rows(
             },
             kind: if f.referent.is_some() {
                 OwnedFileKind::Symlink
+            } else if f.kind == FileKind::Config {
+                OwnedFileKind::Config
             } else {
                 OwnedFileKind::File
             },
             referent: f.referent.clone(),
-            mode: expected_mode_for_path(&f.path, contract_files).or_else(|| {
-                (f.referent.is_none())
-                    .then(|| recorded_mode(&f.path))
-                    .flatten()
-            }),
+            mode: expected_mode(f),
             capabilities: capabilities_for_path(&f.path, applied_capabilities),
         })
         .collect();
@@ -1493,36 +1504,48 @@ fn owned_file_rows(
     files
 }
 
-fn expected_mode_for_path(path: &Path, contract_files: &[ResolvedInstallFile]) -> Option<String> {
-    contract_files
-        .iter()
-        .filter(|file| file.kind != FileKind::Symlink)
-        .find(|file| {
-            file.dest == path
-                || (file
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.ends_with('/'))
-                    && path.starts_with(&file.dest))
-        })
-        .and_then(|file| {
-            let raw = match file.mode.as_deref() {
-                Some(raw) => raw,
-                None if file
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.ends_with('/')) =>
-                {
-                    return None;
-                }
-                None => "0755",
-            };
-            let octal = raw.trim().strip_prefix("0o").unwrap_or(raw.trim());
-            u32::from_str_radix(octal, 8)
-                .ok()
-                .filter(|mode| *mode <= 0o7777)
-                .map(|mode| format!("{mode:04o}"))
-        })
+fn installed_file_digest(layout: &FsLayout, path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Error, Read};
+
+    validate_owned_path(layout, path).map_err(Error::other)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Refuse replacement links and avoid blocking on a replacement FIFO.
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(Error::other("installed path is not a regular file"));
+    }
+    let mut hasher = Sha256::new();
+    // Bound the read by the observed size, as the integrity probe does.
+    let bytes = std::io::copy(
+        &mut file.take(metadata.len().saturating_add(1)),
+        &mut hasher,
+    )?;
+    if bytes != metadata.len() {
+        return Err(Error::other(
+            "installed file changed size while recording its digest",
+        ));
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn expected_mode(file: &InstalledFile) -> Option<String> {
+    if file.referent.is_some() {
+        return None;
+    }
+    let raw = file.mode.as_deref().unwrap_or("0755");
+    let octal = raw.trim().strip_prefix("0o").unwrap_or(raw.trim());
+    u32::from_str_radix(octal, 8)
+        .ok()
+        .filter(|mode| *mode <= 0o7777)
+        .map(|mode| format!("{mode:04o}"))
 }
 
 #[cfg(unix)]
@@ -1624,6 +1647,8 @@ mod tests {
         fs::write(&manifest, b"[component]\nname = \"tool\"\n").expect("manifest");
         let placed = vec![InstalledFile {
             path: binary.clone(),
+            kind: FileKind::Executable,
+            mode: Some("0755".into()),
             sha256: "deadbeef".to_string(),
             referent: None,
         }];
@@ -1637,13 +1662,6 @@ mod tests {
             &placed,
             &manifest,
             "[component]\nname = \"tool\"\n",
-            &[ResolvedInstallFile {
-                source: Some("bin/tool".to_string()),
-                dest: binary.clone(),
-                mode: Some("0755".to_string()),
-                kind: FileKind::Executable,
-                render: None,
-            }],
             &capabilities,
         );
         let row = rows
@@ -1680,11 +1698,15 @@ mod tests {
         let placed = vec![
             InstalledFile {
                 path: script.clone(),
+                kind: FileKind::Data,
+                mode: Some("0755".into()),
                 sha256: sha256_hex(b"#!/usr/bin/env python3\n"),
                 referent: None,
             },
             InstalledFile {
                 path: hooks.clone(),
+                kind: FileKind::Data,
+                mode: Some("0644".into()),
                 sha256: sha256_hex(br#"{"hooks":{}}"#),
                 referent: None,
             },
@@ -1694,13 +1716,6 @@ mod tests {
             &placed,
             &manifest,
             "[component]\nname = \"tokenless\"\n",
-            &[ResolvedInstallFile {
-                source: Some("adapters/tokenless/codex/".to_string()),
-                dest: adapter_root,
-                mode: None,
-                kind: FileKind::Data,
-                render: None,
-            }],
             &[],
         );
 

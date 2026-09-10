@@ -67,7 +67,7 @@ daemon 当前不承担：
 - 收到 SIGHUP 后重载配置；
 - 以 daemon 内存状态作为安全事件、Skill Ledger 或 observability 的唯一事实来源。
 
-**[TARGET V2]** asc-daemon 是 one daemon per host 的 system-level service；asc-cli 是 Rust
+**[TARGET V2]** asc-daemon 是 one daemon per host 的 system-level service；agent-sec-cli 是 Rust
 daemon client，不拥有 daemon 生命周期，也不提供 PyO3 NativeExecutor 或通用本地 fallback。
 同一 daemon 服务多个 UID/Agent，并通过 trusted Principal、authorization 和 QueryScope
 隔离访问。上述 V2 目标不改写本节记录的 V1 当前事实。
@@ -432,7 +432,7 @@ per-user path、user service 和用户级 singleton 不能直接升级为 V2 PRE
 | ID | 必须验证的行为 |
 | --- | --- |
 | DCB-013 | Rust daemon 对当前 Python oracle 的同一 fixture 输出规范化后等价 |
-| DCB-014 | asc-cli 只通过 daemon 执行；daemon 不可用时返回受控 unavailable/version error，不启动用户 daemon、不使用 PyO3 或本地业务 fallback |
+| DCB-014 | agent-sec-cli 只通过 daemon 执行；daemon 不可用时返回受控 unavailable/version error，不启动用户 daemon、不使用 PyO3 或本地业务 fallback |
 | DCB-015 | 当前 9 个 method 均有 compatibility classification；八个 action method 通过 protocol Definition Review 后才进入 canonical registry |
 | DCB-016 | daemon error 与失败 ActionResult 保持三层分离，并兼容历史 action response projection |
 | DCB-017 | Host 第二实例被拒绝；system-scope service 和每 Node 单 DaemonSet 形态通过验收 |

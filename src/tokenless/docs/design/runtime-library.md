@@ -47,6 +47,47 @@ tool-name collisions fail fast. Normal Core dispositions such as passthrough, no
 recoverability unavailable return typed results. A candidate is applied only when it is strictly
 smaller; schema and response truncation must also remain retrievable.
 
+## Search path sharing
+
+PostTool routes detected `search_results` through `SearchResultsCompressor` only when search path
+sharing is enabled, the origin is `api_response`, and text replacement is available. This is a
+content-based Core capability; it is not restricted to a particular agent ID. File content and
+command output do not enter it, including Bash output without RTK. Successful `path:line:text` listings with at least three records can share full
+paths across consecutive rows. Line numbers, row text, order and line endings remain byte-reversible.
+The input contract excludes colons in paths and context listings. Unsupported rows reject the whole
+candidate; byte length and estimated tokens must both decrease before normal Runtime arbitration.
+The applied operation is `search_path_sharing` (`AppliedOperation.SEARCH_PATH_SHARING` in the
+Python SDK), with `lossless` recoverability and no Stash writes.
+
+Search path sharing is enabled by default. CLI callers can disable it with
+`TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0`. When unset it stays enabled; `1`, `true`, and `yes`
+also enable it (case-insensitively). Empty and other values disable it. This variable is
+independent of the JSON config file.
+Rust callers use `RuntimeConfig.search_path_sharing_enabled`; Python callers use
+`TokenlessConfig(search_path_sharing_enabled=False)` or the matching `TokenlessRuntime` keyword.
+Disabling this domain returns search listings unchanged without computing a search candidate.
+JSON, table, and log compression remain available for other tool names. The exact name `Grep`
+always excludes those domains to retain every received match; disabling path sharing does not
+restore pre-feature JSON/table/log dispatch for a custom tool named `Grep`.
+The global compression switch still controls dry-run behavior for enabled domains.
+Whole-task savings depend on the workload; preserving all received bytes does not guarantee
+fewer follow-up tool calls or lower total token use.
+
+The first line is the fixed format header. Subsequent `File=` lines contain a JSON-encoded path;
+data lines always begin with ASCII digits followed by `:`, so they cannot be mistaken for file
+headers. To reconstruct, prefix each data line with the decoded current path and `:` and retain
+its original line ending. Repeated nonconsecutive paths receive separate headers.
+
+The Claude Code adapter unwraps only native Grep `mode=content` responses without context options,
+declares that slot as API response text, and replaces only `content` in the original output object.
+It preserves host metadata, including any limits; completeness means all received rows, not all
+possible matches before host truncation. Other Grep modes and hosts keep their existing route.
+Unwrapped Grep listings are recorded as `api_response` in statistics, rather than `file_content`:
+they are filtered tool responses, not authoritative file copies. Historical origin-grouped queries
+therefore have a version boundary. Core treats the exact tool name `Grep` as a search-only tool:
+it cannot enter JSON, table, or log compressors, even when search path sharing is disabled. SDK
+callers should use that name only for this search contract. RTK-owned output still bypasses Core.
+
 ## Statistics queries
 
 `TokenlessStats` is a read-only public query client backed by the same Rust `StatsRecorder` and

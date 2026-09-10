@@ -6,7 +6,6 @@ use asc_daemon_protocol::{
     ErrorCode, ListParams, ListResult, RequestId, ResourceParams, RevisionParams,
     UpdateBindingParams, UpdatePolicyParams, UpdateScopeParams, error_code,
 };
-use asc_foundation_types::ResourceId;
 use asc_policy_types::binding::{BindingStatus, BindingView, PreparedBinding};
 use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::scope::{PreparedScope, ScopeSelector};
@@ -127,12 +126,17 @@ fn authored_params_reject_server_owned_or_legacy_fields() {
         assert!(
             serde_json::from_value::<CreateScopeParams>(json!({"selector": selector})).is_err()
         );
+        assert!(
+            serde_json::from_value::<UpdateScopeParams>(json!({
+                "scopeId": "existing-scope",
+                "selector": selector
+            }))
+            .is_err()
+        );
     }
 
     let invalid_outbound = CreateScopeParams {
-        selector: ScopeSelector::LegacyExecutionDomain {
-            execution_domain_id: ResourceId::new("legacy-domain").unwrap(),
-        },
+        selector: ScopeSelector::Pid { pid: 0 },
     };
     assert!(serde_json::to_value(invalid_outbound).is_err());
 }

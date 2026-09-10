@@ -40,12 +40,33 @@ pub struct TokenRecord {
 }
 
 impl TokenRecord {
-    /// Total tokens (input + output + cache)
+    /// Whether the provider bills cache tokens on top of `input_tokens`.
+    ///
+    /// Anthropic reports `cache_creation_input_tokens` and
+    /// `cache_read_input_tokens` separately from `input_tokens`, so they add to
+    /// the call total. OpenAI-compatible APIs — including DashScope and the
+    /// Qoder CLI gateway — already count cached tokens inside `prompt_tokens`,
+    /// and Gemini counts cached content inside `prompt_token_count`; adding the
+    /// cache counters again would inflate every cached call.
+    fn cache_billed_on_top(&self) -> bool {
+        self.provider.eq_ignore_ascii_case("anthropic")
+    }
+
+    /// Input tokens as billed: the reported input plus only those cache
+    /// counters the provider keeps outside of it.
+    pub fn billed_input_tokens(&self) -> u64 {
+        if self.cache_billed_on_top() {
+            self.input_tokens
+                + self.cache_creation_tokens.unwrap_or(0)
+                + self.cache_read_tokens.unwrap_or(0)
+        } else {
+            self.input_tokens
+        }
+    }
+
+    /// Total tokens for the call (billed input + output)
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_tokens.unwrap_or(0)
-            + self.cache_read_tokens.unwrap_or(0)
+        self.billed_input_tokens() + self.output_tokens
     }
 
     /// Create a new record with current timestamp
@@ -121,6 +142,44 @@ mod tests {
     #[test]
     fn test_token_record_total() {
         let record = TokenRecord::new(1234, "python".to_string(), "openai".to_string(), 100, 50);
+        assert_eq!(record.total_tokens(), 150);
+    }
+
+    /// OpenAI-compatible gateways count cached tokens inside `prompt_tokens`,
+    /// so the cache counters must not be added again. Numbers taken from a
+    /// captured Qoder CLI call (prompt 3021, completion 170, cached 491).
+    #[test]
+    fn test_openai_style_cache_is_already_inside_input() {
+        let record = TokenRecord::new(1, "qodercli".to_string(), "openai".to_string(), 3021, 170)
+            .with_cache_tokens(0, 491);
+        assert_eq!(record.billed_input_tokens(), 3021);
+        assert_eq!(record.total_tokens(), 3191);
+    }
+
+    /// Anthropic reports cache tokens outside `input_tokens`, so they add up.
+    #[test]
+    fn test_anthropic_style_cache_adds_to_input() {
+        let record = TokenRecord::new(1, "claude".to_string(), "anthropic".to_string(), 100, 50)
+            .with_cache_tokens(10, 20);
+        assert_eq!(record.billed_input_tokens(), 130);
+        assert_eq!(record.total_tokens(), 180);
+    }
+
+    /// Provider casing comes from whatever the wire reported, so matching must
+    /// not be case-sensitive.
+    #[test]
+    fn test_anthropic_match_is_case_insensitive() {
+        let record = TokenRecord::new(1, "c".to_string(), "Anthropic".to_string(), 100, 50)
+            .with_cache_tokens(10, 20);
+        assert_eq!(record.total_tokens(), 180);
+    }
+
+    /// An unrecognised provider is treated as OpenAI-style, which is what every
+    /// gateway seen so far does.
+    #[test]
+    fn test_unknown_provider_keeps_cache_inside_input() {
+        let record = TokenRecord::new(1, "p".to_string(), "unknown".to_string(), 100, 50)
+            .with_cache_tokens(10, 20);
         assert_eq!(record.total_tokens(), 150);
     }
 

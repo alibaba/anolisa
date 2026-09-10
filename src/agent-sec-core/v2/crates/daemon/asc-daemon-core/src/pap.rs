@@ -105,10 +105,9 @@ fn project_pap_error(
             PolicyAdministrationError::NotFound(NotFoundResource::ReferencedScopeRevision)
         }
         PapError::RevisionExhausted => PolicyAdministrationError::ResourceExhausted,
-        PapError::InvalidIdentifier(_)
-        | PapError::InvalidBinding(_)
-        | PapError::Serialization
-        | PapError::Persistence => PolicyAdministrationError::Internal,
+        PapError::InvalidIdentifier(_) | PapError::InvalidBinding(_) | PapError::Persistence => {
+            PolicyAdministrationError::Internal
+        }
     }
 }
 

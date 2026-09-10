@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-09-09
+
+### Added
+
+- Register `ktuner` in both component catalogs for Linux x86_64 RPM
+  discovery and installation when the configured repository provides it
+  ([#2084](https://github.com/alibaba/anolisa/pull/2084)).
+
+### Changed
+
+- `anolisa adapter enable <component> openclaw` now accepts the plugin's
+  declared capabilities when the host advertises `--accept-capabilities`.
+  Unsafe-install bypass still requires separate explicit authorization
+  ([#3126](https://github.com/alibaba/anolisa/pull/3126)).
+- `status` and `doctor` now allow content edits to raw-installed
+  `type = "config"` files, including directory-expanded files, while still
+  checking presence, file type, path safety, permissions, and capabilities.
+  Legacy state recovers config kinds where the installed manifest is
+  unambiguous. Update and uninstall behavior is unchanged; back up edited
+  configs before those operations. Older CLI versions cannot read the new
+  `kind = "config"` state: before downgrading, back up state and change those
+  owned-file entries to `kind = "file"`, restoring content digest checks
+  ([#3142](https://github.com/alibaba/anolisa/pull/3142)).
+
+### Fixed
+
+- OpenClaw adapter cleanup can now finish when uninstall reports no tracked
+  package and `plugins list --json` confirms the plugin is absent with clean
+  diagnostics. Inconclusive results retain cleanup ownership for a retry
+  ([#3118](https://github.com/alibaba/anolisa/pull/3118)).
+- Component index reads now use a temporary private cache when the system
+  cache is not writable, allowing ordinary users to resolve components for
+  previews while retaining index validation. RPM install preflight still
+  requires root with DNF 4
+  ([#3127](https://github.com/alibaba/anolisa/pull/3127)).
+- Fresh raw installs now record file digests after `post_install` and
+  `post_enable` hooks, avoiding false corruption reports for hook-written
+  content while detecting subsequent changes to immutable files. Repair and
+  update still restore the package payload without replaying install hooks
+  ([#3141](https://github.com/alibaba/anolisa/pull/3141)).
+- RPM installs, including `--dry-run` and merged `install --all` transactions,
+  now check DNF conflicts before creating recovery journals, so solver
+  refusals no longer leave false pending operations. Use `sudo` for RPM
+  `--dry-run` with DNF 4; the check may refresh repository metadata
+  ([#3158](https://github.com/alibaba/anolisa/pull/3158)).
+- `anolisa list` now uses the same authoritative RPM package mapping as
+  install, preventing legacy aliases or stale provider declarations from
+  showing the wrong component as installed
+  ([#3158](https://github.com/alibaba/anolisa/pull/3158)).
+- `anolisa forget` now directs journal-only pending operations to
+  `anolisa repair <component>` instead of reporting nothing to forget,
+  preserving the recovery evidence
+  ([#3158](https://github.com/alibaba/anolisa/pull/3158)).
+
 ## [0.3.10] - 2026-09-06
 
 ### Added

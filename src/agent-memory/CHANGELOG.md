@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-09-09
+
+### Fixed
+
+- **agent-memory**: Negotiates OpenClaw installer flags from host help and grants declared capabilities by default, operators can install on hosts that require consent or withhold it with `AGENT_MEMORY_ACCEPT_CAPABILITIES=0`; deprecated no-op unsafe-install flags are omitted and failures distinguish consent rejection from unwritable destinations (#3149)
+- **agent-memory**: Labels corpus hits as `agent-memory` and supplies read handles for `memory_get corpus=all`, agents can retrieve matching stored memories even when their paths overlap OpenClaw workspace memory and receive accurate `fromLine` / `lineCount` for windowed reads (#3177)
+- **agent-memory**: Validates plugin configuration before locating the binary, operators see invalid `userId` / `sessionId` errors even when `agent-memory` is not installed (#3155)
+- **agent-memory**: Declares its RPM component identity, ANOLISA can recognize the installed package as the `agent-memory` component (#2560)
+- **agent-memory**: Declares Node.js >= 20 and npm as source-build dependencies in the unified build workflow, user-mode setup provisions the tools needed to bundle the OpenClaw adapter and system-mode preflight reports missing tools before building (#3187)
+
 ## [0.2.6] - 2026-07-30
 
 ### Fixed

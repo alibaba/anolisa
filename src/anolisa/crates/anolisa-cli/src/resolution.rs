@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anolisa_core::download::DownloadCache;
+use anolisa_core::download::{DownloadCache, DownloadError};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use serde::{Deserialize, Serialize};
@@ -702,11 +702,24 @@ pub(crate) fn load_component_index_from_base(
             reason: format!("test mode: refusing non-file URL {url}"),
         });
     }
-    let downloaded = cache
-        .fetch(&url, None)
-        .map_err(|err| ComponentIndexError::Fetch {
-            reason: format!("failed to fetch {url}: {err}"),
-        })?;
+    let temporary_cache;
+    let downloaded = match cache.fetch(&url, None) {
+        Err(DownloadError::Io { path, source })
+            if source.kind() == std::io::ErrorKind::PermissionDenied
+                && path.starts_with(&layout.cache_dir) =>
+        {
+            // System previews must not require a writable system cache or home.
+            // Keep the private cache alive until the index has been parsed.
+            temporary_cache = tempfile::tempdir().map_err(|err| ComponentIndexError::Fetch {
+                reason: format!("cannot create temporary component index cache: {err}"),
+            })?;
+            DownloadCache::new(temporary_cache.path().to_path_buf()).fetch(&url, None)
+        }
+        result => result,
+    }
+    .map_err(|err| ComponentIndexError::Fetch {
+        reason: format!("failed to fetch {url}: {err}"),
+    })?;
     ComponentIndex::load(&downloaded.cached_path)
 }
 
@@ -723,6 +736,55 @@ pub(crate) fn load_optional_component_index(
 mod tests {
     use super::*;
     use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
+
+    #[cfg(unix)]
+    #[test]
+    fn component_index_loads_without_write_access_to_system_cache() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses mode bits; run this regression as an unprivileged user.
+        if anolisa_platform::privilege::is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let repo = tmp.path().join("repo/v1");
+        std::fs::create_dir_all(&repo).expect("repo directory");
+        let index_path = repo.join("components-v2.toml");
+        std::fs::write(
+            &index_path,
+            "schema_version = 2\n[[components]]\nname = 'cosh'\ntargets = [{ os = 'linux', arch = 'x86_64' }]\n",
+        )
+        .expect("index");
+        std::fs::create_dir_all(&layout.cache_dir).expect("cache directory");
+        std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("read-only cache");
+
+        let base_url = format!("file://{}", repo.display());
+        let loaded = load_component_index_from_base(&layout, &base_url);
+        std::fs::write(&index_path, "schema_version = 1\n").expect("invalid index");
+        let invalid = load_component_index_from_base(&layout, &base_url);
+        let cache_entries = std::fs::read_dir(&layout.cache_dir)
+            .expect("read cache")
+            .count();
+        std::fs::set_permissions(&layout.cache_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore cache permissions");
+
+        let index = loaded.expect("read-only cache must not prevent index validation");
+        assert_eq!(
+            resolve_index_identity("cosh", Some(&index)),
+            IndexIdentity::Resolved("cosh".to_string())
+        );
+        assert_eq!(
+            resolve_index_identity("unknown", Some(&index)),
+            IndexIdentity::Unsupported
+        );
+        assert!(matches!(
+            invalid,
+            Err(ComponentIndexError::UnsupportedSchema { .. })
+        ));
+        assert_eq!(cache_entries, 0, "system cache must remain untouched");
+    }
 
     #[derive(Default)]
     struct FakeQuery {
@@ -844,6 +906,43 @@ name = "copilot-shell"
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         ComponentIndex::load(&index_path).expect("component index template must parse");
+    }
+
+    #[test]
+    fn repository_component_indexes_v1_and_v2_register_the_same_components() {
+        // The CLI resolves identities only through the v2 index, while released
+        // clients keep reading v1; a component registered in one file but not
+        // the other becomes unresolvable for one of the two populations.
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let v1_path = manifest_dir.join("../../manifests/components.toml");
+        let v2_path = manifest_dir.join("../../manifests/components-v2.toml");
+
+        let v2 = ComponentIndex::load(&v2_path).expect("component index v2 must parse");
+        let v2_names: BTreeSet<String> = v2
+            .components
+            .iter()
+            .map(|component| component.name.clone())
+            .collect();
+
+        let v1_body = std::fs::read_to_string(&v1_path).expect("read v1 component index");
+        let v1: toml::Table = toml::from_str(&v1_body).expect("parse v1 component index");
+        let v1_names: BTreeSet<String> = v1["components"]
+            .as_array()
+            .expect("v1 index declares [[components]] rows")
+            .iter()
+            .map(|entry| {
+                entry["name"]
+                    .as_str()
+                    .expect("v1 component row carries a name")
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(
+            v1_names, v2_names,
+            "components registered in only one of components.toml / components-v2.toml \
+             cannot be resolved by clients reading the other"
+        );
     }
 
     #[test]

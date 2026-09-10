@@ -2284,6 +2284,10 @@ mod tests {
     }
 
     impl PackageTransaction for FakeRpm {
+        fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+            panic!("this path must not preflight an install")
+        }
+
         fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
             let &[package] = packages else {
                 panic!("expected exactly one package, got {packages:?}");

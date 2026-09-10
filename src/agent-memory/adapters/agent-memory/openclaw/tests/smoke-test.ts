@@ -9,6 +9,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { execSync } from "node:child_process";
 import { McpStdioClient } from "../src/mcp-client.js";
 
@@ -47,6 +49,14 @@ const binaryPath = findBinary();
 // Skip entire suite if binary is not available.
 const skip = binaryPath === null;
 
+// The client forwards both as MEMORY_SESSION_ID / MEMORY_SESSION_DIR on every
+// spawn. A throwaway dir keeps the smoke test hermetic: the production default
+// /run/anolisa/sessions is root-owned 0700 via tmpfiles.d and need not exist
+// on a dev host. Only created when the suite will actually run.
+const sessionDir = skip
+  ? path.join(os.tmpdir(), "agent-memory-smoke-skipped")
+  : fs.mkdtempSync(path.join(os.tmpdir(), "agent-memory-smoke-"));
+
 describe("agent-memory MCP smoke test", { skip }, () => {
   const client = new McpStdioClient({
     binaryPath: binaryPath!,
@@ -54,6 +64,8 @@ describe("agent-memory MCP smoke test", { skip }, () => {
     profile: "advanced",
     maxReadBytes: 1_048_576,
     maxWriteBytes: 16_777_216,
+    sessionId: `ses_smoke_${process.pid}`,
+    sessionDir,
   });
 
   it("calls memory_search and returns a result", async () => {

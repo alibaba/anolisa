@@ -3,20 +3,27 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/asc-cli",
     "apps/asc-daemon",
+    "crates/daemon/asc-daemon-client",
     "crates/daemon/asc-daemon-core",
     "crates/daemon/asc-daemon-handler",
     "crates/daemon/asc-daemon-protocol",
     "crates/daemon/asc-daemon-service",
     "crates/foundation/asc-foundation-types",
+    "crates/integrations/asc-agentsight-client",
+    "crates/policy/adapters/asc-policy-adapter-agentsight",
     "crates/policy/asc-pap",
     "crates/policy/asc-pap-repository-memory",
+    "crates/policy/asc-pcp",
     "crates/policy/asc-policy-engine",
+    "crates/policy/asc-policy-target-contracts",
     "crates/policy/asc-policy-types",
+    "crates/policy/asc-policy-repository",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.12.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.88"
@@ -24,6 +31,9 @@ repository = "https://github.com/alibaba/anolisa"
 publish = false
 
 [workspace.dependencies]
+asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
+asc-daemon = { path = "apps/asc-daemon" }
+asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }
 asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
 asc-daemon-handler = { path = "crates/daemon/asc-daemon-handler" }
 asc-daemon-protocol = { path = "crates/daemon/asc-daemon-protocol" }
@@ -31,14 +41,21 @@ asc-daemon-service = { path = "crates/daemon/asc-daemon-service" }
 asc-foundation-types = { path = "crates/foundation/asc-foundation-types" }
 asc-pap = { path = "crates/policy/asc-pap" }
 asc-pap-repository-memory = { path = "crates/policy/asc-pap-repository-memory" }
+asc-pcp = { path = "crates/policy/asc-pcp" }
+asc-policy-adapter-agentsight = { path = "crates/policy/adapters/asc-policy-adapter-agentsight" }
 asc-policy-engine = { path = "crates/policy/asc-policy-engine" }
+asc-policy-target-contracts = { path = "crates/policy/asc-policy-target-contracts" }
+asc-policy-repository = { path = "crates/policy/asc-policy-repository" }
 asc-policy-types = { path = "crates/policy/asc-policy-types" }
+clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+socket2 = "0.6"
 sha2 = "0.10"
 thiserror = "2"
-time = { version = "=0.3.44", features = ["parsing"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]

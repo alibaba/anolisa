@@ -87,8 +87,7 @@
             "update": "keep_last_known_good"
           }
         }
-      },
-      "templateDigest": "sha256:415ea26707c498ed9595534845f579c51da046b635f6048d0cd9058b69d76a5b"
+      }
     },
     "policyV2": {
       "policyId": "${policy_id}",
@@ -160,8 +159,7 @@
             "update": "keep_last_known_good"
           }
         }
-      },
-      "templateDigest": "sha256:55de4b6bd96b575ec1a0fc943ad83a419a5747494c6a17d13ac125cb0f92bade"
+      }
     },
     "scopeV1": {
       "scopeId": "${scope_id}",
@@ -169,20 +167,7 @@
       "selector": {
         "kind": "pid",
         "pid": 4242
-      },
-      "template": {
-        "kind": "execution_domain",
-        "processMembership": "root_and_future_members",
-        "preserveAcrossExec": true,
-        "nestedExecutionDomains": "inherit",
-        "namespaceChange": "deny",
-        "lifetime": {
-          "activateAt": "binding_ready",
-          "expiresAt": null,
-          "endCondition": "execution_domain_drained"
-        }
-      },
-      "templateDigest": "sha256:3b92f8f65b2b55b387f3e527cf28c881906f3c2f63c41c9faa60469ad3947957"
+      }
     },
     "scopeV2": {
       "scopeId": "${scope_id}",
@@ -190,20 +175,7 @@
       "selector": {
         "kind": "cgroup_id",
         "cgroupId": 99
-      },
-      "template": {
-        "kind": "execution_domain",
-        "processMembership": "root_and_future_members",
-        "preserveAcrossExec": true,
-        "nestedExecutionDomains": "inherit",
-        "namespaceChange": "deny",
-        "lifetime": {
-          "activateAt": "binding_ready",
-          "expiresAt": null,
-          "endCondition": "execution_domain_drained"
-        }
-      },
-      "templateDigest": "sha256:ab6538c729550b2d86359c2de8d0788e85d167272fb469c5267a06024b8b22db"
+      }
     },
     "bindingV1": {
       "spec": {
@@ -231,10 +203,10 @@
       },
       "status": "PENDING_APPLY"
     },
-    "bindingV3": {
+    "bindingPendingDelete": {
       "spec": {
         "bindingId": "${binding_id}",
-        "bindingRevision": 3,
+        "bindingRevision": 2,
         "policy": {
           "$ref": "policyV2"
         },
@@ -516,7 +488,7 @@
       "expectedResponse": {
         "requestId": "${request_id}",
         "result": {
-          "$ref": "bindingV3"
+          "$ref": "bindingPendingDelete"
         }
       }
     },

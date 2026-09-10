@@ -5,13 +5,16 @@
 
 use super::super::result::AggregatedResult;
 use super::pair::HttpPair;
+#[path = "pending_response.rs"]
+mod pending_response;
 use super::response::AggregatedResponse;
 use crate::config::DEFAULT_CONNECTION_CAPACITY;
-use crate::parser::http::{ParsedRequest, ParsedResponse};
+use crate::parser::http::{HttpParser, ParsedHttpMessage, ParsedRequest, ParsedResponse};
 use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::sslsniff::SslEvent;
 use crate::utils::decompress::ZstdStreamDecoder;
 use lru::LruCache;
+use pending_response::PendingResponse;
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -63,6 +66,11 @@ pub(crate) enum ConnectionState {
         request: ParsedRequest,
         expected_body_len: Option<usize>,
         body_buffer: Vec<u8>,
+    },
+    /// HTTP response headers or body awaiting further SSL reads.
+    ResponsePending {
+        request: Option<ParsedRequest>,
+        assembly: PendingResponse,
     },
     /// SSE active - response headers received, body streaming
     SseActive {
@@ -187,6 +195,7 @@ impl HttpConnectionAggregator {
                     match evicted_state {
                         ConnectionState::Idle => "Idle",
                         ConnectionState::RequestPending { .. } => "RequestPending",
+                        ConnectionState::ResponsePending { .. } => "ResponsePending",
                         ConnectionState::RequestBodyPending { .. } => "RequestBodyPending",
                         ConnectionState::SseActive { .. } => "SseActive",
                     },
@@ -199,8 +208,8 @@ impl HttpConnectionAggregator {
     /// Evict discardable connections that have been idle for longer than
     /// `self.idle_timeout` or whose buffered body exceeds `self.max_body_bytes`.
     ///
-    /// In-flight request/response states are preserved here so callers can
-    /// drain and persist them instead of losing a manually interrupted stream.
+    /// In-flight calls retain request evidence for interruption snapshots and
+    /// can still complete if more response bytes arrive after the idle timeout.
     pub fn evict_idle_and_oversized(&mut self) {
         let now = Instant::now();
         let timeout = self.idle_timeout;
@@ -221,7 +230,20 @@ impl HttpConnectionAggregator {
 
         let mut evicted_idle = 0usize;
         for key in &to_evict {
-            if matches!(self.connections.peek(key), Some(ConnectionState::Idle)) {
+            if matches!(
+                self.connections.peek(key),
+                Some(
+                    ConnectionState::Idle | ConnectionState::ResponsePending { request: None, .. }
+                )
+            ) {
+                if matches!(
+                    self.connections.peek(key),
+                    Some(ConnectionState::ResponsePending { .. })
+                ) {
+                    log::warn!(
+                        "[HttpAggregator] discarded incomplete idle response | conn={key:?}"
+                    );
+                }
                 self.connections.pop(key);
                 self.sse_continuation_buffers.pop(key);
                 self.last_appended_src_ptr.pop(key);
@@ -520,6 +542,15 @@ impl HttpConnectionAggregator {
         let connection_id = ConnectionId::from_ssl_event(&request.source_event);
         self.idle_snapshotted.pop(&connection_id);
 
+        if matches!(
+            self.connections.peek(&connection_id),
+            Some(ConnectionState::ResponsePending { .. })
+        ) {
+            log::warn!(
+                "[HttpAggregator] new request replaced incomplete response | conn={connection_id:?}"
+            );
+        }
+
         // Check if body is complete by comparing with Content-Length
         let content_length: Option<usize> = request
             .headers
@@ -576,9 +607,21 @@ impl HttpConnectionAggregator {
 
     /// Process HTTP Response (from HTTP Parser)
     /// Returns completed HttpPair or SSE started signal
-    pub fn process_response(&mut self, response: ParsedResponse) -> Option<AggregatedResult> {
+    pub fn process_response(&mut self, mut response: ParsedResponse) -> Option<AggregatedResult> {
         let connection_id = ConnectionId::from_ssl_event(&response.source_event);
 
+        while (100..200).contains(&response.status_code) && response.status_code != 101 {
+            if response.body().is_empty() {
+                return None;
+            }
+            let mut event = (*response.source_event).clone();
+            event.buf = response.body().to_vec();
+            event.len = event.buf.len() as u32;
+            match HttpParser::new().parse(Rc::new(event.clone())) {
+                Ok(ParsedHttpMessage::Response(next)) => response = next,
+                _ => return self.process_response_bytes(&event),
+            }
+        }
         let state = self.connections.pop(&connection_id)?;
 
         match state {
@@ -629,8 +672,7 @@ impl HttpConnectionAggregator {
                     );
                     None
                 } else {
-                    let pair = HttpPair::from_parsed(connection_id, completed_request, response);
-                    Some(AggregatedResult::HttpComplete(pair))
+                    self.start_response(connection_id, Some(completed_request), response)
                 }
             }
             ConnectionState::RequestPending { request } => {
@@ -677,8 +719,7 @@ impl HttpConnectionAggregator {
                         connection_id,
                         response.status_code,
                     );
-                    let pair = HttpPair::from_parsed(connection_id, request, response);
-                    Some(AggregatedResult::HttpComplete(pair))
+                    self.start_response(connection_id, Some(request), response)
                 }
             }
             ConnectionState::Idle => {
@@ -723,14 +764,10 @@ impl HttpConnectionAggregator {
                         connection_id,
                         response.status_code
                     );
-                    let aggregated_response = AggregatedResponse::from_parsed(response);
-                    Some(AggregatedResult::ResponseOnly {
-                        connection_id,
-                        response: aggregated_response,
-                    })
+                    self.start_response(connection_id, None, response)
                 }
             }
-            ConnectionState::SseActive { .. } => {
+            ConnectionState::SseActive { .. } | ConnectionState::ResponsePending { .. } => {
                 log::trace!(
                     "[HttpAggregator] State transition: SseActive (unexpected response) | conn={connection_id:?}"
                 );
@@ -745,6 +782,9 @@ impl HttpConnectionAggregator {
     /// Process raw body data (continuation bytes for an in-progress request)
     pub fn process_raw_body_data(&mut self, ssl_event: &SslEvent) -> Option<AggregatedResult> {
         let connection_id = ConnectionId::from_ssl_event(ssl_event);
+        if self.accepts_response_bytes(ssl_event) || self.starts_response(ssl_event) {
+            return self.process_response_bytes(ssl_event);
+        }
         let state = self.connections.pop(&connection_id)?;
 
         match state {
@@ -1262,7 +1302,7 @@ mod tests {
             version: 11,
             status_code: 200,
             reason: "OK".to_string(),
-            headers: HashMap::new(),
+            headers: HashMap::from([("content-length".into(), "0".into())]),
             body_offset: 0,
             body_len: 0,
             source_event: event,
@@ -1433,8 +1473,8 @@ mod tests {
             version: 1,
             status_code: 200,
             reason: "OK".to_string(),
-            headers: HashMap::new(),
-            body_offset: 0,
+            headers: HashMap::from([("content-length".into(), "2".into())]),
+            body_offset: 38,
             body_len: 2,
             source_event: resp_event,
         };
@@ -1501,14 +1541,18 @@ mod tests {
         aggregator.process_raw_body_data(&cont);
 
         // Response arrives before Content-Length is satisfied → force-complete
-        let resp_event =
-            create_mock_ssl_event_with_buf(5678, 0x3000, b"HTTP/1.1 200 OK\r\n\r\n{}".to_vec(), 0);
+        let resp_event = create_mock_ssl_event_with_buf(
+            5678,
+            0x3000,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            0,
+        );
         let response = ParsedResponse {
             version: 1,
             status_code: 200,
             reason: "OK".to_string(),
-            headers: HashMap::new(),
-            body_offset: 0,
+            headers: HashMap::from([("content-length".into(), "2".into())]),
+            body_offset: 38,
             body_len: 2,
             source_event: resp_event,
         };

@@ -861,7 +861,7 @@ pub fn migrate_v3_symlinks(store: &mut StateStore, layout: &FsLayout) -> usize {
     migrated
 }
 
-/// Enrich owned-file rows written before permission and capability metadata
+/// Enrich owned-file rows written before config, permission, and capability metadata
 /// was persisted in v5 state.
 ///
 /// The exact installed component manifest is the authority: explicit file
@@ -881,6 +881,8 @@ pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -
 
     #[derive(Default)]
     struct FileContract {
+        // None distinguishes capability-only entries from exact layout mappings.
+        config: Option<bool>,
         mode: Option<String>,
         capabilities: Vec<String>,
     }
@@ -920,17 +922,12 @@ pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -
         };
 
         let mut contracts: HashMap<PathBuf, FileContract> = HashMap::new();
-        let mut directory_modes = Vec::new();
+        let mut directory_contracts = Vec::new();
         for spec in &manifest.install.files {
             if spec.kind == FileKind::Symlink {
                 continue;
             }
-            let Some(raw_mode) = spec.mode.as_deref() else {
-                continue;
-            };
-            let Some(mode) = normalized_mode(raw_mode) else {
-                continue;
-            };
+            let mode = spec.mode.as_deref().and_then(normalized_mode);
             let Some(template) = spec.install_path() else {
                 continue;
             };
@@ -947,9 +944,11 @@ pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -
                 .as_deref()
                 .is_some_and(|source| source.ends_with('/'))
             {
-                directory_modes.push((dest, mode));
+                directory_contracts.push((dest, mode, spec.kind == FileKind::Config));
             } else {
-                contracts.entry(dest).or_default().mode = Some(mode);
+                let contract = contracts.entry(dest).or_default();
+                contract.mode = mode;
+                contract.config = Some(spec.kind == FileKind::Config);
             }
         }
         for spec in &manifest.install.capabilities {
@@ -989,6 +988,10 @@ pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -
                 continue;
             }
             if let Some(contract) = contracts.get(&file.path) {
+                if contract.config == Some(true) && file.kind == anolisa_core::OwnedFileKind::File {
+                    file.kind = anolisa_core::OwnedFileKind::Config;
+                    hydrated += 1;
+                }
                 if file.mode.is_none()
                     && let Some(mode) = &contract.mode
                 {
@@ -1000,13 +1003,32 @@ pub fn hydrate_owned_file_contracts(store: &mut StateStore, layout: &FsLayout) -
                     hydrated += 1;
                 }
             }
-            if file.mode.is_none()
-                && let Some((_, mode)) = directory_modes
-                    .iter()
-                    .find(|(directory, _)| file.path.starts_with(directory))
-            {
-                file.mode = Some(mode.clone());
-                hydrated += 1;
+            let mut directory_matches = directory_contracts
+                .iter()
+                .filter(|(directory, _, _)| file.path.starts_with(directory));
+            if let Some((_, mode, config)) = directory_matches.next().filter(|_| {
+                contracts
+                    .get(&file.path)
+                    .is_none_or(|contract| contract.config.is_none())
+            }) {
+                // Legacy rows lack archive provenance. Only unanimous directory
+                // contracts can safely exempt content or reconstruct permissions.
+                let mut config = *config;
+                let mut mode = mode.as_ref();
+                for (_, other_mode, other_config) in directory_matches {
+                    config &= *other_config;
+                    if mode != other_mode.as_ref() {
+                        mode = None;
+                    }
+                }
+                if file.mode.is_none() && mode.is_some() {
+                    file.mode = mode.cloned();
+                    hydrated += 1;
+                }
+                if config && file.kind == anolisa_core::OwnedFileKind::File {
+                    file.kind = anolisa_core::OwnedFileKind::Config;
+                    hydrated += 1;
+                }
             }
         }
     }

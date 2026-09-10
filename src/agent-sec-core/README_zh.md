@@ -36,6 +36,13 @@
 形式发布）提供健康检查、SkillFS 通知和安全查询 RPC。Prompt Scanner 通过 Rust 扩展
 在进程内执行；daemon 不会预加载 Prompt Scanner 模型，也不提供扫描 RPC。
 
+## V2 Policy CLI
+
+源码构建的 Rust `agent-sec-cli` 经 `asc-daemon` 提供全部 15 条 Policy、Scope、Binding
+CRUD 命令。参阅[命令参考](../../docs/user-guide/zh/agent-security/agent-sec-core/policy-cli.md)
+和 [V2 workspace](v2/README.md)。当前 PAP 状态仅在进程内存中，Binding 受理不代表策略已生效。
+非 root 开发与 E2E 可通过 daemon 的 `--policy-admin-uid <UID>` 配置管理员；默认仍只授权 root。
+
 ## 安全防护架构
 
 ```

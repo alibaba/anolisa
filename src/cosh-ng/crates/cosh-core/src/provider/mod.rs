@@ -1,4 +1,5 @@
 pub mod mock;
+pub mod observe;
 pub mod openai_compat;
 pub mod profile;
 pub mod sysom;
@@ -299,6 +300,27 @@ pub type GenerateStream = Pin<Box<dyn Stream<Item = GenerateEvent> + Send>>;
 
 #[async_trait]
 pub trait ContentGenerator: Send + Sync {
+    /// Produce a stream of events for one LLM turn.
+    ///
+    /// # Observability contract
+    ///
+    /// An implementation that talks to a real network endpoint **must** report
+    /// its traffic through [`observe`], at three points:
+    ///
+    /// 1. [`observe::tap_request`] before sending the request body.
+    /// 2. [`observe::tap_response_head`] once the response status is known.
+    /// 3. [`observe::tap_response_chunk`] for every chunk received.
+    ///
+    /// This is not optional bookkeeping. cosh-ng terminates TLS in-process via
+    /// rustls, so an external observer can read nothing off the wire and these
+    /// calls are the only way LLM traffic becomes visible; a provider that skips
+    /// them silently contributes no token accounting, and nothing fails loudly to
+    /// say so. See `provider::observe` for why the taps exist and
+    /// `openai_compat`/`sysom` for the two existing call patterns.
+    ///
+    /// Implementations backed by fixtures rather than a network (such as
+    /// `MockProvider`) must **not** tap: doing so would report test data as real
+    /// traffic.
     async fn generate(
         &self,
         messages: &[Message],

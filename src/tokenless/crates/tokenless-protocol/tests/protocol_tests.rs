@@ -143,6 +143,26 @@ fn record_reduction_has_a_stable_wire_name() {
 }
 
 #[test]
+fn content_operations_have_stable_wire_names() {
+    for (operation, name) in [
+        (AppliedOperation::TabularCompaction, "tabular_compaction"),
+        (AppliedOperation::SearchPathSharing, "search_path_sharing"),
+        (
+            AppliedOperation::TabularRowReduction,
+            "tabular_row_reduction",
+        ),
+    ] {
+        assert_eq!(operation.wire_str(), name);
+        let serialized = serde_json::to_string(&operation).unwrap();
+        assert_eq!(serialized, format!("\"{name}\""));
+        assert_eq!(
+            serde_json::from_str::<AppliedOperation>(&serialized).unwrap(),
+            operation
+        );
+    }
+}
+
+#[test]
 fn operation_payloads_are_isolated_and_strict() {
     let mut value: serde_json::Value =
         serde_json::from_str(&requests()[0].to_json().unwrap()).unwrap();

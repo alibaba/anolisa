@@ -1532,8 +1532,6 @@ impl AgentSight {
     /// [`record_agent_crash_interruptions`], passing the decoded raw
     /// `task_struct->exit_code` so clean exits are not misreported.
     fn handle_agent_crash_detection(&mut self, pid: u32, agent_name: &str, raw_exit_code: u32) {
-        use crate::aggregator::ConnectionState;
-
         // Flush this pid's deferred GenAI events first: the exited process can
         // never produce the awaited session_id mapping, and the pending-calls
         // query below must see those already-answered calls as 'complete' so
@@ -1567,12 +1565,8 @@ impl AgentSight {
 
         // 2. Persist drained connections as pending calls
         for (conn_id, state) in &drained {
-            let (_state_name, request) = match state {
-                ConnectionState::RequestPending { request } => ("RequestPending", request),
-                ConnectionState::SseActive {
-                    request: Some(req), ..
-                } => ("SseActive", req),
-                _ => continue,
+            let Some(request) = state.pending_request() else {
+                continue;
             };
 
             if let Some(pending) = self.genai_builder.build_pending_from_request(
@@ -1628,20 +1622,15 @@ impl AgentSight {
             return;
         }
 
-        use crate::aggregator::ConnectionState;
         use crate::storage::sqlite::PendingOrigin;
 
         for (conn_id, state) in snapshots {
-            let (_state_name, request) = match state {
-                ConnectionState::RequestPending { request } => ("RequestPending", request),
-                ConnectionState::SseActive {
-                    request: Some(req), ..
-                } => ("SseActive", req),
-                _ => continue,
+            let Some(request) = state.pending_request() else {
+                continue;
             };
 
             if let Some(mut pending) = self.genai_builder.build_pending_from_request(
-                &request,
+                request,
                 &conn_id,
                 &self.response_mapper,
                 &self.pid_agent_name_cache,
@@ -1698,19 +1687,21 @@ impl AgentSight {
         )> = Vec::new();
 
         for (conn_id, state) in drained {
-            // Destructure to capture both request AND sse_events.
+            let Some(request) = state.pending_request().cloned() else {
+                continue;
+            };
+            // Preserve SSE enrichment while sharing request selection with other drains.
             // For compressed SSE streams that were still in progress when the
             // process died (sse_events empty, compressed_buffer non-empty),
             // decode the buffer here so token-usage data is not lost (#973).
-            let (_state_name, request, sse_events) = match state {
-                ConnectionState::RequestPending { request } => ("RequestPending", request, vec![]),
+            let sse_events = match state {
                 ConnectionState::SseActive {
-                    request: Some(req),
                     sse_events,
                     compressed_buffer: Some(buf),
                     content_encoding,
                     response_headers,
                     zstd_decoder,
+                    ..
                 } if sse_events.is_empty() && !buf.is_empty() => {
                     // fix(#973): decode the unfinalized compressed buffer
                     // so drain-path token extraction can proceed.
@@ -1718,22 +1709,16 @@ impl AgentSight {
                         crate::aggregator::HttpConnectionAggregator::is_chunked_response(
                             &response_headers,
                         );
-                    let decoded =
-                        crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
-                            &buf,
-                            content_encoding.as_deref(),
-                            is_chunked,
-                            zstd_decoder.as_deref(),
-                            &response_headers.source_event,
-                        );
-                    ("SseActive", req, decoded)
+                    crate::aggregator::HttpConnectionAggregator::decode_compressed_sse(
+                        &buf,
+                        content_encoding.as_deref(),
+                        is_chunked,
+                        zstd_decoder.as_deref(),
+                        &response_headers.source_event,
+                    )
                 }
-                ConnectionState::SseActive {
-                    request: Some(req),
-                    sse_events,
-                    ..
-                } => ("SseActive", req, sse_events),
-                _ => continue,
+                ConnectionState::SseActive { sse_events, .. } => sse_events,
+                _ => vec![],
             };
 
             if let Some(pending) = self.genai_builder.build_pending_from_request(
@@ -2674,6 +2659,9 @@ fn watermark_report(marks: ChannelWatermarks, pending_genai: usize) -> (bool, St
 }
 
 #[cfg(test)]
+mod response_pending_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -2769,7 +2757,7 @@ mod tests {
     }
 
     /// Generate a unique temp directory for each test invocation.
-    fn unique_tmp_dir(tag: &str) -> PathBuf {
+    pub(super) fn unique_tmp_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let pid = std::process::id();
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);

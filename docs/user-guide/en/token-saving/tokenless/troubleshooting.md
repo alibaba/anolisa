@@ -194,7 +194,7 @@ anolisa adapter enable tokenless openclaw \
   --allow-unsafe-plugin-install
 ```
 
-The npm/manual install script behaves differently: it always passes OpenClaw's `--dangerously-force-unsafe-install` because the plugin launches fixed `tokenless` and `rtk` child processes. Review the adapter and policy; do not enable it where that override is prohibited.
+The npm/manual install script differs in *how* it consents, not *whether*: it adds `--dangerously-force-unsafe-install` automatically whenever the installer still advertises that option as effective, because the plugin launches fixed `tokenless` and `rtk` child processes. Hosts that mark the option a deprecated no-op (OpenClaw 2026.6.5+) never receive it — there the safety scan is decided by `security.installPolicy`, so a rejection must be resolved by the operator relaxing that policy, not by re-running the script. Review the adapter and policy; do not enable it where that override is prohibited.
 
 ## A command is not rewritten
 

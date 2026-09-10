@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.24.1] — 2026-09-09
+
+### Fixed
+- LLM token recording via agentsight broke silently when the Rust compiler version changed after the TLS library switch: cosh-core now exports a named probe symbol that agentsight attaches to by name, so capture stays stable across compiler upgrades (#3156)
+
+## [0.24.0] — 2026-09-08
+
+### Added
+- In Enhanced Assisted Zsh sessions, slash-bearing, space-prefixed, and Han-leading path prompts are now routed to the Agent instead of falling through to the Zsh line editor, while ordinary shell input returns to Zsh unchanged once routing has been decided (#3004)
+- The Tab key is handed back to the Zsh line editor before later typed input is processed, so custom Tab widgets keep working; retained input is replayed automatically without requiring another keypress, and user traps, key bindings, history, and prompt status are preserved (#3004)
+- Default Bash Cosh sessions now include PATH additions from login profiles, so commands installed there are available in a new terminal; set `COSH_SHELL_BOOTSTRAP_PATH=0` to disable this startup check (#3050)
+
+### Fixed
+- Cookie headers assembled through braced shell parameter expansions (such as `${parameter#pattern}`) are now recognized as sensitive data and kept out of native shell history; ambiguous nested syntax is redacted as a whole command (#3004)
+- Zsh aliases and functions whose names contain slashes no longer get mistaken for missing filesystem paths and routed to the Agent; they continue to run in the shell (#3058)
+
 ## [0.23.0] — 2026-09-02
 
 ### Added

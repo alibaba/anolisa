@@ -23,6 +23,10 @@ Agent integration.
 Interactive programs, pipes, redirects, job control, bash/zsh configuration,
 and `Ctrl+C` continue to work in the foreground terminal.
 
+For isolated command execution, use `cosh --isolated -c '<command>'` with Bash.
+Isolated Bash login invocations are rejected with status 2 because Bash cannot
+suppress logout files. See [shell invocation options](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/interactive-mode.md).
+
 ## Install
 
 On Alibaba Cloud Linux 4, install cosh-ng from the RPM backend in system scope

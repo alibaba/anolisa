@@ -23,6 +23,7 @@ from agent_sec_cli.skill_ledger.config import (
     DEFAULT_SKILL_DIRS,
     _compact_skill_dirs,
     _deep_merge_config,
+    default_skill_dir_entries,
     deprecated_skill_dir_entries,
     effective_skill_dir_entries,
     is_covered,
@@ -152,7 +153,7 @@ class TestConfigMerge(unittest.TestCase):
     def test_effective_entries_include_defaults_by_default(self):
         config = {"enableDefaultSkillDirs": True, "managedSkillDirs": ["/opt/custom/*"]}
         entries = effective_skill_dir_entries(config)
-        self.assertEqual(entries, [*DEFAULT_SKILL_DIRS, "/opt/custom/*"])
+        self.assertEqual(entries, [*default_skill_dir_entries(), "/opt/custom/*"])
 
     def test_managed_resolver_excludes_default_skill_dirs(self):
         tmpdir = Path(tempfile.mkdtemp())
@@ -564,6 +565,49 @@ class TestIsCovered(unittest.TestCase):
 
         self.assertFalse(hidden.exists())
         self.assertTrue(is_managed_covered(hidden, config))
+
+
+def test_raw_user_defaults_follow_xdg_and_default_opt_out(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for data_home in [
+        None,
+        str(tmp_path / "XDG Data"),
+        "",
+        "relative",
+        "/x/./y",
+        "/x/../y",
+    ]:
+        if data_home is None:
+            monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        else:
+            monkeypatch.setenv("XDG_DATA_HOME", data_home)
+        root = (
+            Path(data_home)
+            if data_home == str(tmp_path / "XDG Data")
+            else home / ".local/share"
+        )
+        skill = root / "anolisa/skills/raw-probe"
+        skill.mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
+        assert skill in resolve_skill_dirs({"enableDefaultSkillDirs": True})
+        assert not resolve_skill_dirs({"enableDefaultSkillDirs": False})
+
+
+def test_raw_user_defaults_normalize_leading_slashes(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for count in (2, 3):
+        root = tmp_path / f"data-{count}"
+        monkeypatch.setenv("XDG_DATA_HOME", "/" * count + str(root).lstrip("/"))
+        config = {"enableDefaultSkillDirs": True}
+        assert not root.exists()
+        assert f"{root}/anolisa/skills/*" in effective_skill_dir_entries(config)
+        skill = root / "anolisa/skills/raw-probe"
+        assert skill not in resolve_skill_dirs(config)
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: raw-probe\n---\n")
+        assert skill in resolve_skill_dirs(config)
+        assert is_covered(skill, config)
 
 
 if __name__ == "__main__":

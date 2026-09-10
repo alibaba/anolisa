@@ -254,7 +254,7 @@ class SigningBackend(Protocol):
 
 不存在的目录会被静默忽略。
 
-**默认值**：内置六个默认目录（`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`、`/usr/local/share/anolisa/skills/*`），覆盖 OpenClaw、copilot-shell、Hermes、Qoder 用户级，以及 RPM 与 raw install 系统级 Skill。项目级 Qoder 目录不使用相对默认项，由 Qoder hook 根据事件中的绝对 `cwd` 运行时解析；显式 `scan` / `certify` 后再通过自动记忆写入绝对 `managedSkillDirs`。
+**默认值**：内置六个静态默认目录及 raw 用户目录 `$XDG_DATA_HOME/anolisa/skills/*`（未设置或非法时为 `~/.local/share/anolisa/skills/*`）。静态目录（`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`、`/usr/local/share/anolisa/skills/*`），覆盖 OpenClaw、copilot-shell、Hermes、Qoder 用户级，以及 RPM 与 raw install 系统级 Skill。项目级 Qoder 目录不使用相对默认项，由 Qoder hook 根据事件中的绝对 `cwd` 运行时解析；显式 `scan` / `certify` 后再通过自动记忆写入绝对 `managedSkillDirs`。
 
 **合并策略**：默认目录默认启用，由 `enableDefaultSkillDirs` 控制；`managedSkillDirs` 存放 skill-ledger 动态管理或用户额外配置的目录，不再兼容旧的 `skillDirs` 字段。解析时默认目录在前，`managedSkillDirs` 在后，自动去重。`scanners` 按 `name` 合并，用户配置可覆盖同名扫描器；`activationPolicy` 是全局运行态策略，当前只执行 `pass_warn_only` 行为，历史配置值 `pass_only` / `latest_scanned` 会兼容读取并归一化；`signingBackend` 当前会被读取到配置摘要中，但不会改变实际签名后端。
 
@@ -754,6 +754,7 @@ OpenClaw、Cosh（Legacy 与 NG）、Hermes、Codex 和 Qwen Code 遇到 CLI 不
 **Skill 目录定位（当前版本范围）**：两种 Cosh 输入协议共用同一目录边界，hook 仅覆盖 project → user → system 三类 Skill：
 - project：`<cwd>/.copilot-shell/skills/<skill>/`
 - user：`~/.copilot-shell/skills/<skill>/`
+- raw user：`$XDG_DATA_HOME/anolisa/skills/<skill>/`（默认 `~/.local/share/anolisa/skills/<skill>/`）
 - system（RPM）：`/usr/share/anolisa/skills/<skill>/`
 - system（raw install）：`/usr/local/share/anolisa/skills/<skill>/`
 

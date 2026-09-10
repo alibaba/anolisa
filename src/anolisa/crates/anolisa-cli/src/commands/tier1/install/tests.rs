@@ -694,6 +694,10 @@ sha256 = "{sha}"
 pub struct NoTxn;
 
 impl PackageTransaction for NoTxn {
+    fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        Ok(())
+    }
+
     fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         panic!("adopt-path test reached a delegated dnf install");
     }
@@ -760,6 +764,8 @@ pub struct FakeInstaller {
     pub available: Vec<PackageInfo>,
     /// `false` makes the dnf install transaction fail.
     pub install_succeeds: bool,
+    pub preflight_failure_on_call: Option<usize>,
+    pub preflight_calls: Cell<usize>,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
     /// Package spec(s) each `install` call received, joined per call, so tests
@@ -795,6 +801,8 @@ impl FakeInstaller {
             origin: None,
             available: Vec::new(),
             install_succeeds: true,
+            preflight_failure_on_call: None,
+            preflight_calls: Cell::new(0),
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
             install_specs: RefCell::new(Vec::new()),
@@ -988,6 +996,23 @@ impl PackageQuery for FakeInstaller {
 }
 
 impl PackageTransaction for FakeInstaller {
+    fn check_install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.preflight_calls.set(self.preflight_calls.get() + 1);
+        assert_eq!(
+            packages,
+            &[self.expected_install.as_deref().unwrap_or(&self.package)]
+        );
+        if self.preflight_failure_on_call == Some(self.preflight_calls.get()) {
+            return Err(PackageTransactionError::TransactionFailed {
+                command: "dnf".to_string(),
+                operation: "install preflight".to_string(),
+                code: Some(1),
+                stderr: "installed cosh-ng conflicts with copilot-shell".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
         self.install_specs.borrow_mut().push(packages.join(","));

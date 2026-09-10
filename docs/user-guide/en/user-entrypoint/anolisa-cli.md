@@ -60,6 +60,20 @@ An installation in the other scope does not make the selected scope
 "already installed." Reinstalling or changing an existing record is handled
 by lifecycle planning rather than silently overwriting it.
 
+RPM installs, including `--dry-run` and merged `--all` plans, ask DNF to
+resolve dependencies and package conflicts before creating recovery journals.
+The check uses the same repositories and version pins as the install. It may
+refresh repository metadata but does not download packages or change rpmdb.
+DNF 4 requires root for this check:
+
+```bash
+sudo anolisa --install-mode system --dry-run install cosh --backend rpm
+```
+
+A conflict fails the command without leaving a pending operation. Resolve the
+reported conflict before retrying. A successful check does not guarantee that
+a later download, scriptlet, or transaction will succeed.
+
 ### uninstall
 
 Remove one installation from the selected scope:
@@ -105,6 +119,13 @@ In a user view with records in both scopes, the user record is active and the
 system record remains visible as shadowed state. A system-mode view reads only
 the system root; it does not enumerate other users' state.
 
+Untracked RPM observations use the same package resolver as installation.
+An index mapping takes precedence over historical package aliases and
+capabilities: an old cosh-ng RPM providing `anolisa-component(cosh)` is shown
+under cosh-ng, while cosh still resolves to copilot-shell. `action=install`
+identifies a lifecycle action; it is not a native dependency check. Use the
+RPM install dry-run to check whether the packages can coexist.
+
 ### doctor
 
 Run read-only health, dependency, service, state, and recovery-journal checks:
@@ -121,6 +142,16 @@ system root. It qualifies system repair suggestions with
 `sudo anolisa --install-mode system` when the current invocation cannot mutate
 that root. `--fix` is reserved in this release; follow the reported `fix_plan`
 explicitly.
+
+For raw installations, `status` and `doctor` allow content edits to files
+declared as `type = "config"`. Missing files, unsafe paths, unexpected symlinks,
+and permission or capability drift still fail checks; ordinary data and
+executable files still undergo SHA-256 verification. Older installation records
+recover unambiguous config declarations from their saved component manifest in
+memory. If overlapping directory declarations mix config and immutable kinds,
+legacy files retain digest checking because their source mapping is unknown.
+Back up edited configs and reinstall the component to record accurate kinds.
+Diagnostics do not rewrite state.
 
 ### restart
 
@@ -166,6 +197,11 @@ interrupted journal. `forget` removes only the record in the selected scope and
 never performs package or owned-file removal; a user-scoped forget cannot
 delete a visible system record.
 
+If an operation is pending, `forget` directs you to `repair`, even when an
+install failed before creating an installation record. Repair reconciles the
+journal with rpmdb; forgetting must not discard evidence of a transaction
+that may already have changed the system.
+
 ### adapter
 
 Manage component adapters:
@@ -176,6 +212,12 @@ anolisa adapter enable <component> [framework]
 anolisa adapter disable <component> [framework]
 anolisa adapter status [component]
 ```
+
+For OpenClaw plugins, executing `adapter enable` accepts the plugin's declared
+capabilities. ANOLISA adds `--accept-capabilities` only when the installer's
+help advertises it, including in the dry-run plan. Capability consent does
+not authorize `--allow-unsafe-plugin-install`; a consent rejection is reported
+separately from a plugin-safety rejection.
 
 ### logs and bug reports
 

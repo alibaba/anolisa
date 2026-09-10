@@ -1,15 +1,17 @@
-//! **TEMPORARY IMPLEMENTATION -- NOT PART OF THE REVIEW SCOPE.**
+//! **TEMPORARY PROCESS-LOCAL IMPLEMENTATION -- NO DURABLE PERSISTENCE.**
 //!
 //! This process-local adapter exists only to make the PAP daemon request path
 //! runnable before the durable Repository work package lands. Its internal
-//! implementation is disposable, must not be treated as a production storage
-//! design, and does not require review in the current PAP daemon-handler change.
+//! implementation is replaceable and must not be treated as a durable storage
+//! design. Reconciliation transactions are reviewed/tested as logical atomicity.
 //! All state is lost when the daemon restarts.
 
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
+
+mod binding_state;
 
 use asc_foundation_types::{ResourceId, Revision};
 use asc_pap::{Page, PapError, PapRepository, PolicyRevisionState, ScopeRevisionState};
@@ -34,6 +36,15 @@ struct State {
     scope_heads: BTreeMap<String, Revision>,
     scopes: BTreeMap<String, PreparedScope>,
     bindings: BTreeMap<String, BindingView>,
+    binding_states: BTreeMap<String, BindingStateData>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct BindingStateData {
+    runtime: asc_policy_repository::RuntimeState,
+    deployments: Vec<asc_policy_repository::Deployment>,
+    // Latest atomic write receipt, independent of reconciliation decisions.
+    last_write: Option<asc_policy_repository::BindingStateWrite>,
 }
 
 impl ProcessLocalPapRepository {
@@ -179,27 +190,52 @@ impl PapRepository for ProcessLocalPapRepository {
             .ok_or(PapError::Persistence)
     }
 
-    fn update_binding(&self, binding: &BindingView) -> Result<BindingView, PapError> {
+    fn update_binding(
+        &self,
+        expected: Option<&BindingView>,
+        binding: &BindingView,
+    ) -> Result<BindingView, PapError> {
         if !matches!(
             binding.status,
             BindingStatus::PendingApply | BindingStatus::PendingDelete
         ) {
             return Err(PapError::Conflict);
         }
-
         let mut state = self.lock()?;
         let id = binding.spec.binding_id.as_str().to_owned();
-        if let Some(current) = state.bindings.get(&id) {
+        let current = state.bindings.get(&id);
+        if expected.is_some() && current.is_none() {
+            return Err(PapError::NotFound);
+        }
+        if current != expected {
+            return Err(PapError::Conflict);
+        }
+        let mut same_spec = false;
+        if let Some(current) = current {
             if current == binding {
                 return Ok(current.clone());
             }
-            if current.status.is_reconciling() {
+            same_spec = current.spec.policy == binding.spec.policy
+                && current.spec.scope == binding.spec.scope;
+            let permitted = if binding.status == BindingStatus::PendingDelete {
+                same_spec && current.status.request_delete() == binding.status
+            } else if same_spec {
+                current.status.request_apply().ok() == Some(binding.status)
+            } else {
+                current.status.request_apply().is_ok() && current.status != BindingStatus::Applying
+            };
+            if !permitted {
                 return Err(PapError::OperationInProgress);
             }
-            if !is_next_revision(
-                Some(current.spec.binding_revision),
-                binding.spec.binding_revision,
-            ) {
+            let valid_revision = if same_spec {
+                current.spec.binding_revision == binding.spec.binding_revision
+            } else {
+                is_next_revision(
+                    Some(current.spec.binding_revision),
+                    binding.spec.binding_revision,
+                )
+            };
+            if !valid_revision {
                 return Err(PapError::Conflict);
             }
         } else if binding.spec.binding_revision.get() != 1
@@ -207,30 +243,19 @@ impl PapRepository for ProcessLocalPapRepository {
         {
             return Err(PapError::Conflict);
         }
+        if let Some(record) = state.binding_states.get_mut(&id) {
+            let prepared = if same_spec {
+                record.runtime.prepared.take()
+            } else {
+                None
+            };
+            record.runtime = asc_policy_repository::RuntimeState {
+                prepared,
+                ..Default::default()
+            };
+        }
         state.bindings.insert(id, binding.clone());
         Ok(binding.clone())
-    }
-
-    fn update_binding_status(
-        &self,
-        id: &ResourceId,
-        binding_revision: Revision,
-        expected_status: BindingStatus,
-        next_status: BindingStatus,
-    ) -> Result<BindingStatus, PapError> {
-        let mut state = self.lock()?;
-        let binding = state
-            .bindings
-            .get_mut(id.as_str())
-            .ok_or(PapError::NotFound)?;
-        if binding.spec.binding_revision != binding_revision || binding.status != expected_status {
-            return Err(PapError::Conflict);
-        }
-        expected_status
-            .validate_successor(next_status)
-            .map_err(|_| PapError::Conflict)?;
-        binding.status = next_status;
-        Ok(next_status)
     }
 
     fn get_binding(&self, id: &ResourceId) -> Result<BindingView, PapError> {

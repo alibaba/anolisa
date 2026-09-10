@@ -62,11 +62,11 @@ pub fn detect(content: &str) -> ContentType {
     if build_log::is_build_log(content) {
         return ContentType::BuildLog;
     }
-    if tabular::is_tabular(scan) {
-        return ContentType::Tabular;
-    }
     if source_code::is_source_code(scan) {
         return ContentType::SourceCode;
+    }
+    if tabular::is_tabular(content) {
+        return ContentType::Tabular;
     }
     ContentType::PlainText
 }

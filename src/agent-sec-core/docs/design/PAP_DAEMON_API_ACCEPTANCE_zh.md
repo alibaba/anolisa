@@ -47,6 +47,10 @@ V1 九个 daemon method 的替代或退役。
   public error contract，不暴露内部 persistence/compiler error。
 - shared V1 request envelope 的 `trace_context`、`caller`、`timeout_ms` 和未知顶层字段兼容性
   尚未在此工作包中实现，因此本记录不声明 V1 envelope compatibility 已完成。
+- PAP-CR-007 删除未使用的旧 Scope 读取格式：显式 `legacy_execution_domain`、缺失或
+  null selector 均不再解码为 PreparedScope（包括 Binding 内嵌 Scope）。PID/cgroup
+  格式不变；旧 kind 在 Create/Update 请求上均返回 `invalid_request`，错误文案改为
+  unknown variant。其它既有 legacy 字段读取兼容不随本次变更删除。
 
 ## 4. Internal contract change record
 
@@ -56,6 +60,12 @@ V1 九个 daemon method 的替代或退役。
 | PAP-CR-002 | `DaemonError` 在构造和 decode 时统一限制为 256 UTF-8 bytes | 防止任一 handler 绕过公共 response bound；超长 caller-authored decode error 使用稳定通用消息，不回显输入 |
 | PAP-CR-003 | `pid`、`cgroupId` selector validation path 投影为 `InvalidArgument` | 这些路径来自 authored selector，不是 canonical/internal state |
 | PAP-CR-004 | serialized CRUD scenario 要求所有 dispatch request ID 互不相同 | 冻结每个请求生成 fresh UUID 的 correlation contract |
+| PAP-CR-005 | Binding revision 仅随 spec 变化；Delete 不可撤销；清理完成后移除记录 | 2026-09-08 V2 contract correction；Delete/失败重试同版，Applying 可受理 Delete，旧 ID 不允许 Update 重建；方法和 DTO 不变 |
+| PAP-CR-006 | Repository 请求写入增加完整 expected Binding 条件 | 区分创建与条件更新，关闭 service-read/worker-claim/物理删除间的竞争；prepared 与部署记录按 spec 保留 |
+| PAP-CR-007 | 移除 LegacyExecutionDomain 及缺失 selector 的读取回退 | 当前无旧 Scope 数据；ScopeSelector 仅含 pid/cgroup_id，PreparedScope 的 selector 必填；不预留未使用的兼容格式 |
+| PAP-CR-008 | 移除 ScopeTemplate、附属枚举与 Scope templateDigest | 2026-09-08 用户确认的 V2 简化；PreparedScope 只含 scopeId/revision/selector，PAP 不生成固定模板或摘要；Policy 同名字段不变 |
+| PAP-CR-009 | 移除 PreparedPolicy.templateDigest 和 Binding.executionDomainId 读取兼容 | 前者仅生成/存储/校验格式，未用于去重或 CAS；后者读取后即丢弃。按用户确认删除，旧字段（含 null）拒绝；Policy authored template、IR payloadDigest 及 retired 兼容保留 |
+| PAP-CR-010 | 移除 Policy/Scope retired 读取兼容和 PolicyEnvelope.payloadDigest | 2026-09-08 用户确认：retired 读取后即丢弃，payloadDigest 始终为 None 且无消费者。取消 CR-009 暂留的这三项，Policy/Scope 直接派生 Deserialize，已删除字段含 null 均拒绝 |
 
 若未来需要阻止 rename-out，必须先为 source/destination namespace 语义建立 IR 和直接 Adapter
 conformance；不能只把所有 `NamespaceMutation` 无差别加入当前 rule。
@@ -74,6 +84,10 @@ conformance；不能只把所有 `NamespaceMutation` 无差别加入当前 rule�
 | PAPAPI-008 | full workspace regression | `cargo test --workspace --locked` | PASS |
 | PAPAPI-009 | lint、format 和 API docs | Clippy、rustfmt、Rustdoc commands below | PASS |
 | PAPAPI-010 | durable state、target enforcement 和 packaging rollout | 不在本工作包范围 | NOT RUN |
+| PAPAPI-011 | Scope selector 必填且仅支持 pid/cgroup_id | `prepared_binding_contract.rs::scope_requires_an_explicit_supported_selector_including_inside_bindings`；`pap_contract.rs`；invalid-requests fixture 经真实 UDS 验证 Create/Update 旧 kind 错误 | PASS |
+| PAPAPI-012 | Scope 精简字段及直接消费者 | `scope_contains_only_identity_revision_and_selector_and_rejects_removed_fields`；PAP CRUD/真实 UDS 完整响应；Adapter 固定输出与 Reconciler 完整 fixtures | PASS |
+| PAPAPI-013 | Policy 摘要与 Binding 废弃身份字段清理 | `policy_round_trips_without_template_digest_and_rejects_the_removed_field`、`removed_legacy_fields_and_unknown_fields_are_rejected`；完整 PAP/UDS/Adapter/Reconciler 回归 | PASS |
+| PAPAPI-014 | 删除 retired/payloadDigest 后严格解码 | `removed_legacy_fields_and_unknown_fields_are_rejected` 和 `canonical_policy_rejects_removed_payload_digest_at_every_embedding_boundary`；独立模型、Policy/Binding 嵌套边界及完整 golden round-trip | PASS |
 
 可重复执行命令：
 
@@ -97,10 +111,41 @@ git diff --check
 - binary fixture 只能证明当前 host 身份、protocol 注册、permission 和 signal cleanup；不能
   替代安装后 systemd/container/Kubernetes 或真实 target enforcement。
 - memory Repository 在进程重启后丢失全部状态，不得作为 durable acceptance evidence。
+- 2026-09-08 生命周期修正：`pap-crud-e2e.json` 的删除响应改为同 revision 的
+  `bindingPendingDelete`；真实 UDS 验证 Applying Delete、禁止取消删除与同版重试。
+  `asc-pcp/tests/pap_lifecycle.rs` 验证真实 PAP + memory + 同步核心的清理、NotFound、
+  LIST 移除、新 ID 创建及最大 revision。目标 Client 为脚本替身，不代表 daemon 已接线。
+- 2026-09-08 Scope 清理：在 `5a6a3460` 加本次改动上运行 V2 workspace test、Clippy、
+  fmt、Rustdoc 和 diff 检查；覆盖 PAP、协议/UDS、Adapter 与 Reconciler 直接消费者。
+  此验证不包含 durable Scope 数据迁移或真实 PEP 执行。
+- PAP-CR-008 同步更新完整 Scope/Binding 与 Reconciler 输入输出快照，仅移除 Scope
+  的 template/templateDigest。显式旧字段在反序列化边界拒绝；不提供静默兼容读取。
+  Adapter 移除不再可表达的 lifetime 检查，但既有 PID→process_tree 翻译、DSL 和
+  Client 请求 golden 保持不变。Scope 更新幂等性直接比较 selector；其 revision/CAS
+  不变。移除仅为 ScopeTemplate 时间校验引入的 time 依赖。
+- 随后 PAP-CR-009 移除 Policy templateDigest 的生成、格式检查和完整快照字段；PAP
+  不再需要 sha2，serde_json 仅保留为测试依赖。Binding 改用直接派生 Deserialize，
+  不再为丢弃 executionDomainId 保留 Wire 类型。现有 Policy 模板比较、revision/CAS、
+  Adapter 输出、Client prepared/request golden 不变；无 durable-state 迁移声明。
 
 ## 7. Rollback
+
+2026-09-08 PAP-CR-010 验证基线：`f15431ee` 加本次改动；V2 workspace test、Clippy、
+fmt、Rustdoc 和 diff 检查通过。正常 golden 本来不含 retired/payloadDigest，因此
+无需改写；Compiler、PAP、Adapter、Client 和 Reconciler 的直接消费者回归继续通过。
+新增测试拒绝 retired 的 true/false/null，以及 payloadDigest 的有效摘要字符串/null。
+仅移除字段和解码兼容，不删除其它用途的 Digest 类型，不代表 durable migration 或
+真实 PEP 验证。回退本项需同步恢复模型字段、Wire 解码、编译器 None 初始化及测试；
+既有正常输出没有变化。
 
 回滚本工作包时撤销对应 Rust commit，并从 workspace/composition root 移除新增 crate 和 PAP
 dispatcher registration。当前 Repository 不写 durable state，因此没有 schema/state downgrade；
 停止进程后其状态即消失。若只回滚 contract correction，不得仅恢复 rename-out 文案：必须连同
 支持该语义的 IR、compiler、Adapter fixture 和版本化兼容记录一起交付。
+仅回退 PAP-CR-007 时，必须一起恢复 Scope enum/读取回退、PAP/协议校验及对应错误
+fixtures；不能只恢复 enum 而让旧 selector 通过 authored 请求。当前无旧 Scope 数据，
+无需持久化迁移。
+回退 PAP-CR-008 时应同步恢复 Scope 数据模型、PAP 生成逻辑、Adapter 检查和完整
+fixtures；不能单独恢复模板输入而忽略其中的约束。此精简不涉及 Policy 模板/摘要。
+PAP-CR-009 为后续独立清理；回退时需一起恢复 Policy 摘要字段与 PAP 生成逻辑、依赖和
+fixtures，以及 Binding 旧字段读取实现。不能只恢复必填字段而使 PAP 返回值缺失它。

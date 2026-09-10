@@ -71,6 +71,15 @@ impl<'a> DelegatedProvider<'a> {
         }
     }
 
+    /// Check an install without applying the native transaction.
+    ///
+    /// # Errors
+    /// Propagates the native solver or tooling failure.
+    pub fn check_install(&self, packages: &[&str]) -> Result<(), ProviderError> {
+        self.txn.check_install(packages)?;
+        Ok(())
+    }
+
     /// Run one native transaction verb over `packages`.
     ///
     /// The whole slice goes to the backend as a single native transaction:
@@ -201,6 +210,10 @@ pub(crate) mod test_fakes {
     }
 
     impl PackageTransaction for FakeTxn {
+        fn check_install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+            panic!("this path must not preflight an install")
+        }
+
         fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
             self.run("install", packages)
         }

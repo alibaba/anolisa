@@ -39,6 +39,9 @@ anolisa update all
 | `adopt` | Record an existing system RPM as adopted without default removal authority |
 | `forget` | Drop state record without package operations |
 
+`status` and `doctor` allow content edits to raw-installed `type = "config"`
+files while continuing to check their presence, permissions, and path safety.
+
 ### Tier 2 — Management
 
 | Command | Description |
@@ -51,6 +54,10 @@ anolisa update all
 | `register` | Join / leave Agentic OS Co-Build Program |
 | `env` | Show environment detection results |
 | `bug` | Generate a bug report |
+
+Running `anolisa adapter enable <component> openclaw` accepts the plugin's
+declared capabilities when the host supports capability consent. This does
+not authorize an unsafe-install bypass.
 
 ## Install Modes
 
@@ -79,6 +86,9 @@ installation even when the same component is already installed system-wide.
 
 See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
 for command forms, scope behavior, and recovery workflows.
+
+RPM install plans run DNF conflict checks before creating a recovery journal.
+DNF 4 requires root even for this check; use `sudo` with RPM `--dry-run`.
 
 ## Architecture
 

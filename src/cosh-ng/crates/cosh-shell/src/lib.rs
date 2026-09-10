@@ -3,6 +3,9 @@ pub mod adapter;
 #[path = "agent/public.rs"]
 pub mod agent;
 mod command;
+#[cfg(test)]
+#[path = "tools/command_risk_quoted_tests.rs"]
+mod command_risk_quoted_tests;
 #[allow(dead_code, unused_imports)]
 mod config;
 #[allow(dead_code, unused_imports)]

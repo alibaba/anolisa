@@ -151,6 +151,43 @@ impl Http2StreamState {
     }
 }
 
+/// Whether a response DATA payload carries the SSE terminator that ends the
+/// body, letting the stream be closed without waiting for END_STREAM.
+///
+/// A stream normally closes on the END_STREAM flag, but that flag can never
+/// arrive: a client which recognises `[DONE]` as the end of the answer may exit
+/// before reading the server's final, empty DATA frame. The stream then sits in
+/// `ReceivingResponse` forever and no token usage is ever extracted from it —
+/// the HTTP/1.1 path already avoids this by synthesising a done marker from the
+/// chunked terminator (see `parser::unified`), and this is the HTTP/2 equivalent.
+///
+/// Only the OpenAI-style literal terminator counts, deliberately:
+///
+/// - It is unambiguous, and by protocol no body bytes follow it, so closing here
+///   yields the same aggregated frames a later END_STREAM would have produced.
+/// - Anthropic (`message_stop`) and the DashScope native protocol have their own
+///   terminators, but those streams close on END_STREAM today. Recognising them
+///   here would change when an already-working stream completes, for no gain.
+fn response_sse_stream_ended(payload: &[u8]) -> bool {
+    // Both spacings occur in the wild; `data:[DONE]` is legal SSE.
+    const TERMINATORS: [&[u8]; 4] = [
+        b"data: [DONE]",
+        b"data:[DONE]",
+        b"data: [END]",
+        b"data:[END]",
+    ];
+    // Match only at SSE field boundaries: the terminator must sit at the very
+    // start of the payload or be preceded by a newline. A bare substring search
+    // would false-positive on model output that happens to contain the literal
+    // text (e.g. a JSON delta whose `content` is `"data: [DONE]"`).
+    TERMINATORS.iter().any(|t| {
+        payload
+            .windows(t.len())
+            .enumerate()
+            .any(|(i, w)| w == *t && (i == 0 || payload[i - 1] == b'\n'))
+    })
+}
+
 /// A complete or partial HTTP/2 stream
 #[derive(Debug, Clone)]
 pub struct Http2Stream {
@@ -942,8 +979,9 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
+                        let sse_ended = response_sse_stream_ended(frame.payload());
                         response_data_frames.push(frame.clone());
-                        if frame.has_end_stream() {
+                        if frame.has_end_stream() || sse_ended {
                             // Response is complete
                             let mut stream = Http2Stream::new(
                                 *stream_id,
@@ -1007,8 +1045,9 @@ impl Http2StreamAggregator {
                             return Http2StreamState::Complete(stream);
                         }
                     } else if frame.is_data() {
+                        let sse_ended = response_sse_stream_ended(frame.payload());
                         response_data_frames.push(frame.clone());
-                        if frame.has_end_stream() {
+                        if frame.has_end_stream() || sse_ended {
                             // Response is complete
                             let mut stream = Http2Stream::new(
                                 *stream_id,
@@ -1346,6 +1385,141 @@ mod tests {
         ));
 
         assert_eq!(stream.first_output_timestamp_ns(), None);
+    }
+
+    // ─── SSE terminator completion (HTTP/2 counterpart of the chunked
+    // synthetic done marker in parser::unified) ─────────────────────────────
+
+    /// Drive one request/response exchange and return the completed streams.
+    ///
+    /// `resp_data` are response DATA payloads with their END_STREAM flag, applied
+    /// in order, so a test can withhold END_STREAM the way a client that exits on
+    /// `[DONE]` does.
+    fn run_exchange(resp_data: &[(&[u8], bool)]) -> Vec<Http2Stream> {
+        let mut aggregator = Http2StreamAggregator::new();
+
+        // Request: HEADERS with END_STREAM, so the stream reaches RequestComplete.
+        let completed = aggregator.process_frames(vec![create_test_frame(
+            1,
+            1,
+            0x05,
+            b":method: POST\n:path: /v1/chat/completions".to_vec(),
+            create_test_event(1234, 0x1000, 1, 1000),
+        )]);
+        assert!(completed.is_empty(), "response has not started yet");
+
+        // Response HEADERS without END_STREAM: a body follows.
+        let mut completed = aggregator.process_frames(vec![create_test_frame(
+            1,
+            1,
+            0x04,
+            b":status: 200".to_vec(),
+            create_test_event(1234, 0x1000, 0, 2000),
+        )]);
+
+        for (i, (payload, end_stream)) in resp_data.iter().enumerate() {
+            let flags = if *end_stream { 0x01 } else { 0x00 };
+            completed.extend(aggregator.process_frames(vec![create_test_frame(
+                1,
+                0,
+                flags,
+                payload.to_vec(),
+                create_test_event(1234, 0x1000, 0, 3000 + i as u64),
+            )]));
+        }
+        completed
+    }
+
+    #[test]
+    fn sse_done_completes_stream_without_end_stream() {
+        // The regression this exists for: the client stops reading at `[DONE]`, so
+        // END_STREAM never arrives and the stream used to stall forever.
+        let completed = run_exchange(&[
+            (
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                false,
+            ),
+            (b"data: [DONE]\n\n", false),
+        ]);
+        assert_eq!(completed.len(), 1, "[DONE] must close the stream");
+        let stream = &completed[0];
+        assert!(stream.response_complete);
+        assert_eq!(
+            stream.response_data_frames.len(),
+            2,
+            "the terminator frame is part of the body, not dropped"
+        );
+    }
+
+    #[test]
+    fn end_stream_still_completes_without_sse_terminator() {
+        // Guards the pre-existing path: a plain JSON response has no `[DONE]` and
+        // must still complete on END_STREAM alone, at exactly that frame.
+        let completed = run_exchange(&[
+            (b"{\"usage\":{\"prompt_tokens\":7", false),
+            (b",\"completion_tokens\":3}}", true),
+        ]);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].response_data_frames.len(), 2);
+    }
+
+    #[test]
+    fn body_without_terminator_stays_open() {
+        // Neither END_STREAM nor `[DONE]`: the stream must keep collecting rather
+        // than be closed on a guess.
+        let completed = run_exchange(&[
+            (b"data: {\"delta\":\"a\"}\n\n", false),
+            (b"data: {\"delta\":\"b\"}\n\n", false),
+        ]);
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn anthropic_terminator_is_left_to_end_stream() {
+        // Anthropic streams close on END_STREAM today. `message_stop` is
+        // deliberately not treated as a terminator here, so their completion point
+        // is unchanged: the first two frames must not complete the stream.
+        let completed = run_exchange(&[
+            (
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                false,
+            ),
+            (b"data: {\"type\":\"message_stop\"}\n\n", false),
+            (b"", true),
+        ]);
+        assert_eq!(
+            completed.len(),
+            1,
+            "completes on END_STREAM, not on message_stop"
+        );
+        assert_eq!(
+            completed[0].response_data_frames.len(),
+            3,
+            "all three frames were collected before END_STREAM closed it"
+        );
+    }
+
+    #[test]
+    fn sse_terminator_detection_boundaries() {
+        assert!(response_sse_stream_ended(b"data: [DONE]\n\n"));
+        assert!(response_sse_stream_ended(b"data:[DONE]\n\n"));
+        assert!(response_sse_stream_ended(b"data: [END]\n\n"));
+        // Embedded in a multi-event frame, not just at the end.
+        assert!(response_sse_stream_ended(
+            b"data: {\"a\":1}\n\ndata: [DONE]\n\n"
+        ));
+        // A payload merely mentioning the token is not a terminator.
+        assert!(!response_sse_stream_ended(
+            b"data: {\"text\":\"the [DONE] marker\"}\n\n"
+        ));
+        assert!(!response_sse_stream_ended(b"data: {\"delta\":\"x\"}\n\n"));
+        assert!(!response_sse_stream_ended(b""));
+        // Model output whose content is the literal terminator text must NOT
+        // close the stream — the `data: [DONE]` sits mid-JSON, not at a line
+        // start. This is the false-positive the line-boundary check prevents.
+        assert!(!response_sse_stream_ended(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"data: [DONE]\"}}]}\n\n"
+        ));
     }
 
     #[test]

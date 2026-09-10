@@ -24,13 +24,14 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+csv = "1.4"
 regex = "1.10"
 thiserror = "2.0"
 clap = { version = "4", features = ["derive"] }

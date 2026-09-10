@@ -612,7 +612,7 @@ request 中非 null `passphrase` 必须写成 `[REDACTED]`。event result key �
 
 环境变量和路径进入 compatibility inventory；V2 不自动保留 HOME/XDG/per-user 布局。
 **[TARGET V2]** 由 capability/config contract 统一解析领域配置，asc-daemon composition
-root 注入依赖；asc-cli 只处理终端交互和 RPC DTO，不读取领域状态或复制默认值。
+root 注入依赖；agent-sec-cli 只处理终端交互和 RPC DTO，不读取领域状态或复制默认值。
 
 ## 12. V1/Rust action conformance
 
@@ -636,7 +636,7 @@ root 注入依赖；asc-cli 只处理终端交互和 RPC DTO，不读取领域�
 | --- | --- |
 | SAR-008 | Python oracle 与 Rust CapabilityExecutor/action-runtime 比较完整 ActionResult、event 和副作用；daemon compatibility adapter 只比较 V1 projection |
 | SAR-009 | 八个 action handler 候选的 method/params、authorization、未知字段、错误层级和失败 projection 经 protocol Definition Review 后与本参考一致 |
-| SAR-010 | asc-cli 不通过 PyO3/local backend 执行 action；daemon unavailable 返回稳定错误 |
+| SAR-010 | agent-sec-cli 不通过 PyO3/local backend 执行 action；daemon unavailable 返回稳定错误 |
 
 各 action 的最低 fixture：
 

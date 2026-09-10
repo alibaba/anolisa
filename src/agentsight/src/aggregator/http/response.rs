@@ -13,6 +13,8 @@ use serde_json::json;
 pub struct AggregatedResponse {
     /// Parsed response data
     pub parsed: ParsedResponse,
+    /// Last captured byte timestamp for a completed non-SSE response.
+    pub completion_timestamp_ns: Option<u64>,
     /// SSE events collected during streaming (if is_sse is true)
     pub sse_events: Vec<ParsedSseEvent>,
     /// Raw bytes that arrived as RawData while in SseActive state. These are
@@ -28,6 +30,7 @@ impl AggregatedResponse {
     pub fn from_parsed(parsed: ParsedResponse) -> Self {
         AggregatedResponse {
             parsed,
+            completion_timestamp_ns: None,
             sse_events: Vec::new(),
             sse_continuation_bytes: None,
         }
@@ -72,11 +75,12 @@ impl AggregatedResponse {
     }
 
     /// Get end timestamp (last packet) in nanoseconds
-    /// For SSE: last event's timestamp; for regular response: same as start
+    /// Uses the final body fragment for non-SSE responses.
     pub fn end_timestamp_ns(&self) -> u64 {
         self.sse_events
             .last()
             .map(|e| e.source_event().timestamp_ns)
+            .or(self.completion_timestamp_ns)
             .unwrap_or_else(|| self.start_timestamp_ns())
     }
 
@@ -335,6 +339,7 @@ mod latency_tests {
 
     fn response_with_sse_events(sse_events: Vec<ParsedSseEvent>) -> AggregatedResponse {
         AggregatedResponse {
+            completion_timestamp_ns: None,
             parsed: ParsedResponse {
                 version: 1,
                 status_code: 200,

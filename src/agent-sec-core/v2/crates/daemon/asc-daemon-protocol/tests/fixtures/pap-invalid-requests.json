@@ -217,7 +217,7 @@
     {
       "name": "update scope with an unknown selector kind",
       "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "unknown", "pid": 1}}},
-      "expectedError": {"code": "invalid_request", "message": "unknown variant `unknown`, expected one of `pid`, `cgroup_id`, `legacy_execution_domain`"}
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `unknown`, expected `pid` or `cgroup_id`"}
     },
     {
       "name": "create PID scope without a PID",
@@ -307,22 +307,12 @@
     {
       "name": "create scope with a legacy selector",
       "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "legacy_execution_domain", "executionDomainId": "legacy-domain"}}},
-      "expectedError": {"code": "invalid_request", "message": "legacy execution-domain selectors cannot be authored"}
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `legacy_execution_domain`, expected `pid` or `cgroup_id`"}
     },
     {
-      "name": "create legacy scope without an execution-domain ID",
-      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "legacy_execution_domain"}}},
-      "expectedError": {"code": "invalid_request", "message": "missing field `executionDomainId`"}
-    },
-    {
-      "name": "create legacy scope with a non-string execution-domain ID",
-      "request": {"method": "policy.scopes.create", "params": {"selector": {"kind": "legacy_execution_domain", "executionDomainId": 1}}},
-      "expectedError": {"code": "invalid_request", "message": "invalid type: integer `1`, expected a string"}
-    },
-    {
-      "name": "update scope with an invalid legacy selector ID",
-      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "legacy_execution_domain", "executionDomainId": "invalid/id"}}},
-      "expectedError": {"code": "invalid_request", "message": "identifier must be 1..=128 ASCII letters, digits, '.', ':', '_' or '-'"}
+      "name": "update scope with a legacy selector",
+      "request": {"method": "policy.scopes.update", "params": {"scopeId": "missing-scope", "selector": {"kind": "legacy_execution_domain", "executionDomainId": "legacy-domain"}}},
+      "expectedError": {"code": "invalid_request", "message": "unknown variant `legacy_execution_domain`, expected `pid` or `cgroup_id`"}
     },
     {
       "name": "update a missing policy",

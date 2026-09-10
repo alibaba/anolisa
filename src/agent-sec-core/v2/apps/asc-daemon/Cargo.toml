@@ -8,6 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "agent-sec-daemon"
+path = "src/main.rs"
+
 [dependencies]
 asc-daemon-core = { workspace = true }
 asc-daemon-handler = { workspace = true }
@@ -19,6 +23,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+asc-policy-repository = { workspace = true }
 asc-daemon-protocol = { workspace = true }
 asc-foundation-types = { workspace = true }
 asc-policy-types = { workspace = true }

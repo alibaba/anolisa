@@ -3,9 +3,16 @@
 This workspace slice contains the dependency-light contracts, Policy
 Administration Point, first-version PAP daemon protocol, product Policy-template
 compiler, protocol-independent Unix-domain-socket service framework, and runnable
-foreground process bootstrap used by later AgentSecCore V2 work packages. It
-deliberately contains no concrete persistence, Policy runtime, reconciliation
-worker, outbox, or target Adapter.
+foreground process bootstrap, together with the first AgentSight file-deletion
+target Adapter, and its independent deployment Client used by later AgentSecCore
+V2 work packages. It deliberately contains no durable persistence, Policy runtime,
+reconciliation scheduling worker, daemon reconciliation wiring, or outbox.
+The synchronous single-attempt reconciliation core is available as `asc-pcp`.
+
+The Rust `agent-sec-cli` exposes all 15 Policy, Scope and Binding CRUD commands through
+an explicit daemon socket. Its Cargo package and source directory remain `asc-cli`;
+the executable target is `agent-sec-cli`. See the [CLI reference](../../../docs/user-guide/en/agent-security/agent-sec-core/policy-cli.md)
+and [CLI acceptance record](../docs/design/POLICY_CLI_ACCEPTANCE_zh.md).
 
 The current crates are:
 
@@ -17,11 +24,24 @@ The current crates are:
   explicitly unsupported until their lowering and Adapter evidence are defined.
   The implemented template covers path-entry deletion only; rename, move, and
   other namespace mutations are outside its contract.
+- `asc-policy-adapter-agentsight`: deterministic file-deletion and PID-Scope
+  translation into an AgentSight/ActPlane plan, with semantic and encoding checks.
+  Compiler acceptance belongs to the deployed target, not an embedded compiler.
+- `asc-agentsight-client`: health-gated AgentSight apply/delete transport for
+  one configured endpoint, with process identity resolution and complete HTTP
+  fixtures. It does not depend on a reconciliation framework.
+- `asc-policy-target-contracts`: shared, PEP-neutral `TargetBindingAdapter` and
+  `TargetDeploymentClient` ports; data lives in `asc-policy-types::target`.
+- `asc-policy-repository`: shared Binding aggregate data, consistent reads and
+  atomic snapshot CAS; independent of reconciliation implementation.
+- `asc-pcp`: synchronous single-attempt `BindingReconciler::reconcile` core over
+  repository, Adapter and Client ports. Event delivery, timers and daemon wiring
+  remain separate work packages.
 - `asc-pap`: transport-independent current-record Policy/Scope/Binding CRUD with
   monotonic revisions over explicit compiler and repository ports.
 - `asc-pap-repository-memory`: explicitly temporary process-local Repository
   adapter used only to keep daemon/PAP integration runnable before durable
-  persistence lands; its implementation is outside the current review scope.
+  persistence lands; also implements aggregate reads/CAS over PAP's Binding map.
 - `asc-daemon-protocol`: strict request/response contracts and an explicit
   allowlist for 15 Policy, Scope, and Binding administration methods.
 - `asc-daemon-handler`: inbound protocol adapter that decodes daemon requests,
@@ -33,12 +53,25 @@ The current crates are:
 - `asc-daemon-service`: bounded UDS admission, one-request framing, kernel peer
   credentials, dispatcher/rejection-encoder injection, connection isolation,
   dispatch cancellation, and controlled drain.
+- `asc-daemon-client`: synchronous UDS client preserving complete responses, with
+  a single connect/write/read deadline and no retries or local fallback. It uses
+  standard-library blocking I/O and `socket2` for bounded connect; neither it nor
+  the CLI binary requires a Tokio runtime.
+- `asc-cli`: command parsing, typed Policy request construction and Policy output;
+  server dependencies are test-only. `commands.rs` registers and dispatches the
+  top-level commands; `commands/{policy,scope,binding}.rs` own their arguments and
+  request mappings, with pagination and encoding helpers in `commands/common.rs`.
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
 
 The crate relationships, acceptance types, executable pass/fail matrix,
 compatibility report, direct-consumer evidence, and rollback boundary are recorded
 in [`PAP_DAEMON_API_ACCEPTANCE_zh.md`](../docs/design/PAP_DAEMON_API_ACCEPTANCE_zh.md).
+
+The [scan capability development guide (Chinese)](../docs/design/V2_SCAN_CAPABILITY_DEVELOPMENT_GUIDE_zh.md)
+maps Prompt Scan and Code Scan migration work onto this checkout, including module
+locations, dependency order, interface boundaries, and acceptance requirements.
+It describes planned work; this workspace does not yet expose scan methods.
 
 ## Daemon service boundary
 
@@ -90,10 +123,12 @@ startup. It also requires an explicit absolute socket path because
 packaging-owned system paths, singleton/stale-socket policy, runtime directory
 hardening, and readiness remain later process-integration work.
 
-UID 0 is always a Policy administrator. Other UIDs are denied until root adds
-them to the process-local allowlist. Delegated administrators cannot delegate
-other UIDs. Loading, persisting, and exposing management RPCs for that allowlist
-remain later daemon state/configuration work.
+UID 0 is always a Policy administrator. A deployment operator can add other UIDs
+at startup with repeatable `--policy-admin-uid <UID>` options. Omitted means root
+only. Configured administrators cannot delegate other UIDs at runtime; that API
+still requires root. The allowlist is process-local and must be supplied on each
+startup. Configuration-file loading, persistence and management RPCs remain later
+work. Authorization does not change OS socket permissions or deployment topology.
 
 Run the independent transport process in the foreground:
 
@@ -123,9 +158,10 @@ statuses, and deterministic digests. Server-generated request and resource UUIDs
 use named placeholders so the same fixture can assert their format and identity
 flow across later requests. A UDS integration E2E always executes the complete
 scenario with a server-authorized test principal. The `asc-daemon` bootstrap E2E
-also starts the real binary and repeats that scenario when the process is root;
-a non-root binary run instead verifies the product's default
-`permission_denied` policy.
+also starts the real binary with `--policy-admin-uid` set to the test UID and
+executes the complete scenario without root. A separate default-config case
+verifies non-root `permission_denied` (or full CRUD when root). CLI process tests
+use an in-process daemon service; a combined CLI and daemon binary E2E is deferred.
 
 Binding create/update accepts desired state and returns `PENDING_APPLY`; delete
 returns `PENDING_DELETE`. These responses prove PAP acceptance only. They do not
@@ -157,98 +193,51 @@ operation/audit history belongs to later work packages.
 
 ## Binding spec and lifecycle boundary
 
-`PreparedBinding` is an immutable snapshot. The pair
-`(binding_id, binding_revision)` identifies exactly one complete Policy/Scope
-snapshot and must never be reused for a different desired-state operation.
-Only the current Binding snapshot is retained. Mutable status is deliberately
-outside that spec:
+`PreparedBinding` is an immutable Policy/Scope snapshot. `(binding_id,
+binding_revision)` identifies that spec; `BindingView { spec, status }` projects
+its current lifecycle. Only spec changes increment `bindingRevision`.
 
-- `BindingStatus` contains only the lifecycle state; it carries no duplicated
-  Binding ID or revision.
-- `BindingView { spec, status }` joins one immutable spec with its status for
-  GET/LIST responses.
-- `bindingRevision` advances for every accepted, non-idempotent Apply or Delete
-  intent, including reapplying identical content after failure or deletion.
-- Reconciler claim, retry, completion, and failure transitions do not advance
-  the revision.
-
-All legal lifecycle states are shared in `asc-policy-types::binding`, next to
-`PreparedBinding`, so PAP, the future outbox, and the future reconciler use one
-contract:
-
-| State | Meaning | Written by | Terminal without a new request? |
+| Current | Request | Result | Revision |
 |---|---|---|---|
-| `PENDING_APPLY` | Apply request accepted but not claimed | PAP | no |
-| `APPLYING` | Apply work claimed and running | reconciler | no |
-| `READY` | referenced spec applied successfully | reconciler | yes, success |
-| `APPLY_FAILED` | Apply permanently failed or exhausted retries | reconciler | yes, failure |
-| `PENDING_DELETE` | Delete request accepted but not claimed | PAP | no |
-| `DELETING` | detach work claimed and running | reconciler | no |
-| `DELETED` | detach completed successfully | reconciler | yes, success |
-| `DELETE_FAILED` | detach permanently failed or exhausted retries | reconciler | yes, failure |
+| absent | CREATE | fresh server-generated ID, `PENDING_APPLY` | 1 |
+| `PENDING_APPLY`, `APPLYING`, `READY` | identical UPDATE | no-op | unchanged |
+| `APPLY_FAILED` | identical UPDATE | `PENDING_APPLY`, reset retry controls, retain prepared request | unchanged |
+| `PENDING_APPLY`, `READY`, `APPLY_FAILED` | changed-spec UPDATE | `PENDING_APPLY`, clear prepared request, retain cleanup targets | +1 |
+| `APPLYING` | changed-spec UPDATE | `OperationInProgress` | unchanged |
+| `PENDING_DELETE`, `DELETING`, `DELETE_FAILED` | any UPDATE | `OperationInProgress`; deletion is irreversible | unchanged |
+| Apply-side states, `DELETE_FAILED` | DELETE | `PENDING_DELETE`, reset retry controls, retain spec/prepared/targets | unchanged |
+| `PENDING_DELETE`, `DELETING` | DELETE | no-op | unchanged |
+| absent | GET / UPDATE / DELETE | `NotFound` | — |
 
-“Terminal” means that no automatic transition remains. A later user request can
-still move lifecycle from a terminal state to a new pending state.
+Workers claim pending work as `APPLYING` or `DELETING`. Apply success becomes
+`READY`; retryable failure returns to the corresponding pending state with a
+deadline; permanent/exhausted failure becomes `APPLY_FAILED` or `DELETE_FAILED`.
+Delete success atomically removes the Binding and all runtime data only after
+all targets are confirmed absent. `Deleted` remains an internal completion marker
+in the state machine, never a persisted current status. LIST omits removed rows.
+Re-deployment uses CREATE with a new ID at revision 1.
 
-The successful creation path is:
+PAP writes compare the complete expected Binding under the same transaction as
+request admission. `update_binding(None, next)` inserts a fresh ID;
+`update_binding(Some(expected), next)` updates only an existing record. It cannot
+resurrect a record removed between the service read and repository write.
+Reconciler aggregate CAS also compares runtime and deployments; it cannot erase
+a newer intent or target observation. A Delete accepted while Apply is running
+keeps the same revision, and the old Apply still records its target observations
+before the next cleanup attempt.
 
-```text
-none --CREATE--> PENDING_APPLY --claim--> APPLYING --success--> READY
-```
+PAP request semantics and the synchronous reconciler are tested together using
+the memory repository. The daemon still has no notification/timer worker wired
+to accepted requests; PAP acceptance does not imply target completion. Durable
+storage and cross-process recovery remain separate work packages.
 
-The successful deletion path is:
-
-```text
-apply-side state --DELETE--> PENDING_DELETE --claim--> DELETING --success--> DELETED
-```
-
-The complete legal transition set is:
-
-| Current | Event | Next | Revision rule |
-|---|---|---|---|
-| none | CREATE valid spec | `PENDING_APPLY` | allocate revision 1 |
-| `PENDING_APPLY`, `APPLYING`, `READY` | UPDATE identical spec | no-op | unchanged |
-| `APPLYING`, `DELETING` | UPDATE changed spec | `OPERATION_IN_PROGRESS` | unchanged |
-| `DELETING` | UPDATE identical spec | `OPERATION_IN_PROGRESS` | unchanged |
-| any other state | UPDATE accepted Apply intent | `PENDING_APPLY` | allocate next revision and replace current record |
-| `APPLYING` | DELETE | `OPERATION_IN_PROGRESS` | unchanged |
-| `PENDING_APPLY`, `READY`, `APPLY_FAILED`, `DELETE_FAILED` | DELETE | `PENDING_DELETE` | allocate next revision and replace current record |
-| `PENDING_DELETE`, `DELETING`, `DELETED` | DELETE | no-op | unchanged |
-| `PENDING_APPLY` | worker claim | `APPLYING` | unchanged |
-| `APPLYING` | success | `READY` | unchanged |
-| `APPLYING` | retryable failure | `PENDING_APPLY` | unchanged |
-| `APPLYING` | permanent/retry-exhausted failure | `APPLY_FAILED` | unchanged |
-| `PENDING_DELETE` | worker claim | `DELETING` | unchanged |
-| `DELETING` | success | `DELETED` | unchanged |
-| `DELETING` | retryable failure | `PENDING_DELETE` | unchanged |
-| `DELETING` | permanent/retry-exhausted failure | `DELETE_FAILED` | unchanged |
-
-There are no other legal transitions. In particular, a user request may reverse
-`PENDING_APPLY` or `PENDING_DELETE` because target-side work has not been
-claimed, but it cannot interrupt `APPLYING` or `DELETING`. There is no
-`APPLYING -> PENDING_DELETE` or `DELETING -> PENDING_APPLY` transition within
-one revision.
-
-Repositories atomically replace the single current Binding snapshot and status
-when PAP accepts a new desired-state revision; no older Binding record remains.
-A status-only worker transition does not rewrite spec content. Status CAS APIs
-identify the current target by `binding_id` plus the revision contained in the
-Binding and require the expected current status. Repository implementations
-must repeat the `APPLYING`/`DELETING` admission gate inside the atomic update so
-a worker claim cannot race a PAP pre-check.
-
-The shared state machine is defined and tested now, but the PAP-only phase
-implements no outbox, delivery dispatcher, or reconciler. Therefore
-PAP writes only `PENDING_APPLY` and `PENDING_DELETE`; nothing in this phase
-advances them. TODO(policy-reconciliation): persist each accepted current
-Binding replacement and its reconcile intent atomically, then let the future
-Reconciler consume one complete `BindingView` whose embedded revision fences
-claim, retry, completion, failure, restart recovery, and cancellation.
-
-CLI client, concrete persistence, Policy runtime, reconciliation worker, outbox,
-and target Adapter belong to later work packages and are intentionally absent
+Durable persistence, Policy runtime, reconciliation scheduling worker, and
+outbox belong to later work packages and are intentionally absent
 from this slice. The compiler included here is limited to the one golden-backed
 `prevent_file_deletion` lowering described above.
+
+Dependency sources, TLS/unsafe boundaries and release audit requirements are
+recorded in [DEPENDENCIES.md](DEPENDENCIES.md).
 
 Run the branch-owned validation from this directory:
 

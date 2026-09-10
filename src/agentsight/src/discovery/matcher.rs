@@ -438,4 +438,26 @@ mod tests {
             Some("QwenCode")
         );
     }
+
+    #[test]
+    fn test_default_rules_capture_openclaw_gateway_with_node_heap_flag() {
+        // OpenClaw 2026.9.2 launches the gateway via systemd --user with a
+        // V8 heap flag, so argv[0] is the full node path and "openclaw" sits
+        // at argv[2] (not argv[1]) — the flag position must be wildcarded.
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "/usr/bin/node",
+                    "--max-old-space-size=7722",
+                    "/usr/local/lib/node_modules/openclaw/dist/index.js",
+                    "gateway",
+                    "--port",
+                    "18789",
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("OpenClaw")
+        );
+    }
 }

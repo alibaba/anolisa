@@ -42,7 +42,8 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
 
     Every invocation appends its argv to a `spawn_log` file next to the
     binary, so tests can assert the one-subprocess contract (§5.6). The
-    mock also validates the request shape: a malformed request from the
+    mock also overwrites `request.json` with the latest PostTool input. The
+    mock validates the request shape: a malformed request from the
     hook exits non-zero, which the hook fails open on — surfacing
     request-construction bugs as envelope mismatches.
 
@@ -67,6 +68,9 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
             sys.exit(2)
         operation_input = request["input"]
         content = operation_input["content"]
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "request.json"), "w") as captured:
+            json.dump(operation_input, captured)
 
         def respond(output, disposition, additional_context=None):
             result = {
@@ -783,6 +787,94 @@ class TestShellEnvelopeUnwrap(unittest.TestCase):
         self.assertIsInstance(updated, str,
                               "Qoder requires a string updatedToolOutput")
         self.assertEqual(json.loads(updated), self._bash_envelope(log[:40], ""))
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestGrepEnvelopeUnwrap(unittest.TestCase):
+    def test_claude_content_slot_is_replaced_without_changing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = _create_mock_tokenless(directory, "compress-text")
+            _create_mock_claude(directory)
+            content = "crates/long_directory/file.rs:7:  matching text  \n" * 12
+            envelope = {
+                "mode": "content", "content": content, "numLines": 12,
+                "numFiles": 0, "filenames": [], "appliedLimit": 12,
+            }
+            result = _run_hook(
+                {"tool_name": "Grep", "tool_response": envelope},
+                "claude-code", binary, directory,
+            )
+            self.assertEqual(
+                result["hookSpecificOutput"]["updatedToolOutput"],
+                dict(envelope, content=content[:40]),
+            )
+            with open(os.path.join(directory, "request.json")) as captured:
+                request = json.load(captured)
+            self.assertEqual(request["content"], content)
+            self.assertEqual(request["content_origin"], "api_response")
+            self.assertTrue(request["capabilities"]["replace_with_text"])
+            self.assertEqual(len(_spawn_log_lines(binary)), 1)
+
+    def test_invalid_tool_input_keeps_the_existing_route(self) -> None:
+        for tool_input in [None, "grep -rn foo", ["-C"], 3]:
+            with self.subTest(tool_input=tool_input), tempfile.TemporaryDirectory() as directory:
+                binary = _create_mock_tokenless(directory, "compress-text")
+                _create_mock_claude(directory)
+                result = _run_hook(
+                    {"tool_name": "Grep", "tool_input": tool_input, "tool_response": {
+                        "mode": "content", "content": "file.rs:1:match\n" * 20,
+                    }},
+                    "claude-code", binary, directory,
+                )
+                self.assertEqual(result, {})
+                with open(os.path.join(directory, "request.json")) as captured:
+                    request = json.load(captured)
+                self.assertEqual(request["content_origin"], "file_content")
+
+    def test_other_modes_hosts_and_context_keep_the_existing_json_route(self) -> None:
+        cases = [
+            ("claude-code", "count", {}),
+            ("claude-code", "files_with_matches", {}),
+            ("qoder-cli", "content", {}),
+            ("opencode", "content", {}),
+            *[("claude-code", "content", {flag: 2})
+              for flag in ("-A", "-B", "-C", "context")],
+        ]
+        for agent, mode, tool_input in cases:
+            with self.subTest(agent=agent, mode=mode, tool_input=tool_input):
+                with tempfile.TemporaryDirectory() as directory:
+                    binary = _create_mock_tokenless(directory, "no-savings")
+                    _create_mock_claude(directory)
+                    envelope = {"mode": mode, "content": "file.rs:1:match\n" * 20}
+                    result = _run_hook(
+                        {"tool_name": "Grep", "tool_response": envelope,
+                         "tool_input": tool_input},
+                        agent, binary, directory,
+                    )
+                    self.assertEqual(result, {})
+                    with open(os.path.join(directory, "request.json")) as captured:
+                        request = json.load(captured)
+                    self.assertEqual(json.loads(request["content"]), envelope)
+                    self.assertFalse(request["capabilities"]["replace_with_text"])
+
+    def test_no_savings_and_old_claude_do_not_emit_replacements(self) -> None:
+        for version in ["2.1.120", "2.1.259"]:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                binary = _create_mock_tokenless(directory, "no-savings")
+                _create_mock_claude(directory, version)
+                result = _run_hook(
+                    {"tool_name": "Grep", "tool_response": {
+                        "mode": "content", "content": "file.rs:1:match\n" * 20,
+                    }},
+                    "claude-code", binary, directory,
+                )
+                self.assertEqual(result, {})
+                with open(os.path.join(directory, "request.json")) as captured:
+                    request = json.load(captured)
+                self.assertEqual(
+                    request["capabilities"]["replace_output"], version == "2.1.259"
+                )
+                self.assertEqual(request["content_origin"], "api_response")
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")

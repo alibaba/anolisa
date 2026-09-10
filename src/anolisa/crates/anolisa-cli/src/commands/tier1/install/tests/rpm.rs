@@ -1522,6 +1522,7 @@ fn pinned_delegated_dry_run_shows_resolved_candidate_without_txn_or_state() {
         "copilot-shell",
         pkg_info("copilot-shell", "0.6.2", Some("1.al8"), &arch),
     )
+    .expecting_install(&format!("copilot-shell-0.6.2-1.al8.{arch}"))
     .with_available(vec![
         available_candidate(
             "copilot-shell",
@@ -1714,4 +1715,41 @@ fn pinned_install_refuses_state_when_dnf_installs_a_different_evr() {
             .is_none(),
         "the wrong version must not be recorded"
     );
+}
+
+#[test]
+fn rpm_solver_conflict_leaves_no_journal_or_install_record() {
+    for (dry_run, failed_call) in [(true, 1), (false, 1), (false, 2)] {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(dry_run);
+        let layout = common::resolve_layout(&ctx);
+        let mut fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.8.0", Some("1.alnx4"), "x86_64"),
+        );
+        fake.preflight_failure_on_call = Some(failed_call);
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+        let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+            .expect_err("solver must refuse the conflicting package before execution");
+        assert!(
+            err.reason()
+                .contains("cosh-ng conflicts with copilot-shell")
+        );
+        assert!(err.reason().contains("no recovery journal was created"));
+        assert_eq!(fake.install_calls.get(), 0);
+        assert_eq!(fake.preflight_calls.get(), failed_call);
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_none()
+        );
+        let journal_dir = rpm_install::journal_dir(&layout);
+        assert!(!journal_dir.exists() || std::fs::read_dir(journal_dir).unwrap().next().is_none());
+        // Retrying can reach the solver again instead of entering pending recovery.
+        fake.preflight_failure_on_call = Some(failed_call + 1);
+        let retry = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+            .expect_err("retry should report the conflict again");
+        assert!(!retry.reason().contains("pending recovery"));
+        assert!(retry.reason().contains("cosh-ng conflicts"));
+    }
 }

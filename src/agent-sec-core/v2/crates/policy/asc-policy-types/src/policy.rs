@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authoring::PolicyTemplate;
 use crate::error::{Validate, ValidationError};
-use crate::identifiers::{Digest, PolicyId, ProfileId, ResourceId, Revision};
+use crate::identifiers::{PolicyId, ProfileId, ResourceId, Revision};
 use crate::ir::CanonicalPolicyIr;
 use crate::profile::{IR_SCHEMA_VERSION_V1, PROFILE_V1ALPHA1_DEMO1};
 
@@ -20,12 +20,6 @@ pub struct PolicyEnvelope {
     pub policy_id: PolicyId,
     /// Immutable policy revision.
     pub revision: Revision,
-    /// Optional digest over the canonical payload representation.
-    ///
-    /// Phase one deliberately permits this field to be absent until a shared
-    /// JSON canonicalization algorithm is frozen.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_digest: Option<Digest>,
     /// Backend-independent security semantics.
     pub payload: CanonicalPolicyIr,
 }
@@ -51,7 +45,7 @@ impl Validate for PolicyEnvelope {
 }
 
 /// Durable Policy revision with its authored and deterministic lowered forms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedPolicy {
     /// Stable product policy identity.
@@ -64,46 +58,11 @@ pub struct PreparedPolicy {
     pub template: PolicyTemplate,
     /// Backend-independent lowered policy.
     pub canonical_policy: PolicyEnvelope,
-    /// Digest over the exact authored template JSON.
-    pub template_digest: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PreparedPolicyWire {
-    policy_id: ResourceId,
-    policy_name: String,
-    revision: Revision,
-    template: PolicyTemplate,
-    canonical_policy: PolicyEnvelope,
-    template_digest: String,
-    #[serde(default, rename = "retired")]
-    _legacy_retired: bool,
-}
-
-impl<'de> Deserialize<'de> for PreparedPolicy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = PreparedPolicyWire::deserialize(deserializer)?;
-        Ok(Self {
-            policy_id: wire.policy_id,
-            policy_name: wire.policy_name,
-            revision: wire.revision,
-            template: wire.template,
-            canonical_policy: wire.canonical_policy,
-            template_digest: wire.template_digest,
-        })
-    }
 }
 
 impl Validate for PreparedPolicy {
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.policy_name.trim().is_empty()
-            || self.policy_name.len() > 256
-            || self.policy_name.chars().any(char::is_control)
-        {
+        if validate_policy_name(&self.policy_name).is_err() {
             return Err(ValidationError::new(
                 "policyName",
                 "must contain a visible, control-free value of at most 256 bytes",
@@ -121,14 +80,26 @@ impl Validate for PreparedPolicy {
                 "must match the prepared Policy revision",
             ));
         }
-        Digest::new(&self.template_digest).map_err(|message| {
-            ValidationError::new(
-                "templateDigest",
-                format!("invalid template digest: {message}"),
-            )
-        })?;
         self.canonical_policy.validate().map_err(|error| {
             ValidationError::new(format!("canonicalPolicy.{}", error.path), error.message)
         })
     }
+}
+
+/// Shared name rules for authored input and complete Policy snapshots.
+/// Callers retain their own error category and path projection.
+///
+/// # Errors
+/// Returns a stable reason for an empty, oversized, or control-bearing name.
+pub fn validate_policy_name(value: &str) -> Result<(), &'static str> {
+    if value.trim().is_empty() {
+        return Err("must contain a visible character");
+    }
+    if value.len() > 256 {
+        return Err("must not exceed 256 bytes");
+    }
+    if value.chars().any(char::is_control) {
+        return Err("must not contain control characters");
+    }
+    Ok(())
 }

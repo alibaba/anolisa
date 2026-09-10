@@ -190,11 +190,32 @@ impl ContentGenerator for OpenAICompatProvider {
             request = request.header("X-DashScope-CacheControl", "enable");
         }
 
+        // Report the request before it is encrypted: rustls leaves nothing on the
+        // wire an out-of-process observer can read (see `provider::observe`).
+        // Serialising twice is acceptable here — this runs once per LLM call, not
+        // per chunk — and reusing reqwest's own body would mean building the
+        // request in two steps just to peek at it.
+        if let Ok(serialised) = serde_json::to_vec(&body) {
+            super::observe::tap_request("POST", &url, &serialised);
+        }
+
         let response = request
             .json(&body)
             .send()
             .await
             .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+        // Announce the response before the status check: an error response
+        // (401/429/5xx) must still be reported, otherwise the observer is left
+        // with a pending request that never completes. The body below is
+        // reported through the same chunk tap as a success stream.
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("text/event-stream")
+            .to_string();
+        super::observe::tap_response_head(response.status().as_u16(), &content_type);
 
         if !response.status().is_success() {
             let status = response.status();
@@ -202,6 +223,7 @@ impl ContentGenerator for OpenAICompatProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown".to_string());
+            super::observe::tap_response_chunk(text.as_bytes());
             return Err(format!("API error {status}: {text}"));
         }
 
@@ -403,6 +425,8 @@ impl ContentGenerator for OpenAICompatProvider {
 
                     match stream.next().await {
                         Some(Ok(bytes)) => {
+                            // Report the decrypted chunk before it is consumed.
+                            super::observe::tap_response_chunk(&bytes);
                             buf.extend(&bytes);
                             // A line is only extracted once its terminator
                             // arrives, so an endless line must be bounded

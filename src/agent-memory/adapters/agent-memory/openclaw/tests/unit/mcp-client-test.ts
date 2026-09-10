@@ -92,6 +92,10 @@ describe("McpStdioClient", () => {
     profile: "advanced" as const,
     maxReadBytes: 1_048_576,
     maxWriteBytes: 16_777_216,
+    // Inert here — the binary never spawns — but part of AgentMemoryConfig,
+    // which the client forwards as MEMORY_SESSION_ID / MEMORY_SESSION_DIR.
+    sessionId: "ses_test",
+    sessionDir: "/nonexistent/agent-memory-session-dir",
   };
 
   it("stop() is safe when the process was never started", async () => {

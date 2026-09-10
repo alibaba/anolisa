@@ -280,12 +280,14 @@ impl PyTokenlessRuntime {
         data_dir=None,
         *,
         compression_enabled=true,
+        search_path_sharing_enabled=true,
         stats_enabled=true,
         sls_enabled=false
     ))]
     fn new(
         data_dir: Option<PathBuf>,
         compression_enabled: bool,
+        search_path_sharing_enabled: bool,
         stats_enabled: bool,
         sls_enabled: bool,
     ) -> PyResult<Self> {
@@ -294,6 +296,7 @@ impl PyTokenlessRuntime {
             stats_enabled,
             sls_enabled,
             compression_enabled,
+            search_path_sharing_enabled,
         })
         .map_err(to_python_error)?;
         Ok(Self { inner })

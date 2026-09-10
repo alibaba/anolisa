@@ -21,6 +21,16 @@
 集成状态在启动时确定，Enhanced 是默认值。需要长期使用无 Hook 会话时，在
 用户配置中设置 `shell.integration = "native"`；只使用一次时设置环境变量。
 
+执行命令或从重定向的 stdin 执行时，将 `--isolated` 放在 Shell 自有选项之前：
+`cosh --isolated -c '<command>'`。Bash 会跳过启动文件，并从环境中移除 `BASH_ENV`
+和 `ENV`。Bash login 调用（`--login`、`-l`/`+l`、`-lc` 等组合形式，或 `-cosh`
+这样的 login argv[0]）会在 Shell 启动前以状态码 2 拒绝，因为 Bash 无法单独禁用
+`.bash_logout`。隔离命令请使用非 login 调用。命令和脚本参数中出现的 login 选项
+文本会原样保留。
+
+在此 exec 路径中，隔离 Zsh 不接受 Shell 自有参数；携带这些参数时，Cosh 会在
+启动 Zsh 前返回状态码 2。交互 TUI 启动继续使用现有的隔离处理。
+
 ## 输入和编辑
 
 - 原生集成把每个输入字节交给前台 bash 或 zsh。

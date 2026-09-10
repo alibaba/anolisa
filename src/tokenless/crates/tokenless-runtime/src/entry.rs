@@ -34,6 +34,8 @@ const RTK_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct EntryOptions {
     /// Whether accepted candidates replace the original content.
     pub compression_enabled: bool,
+    /// Whether API search listings may share paths; independent of other domains.
+    pub search_path_sharing_enabled: bool,
     /// Whether lifecycle operations may use the attached stash.
     pub stash_enabled: bool,
     /// Resolved RTK executable for PreTool.
@@ -782,6 +784,7 @@ pub(crate) fn post_tool_with_store(
                 max_input_bytes: MAX_INPUT_BYTES,
                 min_input_chars: MIN_RESPONSE_CHARS,
                 compression_enabled: options.compression_enabled,
+                search_path_sharing_enabled: options.search_path_sharing_enabled,
                 stash_enabled: options.stash_enabled,
                 require_reversibility: true,
                 force_json: false,
@@ -983,6 +986,7 @@ mod tests {
     fn options() -> EntryOptions {
         EntryOptions {
             compression_enabled: true,
+            search_path_sharing_enabled: true,
             stash_enabled: true,
             rtk_path: None,
             rtk_data_dir: Some(PathBuf::from("/tmp/tokenless-test")),
@@ -1742,6 +1746,56 @@ mod tests {
         request.capabilities.recovery = RecoveryMethod::tool("tokenless_retrieve").unwrap();
         let outcome = before_model_with_store(&request, &options(), None).unwrap();
         assert_eq!(outcome.response.tools, request.tools);
+    }
+
+    #[test]
+    fn search_path_sharing_records_stats_and_respects_rtk_ownership() {
+        let content = "crates/long_directory/src/file.rs:12:matching source text\n".repeat(20);
+        let mut request = post_tool_request(&content);
+        request.tool_name = "Grep".into();
+        request.content_origin = ContentOrigin::ApiResponse;
+        let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert_eq!(
+            outcome.stats.applied_operations,
+            [AppliedOperation::SearchPathSharing]
+        );
+        assert_eq!(outcome.response.recoverability, Recoverability::Lossless);
+        assert!(outcome.response.stash_keys.is_empty());
+
+        request.tool_name = "Bash".into();
+        request.content_origin = ContentOrigin::CommandOutput;
+        for optimization in [OutputOptimization::None, OutputOptimization::Rtk] {
+            request.output_optimization = optimization;
+            let outcome = post_tool_with_store(&request, &options(), None).unwrap();
+            assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+            assert_eq!(outcome.response.output, content);
+            assert!(outcome.stats.applied_operations.is_empty());
+        }
+    }
+
+    #[test]
+    fn disabling_search_path_sharing_keeps_other_tools_compressible() {
+        let mut options = options();
+        options.search_path_sharing_enabled = false;
+        for tool_name in ["Grep", "SearchFiles"] {
+            let content = "crates/long_directory/src/file.rs:12:matching source text\n".repeat(20);
+            let mut request = post_tool_request(&content);
+            request.tool_name = tool_name.into();
+            request.content_origin = ContentOrigin::ApiResponse;
+            let outcome = post_tool_with_store(&request, &options, None).unwrap();
+            assert_eq!(outcome.response.output, content);
+            assert_eq!(outcome.response.disposition, Disposition::Passthrough);
+            assert!(outcome.stats.applied_operations.is_empty());
+            assert!(outcome.response.stash_keys.is_empty());
+        }
+        let input = serde_json::json!({"debug": "x".repeat(1000), "value": 1}).to_string();
+        let mut request = post_tool_request(&input);
+        request.tool_name = "SearchFiles".into();
+        request.content_origin = ContentOrigin::ApiResponse;
+        let outcome = post_tool_with_store(&request, &options, None).unwrap();
+        assert_eq!(outcome.response.disposition, Disposition::Applied);
+        assert!(!outcome.stats.applied_operations.is_empty());
     }
 
     #[test]

@@ -67,11 +67,12 @@ impl GenAIBuilder {
 
         // Build token usage from TokenRecord
         let token_usage = token_record.as_ref().map(|t| {
-            let cache = t.cache_creation_tokens.unwrap_or(0) + t.cache_read_tokens.unwrap_or(0);
             TokenUsage {
                 input_tokens: t.input_tokens as u32,
                 output_tokens: t.output_tokens as u32,
-                total_tokens: (t.input_tokens + t.output_tokens + cache) as u32,
+                // Whether the cache counters belong in the total depends on the
+                // provider, so let TokenRecord own that rule.
+                total_tokens: t.total_tokens() as u32,
                 cache_creation_input_tokens: t.cache_creation_tokens.map(|v| v as u32),
                 cache_read_input_tokens: t.cache_read_tokens.map(|v| v as u32),
             }
@@ -1166,7 +1167,9 @@ mod tests {
         let tu = call.token_usage.unwrap();
         assert_eq!(tu.input_tokens, 10);
         assert_eq!(tu.output_tokens, 20);
-        assert_eq!(tu.total_tokens, 38);
+        // "token-provider" is not Anthropic, so the cache counters are assumed
+        // to sit inside the reported input already.
+        assert_eq!(tu.total_tokens, 30);
         assert_eq!(tu.cache_creation_input_tokens, Some(5));
         assert_eq!(tu.cache_read_input_tokens, Some(3));
     }

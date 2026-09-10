@@ -76,10 +76,24 @@ async fn request(path: &Path, payload: &[u8]) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dproc_002_003_and_partial_013_binary_registers_pap_and_cleans_socket() {
+    run_binary_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dproc_configured_administrator_runs_full_crud_without_root() {
+    run_binary_scenario(true).await;
+}
+
+async fn run_binary_scenario(configure_admin: bool) {
     let directory = unique_directory();
     std::fs::create_dir(&directory).unwrap();
     let socket_path = directory.join("daemon.sock");
-    let child = Command::new(env!("CARGO_BIN_EXE_asc-daemon"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_agent-sec-daemon"));
+    if configure_admin {
+        let uid = std::fs::metadata(&directory).unwrap().uid();
+        command.args(["--policy-admin-uid", &uid.to_string()]);
+    }
+    let child = command
         .args(["serve", "--socket"])
         .arg(&socket_path)
         .stdin(Stdio::null())
@@ -98,7 +112,7 @@ async fn dproc_002_003_and_partial_013_binary_registers_pap_and_cleans_socket() 
         "../../../crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json"
     ))
     .unwrap();
-    if std::fs::metadata(&running.socket_path).unwrap().uid() == 0 {
+    if configure_admin || std::fs::metadata(&running.socket_path).unwrap().uid() == 0 {
         support::run_frozen_pap_crud_scenario(&running.socket_path, &fixture).await;
     } else {
         let first_request = fixture["steps"][0]["request"].clone();

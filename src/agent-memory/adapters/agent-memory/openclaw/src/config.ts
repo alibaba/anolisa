@@ -225,17 +225,36 @@ function resolveSessionDir(explicit?: string): string {
   return DEFAULT_SESSION_DIR;
 }
 
-/** Resolve the full plugin config with defaults. */
+/** Resolve the full plugin config with defaults.
+ *
+ *  Operator-supplied identifiers are resolved (and therefore validated)
+ *  before the environment is probed for the agent-memory binary. A
+ *  malformed `userId` / `sessionId` is a configuration error, and this
+ *  module's contract — see the header note about failures at plugin boot
+ *  being easier to diagnose than failures in the deep child — is that the
+ *  operator sees it as one. Resolving `binaryPath` first inverted that on
+ *  any host without the binary installed: the throw from
+ *  `resolveBinaryPath` ("agent-memory binary not found") masked the real
+ *  validation error, so `userId: "a/b"` reported a missing binary instead
+ *  of a path separator. Field order in the returned object is unchanged;
+ *  only evaluation order moves. */
 export function resolveConfig(api: OpenClawPluginApi): AgentMemoryConfig {
   const raw = (api.pluginConfig as Record<string, unknown>) ?? {};
 
+  const userId = resolveUserId(normalizeTrimmedString(raw.userId));
+  const sessionId = resolveSessionId(normalizeTrimmedString(raw.sessionId));
+  const sessionDir = resolveSessionDir(normalizeTrimmedString(raw.sessionDir));
+  const profile = normalizeProfile(raw.profile);
+  const maxReadBytes = normalizePositiveInt(raw.maxReadBytes, DEFAULT_MAX_READ_BYTES);
+  const maxWriteBytes = normalizePositiveInt(raw.maxWriteBytes, DEFAULT_MAX_WRITE_BYTES);
+
   return {
     binaryPath: resolveBinaryPath(normalizeTrimmedString(raw.binaryPath)),
-    userId: resolveUserId(normalizeTrimmedString(raw.userId)),
-    profile: normalizeProfile(raw.profile),
-    maxReadBytes: normalizePositiveInt(raw.maxReadBytes, DEFAULT_MAX_READ_BYTES),
-    maxWriteBytes: normalizePositiveInt(raw.maxWriteBytes, DEFAULT_MAX_WRITE_BYTES),
-    sessionId: resolveSessionId(normalizeTrimmedString(raw.sessionId)),
-    sessionDir: resolveSessionDir(normalizeTrimmedString(raw.sessionDir)),
+    userId,
+    profile,
+    maxReadBytes,
+    maxWriteBytes,
+    sessionId,
+    sessionDir,
   };
 }

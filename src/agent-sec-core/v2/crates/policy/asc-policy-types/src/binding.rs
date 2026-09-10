@@ -13,7 +13,7 @@ use crate::scope::PreparedScope;
 /// `(binding_id, binding_revision)` identifies exactly one immutable snapshot.
 /// Repositories retain only the current snapshot; a higher revision replaces
 /// the previous current record without reusing its number.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedBinding {
     /// Stable Binding identity.
@@ -24,32 +24,6 @@ pub struct PreparedBinding {
     pub policy: PreparedPolicy,
     /// Exactly one authored Scope revision.
     pub scope: PreparedScope,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PreparedBindingWire {
-    binding_id: ResourceId,
-    binding_revision: Revision,
-    policy: PreparedPolicy,
-    scope: PreparedScope,
-    #[serde(default, rename = "executionDomainId")]
-    _legacy_execution_domain_id: Option<ResourceId>,
-}
-
-impl<'de> Deserialize<'de> for PreparedBinding {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = PreparedBindingWire::deserialize(deserializer)?;
-        Ok(Self {
-            binding_id: wire.binding_id,
-            binding_revision: wire.binding_revision,
-            policy: wire.policy,
-            scope: wire.scope,
-        })
-    }
 }
 
 impl Validate for PreparedBinding {
@@ -70,32 +44,20 @@ impl Validate for PreparedBinding {
 ///
 /// ```text
 /// CREATE/UPDATE: PendingApply -> Applying -> Ready
-/// DELETE: PendingDelete -> Deleting -> Deleted
+/// DELETE: `PendingDelete` -> `Deleting` -> Deleted
 /// ```
 ///
-/// Request transitions:
+/// Only spec changes increment Binding revision. Same-spec Apply retry and all
+/// Delete requests keep the revision. Pending/running Apply and Ready accept an
+/// identical UPDATE as a no-op. `ApplyFailed` allows a same-spec retry.
+/// Delete intent is irreversible: `PendingDelete`, `Deleting` and `DeleteFailed` reject
+/// every UPDATE. DELETE may supersede Applying; its observations must still be
+/// recorded before cleanup. Repeated pending/running DELETE is a no-op, while
+/// `DeleteFailed` can retry with a fresh retry budget.
 ///
-/// - An identical-spec UPDATE is a no-op from `PendingApply`, `Applying`, or
-///   `Ready`. A new Apply intent from another state allocates the next Binding
-///   revision and starts in `PendingApply`, except that `Deleting` rejects it.
-/// - A DELETE is a no-op from `PendingDelete`, `Deleting`, or `Deleted`. A new
-///   Delete intent allocates the next Binding revision and starts in
-///   `PendingDelete`, except that `Applying` rejects it.
-/// - A changed-spec UPDATE allocates the next Binding revision and starts in
-///   `PendingApply`; it is rejected while Apply or Delete is running.
-///
-/// Reconciler transitions:
-///
-/// - `PendingApply -> Applying`; then success reaches `Ready`, a retryable
-///   failure returns to `PendingApply`, and a permanent or retry-exhausted
-///   failure reaches `ApplyFailed`.
-/// - `PendingDelete -> Deleting`; then success reaches `Deleted`, a retryable
-///   failure returns to `PendingDelete`, and a permanent or retry-exhausted
-///   failure reaches `DeleteFailed`.
-///
-/// `Ready`, `ApplyFailed`, `Deleted`, and `DeleteFailed` are terminal without a
-/// new request. [`BindingStatus::validate_successor`] is the executable closed
-/// transition set used by Repository compare-and-swap implementations.
+/// Workers claim pending work, complete Apply as Ready, or return failures to
+/// pending/failed status. `Deleted` is an internal completion marker: successful
+/// cleanup removes the aggregate atomically; it is not a persisted current record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum BindingStatus {
@@ -111,57 +73,38 @@ pub enum BindingStatus {
     PendingDelete,
     /// A reconciler is detaching the referenced immutable spec.
     Deleting,
-    /// Detach completed successfully.
+    /// Internal successful detach outcome; the reconciler removes the record.
     Deleted,
     /// Detach exhausted retries or failed permanently.
     DeleteFailed,
 }
 
 impl BindingStatus {
-    /// Reports whether no automatic transition remains without a new request.
-    pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Ready | Self::ApplyFailed | Self::Deleted | Self::DeleteFailed
-        )
-    }
-
     /// Reports whether target-side reconciliation may currently be running.
     #[must_use]
     pub const fn is_reconciling(self) -> bool {
         matches!(self, Self::Applying | Self::Deleting)
     }
 
-    /// Returns the status produced by an identical-spec UPDATE.
-    ///
-    /// An identical UPDATE is a no-op while Apply is pending, running, or
-    /// already successful. A new Apply intent otherwise starts in
-    /// `PendingApply` under a new revision. Delete work already in progress
-    /// cannot be interrupted.
-    ///
+    /// Returns the status produced by an identical-spec UPDATE, without changing
+    /// revision. `ApplyFailed` retries; pending/running/successful Apply is a no-op.
     /// # Errors
-    /// Rejects a request while Delete reconciliation is running.
+    /// Rejects every request after Delete intent has been accepted.
     pub fn request_apply(self) -> Result<Self, ValidationError> {
         match self {
             Self::PendingApply | Self::Applying | Self::Ready => Ok(self),
-            Self::Deleting => Err(illegal_status("request Apply", self)),
-            _ => Ok(Self::PendingApply),
+            Self::ApplyFailed => Ok(Self::PendingApply),
+            _ => Err(illegal_status("request Apply", self)),
         }
     }
 
-    /// Returns the status produced by a DELETE request.
-    ///
-    /// DELETE is idempotent while deletion is pending, running, or completed.
-    /// A new Delete intent otherwise starts in `PendingDelete` under a new
-    /// revision. Apply work already in progress cannot be interrupted.
-    ///
-    /// # Errors
-    /// Rejects a request while Apply reconciliation is running.
-    pub fn request_delete(self) -> Result<Self, ValidationError> {
+    /// Returns the status produced by DELETE, without changing spec or revision.
+    /// A running Apply may be superseded; its remote observations still matter.
+    #[must_use]
+    pub const fn request_delete(self) -> Self {
         match self {
-            Self::PendingDelete | Self::Deleting | Self::Deleted => Ok(self),
-            Self::Applying => Err(illegal_status("request Delete", self)),
-            _ => Ok(Self::PendingDelete),
+            Self::PendingDelete | Self::Deleting | Self::Deleted => self,
+            _ => Self::PendingDelete,
         }
     }
 
@@ -217,7 +160,7 @@ impl BindingStatus {
     ///
     /// Identical values are accepted for idempotency. Other successors must be
     /// one of the worker transitions within the same Binding revision. User
-    /// requests allocate a new revision and replace the current Binding record.
+    /// requests use a separate conditional write; only spec changes bump revision.
     ///
     /// # Errors
     /// Rejects an illegal status transition.

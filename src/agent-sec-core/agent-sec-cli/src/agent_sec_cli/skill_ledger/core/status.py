@@ -10,8 +10,8 @@ import logging
 from typing import Any
 
 from agent_sec_cli.skill_ledger.config import (
-    DEFAULT_SKILL_DIRS,
     config_path,
+    default_skill_dir_entries,
     deprecated_skill_dir_entries,
     effective_skill_dir_entries,
     load_config,
@@ -74,7 +74,7 @@ def _config_info() -> dict[str, Any]:
         "configPath": str(cp),
         "customized": cp.is_file(),
         "defaultSkillDirsEnabled": bool(cfg.get("enableDefaultSkillDirs", True)),
-        "defaultSkillDirPatterns": len(DEFAULT_SKILL_DIRS),
+        "defaultSkillDirPatterns": len(default_skill_dir_entries()),
         "managedSkillDirPatterns": len(cfg.get("managedSkillDirs", [])),
         "ignoredDeprecatedSkillDirPatterns": len(deprecated_skill_dirs),
         "effectiveSkillDirPatterns": len(effective_skill_dirs),

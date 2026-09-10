@@ -1,5 +1,5 @@
 use asc_foundation_types::{ResourceId, Revision};
-use asc_policy_types::binding::{BindingStatus, BindingView};
+use asc_policy_types::binding::BindingView;
 use asc_policy_types::policy::PreparedPolicy;
 use asc_policy_types::scope::PreparedScope;
 
@@ -32,7 +32,7 @@ pub trait PapRepository: Send + Sync {
     /// record remains.
     ///
     /// # Errors
-    /// Returns conflict, serialization, or persistence failures.
+    /// Returns conflict or persistence failures.
     fn put_policy(&self, policy: &PreparedPolicy) -> Result<PreparedPolicy, PapError>;
 
     /// Gets Policy allocation state and its optional current record.
@@ -79,7 +79,7 @@ pub trait PapRepository: Send + Sync {
     /// record remains.
     ///
     /// # Errors
-    /// Returns conflict, serialization, or persistence failures.
+    /// Returns conflict or persistence failures.
     fn put_scope(&self, scope: &PreparedScope) -> Result<PreparedScope, PapError>;
 
     /// Gets Scope allocation state and its optional current record.
@@ -116,44 +116,24 @@ pub trait PapRepository: Send + Sync {
         revision: Revision,
     ) -> Result<PreparedScope, PapError>;
 
-    /// Creates or atomically updates the single current Binding record.
+    /// Inserts a fresh Binding (`expected: None`) or conditionally replaces an
+    /// existing Binding (`Some`). Compare the complete expected spec/status under
+    /// the same transaction as the write. An update of an absent ID is `NotFound`;
+    /// it must never insert. Creation uses a fresh server-generated ID at revision 1.
     ///
-    /// A new Binding starts at revision 1 in `PENDING_APPLY`. An update must use
-    /// exactly the next never-reused revision and must enter `PENDING_APPLY` or
-    /// `PENDING_DELETE`. The update replaces the complete current spec and
-    /// status atomically; older Binding records are not retained. Implementations
-    /// reject updates while the current status is `APPLYING` or `DELETING`.
-    ///
-    /// TODO(policy-reconciliation): this method is the transaction boundary
-    /// that must later atomically persist a durable reconcile intent and its
-    /// ordering/CAS token together with the new spec/current-status pointer.
-    /// No outbox is written in the PAP-only phase.
+    /// Only changed specs increment revision. Same-spec Apply retries and Delete
+    /// requests keep revision and deployments. Reset retry controls for a new
+    /// request; retain prepared bytes for the same spec, clear them on spec change.
+    /// Delete intent cannot return to Apply. Repeated requests that do not change
+    /// the record preserve runtime state. No dispatch occurs in this operation.
     ///
     /// # Errors
-    /// Returns operation-in-progress, conflict, serialization, or persistence
-    /// failures.
-    fn update_binding(&self, binding: &BindingView) -> Result<BindingView, PapError>;
-
-    /// Compare-and-swaps worker status for the current Binding revision.
-    ///
-    /// Implementations must atomically require the current spec and status to
-    /// equal `binding_revision` and `expected_status`, then call
-    /// `expected_status.validate_successor(next_status)` or enforce an
-    /// equivalent predicate. No `PreparedBinding` is rewritten.
-    ///
-    /// Request transitions use [`PapRepository::update_binding`] and allocate a
-    /// new revision; this method only persists Reconciler transitions within one
-    /// current revision.
-    ///
-    /// # Errors
-    /// Returns conflict or persistence failures.
-    fn update_binding_status(
+    /// Returns not-found, operation-in-progress, conflict or persistence failures.
+    fn update_binding(
         &self,
-        id: &ResourceId,
-        binding_revision: Revision,
-        expected_status: BindingStatus,
-        next_status: BindingStatus,
-    ) -> Result<BindingStatus, PapError>;
+        expected: Option<&BindingView>,
+        binding: &BindingView,
+    ) -> Result<BindingView, PapError>;
 
     /// Gets the current Binding spec and status as a read-only aggregate.
     ///

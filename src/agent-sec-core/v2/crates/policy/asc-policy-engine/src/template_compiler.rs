@@ -68,7 +68,6 @@ impl PolicyCompiler for PolicyTemplateCompiler {
                 .map_err(|message| ValidationError::new("profileId", message))?,
             policy_id: template.policy_id.clone(),
             revision: template.revision,
-            payload_digest: None,
             payload: CanonicalPolicyIr {
                 resources: vec![ResourceSet {
                     id: resource_id.clone(),

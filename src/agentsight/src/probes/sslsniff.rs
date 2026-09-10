@@ -17,6 +17,7 @@ use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Read,
     mem::{self, MaybeUninit},
     path::Path,
     slice,
@@ -50,17 +51,33 @@ const POLL_TIMEOUT_MS: u64 = 100;
 /// without any userspace-visible error (observed on serverless/overlayfs
 /// hosts), leaving the `Link` objects alive but the probes silent. Userspace
 /// cannot query liveness, so re-attach on TTL expiry is the recovery path.
-const STALE_REATTACH_TTL: Duration = Duration::from_secs(300);
+///
+/// 300s was too coarse for short-lived processes (e.g. a `qwen -p` headless
+/// call lives for seconds): a process that execs within the window after a
+/// silent deregistration saw the stale attachment and skipped the re-attach,
+/// so its traffic was silently missed (#3034). 30s shrinks the window by 10x;
+/// the churn cost is bounded by the number of distinct SSL library inodes,
+/// not by the exec rate.
+const STALE_REATTACH_TTL: Duration = Duration::from_secs(30);
 
 /// Effective stale re-attach TTL, resolved once per `SslSniff` at
 /// construction. `AGENTSIGHT_SSL_REATTACH_TTL_SECS` overrides the default
 /// (0 forces a re-attach on every matching exec; used by tests).
-fn stale_reattach_ttl() -> Duration {
-    std::env::var("AGENTSIGHT_SSL_REATTACH_TTL_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+/// Parse the TTL from an optional env-var string, falling back to the
+/// default on absence or parse failure. Extracted so tests never touch the
+/// process environment (which would be unsound under the parallel harness).
+fn parse_reattach_ttl(raw: Option<&str>) -> Duration {
+    raw.and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(STALE_REATTACH_TTL)
+}
+
+fn stale_reattach_ttl() -> Duration {
+    parse_reattach_ttl(
+        std::env::var("AGENTSIGHT_SSL_REATTACH_TTL_SECS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Per-inode uprobe attachment state used for stale re-attach.
@@ -168,7 +185,9 @@ impl SslEvent {
 
         Some(Self {
             source: u32_at(mem::offset_of!(R, source)),
-            timestamp_ns: config::ktime_to_unix_ns(u64_at(mem::offset_of!(R, timestamp_ns))),
+            timestamp_ns: config::ktime_to_unix_ns(u64_at(mem::offset_of!(R, timestamp_ns)))
+                .inspect_err(|error| config::report_clock_error("sslsniff", error))
+                .ok()?,
             delta_ns: u64_at(mem::offset_of!(R, delta_ns)),
             pid: u32_at(mem::offset_of!(R, pid)),
             tid: u32_at(mem::offset_of!(R, tid)),
@@ -346,8 +365,9 @@ impl SslSniff {
     /// Attach SSL probes to a running process by reading its `/proc/<pid>/maps`.
     ///
     /// Detects which SSL libraries the process has mapped (OpenSSL, GnuTLS, NSS,
-    /// or statically-linked SSL — BoringSSL/OpenSSL), attaches uprobes, and skips any
-    /// library whose inode has already been traced (dedup via `traced_files`) —
+    /// statically-linked SSL — BoringSSL/OpenSSL — or rustls), attaches uprobes,
+    /// and skips any library whose inode has already been traced (dedup via
+    /// `traced_files`) —
     /// unless that attachment is stale (older than the re-attach TTL), in
     /// which case the probes are re-attached and the old links are dropped
     /// only after the replacement succeeds.
@@ -478,49 +498,79 @@ impl SslSniff {
             SslLibKind::OpenSsl => attach_openssl(&mut self.skel, path, -1),
             SslLibKind::GnuTls => attach_gnutls(&mut self.skel, path, -1),
             SslLibKind::Nss => attach_nss(&mut self.skel, path, -1),
+            SslLibKind::ExplicitTap => {
+                if !cosh_tap_present(path) {
+                    // A pre-tap cosh-ng can be deployed alongside an upgraded
+                    // AgentSight, and then its LLM calls are simply not
+                    // capturable: there is no TLS-layer API to fall back to.
+                    // Say so once per inode instead of staying silent, which
+                    // would be indistinguishable from a probe bug.
+                    if missing_tap_is_a_coverage_gap(path) {
+                        log::warn!(
+                            "[attach_process] pid={pid}: {path} exports no {COSH_TAP_SYMBOL}; \
+                             this cosh-ng predates the plaintext tap, so its LLM traffic \
+                             cannot be captured -- upgrade cosh-ng to restore coverage"
+                        );
+                    } else {
+                        log::debug!(
+                            "[attach_process] pid={pid}: {path} exports no {COSH_TAP_SYMBOL}; \
+                             only the LLM-issuing binary carries the tap"
+                        );
+                    }
+                    return AttachOutcome::Untraceable;
+                }
+                attach_cosh_tap(&mut self.skel, path, -1)
+            }
             SslLibKind::Static => {
                 match attach_static_ssl_by_symbol(&mut self.skel, path, -1) {
                     Ok(ls) => Ok(ls),
                     Err(sym_err) => {
                         log::debug!(
-                            "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                            "[attach_process] pid={pid}: Static SSL symbol attach failed for {path} ({sym_err:#}), falling back to the offset table"
                         );
+                        // Consult the offset table before the byte-pattern scan.
+                        // A lookup costs a stat() plus, only when the size already
+                        // matches a known build, a 64 KiB head read; the scan reads
+                        // the whole binary. Probing in the opposite order charged
+                        // every unsupported agent binary its own size in resident
+                        // memory before the table could answer, which exhausted the
+                        // service memory cap during startup attach on hosts running
+                        // several large harnesses (#2981).
+                        if let Some(off) = CODEX_OFFSET_TABLE
+                            .as_ref()
+                            .and_then(|table| table.lookup(path))
+                        {
+                            log::info!(
+                                "[attach_process] pid={pid}: codex offset table matched for {path} \
+                                 (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
+                                off.ssl_write,
+                                off.ssl_read,
+                                off.ssl_do_handshake
+                            );
+                            return match attach_static_ssl_by_offset(
+                                &mut self.skel,
+                                path,
+                                &off,
+                                true,
+                                -1,
+                            ) {
+                                Ok(links) => AttachOutcome::Attached(links),
+                                Err(e) => {
+                                    log::warn!(
+                                        "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
+                                    );
+                                    AttachOutcome::Failed
+                                }
+                            };
+                        }
                         match find_static_ssl_offsets(path) {
                             Some(off) => {
                                 attach_static_ssl_by_offset(&mut self.skel, path, &off, false, -1)
                             }
                             None => {
-                                // Tier 3: codex offset table lookup (for static-pie binaries
-                                // like Codex CLI that statically link OpenSSL/BoringSSL without symbols)
-                                if let Some(ref table) = *CODEX_OFFSET_TABLE {
-                                    if let Some(off) = table.lookup(path) {
-                                        log::info!(
-                                            "[attach_process] pid={pid}: codex offset table matched for {path} \
-                                         (write=0x{:x}, read=0x{:x}, handshake=0x{:x})",
-                                            off.ssl_write,
-                                            off.ssl_read,
-                                            off.ssl_do_handshake
-                                        );
-                                        return match attach_static_ssl_by_offset(
-                                            &mut self.skel,
-                                            path,
-                                            &off,
-                                            true,
-                                            -1,
-                                        ) {
-                                            Ok(links) => AttachOutcome::Attached(links),
-                                            Err(e) => {
-                                                log::warn!(
-                                                    "[attach_process] pid={pid}: attach failed for {path}: {e:#}"
-                                                );
-                                                AttachOutcome::Failed
-                                            }
-                                        };
-                                    }
-                                }
                                 log::warn!(
                                     "[attach_process] pid={pid}: SSL detection failed for {path} \
-                                 (no SSL_* in .dynsym, no byte-pattern match, and not in codex offset table), skipping"
+                                 (no SSL_* in .dynsym, not in the codex offset table, and no byte-pattern match), skipping"
                                 );
                                 return AttachOutcome::Untraceable;
                             }
@@ -582,6 +632,7 @@ impl SslSniff {
     /// Returns a [`SslPoller`] handle.  Drop it (or call [`SslPoller::stop`])
     /// to signal the poll thread to exit.
     pub fn run(&self) -> Result<SslPoller> {
+        config::initialize_event_clock().context("failed to initialize event clock")?;
         let tx = self.tx.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_inner = Arc::clone(&stop_flag);
@@ -687,29 +738,103 @@ pub(super) struct StaticSslOffsets {
     pub read_is_ex: bool,
 }
 
-fn find_pattern(haystack: &[u8], pattern: &[u8]) -> Option<usize> {
-    if pattern.is_empty() || pattern.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(pattern.len()).position(|w| w == pattern)
-}
-
-/// Find all occurrences of `pattern` in `haystack`.
-fn find_all_patterns(haystack: &[u8], pattern: &[u8]) -> Vec<usize> {
-    if pattern.is_empty() || pattern.len() > haystack.len() {
-        return Vec::new();
-    }
-    let mut results = Vec::new();
-    let mut pos = 0;
-    while pos + pattern.len() <= haystack.len() {
-        if let Some(off) = find_pattern(&haystack[pos..], pattern) {
-            results.push(pos + off);
-            pos += off + 1;
-        } else {
-            break;
+/// Appends the absolute offset of every pattern match starting in `window`
+/// below `limit`, one vector per entry of `patterns`, in ascending order.
+///
+/// Walks the window once and tests every pattern at each position, rather than
+/// walking it once per pattern. The signatures are all function prologues that
+/// share a leading byte run, so each comparison rejects a position on its first
+/// byte and the extra signatures cost close to nothing. Walking per pattern
+/// instead means a binary matching none of them is scanned once for every
+/// signature before it can be rejected, on the synchronous attach path.
+fn collect_pattern_hits(
+    window: &[u8],
+    patterns: &[&[u8]],
+    base: usize,
+    limit: usize,
+    hits: &mut [Vec<usize>],
+) {
+    for pos in 0..limit.min(window.len()) {
+        let tail = &window[pos..];
+        for (slot, pattern) in hits.iter_mut().zip(patterns) {
+            if tail.len() >= pattern.len() && &tail[..pattern.len()] == *pattern {
+                slot.push(base + pos);
+            }
         }
     }
-    results
+}
+
+/// Bytes read per window by [`scan_file_patterns`].
+///
+/// Caps the scan's peak memory. Agent binaries reach hundreds of megabytes (a
+/// Codex build is ~264 MiB, node ~120 MiB), more than the whole budget the
+/// service runs under, so the image must never be held in one piece (#2981).
+const SCAN_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+/// Absolute offsets of every occurrence of each pattern in the file at `path`.
+///
+/// Returns one vector per entry of `patterns`, in the same order and each
+/// ascending. The file is streamed in [`SCAN_CHUNK_BYTES`] windows overlapping
+/// by `max_pattern_len - 1` bytes, so a match straddling a window boundary is
+/// still reported, and reported only once.
+///
+/// # Errors
+///
+/// Returns `None` when `patterns` is empty, or the file cannot be opened or read.
+fn scan_file_patterns(path: &str, patterns: &[&[u8]]) -> Option<Vec<Vec<usize>>> {
+    let overlap = patterns.iter().map(|p| p.len()).max()?.checked_sub(1)?;
+    let mut file = fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; overlap + SCAN_CHUNK_BYTES];
+    let mut hits = vec![Vec::new(); patterns.len()];
+    // Absolute offset that `buf[0]` maps to, and how many leading bytes of `buf`
+    // are the previous window's carried-over tail.
+    let mut base = 0usize;
+    let mut carry = 0usize;
+    loop {
+        let read = fill_buf(&mut file, &mut buf[carry..])?;
+        let filled = carry + read;
+        if filled == 0 {
+            break;
+        }
+        // A match beginning inside the trailing `overlap` bytes may run past this
+        // window, so defer it to the next round; on the final window nothing is
+        // left to wait for, so every start counts.
+        let last = filled < buf.len();
+        let start_limit = if last { filled } else { filled - overlap };
+        collect_pattern_hits(&buf[..filled], patterns, base, start_limit, &mut hits);
+        if last {
+            break;
+        }
+        buf.copy_within(filled - overlap..filled, 0);
+        base += filled - overlap;
+        carry = overlap;
+    }
+    Some(hits)
+}
+
+/// Reads until `dst` is full or the file ends, returning the byte count.
+///
+/// `Read::read` is free to return short of the request before EOF, and a short
+/// window would split a pattern that is actually present, so the fill has to be
+/// driven to completion rather than trusted to one call.
+///
+/// # Errors
+///
+/// Returns `None` on any I/O error other than an interrupted call.
+fn fill_buf(file: &mut fs::File, mut dst: &mut [u8]) -> Option<usize> {
+    let mut total = 0;
+    while !dst.is_empty() {
+        match file.read(dst) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                dst = &mut dst[n..];
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    Some(total)
 }
 
 fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
@@ -742,10 +867,19 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     const ADJACENCY_THRESHOLD: usize = 0x1000; // 4KB
     let verbose = config::verbose();
 
-    let data = fs::read(path).ok()?;
+    // One streaming pass collects every pattern at once: the file is read in
+    // bounded windows, so a hundreds-of-megabytes binary costs a few MiB here
+    // instead of its own size.
+    let mut patterns: Vec<&[u8]> = vec![READ_PAT, WRITE_PAT];
+    patterns.extend_from_slice(HANDSHAKE_PATS);
+    let mut hits = scan_file_patterns(path, &patterns)?;
+    // Drain the fixed slots high-index-first so the remaining vectors are
+    // exactly the handshake variants.
+    let write_matches = hits.remove(1);
+    let read_matches = hits.remove(0);
+    let handshake_hits = hits;
 
     // --- SSL_read: expect unique match ---
-    let read_matches = find_all_patterns(&data, READ_PAT);
     if read_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_read pattern not found in {path}");
@@ -765,10 +899,7 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     };
 
     // --- SSL_do_handshake: collect matches across all known variants ---
-    let mut hs_matches: Vec<usize> = HANDSHAKE_PATS
-        .iter()
-        .flat_map(|pat| find_all_patterns(&data, pat))
-        .collect();
+    let mut hs_matches: Vec<usize> = handshake_hits.into_iter().flatten().collect();
     if hs_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_do_handshake pattern not found in {path}");
@@ -797,7 +928,6 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     };
 
     // --- SSL_write: adjacency verification ---
-    let write_matches = find_all_patterns(&data, WRITE_PAT);
     if write_matches.is_empty() {
         if verbose {
             eprintln!("Static SSL: SSL_write pattern not found in {path}");
@@ -836,6 +966,44 @@ fn find_static_ssl_offsets(path: &str) -> Option<StaticSslOffsets> {
     })
 }
 
+/// Symbol cosh-ng exports as its plaintext observability attach point.
+///
+/// Defined by `cosh-core`'s `provider::observe` module. Resolving it by name is
+/// what makes this robust: an earlier attempt located rustls' own plaintext
+/// functions by byte pattern, which broke as soon as the release build moved to
+/// a different rustc (#3115), because those patterns encode register allocation.
+/// A symbol address is resolved by libbpf at attach time, so the same name keeps
+/// working across toolchains.
+const COSH_TAP_SYMBOL: &str = "cosh_llm_plaintext_tap";
+
+/// Whether `path` exports the plaintext tap at all.
+///
+/// Only `cosh-core` issues LLM requests; `cosh-shell`, `cosh-cli` and
+/// `cosh-gateway` match the same name rule but carry no tap. Attaching to them
+/// would fail on every discovery sweep and be retried forever, so they are
+/// recognised as legitimately untraceable instead.
+///
+/// The check looks for the symbol name in the file rather than parsing
+/// `.dynsym`: the streaming scan is bounded and already available, and a name
+/// that appears nowhere in the binary certainly is not in its symbol table. A
+/// false positive merely lets the attach proceed and report the real error.
+fn cosh_tap_present(path: &str) -> bool {
+    scan_file_patterns(path, &[COSH_TAP_SYMBOL.as_bytes()])
+        .is_some_and(|hits| hits.first().is_some_and(|h| !h.is_empty()))
+}
+
+/// Whether a missing tap on this binary means lost LLM coverage.
+///
+/// Only `cosh-core` issues LLM calls, so only there does an absent symbol mean
+/// a pre-tap build whose traffic goes unseen. The sibling binaries are mapped
+/// in the same process and never carry the tap, so their absence is expected
+/// and must not be reported as a problem.
+fn missing_tap_is_a_coverage_gap(path: &str) -> bool {
+    Path::new(path.strip_suffix(" (deleted)").unwrap_or(path))
+        .file_name()
+        .is_some_and(|name| name == "cosh-core")
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// SSL library kind detected from `/proc/<pid>/maps`.
@@ -849,6 +1017,11 @@ enum SslLibKind {
     Nss,
     /// Statically-linked SSL (BoringSSL or OpenSSL, e.g. Node.js, Chrome, Codex CLI)
     Static,
+    /// A binary that carries an explicit observability tap and therefore needs
+    /// no TLS-layer probe at all (cosh-ng today, via cosh-core's
+    /// `cosh_llm_plaintext_tap`). Distinct from `Static` because there is no
+    /// SSL_* API to hook: the uprobe goes on the exported tap symbol instead.
+    ExplicitTap,
 }
 
 /// Classify a mapped file path into an `SslLibKind`, if it is an SSL library.
@@ -886,6 +1059,14 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
     // Codex CLI statically links OpenSSL 3.x (via openssl-sys / native-tls).
     if name.starts_with("codex") && !name.contains('.') {
         return Some(SslLibKind::Static);
+    }
+    // cosh-ng links rustls, so nothing SSL-shaped appears in its maps at all
+    // and there is no library name to key off -- only the binary itself (#3042).
+    if matches!(
+        name.as_ref(),
+        "cosh-core" | "cosh-shell" | "cosh-cli" | "cosh-gateway"
+    ) {
+        return Some(SslLibKind::ExplicitTap);
     }
     // uv Python statically links OpenSSL into the binary. The ELF .symtab contains
     // SSL_write/SSL_read/SSL_do_handshake as LOCAL symbols, so attach_openssl()
@@ -966,8 +1147,8 @@ fn ssl_libs_from_maps(pid: i32) -> Result<Vec<(String, u64, SslLibKind)>> {
             // `<pid>` entry itself comes from a bind-mounted host procfs.
             let attach_path = if path_str.ends_with(" (deleted)") {
                 proc_pid_entry(pid, "exe")
-            } else if matches!(kind, SslLibKind::Static) {
-                // Statically-linked SSL binary (codex, node, etc).
+            } else if matches!(kind, SslLibKind::Static | SslLibKind::ExplicitTap) {
+                // Statically-linked SSL binary (codex, node, cosh-core, etc).
                 // <pid>/exe is a kernel-maintained symlink that stays valid
                 // even when the backing file has been replaced or unlinked,
                 // which is common for npm-installed binaries that get updated
@@ -1231,6 +1412,28 @@ fn attach_static_ssl_by_offset(
         )?);
     }
     Ok(links)
+}
+
+/// Attach the plaintext tap cosh-ng exports for observability.
+///
+/// One uprobe covers both directions: the tap's first argument says which way
+/// the payload is going. It fires at function entry, where the buffer is already
+/// an argument, so no uretprobe is needed. There is no handshake probe either —
+/// the tap sits at the application layer and never sees TLS records, so a
+/// cosh-ng process reports no handshake timings.
+///
+/// # Errors
+///
+/// Fails when the symbol is absent, which means the binary was built without
+/// `-Wl,--export-dynamic`: `strip = true` erases `.symtab`, so only `.dynsym`
+/// survives, and the symbol has to be promoted there deliberately.
+fn attach_cosh_tap(skel: &mut SslsniffSkel<'_>, lib: &str, pid: i32) -> Result<Vec<Link>> {
+    Ok(vec![up!(
+        skel.progs_mut().probe_cosh_plaintext_tap(),
+        pid,
+        lib,
+        COSH_TAP_SYMBOL
+    )?])
 }
 
 // ─── Codex offset table (Tier 3) ────────────────────────────────────────────
@@ -1509,6 +1712,76 @@ mod tests {
         });
     }
 
+    #[test]
+    fn static_ssl_offsets_still_resolves_past_one_scan_window() {
+        // Guards Claude Code: its Bun single-file executable is the case the
+        // byte-pattern path exists for, and it is far larger than one window.
+        // The patterns sit in the final window, so a resolution here proves the
+        // scan neither stops early nor loses the absolute offset.
+        let img = build_static_ssl_image(Some((0x100, HS_BUN_PAT)), Some(0x2000), Some(0x2100));
+        let pad = SCAN_CHUNK_BYTES + 0x3000;
+        let mut padded = vec![0u8; pad];
+        padded.extend_from_slice(&img);
+        with_static_ssl_fixture("past-window", &padded, |path| {
+            let off = find_static_ssl_offsets(path).expect("large image must still resolve");
+            assert_eq!(off.ssl_do_handshake, pad + 0x100);
+            assert_eq!(off.ssl_read, pad + 0x2000);
+            assert_eq!(off.ssl_write, pad + 0x2100);
+        });
+    }
+
+    #[test]
+    fn scan_file_patterns_finds_match_straddling_window_boundary() {
+        // A pattern laid across the window edge is only found if the windows
+        // overlap; without the carry it would be split and silently missed.
+        let start = SCAN_CHUNK_BYTES - READ_PAT_T.len() / 2;
+        let mut img = vec![0u8; SCAN_CHUNK_BYTES + 0x1000];
+        img[start..start + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        with_static_ssl_fixture("straddle", &img, |path| {
+            let hits = scan_file_patterns(path, &[READ_PAT_T]).expect("scan must succeed");
+            assert_eq!(hits[0], vec![start]);
+        });
+    }
+
+    #[test]
+    fn collect_pattern_hits_finds_every_signature_in_one_walk() {
+        // Distinct signatures at distinct positions must all be reported from a
+        // single walk, and a window matching none of them must yield nothing —
+        // the rejection case that used to cost one walk per signature.
+        let mut window = vec![0u8; 0x400];
+        window[0x10..0x10 + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        window[0x200..0x200 + WRITE_PAT_T.len()].copy_from_slice(WRITE_PAT_T);
+        let patterns: [&[u8]; 2] = [READ_PAT_T, WRITE_PAT_T];
+        let mut hits = vec![Vec::new(); patterns.len()];
+        collect_pattern_hits(&window, &patterns, 0x1000, window.len(), &mut hits);
+        assert_eq!(hits[0], vec![0x1000 + 0x10]);
+        assert_eq!(hits[1], vec![0x1000 + 0x200]);
+
+        let mut empty = vec![Vec::new(); patterns.len()];
+        collect_pattern_hits(&vec![0u8; 0x400], &patterns, 0, 0x400, &mut empty);
+        assert!(empty.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn scan_file_patterns_reports_each_match_once() {
+        // Overlapping windows must not double-count a match that lands inside
+        // the carried-over tail.
+        let offsets = [
+            0usize,
+            SCAN_CHUNK_BYTES - READ_PAT_T.len(),
+            SCAN_CHUNK_BYTES,
+            SCAN_CHUNK_BYTES + 0x800,
+        ];
+        let mut img = vec![0u8; SCAN_CHUNK_BYTES * 2];
+        for &off in &offsets {
+            img[off..off + READ_PAT_T.len()].copy_from_slice(READ_PAT_T);
+        }
+        with_static_ssl_fixture("once", &img, |path| {
+            let hits = scan_file_patterns(path, &[READ_PAT_T]).expect("scan must succeed");
+            assert_eq!(hits[0], offsets.to_vec());
+        });
+    }
+
     // ── parse_maps_line ─────────────────────────────────────────────────────
     //
     // Replaces the procfs crate's maps parsing, so it carries the coverage the
@@ -1580,5 +1853,89 @@ mod tests {
         // Not a maps line at all.
         assert_eq!(parse_maps_line("rubbish"), None);
         assert_eq!(parse_maps_line(""), None);
+    }
+
+    // ─── cosh-ng tap detection tests (#3042, #3115) ──────────────────────
+
+    #[test]
+    fn classify_recognises_cosh_binaries_as_rustls() {
+        for path in [
+            "/usr/libexec/anolisa/cosh-ng/cosh-core",
+            "/usr/libexec/anolisa/cosh-ng/cosh-shell",
+            "/usr/bin/cosh-cli",
+            "/usr/libexec/anolisa/cosh-ng/cosh-gateway",
+        ] {
+            assert_eq!(
+                classify_ssl_lib(path),
+                Some(SslLibKind::ExplicitTap),
+                "{path} must be probed through its exported plaintext tap"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_keeps_existing_kinds_unchanged() {
+        // Guards against the rustls arm shadowing an established classification.
+        assert_eq!(
+            classify_ssl_lib("/usr/lib64/libssl.so.3"),
+            Some(SslLibKind::OpenSsl)
+        );
+        assert_eq!(
+            classify_ssl_lib("/usr/lib64/libgnutls.so.30"),
+            Some(SslLibKind::GnuTls)
+        );
+        assert_eq!(classify_ssl_lib("/usr/bin/node"), Some(SslLibKind::Static));
+        assert_eq!(classify_ssl_lib("/usr/bin/codex"), Some(SslLibKind::Static));
+        // `/usr/bin/cosh` is a symlink; maps always reports the resolved target,
+        // so the bare name is deliberately NOT matched.
+        assert_eq!(classify_ssl_lib("/usr/bin/cosh"), None);
+        assert_eq!(classify_ssl_lib("/usr/lib64/libc.so.6"), None);
+    }
+
+    #[test]
+    fn cosh_tap_symbol_matches_the_exported_contract() {
+        // The name is a cross-component contract with cosh-core's
+        // `provider::observe`; renaming either side silently stops capture, so
+        // pin the literal here rather than only in the attach call.
+        assert_eq!(COSH_TAP_SYMBOL, "cosh_llm_plaintext_tap");
+    }
+
+    /// A pre-tap cosh-ng deployed under an upgraded AgentSight loses coverage
+    /// with no TLS-layer fallback available, so only `cosh-core` may report the
+    /// missing symbol as a problem. Warning for the siblings, which never carry
+    /// the tap, would emit a line per process start on every healthy host.
+    #[test]
+    fn only_the_llm_binary_treats_a_missing_tap_as_a_coverage_gap() {
+        assert!(missing_tap_is_a_coverage_gap(
+            "/usr/libexec/anolisa/cosh-ng/cosh-core"
+        ));
+        // Still the LLM binary once its file has been unlinked mid-run.
+        assert!(missing_tap_is_a_coverage_gap(
+            "/usr/libexec/anolisa/cosh-ng/cosh-core (deleted)"
+        ));
+        for sibling in [
+            "/usr/libexec/anolisa/cosh-ng/cosh-shell",
+            "/usr/bin/cosh-cli",
+            "/usr/libexec/anolisa/cosh-ng/cosh-gateway",
+        ] {
+            assert!(
+                !missing_tap_is_a_coverage_gap(sibling),
+                "{sibling} never carries the tap; a missing symbol is expected there"
+            );
+        }
+    }
+
+    /// The default re-attach TTL must cover short-lived processes (#3034).
+    /// Discriminating: reverting the constant to 300s makes this fail.
+    /// The env override must still work after the default change.
+    #[test]
+    fn stale_reattach_ttl_default_and_override() {
+        assert_eq!(parse_reattach_ttl(None), Duration::from_secs(30));
+        assert_eq!(parse_reattach_ttl(Some("60")), Duration::from_secs(60));
+        assert_eq!(parse_reattach_ttl(Some("0")), Duration::from_secs(0));
+        assert_eq!(
+            parse_reattach_ttl(Some("not-a-number")),
+            Duration::from_secs(30)
+        );
     }
 }

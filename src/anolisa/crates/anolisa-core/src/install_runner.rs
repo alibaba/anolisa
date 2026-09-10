@@ -56,6 +56,10 @@ pub const SUPPORTED_ARTIFACT_TYPES: &[&str] = &["tar_gz"];
 pub struct InstalledFile {
     /// Absolute destination path actually written.
     pub path: PathBuf,
+    /// Role from the mapping that supplied this file, before source provenance is lost.
+    pub kind: FileKind,
+    /// Mode applied from that mapping or archive entry; `None` uses the runner default.
+    pub mode: Option<String>,
     /// Lowercase-hex sha256 of the installed bytes. Empty for symlink
     /// entries (they record a [`referent`](Self::referent) instead).
     pub sha256: String,
@@ -859,12 +863,16 @@ impl PreparedFileSet {
             .iter()
             .map(|staged| InstalledFile {
                 path: staged.file.dest.clone(),
+                kind: staged.file.kind,
+                mode: staged.file.mode.clone(),
                 sha256: staged.sha256.clone(),
                 referent: None,
             })
             .collect::<Vec<_>>();
         files.extend(self.links.iter().map(|link| InstalledFile {
             path: link.dest.clone(),
+            kind: FileKind::Symlink,
+            mode: None,
             sha256: String::new(),
             referent: Some(link.referent.clone()),
         }));
@@ -1385,6 +1393,8 @@ fn create_symlink(link: &PreparedSymlink) -> Result<InstalledFile, InstallError>
     })?;
     Ok(InstalledFile {
         path: link.dest.clone(),
+        kind: FileKind::Symlink,
+        mode: None,
         sha256: String::new(),
         referent: Some(link.referent.clone()),
     })
@@ -1406,9 +1416,8 @@ fn place_staged_file(staged: &PreparedRegularFile) -> Result<InstalledFile, Inst
         source,
     })?;
     write_dest_atomic(
-        &staged.file.dest,
+        &staged.file,
         &mut source,
-        staged.file.mode.as_deref(),
         StagedContent {
             sha256: &staged.sha256,
             size: staged.size,
@@ -1428,13 +1437,13 @@ struct StagedContent<'a> {
 /// during preparation; a mismatch removes the temporary sibling and fails
 /// before anything is renamed over the destination.
 fn write_dest_atomic(
-    dest: &Path,
+    file: &ResolvedInstallFile,
     source: &mut impl Read,
-    mode: Option<&str>,
     expected: StagedContent<'_>,
 ) -> Result<InstalledFile, InstallError> {
+    let dest = &file.dest;
     #[cfg(unix)]
-    let parsed_mode = parse_unix_mode(mode, dest)?;
+    let parsed_mode = parse_unix_mode(file.mode.as_deref(), dest)?;
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|source| InstallError::Io {
@@ -1481,6 +1490,8 @@ fn write_dest_atomic(
     })?;
     Ok(InstalledFile {
         path: dest.to_path_buf(),
+        kind: file.kind,
+        mode: file.mode.clone(),
         sha256: sha,
         referent: None,
     })

@@ -26,6 +26,20 @@ anolisa install agent-memory
 sudo yum install agent-memory
 ```
 
+### OpenClaw 适配器
+
+随包附带的插件（`memory-anolisa`）由
+`/usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh` 部署，默认授予插件声明的能力。设置
+`AGENT_MEMORY_ACCEPT_CAPABILITIES=0` 可拒绝授予同意——带门禁的宿主上安装将失败，直至交互式授予。设置
+`AGENT_MEMORY_SAFE_INSTALL=1` 可在仍会传递 unsafe-install 覆盖参数的宿主上拒绝它。完整说明见[用户指南](../../docs/user-guide/zh/token-saving/agent-memory.md)。
+
+```bash
+bash /usr/share/anolisa/adapters/agent-memory/openclaw/scripts/install.sh
+openclaw gateway restart
+```
+
+两个可选安装参数都从 `openclaw plugins install --help` 协商，但两个开关并不对称。只有宿主列出完整的 `--accept-capabilities` 时才传递它——当前宿主会列出，因此 `AGENT_MEMORY_ACCEPT_CAPABILITIES` 在这些宿主上仍然会改变 argv：取 `1` 时在 `openclaw plugins install <插件目录> --force` 之后追加 `--accept-capabilities`，取 `0` 时省略它，带同意门禁的宿主随后会拒绝这次安装。只有宿主仍声明 `--dangerously-force-unsafe-install` 有效时才传递该覆盖参数（OpenClaw 2026.6.1 及更早版本）。当前宿主把它标注为 deprecated no-op，两种取值下都不会收到它，因此 `AGENT_MEMORY_SAFE_INSTALL` 在这些宿主上不产生任何差别，安装期安全由运维自有的 `security.installPolicy` 决定。安装日志会说明命中的是哪一种情况。
+
 ### 集成（MCP 客户端）
 
 添加到 MCP 配置（Claude Code、Cursor 等）：
@@ -53,6 +67,13 @@ sudo yum install agent-memory
 - **Tier B**（6 工具）：结构化检索
 - **Tier C**（7 工具）：治理（快照、版本控制、聚合）
 - **主权**（13 工具）：关于、遗忘、同意、导入导出、任务、梦境合成
+
+## 环境要求
+
+- Linux（x86_64 / aarch64）
+- Rust ≥ 1.85（源码构建）
+- Node.js ≥ 20 与 npm（源码构建 —— 打包内置的 OpenClaw adapter）
+- 可选：用于向量检索的 embedding 提供方（OpenAI 或 Ollama）
 
 ## 许可证
 

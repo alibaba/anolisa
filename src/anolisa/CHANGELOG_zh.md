@@ -9,6 +9,53 @@
 
 ## [未发布]
 
+## [0.3.11] - 2026-09-09
+
+### 新增
+
+- 在两版组件目录中注册 `ktuner`，配置的仓库提供该软件包时，可在
+  Linux x86_64 上发现并通过 RPM 安装
+  ([#2084](https://github.com/alibaba/anolisa/pull/2084))。
+
+### 变更
+
+- 执行 `anolisa adapter enable <component> openclaw` 时，若宿主声明支持
+  `--accept-capabilities`，现在会接受插件声明的能力。
+  绕过不安全安装检查仍需要单独明确授权
+  ([#3126](https://github.com/alibaba/anolisa/pull/3126))。
+- `status` 和 `doctor` 现在允许修改 Raw 安装的 `type = "config"` 文件内容，
+  包括从目录展开的文件，同时继续检查文件存在性、类型、路径安全、权限及
+  capabilities。旧状态会在已安装清单能够明确判定时恢复配置文件类型。
+  更新和卸载行为保持不变，执行这些操作前应备份编辑过的配置。
+  旧版 CLI 无法读取新的 `kind = "config"` 状态：降级前应备份状态，
+  将这些受管文件条目改为 `kind = "file"`，恢复内容摘要检查
+  ([#3142](https://github.com/alibaba/anolisa/pull/3142))。
+
+### 修复
+
+- OpenClaw 卸载报告没有受跟踪的软件包时，若 `plugins list --json`
+  确认插件已不存在且诊断正常，适配器清理现在可以完成；
+  无法确认时保留清理归属记录，供后续重试
+  ([#3118](https://github.com/alibaba/anolisa/pull/3118))。
+- 系统缓存不可写时，组件索引读取现在改用临时私有缓存，
+  使普通用户能够解析组件并进行预览，同时保留索引校验。
+  使用 DNF 4 的 RPM 安装预检仍需要 root 权限
+  ([#3127](https://github.com/alibaba/anolisa/pull/3127))。
+- 全新 Raw 安装现在会在 `post_install` 和 `post_enable` hook 执行后
+  记录文件摘要，避免将 hook 写入的内容误报为损坏，并继续检测不可变文件的后续修改。
+  修复和更新仍恢复软件包内容，不会重新执行安装 hook
+  ([#3141](https://github.com/alibaba/anolisa/pull/3141))。
+- RPM 安装现在会在创建恢复日志前检查 DNF 冲突，覆盖 `--dry-run` 及合并的
+  `install --all` 事务，避免依赖求解被拒绝后留下虚假的待恢复操作。
+  使用 DNF 4 时，RPM `--dry-run` 需要加 `sudo`，检查可能刷新仓库元数据
+  ([#3158](https://github.com/alibaba/anolisa/pull/3158))。
+- `anolisa list` 现在与安装使用相同的权威 RPM 软件包映射，
+  避免历史别名或过期的 provider 声明导致错误地显示组件已安装
+  ([#3158](https://github.com/alibaba/anolisa/pull/3158))。
+- 对于仅留下恢复日志的待处理操作，`anolisa forget` 现在会引导执行
+  `anolisa repair <component>`，而不是报告没有可遗忘的记录，并保留恢复证据
+  ([#3158](https://github.com/alibaba/anolisa/pull/3158))。
+
 ## [0.3.10] - 2026-09-06
 
 ### 新增

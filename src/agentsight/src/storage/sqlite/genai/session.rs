@@ -2,7 +2,7 @@
 
 use rusqlite::params;
 
-use super::GenAISqliteStore;
+use super::{GenAISqliteStore, billed_input_col};
 
 // ─── Query result types ────────────────────────────────────────────────────────
 
@@ -78,11 +78,14 @@ impl GenAISqliteStore {
             " AND (g2.call_kind = 'main' OR g2.call_kind IS NULL)"
         };
         let sql = format!(
-            "SELECT session_id,
+            concat!(
+                "SELECT session_id,
                     COUNT(DISTINCT conversation_id) AS conversation_count,
                     MIN(start_timestamp_ns)  AS first_seen_ns,
                     MAX(start_timestamp_ns)  AS last_seen_ns,
-                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
+                    COALESCE(SUM(",
+                billed_input_col!(),
+                "), 0)  AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
                     MAX(model)               AS model,
                     MAX(agent_name)          AS agent_name,
@@ -104,6 +107,9 @@ impl GenAISqliteStore {
                AND start_timestamp_ns BETWEEN ?1 AND ?2{call_kind_filter}
              GROUP BY session_id
              ORDER BY last_seen_ns DESC"
+            ),
+            sub_call_kind_filter = sub_call_kind_filter,
+            call_kind_filter = call_kind_filter
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| {
@@ -139,10 +145,13 @@ impl GenAISqliteStore {
     ) -> Result<Vec<SavingsSessionSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        let sql = if agent_name.is_some() {
-            "SELECT session_id,
+        let sql: &str = if agent_name.is_some() {
+            concat!(
+                "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
+                    COALESCE(SUM(",
+                billed_input_col!(),
+                "), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -152,10 +161,14 @@ impl GenAISqliteStore {
                AND agent_name = ?3
              GROUP BY session_id
              ORDER BY MAX(start_timestamp_ns) DESC"
+            )
         } else {
-            "SELECT session_id,
+            concat!(
+                "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
+                    COALESCE(SUM(",
+                billed_input_col!(),
+                "), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
@@ -164,6 +177,7 @@ impl GenAISqliteStore {
                AND start_timestamp_ns BETWEEN ?1 AND ?2
              GROUP BY session_id
              ORDER BY MAX(start_timestamp_ns) DESC"
+            )
         };
 
         let mut stmt = conn.prepare(sql)?;
@@ -201,15 +215,19 @@ impl GenAISqliteStore {
     ) -> Result<Option<SavingsSessionSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        let sql = "SELECT session_id,
+        let sql = concat!(
+            "SELECT session_id,
                     MAX(agent_name)                  AS agent_name,
-                    COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)   AS total_input,
+                    COALESCE(SUM(",
+            billed_input_col!(),
+            "), 0)   AS total_input,
                     COALESCE(SUM(output_tokens), 0)  AS total_output,
                     COUNT(*)                         AS request_count
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND session_id = ?1
-             GROUP BY session_id";
+             GROUP BY session_id"
+        );
 
         let mut stmt = conn.prepare(sql)?;
         let mut rows = stmt.query_map(rusqlite::params![session_id], |row| {
@@ -342,9 +360,12 @@ impl GenAISqliteStore {
         // When both start_ns and end_ns are present, rewrite with BETWEEN
         let sql = if start_ns.is_some() && end_ns.is_some() {
             format!(
-                "SELECT conversation_id,
+                concat!(
+                    "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
+                        COALESCE(SUM(",
+                    billed_input_col!(),
+                    "), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -357,12 +378,17 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns BETWEEN ?2 AND ?3{call_kind_filter}
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
+                ),
+                call_kind_filter = call_kind_filter
             )
         } else if start_ns.is_some() {
             format!(
-                "SELECT conversation_id,
+                concat!(
+                    "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
+                        COALESCE(SUM(",
+                    billed_input_col!(),
+                    "), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -375,12 +401,17 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns >= ?2{call_kind_filter}
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
+                ),
+                call_kind_filter = call_kind_filter
             )
         } else if end_ns.is_some() {
             format!(
-                "SELECT conversation_id,
+                concat!(
+                    "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
+                        COALESCE(SUM(",
+                    billed_input_col!(),
+                    "), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -393,12 +424,17 @@ impl GenAISqliteStore {
                    AND start_timestamp_ns <= ?2{call_kind_filter}
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
+                ),
+                call_kind_filter = call_kind_filter
             )
         } else {
             format!(
-                "SELECT conversation_id,
+                concat!(
+                    "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens + COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)), 0)  AS total_input,
+                        COALESCE(SUM(",
+                    billed_input_col!(),
+                    "), 0)  AS total_input,
                         COALESCE(SUM(output_tokens), 0) AS total_output,
                         MIN(start_timestamp_ns)         AS start_ns,
                         MAX(end_timestamp_ns)           AS end_ns,
@@ -410,6 +446,8 @@ impl GenAISqliteStore {
                    AND conversation_id IS NOT NULL{call_kind_filter}
                  GROUP BY conversation_id
                  ORDER BY start_ns DESC"
+                ),
+                call_kind_filter = call_kind_filter
             )
         };
 

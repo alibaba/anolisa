@@ -281,6 +281,8 @@ test-hook-parity:
 	python3 tests/test_hook_parity.py
 
 test-adapters: build-openclaw-plugin build-dsh-plugin
+	@echo "==> Testing OpenClaw adapter installer..."
+	bash tests/test-openclaw-adapter-install.sh
 	@echo "==> Testing openclaw Protocol v2 lifecycle..."
 	node --test tests/test-openclaw-lifecycle-v2.mjs
 	@echo "==> Testing native dsh adapter bundle..."
@@ -476,8 +478,9 @@ claude-code-install:
 	@# detect.sh exits 1 (installable) or 2 (missing prereq); we tolerate both
 	@# and let install.sh make the final call (it gracefully no-ops without claude CLI).
 	@# This pre-install probe runs on a steady-state machine and its output is
-	@# informational only, so skip detect.sh's first-run settling retries.
-	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code TOKENLESS_DETECT_RETRIES=0 bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
+	@# informational only, so skip detect.sh's first-run settling retries and
+	@# the plugin registry re-lists that ride out the GH #3082 index lag.
+	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code TOKENLESS_DETECT_RETRIES=0 TOKENLESS_DETECT_PLUGIN_RELISTS=0 bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
 	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/install.sh
 
 claude-code-uninstall:

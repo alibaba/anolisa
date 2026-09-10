@@ -561,9 +561,9 @@ Tokio [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocki
 
 ## 10. Adapter 边界
 
-### 10.1 asc-cli 与 protocol client
+### 10.1 agent-sec-cli 与 protocol client
 
-asc-cli 是 Rust daemon client，只负责：
+agent-sec-cli 是 Rust daemon client，只负责：
 
 1. 解析 CLI 参数和终端输入；
 2. 构造版本化 RPC request 和 trace carrier；
@@ -571,7 +571,7 @@ asc-cli 是 Rust daemon client，只负责：
 4. 把 response 映射为 supported CLI 输出和 exit code；
 5. 在 daemon unavailable/version mismatch 时返回稳定错误。
 
-asc-cli 不构造 Principal、不直读 SQLite、不启动 daemon、不安装 event writer，也不通过
+agent-sec-cli 不构造 Principal、不直读 SQLite、不启动 daemon、不安装 event writer，也不通过
 PyO3、Python backend 或另一套 local executor 执行业务 action。
 
 ### 10.2 asc-daemon-handler inbound adapter
@@ -679,7 +679,7 @@ daemon handler 只接已冻结的 ActionSpec/MethodSpec，并验证 timeout、di
 | RSCE-013 | transport/binding、action schema 和 domain validation 的责任及 error layer 与 oracle 一致 |
 | RSCE-014 | V2 只接受标准 `traceparent/tracestate`；不存在 AgentSec 自定义 trace ID 生成、fallback 或解析路径 |
 | RSCE-015 | daemon request、security invocation 和 capability span 都有有效 OTel TraceId/SpanId，父子关系可验证 |
-| RSCE-020 | asc-cli 不执行 local fallback、不直读 SQLite、不构造自报 Principal；daemon unavailable 返回稳定错误 |
+| RSCE-020 | agent-sec-cli 不执行 local fallback、不直读 SQLite、不构造自报 Principal；daemon unavailable 返回稳定错误 |
 | RSCE-021 | Action Slice 在 system daemon 上以两个 UID 验证 owner isolation 和服务端 QueryScope |
 | RSCE-016 | session/run/call/tool-call/action/backend/policy/verdict 只作为有界 AgentSec semantic attributes，不替代 OTel identity |
 | RSCE-017 | sampling、无 exporter、Collector/export failure 不改变 ActionResult，且每次已路由 invocation 的 SecurityEvent 仍按契约尝试落盘 |

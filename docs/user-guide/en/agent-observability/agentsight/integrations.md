@@ -47,6 +47,15 @@ The page reads Tokenless's own statistics database, so numbers appear only after
 optimized something. A savings figure of 0 usually means Tokenless is installed but not active for
 the Agent that produced those sessions.
 
+Savings association also requires AgentSight to capture and parse the corresponding output tool-call
+ID. Non-SSE HTTP/1.1 responses split across TLS reads are assembled using Content-Length or chunked
+framing before usage and tool calls are extracted. Oversized responses are discarded with a collector
+warning. Incomplete responses, including close-delimited responses without Content-Length or chunked
+framing, cannot supply complete usage or tool-call IDs; Tokenless stats can therefore remain
+unassociated. When SQLite storage is enabled, idle calls retain their request as pending evidence
+for interruption detection and can still complete if the response resumes. Response buffering remains
+bounded by the connection capacity and per-connection body limit.
+
 ## agent-sec-core: security observability and audit
 
 When [agent-sec-core](../../agent-security/agent-sec-core/QUICKSTART.md) is installed, two more
@@ -81,6 +90,16 @@ AgentSight enforcement unavailable: enforcer I/O failed: No such file or directo
 Capture and analysis are unaffected; only the Risk Enforcement page and the
 `/api/enforcement/*` endpoints disappear. Start the unit, or build with `make build-all` if you
 built from source.
+
+The daemon itself logs to the journal — engine startup, socket bind, policy apply outcomes
+(including rollback detail when a kernel step fails), and poller errors:
+
+```
+$ sudo journalctl -u agentsight-enforcer
+[INFO  agentsight_enforcer] agentsight-enforcer listening on /run/agentsight/enforcer.sock
+```
+
+The default level is `info`; add `Environment=RUST_LOG=debug` to the unit for verbose output.
 
 ## cosh: ask in natural language
 

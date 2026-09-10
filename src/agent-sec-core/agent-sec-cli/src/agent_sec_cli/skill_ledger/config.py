@@ -28,7 +28,10 @@ from agent_sec_cli.skill_ledger.path_identity import (
     normalize_canonical_skill_dir,
     validate_path_root_syntax,
 )
-from agent_sec_cli.skill_ledger.paths import get_config_dir
+from agent_sec_cli.skill_ledger.paths import (
+    get_anolisa_skill_dir,
+    get_config_dir,
+)
 from agent_sec_cli.skill_ledger.scanner.names import (
     CODE_SCANNER_NAME,
     STATIC_SCANNER_NAME,
@@ -156,11 +159,16 @@ def _validate_managed_skill_dir_entries(entries: list[str]) -> None:
             raise ConfigError(str(exc)) from exc
 
 
+def default_skill_dir_entries() -> list[str]:
+    """Resolve built-in discovery entries in the current installation environment."""
+    return [*DEFAULT_SKILL_DIRS, f"{get_anolisa_skill_dir()}/*"]
+
+
 def effective_skill_dir_entries(config: dict[str, Any]) -> list[str]:
     """Return built-in plus managed skill directory entries for discovery."""
     entries: list[str] = []
     if config.get("enableDefaultSkillDirs", True):
-        entries.extend(DEFAULT_SKILL_DIRS)
+        entries.extend(default_skill_dir_entries())
     entries.extend(str(v) for v in config.get("managedSkillDirs", []))
     return _compact_skill_dirs(entries)
 

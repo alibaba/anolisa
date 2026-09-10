@@ -39,6 +39,9 @@ anolisa update all
 | `adopt` | 将已有 system RPM 记录为已采纳安装 |
 | `forget` | 仅删除状态记录，不执行包操作 |
 
+`status` 和 `doctor` 允许修改 raw 安装中 `type = "config"` 文件的内容，
+同时继续检查文件是否存在、权限和路径安全。
+
 ### 二级命令 — 管理
 
 | 命令 | 说明 |
@@ -51,6 +54,10 @@ anolisa update all
 | `register` | 加入/离开 Agentic OS Co-Build Program |
 | `env` | 显示环境检测结果 |
 | `bug` | 生成 bug 报告 |
+
+执行 `anolisa adapter enable <component> openclaw` 即同意插件声明的能力，
+CLI 会在宿主支持 capability consent 时传递对应参数。此操作不授予
+unsafe-install 覆盖权限。
 
 ## 安装模式
 
@@ -78,6 +85,9 @@ scope。因此，即使 system scope 已安装同名组件，
 
 完整的命令形式、scope 行为与恢复流程见
 [CLI 用户指南](../../docs/user-guide/zh/user-entrypoint/anolisa-cli.md)。
+
+RPM 安装计划会先通过 DNF 检查冲突，再创建 recovery journal。
+DNF 4 的预检也要求 root，因此 RPM `--dry-run` 需要使用 `sudo`。
 
 ## 架构
 

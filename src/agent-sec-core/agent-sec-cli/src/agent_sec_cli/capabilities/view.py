@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Mapping
 
+from agent_sec_cli.skill_ledger.paths import valid_anolisa_data_home
+
 CANONICAL_CAPABILITIES = (
     "code-scan",
     "prompt-scan",
@@ -356,6 +358,14 @@ AGENT_SPECS: dict[str, dict[str, CapabilitySpec]] = {
         include_prompt_mode=False,
     ),
 }
+AGENT_SPECS["cosh"]["skill-ledger"] = CapabilitySpec(
+    _COSH_HOOKS["skill-ledger"],
+    (
+        *AGENT_SPECS["cosh"]["skill-ledger"].env,
+        EnvSpec("XDG_DATA_HOME", "~/.local/share", value_kind="anolisa_data_home"),
+    ),
+    "ask",
+)
 AGENT_SPECS["hermes"]["pii-check"] = CapabilitySpec(
     _HERMES_HOOKS["pii-check"],
     (
@@ -576,6 +586,10 @@ def _resolve_env(
             effective = _resolve_bool(spec, raw, diagnostics)
         elif spec.name.endswith("_TIMEOUT"):
             effective = _resolve_timeout(spec, raw, diagnostics)
+        elif spec.value_kind == "anolisa_data_home":
+            effective = raw if valid_anolisa_data_home(raw) else spec.default
+            if raw and effective == spec.default:
+                diagnostics.append(_fallback_diagnostic(spec))
         elif spec.value_kind == "identifier":
             engine_default, known = _engine_l2_backends()
             default = engine_default or spec.default

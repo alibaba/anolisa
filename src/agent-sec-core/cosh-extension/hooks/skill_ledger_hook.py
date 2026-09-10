@@ -211,16 +211,17 @@ def _validate_skill_context(input_data: dict[str, Any], skill_name: str) -> str 
 
 
 def _supported_skill_bases(cwd: str) -> list[Path]:
-    """Return the skill roots currently covered by this hook.
-
-    Current scope is intentionally limited to:
-    project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/) → raw system
-    (/usr/local/share/anolisa/skills/).
-    """
+    """Return project, legacy/raw user, and RPM/raw system skill roots."""
+    data_home = os.environ.get("XDG_DATA_HOME", "")
+    # Keep this standalone hook aligned with ANOLISA and the Ledger CLI.
+    if not Path(data_home).is_absolute() or any(
+        segment in (".", "..") for segment in data_home.split("/")
+    ):
+        data_home = str(Path.home() / ".local/share")
     return [
         Path(cwd) / ".copilot-shell" / "skills",
         Path.home() / ".copilot-shell" / "skills",
+        Path(data_home) / "anolisa/skills",
         Path("/usr/share/anolisa/skills"),
         Path("/usr/local/share/anolisa/skills"),
     ]
@@ -300,10 +301,8 @@ def _resolve_skill_dir_from_context(
 def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
     """Resolve a skill name to its on-disk directory.
 
-    Current hook scope is intentionally limited to:
-    project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/) → raw system
-    (/usr/local/share/anolisa/skills/).
+    Searches the same project, legacy/raw user, and system roots as
+    context-based resolution.
 
     Returns ``(path, traversal_detected)``:
     - ``(str, False)`` — resolved successfully.

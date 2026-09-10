@@ -3,12 +3,17 @@
 //! Provides SlsRecord (SLS-specific field naming via serde rename) and
 //! SlsWriter (JSONL append-only writer with fail-silent semantics).
 //!
+//! The writer stamps every record with the host trace identity from
+//! [`TraceContext`] so an observability backend can attribute token savings to
+//! the trace that produced them (see [`crate::trace`]).
+//!
 //! The JSONL file is owned and lifecycle-managed by the anolisa SLS
 //! component (it creates, rotates, and removes it). tokenless never
 //! creates, truncates, or deletes the file: on each `write()` it appends
 //! only if the file already exists, and silently skips when it does not
 //! (treated as "SLS collection not active").
 
+use crate::trace::TraceContext;
 use crate::{StatsRecord, VERSION};
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -151,6 +156,15 @@ pub struct SlsRecord {
     #[serde(rename = "tokenless.tool_use_id")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// W3C trace id of the host span this operation ran under, when the host
+    /// propagated one. `None` for hosts without OpenTelemetry instrumentation.
+    #[serde(rename = "tokenless.trace_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// Id of the enclosing host span, paired with [`Self::trace_id`].
+    #[serde(rename = "tokenless.span_id")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
     #[serde(rename = "tokenless.source_pid")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_pid: Option<i64>,
@@ -199,6 +213,10 @@ impl From<&StatsRecord> for SlsRecord {
             operation: r.operation.as_str().to_string(),
             session_id: r.session_id.clone(),
             tool_use_id: r.tool_use_id.clone(),
+            // Filled from the environment by SlsWriter::write — the record
+            // itself carries no trace identity (see crate::trace).
+            trace_id: None,
+            span_id: None,
             source_pid: r.source_pid,
             before_chars: r.before_chars,
             before_tokens: r.before_tokens,
@@ -225,6 +243,7 @@ impl From<&StatsRecord> for SlsRecord {
 /// Fail-silent: errors are printed to stderr but never propagated.
 pub struct SlsWriter {
     path: PathBuf,
+    trace: Option<TraceContext>,
 }
 
 impl Default for SlsWriter {
@@ -237,10 +256,15 @@ impl SlsWriter {
     /// Create a writer using the TOKENLESS_SLS_PATH env var,
     /// falling back to DEFAULT_SLS_PATH if the env var is not set,
     /// empty, or contains an invalid path.
+    ///
+    /// The host trace identity is resolved once here, from the same
+    /// environment: a hook process is short-lived and its `traceparent`
+    /// cannot change between records.
     pub fn new() -> Self {
         let env_val = std::env::var("TOKENLESS_SLS_PATH").ok();
         Self {
             path: resolve_sls_path(env_val.as_deref()),
+            trace: TraceContext::from_env(),
         }
     }
 
@@ -249,7 +273,17 @@ impl SlsWriter {
     /// for ensuring the path is safe. Production code should use `new()`.
     #[cfg(test)]
     pub(crate) fn with_path(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, trace: None }
+    }
+
+    /// Attach an explicit trace context (for testing).
+    ///
+    /// Tests inject the identity instead of mutating `TRACEPARENT`, which
+    /// would race across parallel test threads in the same process.
+    #[cfg(test)]
+    pub(crate) fn with_trace(mut self, trace: Option<TraceContext>) -> Self {
+        self.trace = trace;
+        self
     }
 
     /// Convert a StatsRecord to SlsRecord and append it as a JSON line.
@@ -265,7 +299,11 @@ impl SlsWriter {
             return;
         }
 
-        let sls_record = SlsRecord::from(record);
+        let mut sls_record = SlsRecord::from(record);
+        if let Some(trace) = &self.trace {
+            sls_record.trace_id = Some(trace.trace_id.clone());
+            sls_record.span_id = Some(trace.span_id.clone());
+        }
         let line = match serde_json::to_string(&sls_record) {
             Ok(s) => s,
             Err(e) => {
@@ -642,6 +680,54 @@ mod tests {
         assert!(result.is_some());
         let resolved = result.unwrap();
         assert!(resolved.to_str().unwrap().starts_with("/var/log/"));
+    }
+
+    #[test]
+    fn test_sls_record_conversion_leaves_trace_unset() {
+        // The trace identity comes from the environment, not from StatsRecord,
+        // so the pure conversion must not invent one.
+        let sls = SlsRecord::from(&make_record());
+        assert_eq!(sls.trace_id, None);
+        assert_eq!(sls.span_id, None);
+    }
+
+    #[test]
+    fn test_sls_writer_stamps_host_trace_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("traced.jsonl");
+        // The anolisa SLS component owns the file; tokenless only appends.
+        fs::write(&path, "").unwrap();
+        let trace =
+            TraceContext::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").unwrap();
+        let writer = SlsWriter::with_path(path.clone()).with_trace(Some(trace));
+
+        writer.write(&make_record());
+
+        let content = fs::read_to_string(&path).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(
+            obj["tokenless.trace_id"],
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+        assert_eq!(obj["tokenless.span_id"], "00f067aa0ba902b7");
+        // Existing attribution is untouched by trace stamping.
+        assert_eq!(obj["tokenless.session_id"], "session-123");
+    }
+
+    #[test]
+    fn test_sls_writer_omits_trace_keys_without_host_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("untraced.jsonl");
+        fs::write(&path, "").unwrap();
+        let writer = SlsWriter::with_path(path.clone());
+
+        writer.write(&make_record());
+
+        let content = fs::read_to_string(&path).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        let keys = obj.as_object().unwrap();
+        assert!(!keys.contains_key("tokenless.trace_id"));
+        assert!(!keys.contains_key("tokenless.span_id"));
     }
 
     #[cfg(unix)]

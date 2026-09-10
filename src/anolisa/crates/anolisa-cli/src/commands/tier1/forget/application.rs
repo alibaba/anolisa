@@ -62,6 +62,13 @@ pub(super) fn run(
     let store = view.writable.state;
     let target = resolved.as_str();
 
+    let journal_dir = rpm_install::journal_dir(&layout);
+    ensure_no_pending_journal(
+        JournalEvidence::new(&journal_dir, &store.operations),
+        target,
+        &command,
+    )?;
+
     // Forget also resolves quarantined records: it is the documented exit for
     // legacy state the migration refused to classify and repair cannot recover.
     let provenance = record_provenance(&store, target).ok_or_else(|| CliError::NotInstalled {
@@ -70,12 +77,6 @@ pub(super) fn run(
             "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
         ),
     })?;
-    let journal_dir = rpm_install::journal_dir(&layout);
-    ensure_no_pending_journal(
-        JournalEvidence::new(&journal_dir, &store.operations),
-        target,
-        &command,
-    )?;
 
     // A successful preview must prove the same adapter precondition that apply
     // re-checks under the lock; otherwise it would advertise work that cannot run.

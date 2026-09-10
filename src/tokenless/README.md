@@ -6,7 +6,7 @@
 
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
-- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline compresses JSON and recognized build/test command logs.
+- **Lifecycle-aware Compression** — Protocol v2 owns BeforeModel schema handling, PreTool RTK rewriting, PostTool routing, and authorized Retrieve; the PostTool Pipeline compresses JSON, CSV/TSV tables, supported search listings, and recognized build/test command logs.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing syntax overhead for suitable structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
@@ -35,6 +35,8 @@ retrieval, and attribution.
 | Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
 | Content-aware response compression | 36.3% lossless savings on the JSON reference fixture | Routes successful JSON through `JsonCompressor`; lossless candidates saving at least 15% take priority, while recoverable record arrays can be reduced to a 32-record base budget |
 | Build-log compression | workload-dependent | Cleans terminal control output and reduces repeated routine progress in recognized Cargo, pytest, npm/Jest, Go, Make/C, and generic command logs while preserving diagnostics, summaries, phases, and stack traces |
+| Search path sharing | workload-dependent | Enabled by default: API search listings, including Claude native Grep, share consecutive file paths and retain every received match; disable with `TOKENLESS_SEARCH_PATH_SHARING_ENABLED=0` or SDK `search_path_sharing_enabled=False`; command output remains on its existing route |
+| CSV/TSV table compression | workload-dependent | Preserves every cell when compacting quoting and record separators; larger tables can retain selected rows with an explicit incomplete-table notice and byte-exact original retrieval. Requires a text replacement slot; file reads pass through |
 | Reversible compression (stash) | — | Omitted record collections and bounded values are stashed; supported agents run `tokenless retrieve HASH` or call their static Retrieve Tool when full data is needed |
 | TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
@@ -114,7 +116,7 @@ Token-Less/
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
 ├── crates/tokenless-runtime/  # Lifecycle API and Runtime-owned PostTool pipeline
 ├── crates/tokenless-protocol/ # Versioned adapter contract and token estimator
-├── crates/tokenless-compressors/ # JSON and build-log domain compressors
+├── crates/tokenless-compressors/ # JSON, tabular, and build-log compressors
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
 ├── python/tokenless/          # PyO3 package: `anolisa_tokenless`
 ├── python/agentscope/         # Pure-Python AgentScope integration package
@@ -273,7 +275,7 @@ Agent adapters may apply separate pre-check thresholds; see the
 ### compress
 
 Shared Agent hooks send lifecycle requests to `tokenless compress`; only
-successful, non-bypassed PostTool JSON and eligible command-output build logs
+successful, non-bypassed PostTool JSON, CSV/TSV tables, and eligible command-output build logs
 enter the Runtime-owned Pipeline. Tool errors bypass compression and keep their
 original output while Core attaches environment-diagnostic context.
 
@@ -396,6 +398,25 @@ linked only when their stored output/input content matches exactly, avoiding
 duplicate intermediate token counts. See
 [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md)
 for options and measurement limits.
+
+### Trace correlation
+
+Exported SLS records carry the trace identity of the host span they were
+produced under, so an observability backend such as AgentLoop can attribute
+token savings to a trace. Two optional environment variables supply it:
+
+- `TOKENLESS_TRACEPARENT` — adapter-facing override, read first.
+- `TRACEPARENT` — standard W3C variable, used when the override is absent,
+  empty, or unparsable.
+
+Injecting one is the launcher's responsibility: OpenTelemetry keeps the active
+span in an in-process carrier and does not export it to child processes, so a
+host or adapter that wants correlation must set one of them before spawning
+Tokenless. Without a usable context the record shape is unchanged, and the
+identity is written only to the SLS JSONL — never to the local `stats.db`. See
+[Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md)
+and
+[Configuration and Data Privacy](../../docs/user-guide/en/token-saving/tokenless/configuration-and-privacy.md).
 
 ### Database location
 
@@ -944,7 +965,7 @@ layout and single-target interface.
 |---|---|
 | `crates/tokenless-cli/` | CLI binary — `tokenless` command (compress, stats, env-check) |
 | `crates/tokenless-schema/` | BeforeModel tool-schema compression — `SchemaCompressor` |
-| `crates/tokenless-compressors/` | Content-domain engines — `JsonCompressor` and `BuildLogCompressor` are connected to PostTool |
+| `crates/tokenless-compressors/` | Content-domain engines — `JsonCompressor`, `TabularCompressor` and `BuildLogCompressor` are connected to PostTool |
 | `crates/tokenless-runtime/` | Lifecycle API and Runtime-owned `PostToolPipeline`, shared by CLI and language bindings |
 | `crates/tokenless-protocol/` | Versioned adapter contract and shared `heuristic-v1` token estimator |
 | `python/tokenless/` | PyO3 package exposing `anolisa_tokenless` for CPython 3.11+ |

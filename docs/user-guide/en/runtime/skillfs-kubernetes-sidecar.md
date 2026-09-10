@@ -10,6 +10,93 @@ The repository does not currently publish a dedicated SkillFS sidecar image.
 Build the image from the source revision you plan to deploy, verify it locally,
 and push it to a registry that the cluster can pull from.
 
+## Read-only installed skills with Ledger
+
+The optional `30-ledger-pod.yaml` profile copies an installed, flat skill bundle
+into `/state/source`, runs the real Ledger scanner and activation processor,
+then starts Ledger, SkillFS and Cosh in that order. It keeps
+`--security --activation-mode file`; read-only package permissions never grant
+activation. Both `.skill-meta/activation.json` and its version snapshots remain
+inside each copied skill. File activation also reads the existing xattr protocol.
+
+Use an ANOLISA RPM image containing `os-skills`, `agent-sec-core` and `cosh-ng`
+from the revision being validated, and the corresponding dedicated SkillFS
+image. The example uses the RPM Python layout and `/usr/share/anolisa/skills`.
+For a raw install, change the init command's package argument and Python runtime
+to that image's installed paths. Do not point SkillFS directly at the package.
+Run these commands from `src/skillfs`, after creating the example namespace:
+
+```bash
+export NS=skillfs-container-example
+export IMAGE=registry.example.com/anolisa/skillfs-sidecar:validated
+export ANOLISA_IMAGE=registry.example.com/anolisa/anolisa:validated
+kubectl -n "$NS" create configmap skillfs-ledger-init \
+  --from-file=ledger-init.py=container/ledger-init.py --dry-run=client -o yaml |
+  kubectl -n "$NS" apply -f -
+sed -e "s|skillfs-sidecar:dev|$IMAGE|g" \
+    -e "s|anolisa:dev|$ANOLISA_IMAGE|g" deploy/kubernetes/30-ledger-pod.yaml |
+  kubectl -n "$NS" apply -f -
+kubectl -n "$NS" logs skillfs-ledger-example -c ledger-init
+kubectl -n "$NS" wait --for=condition=Ready pod/skillfs-ledger-example --timeout=300s
+```
+
+The init container has a read-only root filesystem. The initializer normalizes
+copied permissions, refuses links, special files and package-supplied Ledger
+metadata, and publishes a complete source tree before scanning. It uses a
+dedicated Ledger configuration with explicit `managedSkillDirs`; daemon startup
+alone does not turn default discovery roots into managed skills. Scanner or
+activation errors stop initialization; policy outcomes, including hidden skills
+and Ledger's safe pending-review snapshots, are preserved without auto-approval.
+
+The Agent receives only the propagated view via its legacy user skill directory.
+`--read-only` makes the FUSE mount itself reject mutations with `EROFS`, including
+after propagation. A parent volume's `readOnly: true` alone does not protect
+submounts. Ledger retains write access to the separate physical source.
+Its home and workspace start empty; RPM/raw system skill and extension roots are
+masked. `skills.custom_paths` is additive and cannot provide this isolation.
+Custom-prefix images, extra extensions or preloaded homes require equivalent
+masking. This profile uses FUSE activation as its enforcement boundary and does
+not enable an independent Cosh Ledger hook. Adding hooks requires checking their
+path identity and daemon access separately; do not mount `/state` in the Agent.
+
+Ledger's startup probe requires a successful `daemon.health` RPC before SkillFS
+and Cosh start. Readiness uses the same RPC, and repeated liveness failures
+restart the Ledger sidecar. A stale socket or an unresponsive daemon fails the
+probe; socket existence alone is insufficient.
+
+The mount probes read virtual `skill-discover/SKILL.md`, which remains available
+when all business skills are hidden. Readiness confirms the mount, not approval
+of a required business skill. Add an application readiness condition if needed.
+The activation watcher reloads activation artifacts already published by Ledger
+without a remount. This profile does not automatically rescan arbitrary source
+edits: the JSONL event log is diagnostic and the daemon does not tail it.
+Treat seeded content as immutable; package updates require a new source volume
+and a new scan. A trusted operator changing the existing source must explicitly
+request Ledger scanning and activation before expecting the view to change.
+
+For persistence, replace the **whole** `state` emptyDir with a dedicated PVC so
+signing keys and per-skill snapshots survive together. Reusing the same package
+preserves existing state; a changed or unrecognized seed fails instead of
+overwriting it. Quiesce the old Pod before reusing its PVC, and keep the old volume
+for rollback. Never run two initializers or daemons against the same state.
+
+Validation: `python3 scripts/test-ledger-init.py` checks seeding without external
+dependencies. In a disposable privileged Linux container with `/dev/fuse`, use
+the agent-sec Python 3.11 environment and place current `skillfs`, `cosh-core`,
+`fusermount3` and `timeout` on PATH, then run
+`python scripts/test-ledger-init.py --integration`. It uses real scanners and
+snapshots, a read-only bind mount, an unprivileged Cosh process, a raw-directory
+bypass negative control, and a probe after every business skill is hidden.
+This does not replace Kubernetes mount-propagation validation on the target cluster.
+
+Delete the example Pod and ConfigMap when finished; retain any PVC until its
+state is no longer needed:
+
+```bash
+kubectl -n "$NS" delete pod skillfs-ledger-example
+kubectl -n "$NS" delete configmap skillfs-ledger-init
+```
+
 ## Prerequisites
 
 - Kubernetes 1.29 or later.
@@ -71,19 +158,54 @@ propagation described below.
 
 ## How the image starts
 
-With no command arguments, the image runs its preflight checks and then starts
-this fixed container lifecycle:
+With no command arguments, the image starts a PID 1 supervisor that runs
+preflight before each attempt and launches a foreground mount worker:
 
 ```text
-skillfs mount "$SKILLFS_SOURCE" "$SKILLFS_MOUNTPOINT" \
-  --foreground --allow-other
+skillfs-supervisor
+  └─ skillfs mount "$SKILLFS_SOURCE" "$SKILLFS_MOUNTPOINT" --foreground --allow-other
 ```
 
 `SKILLFS_DISCOVER_ROOT` and `SKILLFS_EXTRA_ARGS` add optional mount arguments.
-Do not add `--managed`; the foreground SkillFS process must remain PID 1 so the
-kubelet can restart it and deliver `SIGTERM` directly. Passing command arguments
-to the image replaces the mount command completely, which is why the version
-smoke check works without `/dev/fuse`.
+Do not add `--managed`; the container supervisor owns worker recovery and
+forwards shutdown signals. Passing command arguments to the image replaces
+this lifecycle completely, so the version smoke check needs no `/dev/fuse`.
+
+## Automatic mount recovery
+
+The supervisor reuses `skillfs-mount-probe` to read `SKILLFS_PROBE_FILE` through
+FUSE. After consecutive failures it stops and reaps the worker, uses preflight
+to clear the residual FUSE mount at the configured mountpoint, and starts a new
+worker. One transient failure does not trigger a remount. Keep the probe file
+stable, nonempty, and readable under the deployed visibility policy; deleting
+or hiding it is also treated as a health failure.
+
+Both image variants accept these environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SKILLFS_SUPERVISOR_PROBE_INTERVAL_SECONDS` | `2` | Delay between probes |
+| `SKILLFS_SUPERVISOR_FAILURE_THRESHOLD` | `2` | Consecutive runtime failures before recovery |
+| `SKILLFS_SUPERVISOR_STABLE_HEALTHY_PROBES` | `3` | Consecutive successful runtime probes needed to reset the recovery budget |
+| `SKILLFS_SUPERVISOR_STARTUP_TIMEOUT_SECONDS` | `30` | Startup health budget, checked after each probe |
+| `SKILLFS_SUPERVISOR_STOP_TIMEOUT_SECONDS` | `10` | Worker stop budget before SIGKILL |
+| `SKILLFS_SUPERVISOR_MAX_FAILED_ATTEMPTS` | `5` | Consecutive failed cycles before the supervisor exits |
+| `SKILLFS_SUPERVISOR_BACKOFF_INITIAL_SECONDS` | `1` | Initial retry delay, doubled after each failed cycle |
+| `SKILLFS_SUPERVISOR_BACKOFF_MAX_SECONDS` | `30` | Maximum retry delay |
+
+Values must be positive; counts and startup/stop budgets must be integers.
+The initial retry delay must not exceed its maximum. With immediate I/O errors,
+default detection takes roughly 2–4 seconds; probe timeouts, worker shutdown,
+cleanup, and startup add to recovery time. Keep kubelet probes enabled: the
+reference liveness probe runs every 5 seconds and restarts after two failures,
+so it can take over before in-container retries are exhausted.
+
+Recovery restores new path opens. It cannot prevent a runtime from invalidating
+FUSE, guarantee uninterrupted reads, or repair already-open handles. Consumers
+must close failed handles and retry fresh opens within a bounded budget. For
+ACS restart validation, restart an unrelated container in a disposable Pod and
+check reads from both the sidecar and workload, recovery logs, and container
+restart counts; local supervisor tests do not validate mount propagation.
 
 ## Required Pod topology
 
