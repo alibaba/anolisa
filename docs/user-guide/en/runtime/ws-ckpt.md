@@ -202,6 +202,166 @@ receives a plain copy of the mount's contents — subsequent writes land in the
 copy, not on the mounted filesystem, and the two silently diverge. Unmount nested
 mounts before initializing, or keep mount points outside the workspace tree.
 
+### Rolling back to a pre-first-conversation snapshot blocks OpenClaw
+
+OpenClaw seeds baseline files (AGENTS.md, BOOTSTRAP.md, SOUL.md, IDENTITY.md,
+and USER.md; 2026.7.x also seeds HEARTBEAT.md and TOOLS.md) into the
+workspace on its first run and keeps an attestation record of that event. If
+you roll back to a snapshot taken **before** OpenClaw's first conversation —
+one that does not contain these baseline files — OpenClaw mistakes the
+vanished files for an accidentally deleted workspace and refuses to work:
+
+```
+WorkspaceVanishedError: OpenClaw workspace appears to have disappeared ...
+Refusing to reseed BOOTSTRAP.md over a recently attested workspace.
+```
+
+**Rolling back to a pre-first-conversation snapshot is strongly discouraged.**
+Right after OpenClaw's first conversation in a workspace, create a snapshot
+(`ws-ckpt checkpoint -w ...`); every later rollback then targets a snapshot
+of a workspace that was in real use.
+
+What the guard actually checks is survival evidence, not when the snapshot
+was taken: a rollback is safe as long as the target snapshot preserves
+content OpenClaw recognizes. The accepted evidence differs by version:
+
+- All versions:
+  - a still-present BOOTSTRAP.md (setup has not completed yet);
+  - a profile file that differs from its template (SOUL.md, IDENTITY.md,
+    USER.md);
+  - the `memory/` directory (or MEMORY.md);
+  - an installed skill (`skills/<name>/SKILL.md`);
+  - the generated baseline files are all still present and byte-identical to
+    what OpenClaw generated — their hashes are recorded in the attestation —
+    so a completed workspace that was never customized also passes.
+- 2026.7.x only: a required bootstrap file whose content no longer matches
+  the generated one (AGENTS.md, TOOLS.md, or HEARTBEAT.md).
+- 2026.8.1 and later only: a customized AGENTS.md (content differs from both
+  the generated one and the template). These versions no longer seed
+  TOOLS.md or HEARTBEAT.md, and neither file ever counts as evidence there.
+
+Two consequences:
+
+- The error triggers only when the snapshot has lost **all** of the evidence
+  above — typically a state from before the baseline files were seeded, or
+  one where those files were later deleted with no memory, skills, or
+  customized files left behind. Merely never having customized the workspace
+  does not trigger it: intact generated files are themselves evidence.
+- Do not equate safety with the full seeded file list: OpenClaw deletes
+  BOOTSTRAP.md once setup completes, and since 2026.8.1
+  `openclaw-workspace-state.json` is only a legacy migration input — a
+  normal post-conversation snapshot contains neither, yet is safe.
+
+**To recover, pick the path for your OpenClaw version:**
+
+- OpenClaw 2026.7.x and earlier — remove the attestation records for this
+  workspace. The record file is named after the SHA-256 of the workspace's
+  normalized absolute path, and OpenClaw looks for it in its state directory
+  (honoring `OPENCLAW_STATE_DIR`), under the effective home directory
+  (honoring `OPENCLAW_HOME`, default `$HOME`) in both the `.openclaw` and
+  legacy `.clawdbot` state directories, and next to the workspace itself.
+  OpenClaw normalizes paths with Node.js `path.resolve` (collapsing `..`
+  segments and repeated slashes) and expands a leading `~` in its env
+  overrides, so the command below runs entirely inside `node`: it derives
+  the exact same paths and removes the records itself, and path content is
+  never re-evaluated by the shell (Node.js is present wherever the
+  npm-installed OpenClaw CLI runs).
+
+  One input the command cannot derive by itself: an agent started as
+  `openclaw --profile <name>` keeps its state under
+  `<effective home>/.openclaw-<name>` (`--dev` behaves like `--profile dev`),
+  and that choice exists only inside the agent process — exporting
+  `OPENCLAW_PROFILE` in the shell does **not** move the state directory, only
+  the command-line flag does. Rather than guess and silently clean the wrong
+  directory, the command aborts when `OPENCLAW_STATE_DIR` is unset and it
+  finds more than one `.openclaw*` state directory under the effective home.
+  In that case, export the state directory the agent actually used and rerun:
+
+  ```bash
+  export OPENCLAW_STATE_DIR="$HOME/.openclaw-team"   # agent runs `openclaw --profile team ...`
+  ```
+
+  The recovery command:
+
+  ```bash
+  WS='/path/to/workspace'   # workspace's absolute path (single quotes keep $ and backticks literal)
+  node -e '
+    const crypto = require("crypto"), fs = require("fs"), os = require("os"), path = require("path");
+    const env = process.env;
+    if (!process.argv[1]) { console.error("Set WS to the workspace path and pass it to this command."); process.exit(1); }
+    const rawHome = (env.OPENCLAW_HOME || "").trim();
+    const OC_HOME = rawHome
+      ? path.resolve(rawHome.replace(/^~(?=$|[\\/])/, os.homedir()))
+      : os.homedir();
+    const WS = path.resolve(process.argv[1]);
+    const HASH = crypto.createHash("sha256").update(WS).digest("hex");
+    const sdOverride = (env.OPENCLAW_STATE_DIR || "").trim();
+    let SD;
+    if (sdOverride) {
+      SD = path.resolve(sdOverride.replace(/^~(?=$|[\\/])/, OC_HOME));
+    } else {
+      let candidates = [];
+      try {
+        candidates = fs.readdirSync(OC_HOME, { withFileTypes: true })
+          .filter((e) => e.isDirectory() && (e.name === ".openclaw" || e.name.startsWith(".openclaw-")))
+          .map((e) => path.join(OC_HOME, e.name));
+      } catch {}
+      if (candidates.length > 1) {
+        console.error("Multiple OpenClaw state directories exist under " + OC_HOME + ":\n"
+          + candidates.map((d) => "  " + d).join("\n") + "\n"
+          + "An agent started with `openclaw --profile <name>` (or `--dev`) keeps its state in\n"
+          + "<effective home>/.openclaw-<name>, and that value exists only inside the agent process.\n"
+          + "Export the state directory the agent actually used, then rerun this command:\n"
+          + "  export OPENCLAW_STATE_DIR=" + OC_HOME + "/.openclaw-<name>");
+        process.exit(1);
+      }
+      SD = candidates[0] || path.join(OC_HOME, ".openclaw");
+    }
+    const stateDirs = [...new Set([SD, path.join(OC_HOME, ".openclaw"), path.join(OC_HOME, ".clawdbot")])];
+    const targets = stateDirs.map((d) => path.join(d, "workspace-attestations", HASH + ".attested"));
+    targets.push(WS + ".attested");
+    console.log("workspace:   " + WS);
+    console.log("state dir:   " + SD);
+    let failed = false;
+    for (const t of targets) {
+      try {
+        if (fs.existsSync(t)) { fs.rmSync(t); console.log("removed:     " + t); }
+        else { console.log("not present: " + t); }
+      } catch (err) {
+        failed = true;
+        console.error("FAILED:      " + t + " (" + err.message + ")");
+      }
+    }
+    if (failed) process.exit(1);
+  ' "$WS"
+  ```
+
+  Then rerun your agent session; OpenClaw reseeds the baseline files and
+  starts a fresh attestation.
+
+- OpenClaw 2026.8.1 and later — the attestation record has moved into
+  OpenClaw's state SQLite database, and no command currently removes just
+  this one record. The error message suggests a full OpenClaw reset
+  (`openclaw reset --scope full`), but that deletes **every** agent workspace
+  and the entire OpenClaw state directory — credentials, sessions, and
+  installed plugins included — which is far more destructive than this
+  situation warrants. To restore normal workspace behavior, roll back again
+  to a snapshot taken while the workspace was in real use (any snapshot that
+  satisfies the survival-evidence condition above):
+
+  ```bash
+  ws-ckpt rollback -w /path/to/workspace -s <snapshot-id>
+  ```
+
+  The workspace is usable again immediately. Alternatively, the guard state
+  itself expires: 24 hours after the last state write, OpenClaw clears the
+  stale attestation and reseeds the workspace on the next agent run, so
+  keeping the pre-baseline snapshot and retrying after 24 hours also works
+  without a full reset. To clear the block sooner, the full OpenClaw reset
+  described above is currently the only option. Note that waiting for the
+  expiry and running the reset end the same way: the next agent run reseeds
+  the baseline files into the workspace.
+
 ---
 
 ## Natural Language Usage (Agent-Driven)
