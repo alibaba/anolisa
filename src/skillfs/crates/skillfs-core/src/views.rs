@@ -94,6 +94,24 @@ impl ViewsConfig {
             .unwrap_or_default()
     }
 
+    /// Return existing default-view skills plus skills not assigned to any view.
+    ///
+    /// Resolve automatic membership in memory so read-only mounts need not
+    /// rewrite the source configuration. Explicit secondary assignments remain
+    /// excluded, including when the file has no default view.
+    pub fn effective_default_skills(&self, store: &crate::store::SkillStore) -> Vec<String> {
+        let (mut primary, _) = store.split_primary(Some(&self.default_skills()));
+        let assigned = self.all_assigned_skills();
+        primary.extend(
+            store
+                .list()
+                .into_iter()
+                .filter(|name| !assigned.contains(*name))
+                .map(str::to_string),
+        );
+        primary
+    }
+
     /// Return all skill names assigned to any view.
     pub fn all_assigned_skills(&self) -> HashSet<String> {
         self.views
@@ -217,6 +235,23 @@ mod tests {
 
         let loaded = ViewsConfig::load(dir.path()).unwrap();
         assert!(loaded.default_skills().contains(&"new-skill".to_string()));
+    }
+
+    #[test]
+    fn effective_default_includes_unassigned_without_changing_views() {
+        let mut cfg = make_config();
+        let original = cfg.default_skills();
+        let mut store = crate::store::SkillStore::new();
+        for name in ["github", "apple-notes", "new-skill"] {
+            store.upsert(crate::parser::parse_skill_md("# Fixture", name));
+        }
+        assert_eq!(
+            cfg.effective_default_skills(&store),
+            vec!["github", "new-skill"]
+        );
+        assert_eq!(cfg.default_skills(), original);
+        cfg.views[0].default = false;
+        assert_eq!(cfg.effective_default_skills(&store), vec!["new-skill"]);
     }
 
     #[test]

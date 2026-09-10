@@ -821,6 +821,7 @@ dependencies = [
  "skillfs-fuse",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

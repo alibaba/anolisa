@@ -3209,3 +3209,178 @@ trusted_peer_exe = "{}"
         "hermes (config) control socket server did not return an authenticated pong: {resp}"
     );
 }
+
+#[test]
+fn mount_file_rejects_invalid_configuration_and_option_mixing() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("mount.toml");
+    let mount = temp.path().join("mount");
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let valid = format!("mountpoint = {:?}\nsources = [{:?}]\n", mount, source);
+    let cases = [
+        (
+            "mountpoint = '/mnt/view'\nsources = []\n".to_string(),
+            vec![],
+            "must not be empty",
+        ),
+        (
+            "mountpoint = '/mnt/view'\nsources = ['relative']\n".to_string(),
+            vec![],
+            "absolute",
+        ),
+        (
+            format!("{valid}unexpected = true\n"),
+            vec![],
+            "unknown field",
+        ),
+        (valid.clone(), vec!["--security"], "cannot be combined"),
+        (valid.clone(), vec!["--managed"], "cannot be combined"),
+        (
+            valid.clone(),
+            vec!["--skill-layout", "hermes"],
+            "cannot be combined",
+        ),
+        (
+            valid.clone(),
+            vec![source.to_str().unwrap(), mount.to_str().unwrap()],
+            "cannot be combined",
+        ),
+        ("[audit]\n".to_string(), vec![], "SOURCE is required"),
+    ];
+    for (body, extra, expected) in cases {
+        std::fs::write(&config, body).unwrap();
+        let out = Command::new(bin_path())
+            .args(["mount", "--config"])
+            .arg(&config)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(expected),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!mount.exists());
+    }
+}
+
+#[test]
+fn mount_file_aggregates_whole_skills_read_only() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let high = temp.path().join("high");
+    let low = temp.path().join("low");
+    let mount = temp.path().join("mount");
+    for (root, name, body) in [
+        (&high, "demo", "winner"),
+        (&low, "demo", "shadowed"),
+        (&low, "other", "second source"),
+        (&low, "reserve", "secondary view"),
+        (&low, "unassigned", "not assigned to a view"),
+    ] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        std::fs::write(
+            root.join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: fixture\n---\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join(name).join("resource.txt"), body).unwrap();
+    }
+    let views = "[[view]]\nname = 'default'\ndefault = true\nskills = ['demo', 'other']\n[[view]]\nname = 'reserve'\nskills = ['reserve']\n";
+    std::fs::write(high.join("skillfs-views.toml"), views).unwrap();
+    std::fs::write(
+        low.join("skillfs-views.toml"),
+        "[[view]]\nname = 'default'\ndefault = true\nskills = []\n",
+    )
+    .unwrap();
+    std::fs::write(low.join("demo/low-only.txt"), "must not merge").unwrap();
+    let config = temp.path().join("mount.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "mountpoint = {:?}\nsources = [{:?}, {:?}]\n",
+            mount, high, low
+        ),
+    )
+    .unwrap();
+    struct RunningMount(Child, std::path::PathBuf);
+    impl Drop for RunningMount {
+        fn drop(&mut self) {
+            stop_mount_child(&mut self.0, &self.1);
+            let _ = self.0.wait();
+        }
+    }
+    let log = std::fs::File::create(temp.path().join("mount.log")).unwrap();
+    let mut child = RunningMount(
+        Command::new(bin_path())
+            .args(["mount", "--config"])
+            .arg(&config)
+            .arg("--foreground")
+            .stderr(log)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        mount.clone(),
+    );
+    for _ in 0..100 {
+        if is_mounted(&mount) || child.0.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        is_mounted(&mount),
+        "{}",
+        std::fs::read_to_string(temp.path().join("mount.log")).unwrap()
+    );
+    let skill = mount.join("skills/demo");
+    assert!(
+        std::fs::read_to_string(skill.join("SKILL.md"))
+            .unwrap()
+            .contains("winner")
+    );
+    assert_eq!(
+        std::fs::read_to_string(skill.join("resource.txt")).unwrap(),
+        "winner"
+    );
+    assert_eq!(
+        std::fs::read_to_string(mount.join("skills/other/resource.txt")).unwrap(),
+        "second source"
+    );
+    assert!(!skill.join("low-only.txt").exists());
+    let visible: Vec<_> = std::fs::read_dir(mount.join("skills"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(visible.iter().any(|name| name == "unassigned"));
+    assert!(!visible.iter().any(|name| name == "reserve"));
+    assert_eq!(
+        std::fs::read_to_string(mount.join("skills/unassigned/resource.txt")).unwrap(),
+        "not assigned to a view"
+    );
+    assert_eq!(
+        std::fs::read_to_string(high.join("skillfs-views.toml")).unwrap(),
+        views
+    );
+    let discovery = std::fs::read_to_string(mount.join("skills/skill-discover/SKILL.md")).unwrap();
+    assert!(discovery.contains(&mount.join("skills/reserve").display().to_string()));
+    for result in [
+        std::fs::write(skill.join("resource.txt"), "changed"),
+        std::fs::remove_file(skill.join("resource.txt")),
+        std::fs::create_dir(mount.join("skills/new")),
+        std::fs::rename(skill.join("resource.txt"), skill.join("renamed")),
+    ] {
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EROFS));
+    }
+    assert_eq!(
+        std::fs::read_to_string(high.join("demo/resource.txt")).unwrap(),
+        "winner"
+    );
+    drop(child);
+    assert!(!is_mounted(&mount));
+}

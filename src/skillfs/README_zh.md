@@ -123,6 +123,13 @@ cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint --managed
 cargo run -p skillfs -- stop /path/to/mountpoint
 ```
 
+### 挂载配置
+
+使用 `skillfs mount --config /path/to/skillfs-mount.toml`，通过 `mountpoint` 和
+有序 `sources` 数组聚合目录。同名 skill 整体选用较早的来源，多源挂载只读。
+路径必须为绝对路径。TOML 示例、支持的参数和 OpenClaw 接入限制见
+[配置参考](../../docs/user-guide/zh/runtime/skillfs.md#挂载配置)。
+
 ### Managed Mount 模式
 
 默认 `mount`（包括 `--foreground`）保持原有前台行为：进程阻塞，

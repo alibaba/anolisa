@@ -138,14 +138,11 @@ impl SkillFs {
 
     /// Return the list of skill names to show in /skills (default view).
     ///
-    /// If views config is present, returns the default view's skills
-    /// (filtered to those actually in the store). Otherwise returns all skills.
+    /// Include unassigned skills without persisting view changes; explicit
+    /// secondary assignments stay hidden. Without a config, return all skills.
     pub(super) fn primary_skill_names(&self) -> Vec<String> {
         if let Some(cfg) = &self.views_config {
-            let primary = cfg.default_skills();
-            let store = self.store.read();
-            let (primary, _) = store.split_primary(Some(&primary));
-            primary
+            cfg.effective_default_skills(&self.store.read())
         } else {
             let store = self.store.read();
             store.list().iter().map(|s| s.to_string()).collect()

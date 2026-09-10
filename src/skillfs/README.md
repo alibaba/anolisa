@@ -132,6 +132,14 @@ cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint --managed
 cargo run -p skillfs -- stop /path/to/mountpoint
 ```
 
+### Mount Configuration
+
+Use `skillfs mount --config /path/to/skillfs-mount.toml` with `mountpoint` and
+an ordered `sources` array to aggregate directories. Earlier sources win whole
+skill-name conflicts; multiple sources are read-only. Paths must be absolute.
+See the [configuration reference](../../docs/user-guide/en/runtime/skillfs.md#mount-configuration)
+for the TOML example, supported flags, and OpenClaw integration limits.
+
 ### Managed Mount Mode
 
 Default `mount`, including `--foreground`, keeps the original foreground

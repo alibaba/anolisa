@@ -154,6 +154,58 @@ termination, clears them, and remounts with bounded recovery retries. Default
 foreground mounts are unchanged: they still exit and unmount on `SIGTERM` or
 `Ctrl+C`.
 
+### Mount Configuration
+
+Aggregate explicit source directories with a TOML file:
+
+```toml
+mountpoint = "/mnt/skillfs"
+sources = [
+  "/path/to/workspace/skills",
+  "/path/to/managed/skills",
+  "/path/to/bundled/skills",
+]
+```
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml
+```
+
+Sources are ordered from highest to lowest precedence. The first source containing
+a skill directory name wins as a whole, including scripts and resources; files
+from shadowed skills are not merged. Duplicate names are logged with both paths.
+The view is exposed at `/mnt/skillfs/skills`, and discovery advertises mounted
+paths. The existing directory-name identity is retained; this does not implement
+OpenClaw's frontmatter-name precedence rules.
+
+The file accepts only `mountpoint` and `sources`. Supply at least one source and
+absolute paths (no `~` or environment expansion). Sources must exist and be
+readable; canonical duplicate roots are removed, preserving order. Sources and
+the mountpoint must not contain one another. Invalid skills or a combined skill
+count above the existing limit fail startup.
+
+Multiple distinct sources automatically enable read-only mounting. A single
+source remains writable unless `--read-only` is supplied. This configuration
+always uses the flat output layout, retaining the existing flat and categorized
+source scanning depth. Only the first source's `skillfs-views.toml` is used;
+read-only configuration mounts do not update that file. Skills absent from every
+view are included in the effective default view in memory; explicitly assigned
+secondary skills keep their grouping. No source config merge,
+automatic source discovery, or hot reload is performed. Remount after changing
+the config or adding/removing skills; reads are not an immutable content snapshot.
+
+Mount configuration cannot be mixed with positional paths or security,
+activation, installation, layout, or managed-mode options. The supported optional
+flags are `--foreground`, `--allow-other`, `--read-only`, `--verbose`, and
+`--log-file`. Existing `mount SOURCE MOUNTPOINT --config security.toml` usage is
+unchanged for files without `sources` or `mountpoint`.
+
+For OpenClaw, point the intended skill loader at the mounted `skills` directory
+and verify actual loaded paths. Adding it as an extra directory alone does not
+replace higher-priority original sources. Direct source access remains outside
+this mount's coverage. Roll back by unmounting with `fusermount3 -u /mnt/skillfs`
+and returning to the existing single-source command.
+
 ## CLI Utilities
 
 ### validate

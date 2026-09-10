@@ -509,3 +509,22 @@ fn mount_writes_one_record_when_merged_output_closes_early() {
     assert_eq!(records[0]["ops_name"], "mount");
     assert_eq!(records[0]["err_reason"], "panic");
 }
+
+#[test]
+fn mount_file_validation_logs_actual_error_once() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("mount.toml");
+    std::fs::write(&config, "mountpoint = '/mnt/skillfs'\nsources = []\n").unwrap();
+    let log = make_ops_log(temp.path());
+    let output = run_skillfs(&["mount", "--config", config.to_str().unwrap()], &log);
+    assert!(!output.status.success());
+    let records = read_records(&log);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["err_reason"],
+        "mount config sources must not be empty"
+    );
+}

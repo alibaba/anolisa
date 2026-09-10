@@ -148,6 +148,49 @@ Managed mode 还会在 worker 异常退出后检测 stale/dead FUSE endpoint，�
 有界重试重新挂载。默认 foreground mount 行为不变：收到 `SIGTERM` 或 `Ctrl+C`
 时仍会退出并 unmount。
 
+### 挂载配置
+
+通过 TOML 文件聚合显式指定的源目录：
+
+```toml
+mountpoint = "/mnt/skillfs"
+sources = [
+  "/path/to/workspace/skills",
+  "/path/to/managed/skills",
+  "/path/to/bundled/skills",
+]
+```
+
+```bash
+skillfs mount --config /path/to/skillfs-mount.toml
+```
+
+源按优先级从高到低排列。同名 skill 目录整体选用第一个来源，包括脚本和资源；
+不合并被遮蔽 skill 的文件。重名日志记录选中和被遮蔽的路径。
+视图位于 `/mnt/skillfs/skills`，discovery 输出挂载后的路径。
+继续使用目录名作为 skill 标识，不实现 OpenClaw 的 frontmatter 名称优先级规则。
+
+文件只接受 `mountpoint` 和 `sources`。至少指定一个源，所有路径必须为绝对路径，
+不展开 `~` 或环境变量。源必须存在且可读；规范化后相同的源去重，保留原顺序。
+源与挂载点不能相互包含。无法解析的 skill 或合并后超过现有数量上限会导致启动失败。
+
+多个不同源自动启用只读挂载；单源仍可写，除非指定 `--read-only`。
+该入口固定使用 flat 输出布局，保留现有 flat/category 源目录扫描深度。
+只使用第一个源的 `skillfs-views.toml`；只读配置挂载不更新此文件。
+未分配到任何 view 的 skill 会在内存中加入有效默认视图；显式分配到 secondary
+view 的 skill 保持原有分组。
+不合并源配置，不自动发现源，也不热加载。修改配置或新增、删除 skill 后需重新挂载；
+读取结果不是不可变的内容快照。
+
+挂载配置不能与位置参数或 security、activation、installation、layout、managed
+模式参数混用。允许的可选参数为 `--foreground`、`--allow-other`、`--read-only`、
+`--verbose` 和 `--log-file`。不含 `sources` 或 `mountpoint` 的文件继续支持原有
+`mount SOURCE MOUNTPOINT --config security.toml` 用法。
+
+接入 OpenClaw 时，将所需 skill loader 指向挂载后的 `skills` 目录，并检查实际加载路径。
+仅添加 extra directory 不会替代更高优先级的原生来源；直接访问源目录仍不受此挂载覆盖。
+回退时执行 `fusermount3 -u /mnt/skillfs`，再使用原有单源命令。
+
 ## CLI 工具
 
 ### validate

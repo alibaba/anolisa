@@ -13,7 +13,7 @@ fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
     }
 }
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use skillfs_core::store::SkillStore;
 use skillfs_core::views::ViewsConfig;
 use skillfs_core::{ParseConfig, SharedSkillStore};
@@ -37,6 +37,7 @@ use tracing::{debug, error, info, warn};
 
 mod help_text;
 mod managed;
+mod mount_file;
 mod sls_ops;
 
 #[derive(Clone, Debug)]
@@ -177,12 +178,12 @@ enum Commands {
     #[command(after_help = help_text::MOUNT_AFTER_HELP)]
     Mount {
         /// Directory that stores skill folders, SKILL.md, and skillfs-views.toml.
-        #[arg(value_name = "SOURCE", help_heading = help_text::HEADING_MOUNT)]
-        source: PathBuf,
+        #[arg(value_name = "SOURCE", required_unless_present = "config", requires = "mountpoint", help_heading = help_text::HEADING_MOUNT)]
+        source: Option<PathBuf>,
 
         /// Directory where SkillFS exposes the virtual /skills view.
-        #[arg(value_name = "MOUNTPOINT", help_heading = help_text::HEADING_MOUNT)]
-        mountpoint: PathBuf,
+        #[arg(value_name = "MOUNTPOINT", required_unless_present = "config", requires = "source", help_heading = help_text::HEADING_MOUNT)]
+        mountpoint: Option<PathBuf>,
 
         /// Allow users other than the mounter to access the FUSE mount.
         #[arg(long, help_heading = help_text::HEADING_MOUNT)]
@@ -287,9 +288,9 @@ enum Commands {
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_WRITERS)]
         trusted_writer_exe: Option<PathBuf>,
 
-        /// TOML configuration file for security, activation, and logging.
+        /// TOML mount configuration (sources and mountpoint), or legacy security configuration.
         ///
-        /// CLI flags override values from this file.
+        /// Mount configuration replaces positional paths; security configuration keeps CLI overrides.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_CONFIG)]
         config: Option<PathBuf>,
 
@@ -585,6 +586,56 @@ async fn run(
             trusted_peer_gid,
             skill_layout,
         } => {
+            let inputs = (|| -> Result<_, Box<dyn std::error::Error>> {
+                let mount_file = config
+                    .as_deref()
+                    .map(mount_file::load)
+                    .transpose()?
+                    .flatten();
+                if mount_file.is_some() {
+                    let matches = Cli::command().try_get_matches_from(
+                        std::iter::once("skillfs".to_string()).chain(raw_args.iter().cloned()),
+                    )?;
+                    let (_, args) = matches.subcommand().ok_or("missing mount command")?;
+                    mount_file::validate_options(args)?;
+                }
+                let inputs = if let Some(file) = mount_file {
+                    let file = file.validate()?;
+                    (
+                        file.sources[0].clone(),
+                        file.mountpoint,
+                        Some(file.sources),
+                        None,
+                    )
+                } else {
+                    (
+                        source.ok_or("SOURCE is required with a security configuration")?,
+                        mountpoint.ok_or("MOUNTPOINT is required with a security configuration")?,
+                        None,
+                        config,
+                    )
+                };
+                Ok(inputs)
+            })();
+            let (source, mountpoint, sources, config) = match inputs {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    finish_sls(guard, Some(error.to_string()));
+                    return Err(error);
+                }
+            };
+            let multi_source = sources.as_ref().is_some_and(|roots| roots.len() > 1);
+            let read_only = read_only || multi_source;
+            let skill_discover_root = if sources.is_some() {
+                Some(mountpoint.join("skills"))
+            } else {
+                skill_discover_root
+            };
+            let skill_layout = if sources.is_some() {
+                Some("flat".to_string())
+            } else {
+                skill_layout
+            };
             if let Some(root) = &skill_discover_root {
                 if !root.is_absolute() {
                     let result = Err(format!(
@@ -611,6 +662,7 @@ async fn run(
             // failure; the mount-session summary writer remains untouched.
             let result = cmd_mount(
                 source,
+                sources,
                 mountpoint,
                 allow_other,
                 read_only,
@@ -843,6 +895,7 @@ fn daemon_facing_arg_under_private_tmp(path: &Path) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn cmd_mount(
     source: PathBuf,
+    sources: Option<Vec<PathBuf>>,
     mountpoint: PathBuf,
     allow_other: bool,
     read_only: bool,
@@ -1618,7 +1671,12 @@ async fn cmd_mount(
     info!("loading skills from source directory");
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let errors = store.load_from_directory(runtime_roots.physical_source_root(), &config);
+    let errors = if let Some(roots) = &sources {
+        store = mount_file::load_sources(roots, &config)?;
+        Vec::new()
+    } else {
+        store.load_from_directory(runtime_roots.physical_source_root(), &config)
+    };
 
     if !errors.is_empty() {
         warn!(count = errors.len(), "some skills failed to load");
@@ -1630,7 +1688,9 @@ async fn cmd_mount(
     info!(count = store.len(), "skills loaded");
 
     // Auto-assign any skills that are not yet in any view to the default view.
-    if let Some(mut views) = ViewsConfig::load(runtime_roots.physical_source_root()) {
+    if let Some(mut views) = ViewsConfig::load(runtime_roots.physical_source_root())
+        .filter(|_| !(sources.is_some() && read_only))
+    {
         let assigned = views.all_assigned_skills();
         let new_skills: Vec<String> = store
             .list()
@@ -2432,24 +2492,14 @@ async fn cmd_mount(
 
         // Build the canonical "real existing default-view skills" set.
         // Deduplicates and filters out stale/typo names not in the store.
-        let default_served: std::collections::HashSet<&str> = if let Some(ref cfg) = views_config {
-            cfg.views
-                .iter()
-                .find(|v| v.default)
-                .map(|v| {
-                    v.skills
-                        .iter()
-                        .map(|s| s.as_str())
-                        .filter(|n| store_guard.get(n).is_some())
-                        .collect()
-                })
-                .unwrap_or_else(|| {
-                    // Config exists but no default view — treat all as default.
-                    store_guard.list().into_iter().collect()
-                })
+        let default_served: std::collections::HashSet<String> = if let Some(ref cfg) = views_config
+        {
+            cfg.effective_default_skills(&store_guard)
+                .into_iter()
+                .collect()
         } else {
             // No views config => all skills are default.
-            store_guard.list().into_iter().collect()
+            store_guard.list().into_iter().map(str::to_string).collect()
         };
 
         let default_exposed_count = default_served.len() as u64;
