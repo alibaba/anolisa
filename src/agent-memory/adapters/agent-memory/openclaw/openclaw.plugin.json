@@ -26,7 +26,7 @@
       "userId": {
         "type": "string",
         "maxLength": 128,
-        "description": "Namespace user_id for the memory mount. Default: auto-detect from OS uid. Must not contain '..', '/', '\\' or control characters (validated against the Rust side)."
+        "description": "Namespace user_id for the memory mount. Default: auto-detect from OS uid. At most 128 UTF-8 bytes; must not contain '..', '/', '\\' or control characters (validated against the Rust side)."
       },
       "profile": {
         "type": "string",
@@ -52,7 +52,7 @@
       "sessionId": {
         "type": "string",
         "maxLength": 128,
-        "description": "Session id pinned for this plugin's lifetime and forwarded as MEMORY_SESSION_ID on every spawn, so respawns reuse the same session directory and mem_promote finds prior scratch. Default: env MEMORY_SESSION_ID, else a generated ses_<random>. Validated with the same rules as userId."
+        "description": "Session id pinned for this plugin's lifetime and forwarded as MEMORY_SESSION_ID on every spawn, so respawns reuse the same session directory and mem_promote finds prior scratch. Default: env MEMORY_SESSION_ID, else a generated ses_<random>. Validated with the same rules as userId: at most 128 UTF-8 bytes, no '..', path separator or control character."
       },
       "sessionDir": {
         "type": "string",

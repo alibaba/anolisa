@@ -62,8 +62,23 @@ export function validateUserId(value: string): string {
   if (value.length === 0) {
     throw new Error("userId must not be empty");
   }
-  if (value.length > USER_ID_MAX_LEN) {
-    throw new Error(`userId length ${value.length} exceeds ${USER_ID_MAX_LEN} bytes`);
+  // The Rust limit is `str::len() > 128`, i.e. UTF-8 *bytes* (its error
+  // text says so). Counting `value.length` instead — UTF-16 code units —
+  // made this mirror accept everything the subprocess then rejects: 43 CJK
+  // characters are 43 units but 129 bytes, and 33 emoji are 66 units but
+  // 132 bytes. The rejection is also silent where it matters. A `userId`
+  // that fails `validate_user_id` is only warned about and dropped
+  // (`config.rs::read_validated_user_id_env` → the OS uid), and a
+  // `sessionId` that fails it is replaced by a freshly generated one
+  // (`service/mod.rs` → `SessionId::generate()`), so the operator keeps a
+  // working plugin pinned to the wrong namespace and loses the
+  // `mem_promote` continuity that pinning a session id exists to provide.
+  // Failing here instead is the contract this module already states: a
+  // configuration error the operator sees at plugin boot, not one that
+  // resurfaces as different behaviour in the deep child.
+  const byteLength = Buffer.byteLength(value, "utf8");
+  if (byteLength > USER_ID_MAX_LEN) {
+    throw new Error(`userId length ${byteLength} exceeds ${USER_ID_MAX_LEN} bytes`);
   }
   if (value.includes("/") || value.includes("\\")) {
     throw new Error(`userId '${value}' contains a path separator`);

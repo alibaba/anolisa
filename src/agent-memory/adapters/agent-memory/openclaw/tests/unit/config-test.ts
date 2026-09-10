@@ -44,6 +44,42 @@ describe("validateUserId", () => {
     assert.equal(validateUserId("a".repeat(128)).length, 128);
   });
 
+  // The Rust side counts UTF-8 bytes (`str::len() > 128` in
+  // `ns::mod.rs::validate_user_id`, whose own error text says "bytes"), so
+  // this mirror has to count them too. A value accepted here and rejected
+  // there is not a hard failure — it is silently swapped in the subprocess:
+  // `userId` falls back to the OS uid (`config.rs::read_validated_user_id_env`
+  // only warns) and `sessionId` to a freshly generated one (`service/mod.rs`),
+  // which is precisely the pinning the operator asked for, lost without an
+  // error anywhere the operator would look.
+  it("rejects 43 CJK characters (43 code points, 129 bytes)", () => {
+    const cjk = "\u5b57".repeat(43);
+    assert.equal(cjk.length, 43);
+    assert.equal([...cjk].length, 43);
+    assert.equal(Buffer.byteLength(cjk, "utf8"), 129);
+    assert.throws(() => validateUserId(cjk), /length 129 exceeds 128 bytes/);
+  });
+
+  it("rejects 33 emoji (66 code units, 33 code points, 132 bytes)", () => {
+    const emoji = "\u{1f600}".repeat(33);
+    assert.equal(emoji.length, 66);
+    assert.equal([...emoji].length, 33);
+    assert.equal(Buffer.byteLength(emoji, "utf8"), 132);
+    assert.throws(() => validateUserId(emoji), /length 132 exceeds 128 bytes/);
+  });
+
+  it("accepts 42 CJK characters (126 bytes)", () => {
+    const cjk = "\u5b57".repeat(42);
+    assert.equal(Buffer.byteLength(cjk, "utf8"), 126);
+    assert.equal(validateUserId(cjk), cjk);
+  });
+
+  it("accepts exactly 128 bytes of mixed-width text", () => {
+    const mixed = "\u5b57".repeat(42) + "ab"; // 126 + 2 bytes, 44 code points
+    assert.equal(Buffer.byteLength(mixed, "utf8"), 128);
+    assert.equal(validateUserId(mixed), mixed);
+  });
+
   it("rejects '..' substring", () => {
     assert.throws(() => validateUserId("foo..bar"), /contains '\.\.'/);
   });
@@ -188,6 +224,19 @@ describe("resolveConfig sessionId (R6-1 regression)", () => {
     assert.throws(
       () => resolveConfig(mockApi({ sessionId: "../escape" })),
       /path separator|control|contains/,
+    );
+  });
+
+  it("rejects a multibyte sessionId the manifest's code-point bound accepts", () => {
+    // JSON Schema `maxLength` counts code points and has no byte-length
+    // keyword, so the manifest cannot express the Rust limit; the resolver is
+    // the binding check. 43 code points sail through `maxLength: 128` and are
+    // 129 UTF-8 bytes.
+    const sessionId = "\u5b57".repeat(43);
+    assert.equal([...sessionId].length, 43);
+    assert.throws(
+      () => resolveConfig(mockApi({ sessionId })),
+      /length 129 exceeds 128 bytes/,
     );
   });
 

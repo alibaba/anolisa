@@ -132,6 +132,26 @@ describe("openclaw.plugin.json configSchema", () => {
     assert.deepEqual(stray, [], `uiHints has entries for undeclared keys: ${stray.join(", ")}`);
   });
 
+  it("leaves the resolver's byte bound stricter than the schema's code-point bound", async () => {
+    // JSON Schema `maxLength` counts code points and has no byte-length
+    // keyword, while `validate_user_id` counts UTF-8 bytes. Bytes are always
+    // >= code points, so the schema can only ever be the weaker of the two:
+    // it never rejects a value the resolver would accept, and a multibyte id
+    // that slips past it is stopped by the resolver at plugin boot instead of
+    // being silently replaced inside the subprocess. Pinning the direction
+    // keeps anyone from "fixing" the mismatch by loosening the resolver.
+    const { validateUserId } = await import("../../src/config.js");
+    const limit = properties.sessionId?.maxLength ?? properties.userId?.maxLength;
+    assert.ok(
+      typeof limit === "number" && limit > 0,
+      "expected a numeric maxLength on sessionId/userId to compare against",
+    );
+    const multibyte = "\u5b57".repeat(limit); // 3 bytes per code point
+    assert.equal([...multibyte].length, limit);
+    assert.equal(Buffer.byteLength(multibyte, "utf8"), limit * 3);
+    assert.throws(() => validateUserId(multibyte), /exceeds 128 bytes/);
+  });
+
   it("caps sessionId exactly like userId, which is what validates it", () => {
     // resolveSessionId() runs explicit config through validateUserId(), so the
     // two schema entries must not drift apart.
