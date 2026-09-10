@@ -41,12 +41,75 @@ pub(super) enum ReadResolution {
 impl SkillFs {
     pub(super) fn capture_transformed(
         &self,
-        _skill_name: &str,
+        skill_name: &str,
         physical: &Path,
-        _target: Option<&ActiveTarget>,
+        target: Option<&ActiveTarget>,
     ) -> std::io::Result<Arc<str>> {
-        let raw = std::fs::read_to_string(physical)?;
-        Ok(self.transform_pipeline.run(&raw).into())
+        self.load_transformed(skill_name, physical, target)
+            .map(|(content, _)| content)
+    }
+
+    fn load_transformed(
+        &self,
+        skill_name: &str,
+        physical: &Path,
+        target: Option<&ActiveTarget>,
+    ) -> std::io::Result<(Arc<str>, std::fs::Metadata)> {
+        if self.transform_pipeline.is_empty() {
+            use std::io::Read;
+            let mut file = std::fs::File::open(physical)?;
+            let metadata = file.metadata()?;
+            let mut raw = String::new();
+            file.read_to_string(&mut raw)?;
+            return Ok((raw.into(), metadata));
+        }
+        self.transform_cache.load(
+            skill_name,
+            physical,
+            target,
+            self.transform_pipeline.identity(),
+            |raw| self.transform_pipeline.run(raw),
+        )
+    }
+
+    // Select activation once for both the transformed size and physical attrs.
+    pub(super) fn transformed_skill_attr(
+        &self,
+        skill_name: &str,
+        category: Option<&str>,
+    ) -> Option<fuser::FileAttr> {
+        if category.is_none() && skill_name == "skill-discover" {
+            return Some(self.virtual_file_attr(self.get_skill_discover_content().len() as u64));
+        }
+        let (id, target, resolution) = match category {
+            Some(category) => {
+                let (target, resolution) =
+                    self.resolve_hermes_nested_read_pinned(category, skill_name);
+                (
+                    Self::hermes_skill_id(category, skill_name),
+                    target,
+                    resolution,
+                )
+            }
+            None => {
+                let (target, resolution) = self.resolve_skill_read_pinned(skill_name);
+                (skill_name.to_owned(), target, resolution)
+            }
+        };
+        let physical = match resolution {
+            ReadResolution::Hidden => return None,
+            ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
+            ReadResolution::Source if category.is_some() || self.in_place => {
+                self.source_base().join(&id).join("SKILL.md")
+            }
+            ReadResolution::Source => self.skill_source_path(&id)?,
+        };
+        let (content, metadata) = self
+            .load_transformed(&id, &physical, target.as_ref())
+            .ok()?;
+        let mut attr = crate::attr::file_attr_from_metadata(&metadata);
+        attr.size = content.len() as u64;
+        Some(attr)
     }
 
     /// Read and compile a skill's SKILL.md content.
@@ -285,25 +348,6 @@ impl SkillFs {
         (target, resolution)
     }
 
-    /// Compiled SKILL.md for a Hermes nested skill.
-    pub(super) fn compiled_hermes_nested_skill_md(
-        &self,
-        category: &str,
-        skill_name: &str,
-    ) -> Option<String> {
-        let physical_path = match self.resolve_hermes_nested_read(category, skill_name) {
-            ReadResolution::Hidden => return None,
-            ReadResolution::Source => self
-                .source_base()
-                .join(category)
-                .join(skill_name)
-                .join("SKILL.md"),
-            ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
-        };
-        let raw = std::fs::read_to_string(&physical_path).ok()?;
-        Some(self.transform_pipeline.run(&raw))
-    }
-
     /// Compiled nested `SKILL.md` honoring a pinned activation target.
     ///
     /// Mirrors [`Self::compiled_skill_md_pinned`] for the Hermes layout: when a
@@ -365,6 +409,50 @@ mod tests {
     use std::io::Read;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn attrs_and_opens_share_results_but_mutable_reads_and_raw_do_not() {
+        for nested in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let id = if nested { "cloud/web" } else { "web" };
+            let physical = tmp.path().join(id).join("SKILL.md");
+            std::fs::create_dir_all(physical.parent().unwrap()).unwrap();
+            std::fs::write(
+                &physical,
+                "<!-- @if os == plan9 -->\nhidden\n<!-- @endif -->\nvisible\n",
+            )
+            .unwrap();
+            let mut store = SkillStore::new();
+            store.load_from_directory(tmp.path(), &ParseConfig::default());
+            let mut fs = SkillFs::new(
+                tmp.path().into(),
+                tmp.path().into(),
+                Arc::new(RwLock::new(store)),
+                false,
+            );
+            let category = nested.then_some("cloud");
+            let attr = fs.transformed_skill_attr("web", category).unwrap();
+            assert_eq!(fs.transform_cache.events(), [0, 1, 0, 0]);
+            let content = fs.capture_transformed(id, &physical, None).unwrap();
+            assert_eq!(content.len() as u64, attr.size);
+            let again = fs.capture_transformed(id, &physical, None).unwrap();
+            assert!(Arc::ptr_eq(&content, &again));
+            assert_eq!(fs.transform_cache.events(), [2, 1, 0, 0]);
+            // These are the existing read helpers used by mutable handles.
+            let mutable = if nested {
+                fs.compiled_hermes_nested_skill_md_pinned("cloud", "web", None)
+            } else {
+                fs.compiled_skill_md_pinned("web", None)
+            }
+            .unwrap();
+            assert_eq!(mutable, &*content);
+            assert_eq!(fs.transform_cache.events(), [2, 1, 0, 0]);
+            fs.transform_pipeline.set_directive(None);
+            let raw_attr = fs.transformed_skill_attr("web", category).unwrap();
+            assert_eq!(raw_attr.size, std::fs::metadata(&physical).unwrap().len());
+            assert_eq!(fs.transform_cache.events(), [2, 1, 0, 0]);
+        }
+    }
 
     /// Minimal FUSE-availability probe (mirrors the integration harness) so
     /// mount-based unit tests skip gracefully where `/dev/fuse` is unusable.

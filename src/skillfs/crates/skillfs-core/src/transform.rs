@@ -21,6 +21,8 @@
 //! once at mount startup; the per-read hot path does no YAML parsing, OS
 //! detection, subprocess execution, network access, or LLM calls.
 
+use sha2::{Digest, Sha256};
+
 use crate::compiler;
 use crate::env::EnvironmentProfile;
 use crate::os_adapter::OsAdapterStage;
@@ -95,6 +97,7 @@ impl OsAdapterMetadata<'_> {
 pub struct TransformPipeline {
     directive: Option<DirectiveStage>,
     os_adapter: Option<OsAdapterStage>,
+    identity: [u8; 32],
 }
 
 impl TransformPipeline {
@@ -109,10 +112,9 @@ impl TransformPipeline {
     /// With no adapter set, [`Self::run`] is byte-for-byte equivalent to calling
     /// [`compiler::compile`] directly.
     pub fn directive_only(env: EnvironmentProfile) -> Self {
-        Self {
-            directive: Some(DirectiveStage::new(env)),
-            os_adapter: None,
-        }
+        let mut pipeline = Self::empty();
+        pipeline.set_directive(Some(DirectiveStage::new(env)));
+        pipeline
     }
 
     /// Set or clear the directive stage.
@@ -123,6 +125,7 @@ impl TransformPipeline {
     /// a stage can never be present more than once.
     pub fn set_directive(&mut self, stage: Option<DirectiveStage>) {
         self.directive = stage;
+        self.update_identity();
     }
 
     /// Set (or replace) the OS adapter stage. Idempotent — the adapter can never
@@ -130,6 +133,51 @@ impl TransformPipeline {
     /// order.
     pub fn set_os_adapter(&mut self, stage: OsAdapterStage) {
         self.os_adapter = Some(stage);
+        self.update_identity();
+    }
+
+    /// Content-free fingerprint of all enabled stages and their captured inputs.
+    ///
+    /// Recomputed only when configuring stages; environment values are never
+    /// exposed. Empty pipelines share the all-zero identity.
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+
+    fn update_identity(&mut self) {
+        if self.is_empty() {
+            self.identity = [0; 32];
+            return;
+        }
+        let mut digest = Sha256::new();
+        // Length-prefix every field so different partitions cannot collide.
+        let mut field = |value: &str| {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+        };
+        if let Some(stage) = &self.directive {
+            field("directive");
+            field(stage.env.os.as_str());
+            let mut commands: Vec<_> = stage.env.available_commands.iter().collect();
+            commands.sort();
+            field(&commands.len().to_string());
+            for command in commands {
+                field(command);
+            }
+            let mut vars: Vec<_> = stage.env.env_vars.iter().collect();
+            vars.sort();
+            field(&vars.len().to_string());
+            for (key, value) in vars {
+                field(key);
+                field(value);
+            }
+        }
+        if let Some(stage) = &self.os_adapter {
+            field("os_adapter");
+            field(stage.target().as_str());
+            field(stage.rule_digest());
+        }
+        self.identity = digest.finalize().into();
     }
 
     /// Whether reads bypass all transformation stages.
@@ -196,6 +244,66 @@ mod tests {
     fn apt_adapter() -> OsAdapterStage {
         let yaml = "- ubuntu: \"apt-get install -y \"\n  alinux: \"dnf install -y \"\n  direction: bidirectional\n  auto_apply: always\n";
         OsAdapterStage::from_bytes(yaml.as_bytes(), OsTarget::Alinux, Path::new("t.yaml")).unwrap()
+    }
+
+    #[test]
+    fn identity_covers_environment_and_ordered_stages() {
+        let mut env = plain_env();
+        env.available_commands.extend(["uv".into(), "pip".into()]);
+        env.env_vars
+            .extend([("A".into(), "a".into()), ("B".into(), "b".into())]);
+        let baseline = TransformPipeline::directive_only(env.clone()).identity();
+        let mut reordered = plain_env();
+        reordered
+            .available_commands
+            .extend(["pip".into(), "uv".into()]);
+        reordered
+            .env_vars
+            .extend([("B".into(), "b".into()), ("A".into(), "a".into())]);
+        assert_eq!(
+            baseline,
+            TransformPipeline::directive_only(reordered).identity()
+        );
+        let mut changed = env.clone();
+        changed.os = OsKind::Darwin;
+        assert_ne!(
+            baseline,
+            TransformPipeline::directive_only(changed).identity()
+        );
+        let mut changed = env.clone();
+        changed.available_commands.remove("uv");
+        assert_ne!(
+            baseline,
+            TransformPipeline::directive_only(changed).identity()
+        );
+        let mut changed = env.clone();
+        changed.env_vars.insert("A".into(), "changed".into());
+        assert_ne!(
+            baseline,
+            TransformPipeline::directive_only(changed).identity()
+        );
+        let mut pipeline = TransformPipeline::directive_only(env);
+        pipeline.set_os_adapter(apt_adapter());
+        let combined = pipeline.identity();
+        assert_ne!(baseline, combined);
+        pipeline.set_directive(None);
+        assert_ne!(combined, pipeline.identity());
+        assert_ne!(TransformPipeline::empty().identity(), pipeline.identity());
+        let alinux = pipeline.identity();
+        let rules =
+            b"- ubuntu: apt-get\n  alinux: dnf\n  direction: bidirectional\n  auto_apply: always\n";
+        pipeline.set_os_adapter(
+            OsAdapterStage::from_bytes(rules, OsTarget::Alinux, Path::new("t.yaml")).unwrap(),
+        );
+        assert_ne!(alinux, pipeline.identity(), "rule digest participates");
+        let rules_identity = pipeline.identity();
+        pipeline.set_os_adapter(
+            OsAdapterStage::from_bytes(rules, OsTarget::Ubuntu, Path::new("t.yaml")).unwrap(),
+        );
+        assert_ne!(rules_identity, pipeline.identity(), "target participates");
+        let mut pipeline = TransformPipeline::directive_only(plain_env());
+        pipeline.set_directive(None);
+        assert_eq!(pipeline.identity(), TransformPipeline::empty().identity());
     }
 
     #[test]

@@ -35,6 +35,7 @@ mod events;
 mod paths;
 mod policy;
 mod read_resolution;
+mod transform_cache;
 
 // ---------------------------------------------------------------------------
 // Filesystem Implementation
@@ -59,6 +60,7 @@ pub struct SkillFs {
     /// runs in-memory string work. Environment detection happens only when the
     /// directive stage is enabled.
     transform_pipeline: TransformPipeline,
+    transform_cache: transform_cache::TransformCache,
     /// View configuration loaded from skillfs-views.toml (if present).
     views_config: Option<ViewsConfig>,
     /// Optional reader-visible root for paths emitted by `skill-discover`.
@@ -213,6 +215,7 @@ impl SkillFs {
             handles: HandleManager::new(),
             inodes: InodeManager::new(),
             transform_pipeline,
+            transform_cache: transform_cache::TransformCache::default(),
             views_config,
             skill_discover_root: None,
             source_dirfd,

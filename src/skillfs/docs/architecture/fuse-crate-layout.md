@@ -24,13 +24,14 @@ crates/skillfs-fuse/src/
 ├── security.rs             (pre-existing) Skill Security extension seam (re-exports submodules)
 ├── security/               (pre-existing) policy, event, audit, drift, lifecycle, inbox, ledger, etc.
 │
-└── fs/                     SkillFs struct + helpers + the single `impl Filesystem for SkillFs`
-    ├── mod.rs              SkillFs definition, constructor + with_* builders, virtual_file_attr / dir_attr / ro_warn, and the thin trait impl block
+├── fs.rs                   SkillFs definition, constructor + with_* builders, virtual_file_attr / dir_attr / ro_warn, and the thin trait impl block
+└── fs/                     Helpers and callback implementations
     ├── discover.rs         get_skill_discover_content / simple_discover_md
     ├── events.rs           emit_event / emit_op_event / emit_xattr_event / demo_observe / inbox_observe_install_complete / send_sync
     ├── paths.rs            source_base / skill_inode_path / skills_dir_ino / skill_physical_dir / inbox_skill_dir / is_inbox_skill_name_allowed / skill_source_path / primary_skill_names / skill_physical_path / build_fuse_path / resolve_physical_path / open_parent_dir_for
     ├── policy.rs           evaluate_trusted_writer / policy_check / enforce_skill_meta / lifecycle_reservation / enforce_lifecycle_reservation / check_physical_access_result
     ├── read_resolution.rs  ReadResolution enum + resolve_skill_read / snapshot_read_dir / compiled_skill_md / skill_read_dir
+    ├── transform_cache.rs  Bounded reuse of exact transformed results
     └── callbacks/          FUSE callback bodies, one file per semantic group
         ├── mod.rs          Submodule declarations
         ├── meta.rs         lookup, getattr, access, statfs
@@ -48,7 +49,7 @@ crates/skillfs-fuse/src/
 
 Rust does not allow splitting a trait impl across multiple files. To get
 physical-file modularity for the 26 FUSE callbacks while keeping the trait
-impl in one place, `fs/mod.rs` holds the trait impl and each callback is
+impl in one place, `fs.rs` holds the trait impl and each callback is
 a one-line wrapper:
 
 ```rust
@@ -65,14 +66,14 @@ The actual callback body lives in `fs/callbacks/<group>.rs` as
 
 * Helpers in `fs/discover.rs`, `fs/events.rs`, `fs/paths.rs`,
   `fs/policy.rs`, `fs/read_resolution.rs` are `pub(super)` — visible to
-  their parent (`fs/mod.rs`) and, by inclusion, to every other module
+  their parent (`fs.rs`) and, by inclusion, to every other module
   under `fs/`.
 * Callback impls in `fs/callbacks/<group>.rs` use `pub(in crate::fs)`,
   one level wider than `pub(super)`. `pub(super)` from
   `crate::fs::callbacks::meta` would only reach `crate::fs::callbacks`,
-  which is *not* where the trait impl block in `fs/mod.rs` lives.
+  which is *not* where the trait impl block in `fs.rs` lives.
   `pub(in crate::fs)` makes the method visible to the entire `fs/`
-  subtree, including the wrapper in `fs/mod.rs`.
+  subtree, including the wrapper in `fs.rs`.
 
 Both are tighter than `pub(crate)` — none of these helpers leak to
 `lib.rs` or external consumers.
@@ -92,7 +93,7 @@ The split is acyclic. Roughly:
 lib.rs → mount.rs → fs::SkillFs
 lib.rs → fs::SkillFs
 
-fs/mod.rs → fs/{discover, events, paths, policy, read_resolution, callbacks}
+fs.rs → fs/{discover, events, paths, policy, read_resolution, transform_cache, callbacks}
 fs/callbacks/* → fs/{paths, events, policy, read_resolution, discover}
 fs/policy.rs   → fs/events.rs        (uses emit_event)
 fs/read_resolution.rs → fs/paths.rs  (uses source_base / skill_physical_dir / etc.)

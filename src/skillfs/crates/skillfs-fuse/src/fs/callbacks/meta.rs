@@ -159,44 +159,13 @@ impl SkillFs {
                     }
                     return;
                 }
-                // D1.1: hidden skills also hide their virtual SKILL.md.
-                // `compiled_skill_md` already returns `None` for
-                // `ReadResolution::Hidden`, but short-circuiting here
-                // keeps the lookup path uniform with the SkillDir branch
-                // and avoids an extra read attempt.
-                if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                match self.compiled_skill_md(&skill_name) {
-                    Some(compiled) => {
+                match self.transformed_skill_attr(&skill_name, None) {
+                    Some(mut attr) => {
                         let ino = self
                             .inodes
                             .allocate(&path_str, FileType::RegularFile, parent);
-                        // Fetch metadata via fd-safe path to avoid FUSE re-entry.
-                        // For snapshots the size projection is read from the
-                        // snapshot SKILL.md so attr.size matches the compiled
-                        // payload the kernel will see on the next `read`.
-                        let mut attr = if skill_name == "skill-discover" {
-                            self.virtual_file_attr(compiled.len() as u64)
-                        } else {
-                            let md_phys = self
-                                .skill_read_dir(&skill_name)
-                                .map(|d| d.join("SKILL.md"))
-                                .unwrap_or_else(|| {
-                                    self.source_base().join(&skill_name).join("SKILL.md")
-                                });
-                            match std::fs::metadata(&md_phys) {
-                                Ok(meta) => {
-                                    let mut a = file_attr_from_metadata(&meta);
-                                    a.size = compiled.len() as u64;
-                                    a
-                                }
-                                Err(_) => self.virtual_file_attr(compiled.len() as u64),
-                            }
-                        };
-                        attr.ino = ino;
                         self.inodes.remember(ino);
+                        attr.ino = ino;
                         reply.entry(&Duration::from_secs(1), &attr, 0);
                     }
                     None => reply.error(libc::ENOENT),
@@ -472,39 +441,12 @@ impl SkillFs {
                     }
                     return;
                 }
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                // Size must match the compiled payload the kernel will see
-                // on `read`; take mtime/type from the physical SKILL.md but
-                // project the compiled length over the raw size.
-                match self.compiled_hermes_nested_skill_md(category, skill_name) {
-                    Some(compiled) => {
-                        let md_phys = self
-                            .hermes_nested_skill_read_dir(category, skill_name)
-                            .map(|d| d.join("SKILL.md"))
-                            .unwrap_or_else(|| {
-                                self.source_base()
-                                    .join(category)
-                                    .join(skill_name)
-                                    .join("SKILL.md")
-                            });
+                match self.transformed_skill_attr(skill_name, Some(category)) {
+                    Some(mut attr) => {
                         let ino = self
                             .inodes
                             .allocate(&path_str, FileType::RegularFile, parent);
                         self.inodes.remember(ino);
-                        let mut attr = match std::fs::metadata(&md_phys) {
-                            Ok(meta) => {
-                                let mut a = file_attr_from_metadata(&meta);
-                                a.size = compiled.len() as u64;
-                                a
-                            }
-                            Err(_) => self.virtual_file_attr(compiled.len() as u64),
-                        };
                         attr.ino = ino;
                         reply.entry(&Duration::from_secs(1), &attr, 0);
                     }
@@ -678,34 +620,9 @@ impl SkillFs {
                     }
                     return;
                 }
-                if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                match self.compiled_skill_md(&skill_name) {
-                    Some(compiled) => {
-                        // Use fd-safe path to avoid FUSE re-entry in in-place mode.
-                        // Snapshot mode reads metadata from the snapshot's
-                        // SKILL.md so attr.size is consistent with the
-                        // compiled payload the kernel will see on `read`.
-                        let attr = if skill_name == "skill-discover" {
-                            self.virtual_file_attr(compiled.len() as u64)
-                        } else {
-                            let md_phys = self
-                                .skill_read_dir(&skill_name)
-                                .map(|d| d.join("SKILL.md"))
-                                .unwrap_or_else(|| {
-                                    self.source_base().join(&skill_name).join("SKILL.md")
-                                });
-                            match std::fs::metadata(&md_phys) {
-                                Ok(meta) => {
-                                    let mut a = file_attr_from_metadata(&meta);
-                                    a.size = compiled.len() as u64;
-                                    a
-                                }
-                                Err(_) => self.virtual_file_attr(compiled.len() as u64),
-                            }
-                        };
+                match self.transformed_skill_attr(&skill_name, None) {
+                    Some(mut attr) => {
+                        attr.ino = ino;
                         reply.attr(&Duration::from_secs(1), &attr);
                     }
                     None => reply.error(libc::ENOENT),
@@ -932,32 +849,8 @@ impl SkillFs {
                     }
                     return;
                 }
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                match self.compiled_hermes_nested_skill_md(category, skill_name) {
-                    Some(compiled) => {
-                        let md_phys = self
-                            .hermes_nested_skill_read_dir(category, skill_name)
-                            .map(|d| d.join("SKILL.md"))
-                            .unwrap_or_else(|| {
-                                self.source_base()
-                                    .join(category)
-                                    .join(skill_name)
-                                    .join("SKILL.md")
-                            });
-                        let mut attr = match std::fs::metadata(&md_phys) {
-                            Ok(meta) => {
-                                let mut a = file_attr_from_metadata(&meta);
-                                a.size = compiled.len() as u64;
-                                a
-                            }
-                            Err(_) => self.virtual_file_attr(compiled.len() as u64),
-                        };
+                match self.transformed_skill_attr(skill_name, Some(category)) {
+                    Some(mut attr) => {
                         attr.ino = ino;
                         reply.attr(&Duration::from_secs(1), &attr);
                     }
