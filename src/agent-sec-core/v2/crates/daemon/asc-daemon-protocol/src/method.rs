@@ -1,4 +1,9 @@
-//! Closed PAP method inventory and access metadata.
+//! Closed daemon method inventory and access metadata.
+//!
+//! Two method families exist: PAP administration, which requires a Policy
+//! administrator, and Action capabilities, which any authenticated local peer
+//! may call. Keeping both in one closed inventory means an unregistered method
+//! is rejected before authorization rather than defaulting into a family.
 
 /// Create one Policy identity from an authored template.
 pub const POLICY_TEMPLATES_CREATE: &str = "policy.templates.create";
@@ -31,6 +36,9 @@ pub const POLICY_BINDINGS_LIST: &str = "policy.bindings.list";
 /// Request deletion of one current Binding.
 pub const POLICY_BINDINGS_DELETE: &str = "policy.bindings.delete";
 
+/// Scan one Bash or Python snippet for pre-execution security issues.
+pub const ACTION_CODE_SCAN: &str = "action.code_scan";
+
 /// Complete PAP method inventory for this protocol version.
 pub const PAP_METHODS: [&str; 15] = [
     POLICY_TEMPLATES_CREATE,
@@ -49,6 +57,9 @@ pub const PAP_METHODS: [&str; 15] = [
     POLICY_BINDINGS_LIST,
     POLICY_BINDINGS_DELETE,
 ];
+
+/// Complete Action-capability method inventory for this protocol version.
+pub const ACTION_METHODS: [&str; 1] = [ACTION_CODE_SCAN];
 
 /// One Policy operation resolved from its exact wire method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,11 +117,20 @@ pub enum PapMethod {
     Binding(BindingMethod),
 }
 
+/// One Action-capability operation resolved from its exact wire method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionMethod {
+    /// Pre-execution code scan.
+    CodeScan,
+}
+
 /// Closed daemon method identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodId {
     /// PAP administration method.
     Pap(PapMethod),
+    /// Action capability method.
+    Action(ActionMethod),
 }
 
 /// Server-owned access policy for a method.
@@ -118,6 +138,13 @@ pub enum MethodId {
 pub enum AccessPolicy {
     /// Requires a server-assigned Policy administrator principal.
     PolicyAdministrator,
+    /// Requires only a kernel-authenticated local peer, of any role.
+    ///
+    /// The code scanner is an advisory pre-execution gate an agent consults for
+    /// itself; gating it behind Policy administration would put it out of reach
+    /// of the very callers it exists to serve. Peer authentication by the
+    /// transport is still required — this is not an anonymous method.
+    LocalUser,
 }
 
 /// Static method metadata used by authorization before application dispatch.
@@ -133,6 +160,9 @@ impl MethodId {
         match self {
             Self::Pap(_) => Metadata {
                 access: AccessPolicy::PolicyAdministrator,
+            },
+            Self::Action(_) => Metadata {
+                access: AccessPolicy::LocalUser,
             },
         }
     }
@@ -156,6 +186,7 @@ pub fn resolve(method: &str) -> Option<MethodId> {
         POLICY_BINDINGS_GET => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Get))),
         POLICY_BINDINGS_LIST => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::List))),
         POLICY_BINDINGS_DELETE => Some(MethodId::Pap(PapMethod::Binding(BindingMethod::Delete))),
+        ACTION_CODE_SCAN => Some(MethodId::Action(ActionMethod::CodeScan)),
         _ => None,
     }
 }

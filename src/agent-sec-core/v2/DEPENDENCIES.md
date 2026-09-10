@@ -15,13 +15,30 @@ belongs to the actual AgentSight/ActPlane deployment.
 | `ureq / Client -> url -> idna / ICU` | URL and domain-name handling. Keep input bounds and evaluate advisories for the resolved graph. |
 | `tokio -> libc / mio / socket2` | Existing OS/socket boundary, also outside workspace-local `unsafe_code = "forbid"`. |
 | `Client -> uuid (v5) -> sha1_smol` | Deterministic target identity, not an authentication or signature algorithm. The v5 feature is requested only by the Client. Workspace builds can still unify features. |
+| `asc-capability-code-scan -> fancy-regex` | Backtracking regex engine for the code-scan rule set, needed because the rules use look-around that `regex` does not support. The crate itself contains no `unsafe`; its `regex-automata` dependency does. |
+| `asc-capability-code-scan -> yaml-rust2` | Parses the embedded code-scan rule documents. Pure Rust with no `unsafe` in the crate itself; pulls `encoding_rs`, `simdutf8`, `hashlink` and `arraydeque`, which do contain `unsafe`. |
 
-The removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml` chain is no
-longer in this workspace lockfile. No HTTP/TLS library or crypto-provider switch
-is part of this change. In particular, replacing ring with aws-lc-rs would add
-an FFI-based crypto implementation, not prove that unsafe exposure decreased.
+YAML parsing is back in this workspace, so the earlier statement that no YAML
+parser remains no longer holds. What still holds is the narrower property that
+mattered: the removed `actplane-ifc-compiler -> serde_yaml -> unsafe-libyaml`
+chain is not reintroduced. `yaml-rust2` is a Rust parser rather than a
+transliterated C one, so it avoids that specific unsafe surface — it does not
+make the code-scan dependency subtree unsafe-free, as the table above records.
+No HTTP/TLS library or crypto-provider switch is part of this change. In
+particular, replacing ring with aws-lc-rs would add an FFI-based crypto
+implementation, not prove that unsafe exposure decreased.
 
-The daemon's normal/build dependency graph does not currently include the Client,
+The code-scan capability is wired into `asc-daemon` through the handler crate,
+so `fancy-regex` and `yaml-rust2` are now in the daemon's normal dependency
+graph. This is a deliberate consequence of scanning inside the daemon rather
+than in the CLI. Verify the resolved subgraph rather than assuming it:
+
+```sh
+cargo tree -p asc-capability-code-scan --edges normal --locked
+cargo tree -p asc-daemon --edges normal,build --locked
+```
+
+The daemon's normal/build dependency graph does not include the Client,
 Adapter, ureq or ring. Verify that boundary separately from workspace tests:
 
 ```sh

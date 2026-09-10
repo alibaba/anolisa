@@ -177,9 +177,11 @@ kernel peer credentials 和服务端策略，不能接受请求中的 UID/role �
   直接发送尚未定义的顶层字段。
 - 需要新增错误时扩展现有 `src/response.rs` 的错误合同，保持安全、结构化且有大小限制。
 
-`action.prompt_scan`、`action.code_scan` 是仓库设计中的候选名称，当前尚未注册。
-method、权限、timeout 和兼容版本需在本工作包冻结。使用两个显式 allowlisted method，
-不增加接受任意 action name 的通用 RPC。
+本工作包注册 `action.code_scan` 作为唯一的 code scanner method；
+`action.prompt_scan` 仍是未注册的候选名称。该 compatibility slice 冻结
+`action.code_scan` 的 method、参数和结果投影，并保持 LocalUser 可调用、由 CLI transport
+deadline 限制的边界。Action Runtime、finalizer 与 audit/telemetry sink 仍需在后续工作包
+作为完整生命周期一起冻结；不增加接受任意 action name 的通用 RPC。
 
 当前 V2 响应是 `{requestId,result}` 或 `{requestId,error}`。应基于当前协议定义扫描
 result 及失败映射，不默认新增 V1/V2 双格式。如果有受支持的 V1 wire consumer，再以
