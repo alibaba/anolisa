@@ -248,6 +248,7 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OC_VERSION",
     "FAKE_OC_INSTALL_FORCE",
     "FAKE_OC_INSTALL_ACCEPT",
+    "FAKE_OC_ENABLE_ACCEPT",
     "FAKE_OC_INSTALL_UNSAFE",
     "FAKE_OC_INSTALL_UNSAFE_NOOP",
     "FAKE_OC_INSPECT_JSON",
@@ -402,6 +403,7 @@ fn stage() -> World {
 /// - `plugins install --help` lists `--force` unless `FAKE_OC_INSTALL_FORCE=0`
 ///   and `--dangerously-force-unsafe-install` when `FAKE_OC_INSTALL_UNSAFE=1`;
 ///   `FAKE_OC_INSTALL_UNSAFE_NOOP=1` marks that option as a deprecated no-op.
+/// - `plugins enable --help` advertises consent when `FAKE_OC_ENABLE_ACCEPT=1`.
 /// - `plugins inspect --help` lists `--json` unless `FAKE_OC_INSPECT_JSON=0`
 ///   and `--runtime` when `FAKE_OC_INSPECT_RUNTIME=1`.
 ///
@@ -411,9 +413,9 @@ fn stage() -> World {
 /// - `plugins inspect <id> [--runtime] --json` prints an optional legacy
 ///   diagnostic line (when `FAKE_OC_INSPECT_DIAG` is set) followed by the JSON
 ///   `{"plugin":{"id":..,"status":"$FAKE_OC_RUNTIME_STATUS"}}` (default
-///   `loaded`).
-/// - `plugins uninstall <id> ...` removes the marker; `plugins list` prints
-///   markers; `config set` echoes.
+///   `loaded` unless uninstall left a persistent disabled marker).
+/// - `plugins uninstall <id> ...` removes registration and persists disabled state;
+///   `plugins enable <id>` clears it. `plugins list` prints registry markers.
 /// - `FAKE_OPENCLAW_FAIL=untracked` refuses uninstall without changing the
 ///   registry; `FAKE_OC_LIST_JSON` overrides JSON listing, and
 ///   `FAKE_OC_PROBE_FAIL=list` makes listing fail.
@@ -500,6 +502,26 @@ case "$action" in
     if [ "${FAKE_OPENCLAW_FAIL:-}" = "install_after_register" ]; then echo "boom-after-register" >&2; exit 10; fi
     echo "installed $id"
     ;;
+  enable)
+    if [ "$arg3" = "--help" ]; then
+      echo "Usage: openclaw plugins enable [options] <id>"
+      [ "${FAKE_OC_ENABLE_ACCEPT:-0}" = "1" ] && echo "  --accept-capabilities  accept declared capabilities"
+      [ "${FAKE_OC_ENABLE_ACCEPT:-0}" = "near_match" ] && echo "  --accept-capabilities-only  unrelated option"
+      [ "${FAKE_OC_PROBE_FAIL:-}" = "enable_help" ] && exit 4
+      exit 0
+    fi
+    if [ "${FAKE_OPENCLAW_FAIL:-}" = "enable" ]; then echo "boom-enable" >&2; exit 16; fi
+    accepted=0
+    for option in "$@"; do [ "$option" = "--accept-capabilities" ] && accepted=1; done
+    if [ "${FAKE_OC_ENABLE_ACCEPT:-0}" = "1" ]; then
+      if [ "$accepted" != 1 ]; then echo "Plugin requires capability consent" >&2; exit 15; fi
+    elif [ "$accepted" = 1 ]; then
+      echo "unknown option --accept-capabilities" >&2; exit 2
+    fi
+    if [ ! -e "$OPENCLAW_STATE_DIR/registry/$arg3" ]; then echo "Plugin not found: $arg3" >&2; exit 1; fi
+    rm -f "$OPENCLAW_STATE_DIR/disabled/$arg3"
+    echo "enabled $arg3"
+    ;;
   inspect)
     if [ "$arg3" = "--help" ]; then
       echo "Usage: openclaw plugins inspect <id> [options]"
@@ -509,6 +531,7 @@ case "$action" in
       exit 0
     fi
     status="${FAKE_OC_RUNTIME_STATUS:-loaded}"
+    [ -e "$OPENCLAW_STATE_DIR/disabled/$arg3" ] && status=disabled
     [ -n "${FAKE_OC_INSPECT_DIAG:-}" ] && echo "legacy: reading plugin registry for $arg3 ..."
     echo "{\"plugin\":{\"id\":\"$arg3\",\"status\":\"$status\"}}"
     ;;
@@ -521,6 +544,8 @@ case "$action" in
     fi
     if [ ! -e "$reg/$arg3" ]; then echo "Plugin not found: $arg3" >&2; exit 1; fi
     rm -f "$reg/$arg3"
+    mkdir -p "$OPENCLAW_STATE_DIR/disabled"
+    : > "$OPENCLAW_STATE_DIR/disabled/$arg3"
     echo "uninstalled $arg3"
     ;;
   list)
@@ -683,6 +708,35 @@ fn enable_status_disable_happy_path() {
             .is_none(),
         "receipt must be gone after successful disable"
     );
+}
+
+#[test]
+fn enable_after_disable_restores_loaded_plugin() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("first enable");
+    manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("disable");
+    let disabled = world.openclaw_home.join("disabled").join(COMPONENT);
+    assert!(
+        disabled.exists(),
+        "uninstall preserves explicit disabled state"
+    );
+    for _ in 0..2 {
+        let outcome = manager
+            .enable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("re-enable");
+        let EnableOutcome::Enabled(claim) = outcome else {
+            panic!("expected enabled")
+        };
+        assert_eq!(claim.status, ClaimStatus::Enabled);
+        assert!(!disabled.exists(), "explicit enable clears disabled state");
+    }
 }
 
 #[test]
@@ -3206,8 +3260,8 @@ fn missing_inspect_json_blocks_before_mutation() {
     assert!(!world.has_claim());
 }
 
-/// P1 fail-closed: every read-only probe — `--version`, install `--help`, and
-/// inspect `--help` — is performed before the first mutation, so a non-zero
+/// P1 fail-closed: every read-only probe — `--version`, install/enable/inspect
+/// `--help` — is performed before the first mutation, so a non-zero
 /// exit from any of them blocks enable with no install and no receipt, even
 /// when the output would otherwise look like a capability answer.
 #[test]
@@ -3222,6 +3276,7 @@ fn nonzero_probe_exit_blocks_enable_before_mutation() {
             "inspect_help",
             "a non-zero inspect --help still mentioning --json",
         ),
+        ("enable_help", "a non-zero enable --help"),
     ] {
         let guard = OpenClawEnvGuard::acquire();
         let world = stage();
@@ -3241,8 +3296,8 @@ fn nonzero_probe_exit_blocks_enable_before_mutation() {
     }
 }
 
-/// Each probe runs exactly once in a real enable: all three (`--version`,
-/// install `--help`, inspect `--help`) happen in prepare, and apply re-probes
+/// Each probe runs exactly once in a real enable (`--version`,
+/// install/enable/inspect `--help`) happen in prepare, and apply re-probes
 /// nothing (it reuses the prepared capabilities).
 #[test]
 fn each_probe_runs_exactly_once_per_enable() {
@@ -3268,6 +3323,11 @@ fn each_probe_runs_exactly_once_per_enable() {
         "one install --help probe: {lines:?}"
     );
     assert_eq!(
+        count(&|l| l.as_str() == "plugins enable --help"),
+        1,
+        "one enable --help probe: {lines:?}"
+    );
+    assert_eq!(
         count(&|l| l.as_str() == "plugins inspect --help"),
         1,
         "one inspect --help probe: {lines:?}"
@@ -3275,12 +3335,19 @@ fn each_probe_runs_exactly_once_per_enable() {
 }
 
 #[test]
-fn enable_accepts_capabilities_only_when_install_help_supports_it() {
+fn enable_accepts_capabilities_per_subcommand_help() {
     let guard = OpenClawEnvGuard::acquire();
-    for support in ["1", "0", "near_match"] {
+    for (support, enable_support) in [
+        ("1", "1"),
+        ("1", "0"),
+        ("0", "1"),
+        ("0", "0"),
+        ("near_match", "near_match"),
+    ] {
         let world = stage();
         world.apply_env(&guard, None);
         guard.set("FAKE_OC_INSTALL_ACCEPT", support);
+        guard.set("FAKE_OC_ENABLE_ACCEPT", enable_support);
         let argv_log = world.argv_log();
         guard.set("FAKE_OC_ARGV_LOG", &argv_log);
         let manager = world.manager();
@@ -3296,8 +3363,19 @@ fn enable_accepts_capabilities_only_when_install_help_supports_it() {
                 .contains("--accept-capabilities"),
             support == "1"
         );
+        let activation = plan.actions.last().expect("activation preview");
+        assert!(activation.contains("plugins enable tokenless"));
+        assert_eq!(
+            activation.contains("--accept-capabilities"),
+            enable_support == "1"
+        );
         assert!(!world.has_claim());
         assert!(!world.registry_marker_exists());
+        assert!(
+            argv_lines(&argv_log)
+                .iter()
+                .all(|line| line == "--version" || line.ends_with("--help"))
+        );
         std::fs::write(&argv_log, "").expect("reset probe log");
         manager
             .enable(COMPONENT, Some(FRAMEWORK), false)
@@ -3315,8 +3393,52 @@ fn enable_accepts_capabilities_only_when_install_help_supports_it() {
             .expect("install argv");
         assert_eq!(install.contains("--accept-capabilities"), support == "1");
         assert!(!install.contains("--dangerously-force-unsafe-install"));
+        let activation = log
+            .lines()
+            .find(|line| line.starts_with("plugins enable tokenless"))
+            .expect("activation argv");
+        assert_eq!(
+            activation.contains("--accept-capabilities"),
+            enable_support == "1"
+        );
+        assert!(!activation.contains("--dangerously-force-unsafe-install"));
         assert!(world.registry_marker_exists());
     }
+}
+
+#[test]
+fn explicit_enable_failure_keeps_receipt_for_cleanup() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, Some("enable"));
+    guard.set("FAKE_OC_ARGV_LOG", world.argv_log());
+    let manager = world.manager();
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("activation failure");
+    assert!(
+        matches!(err, AdapterError::FrameworkCli { reason, .. } if reason.contains("plugins enable") && reason.contains("boom-enable"))
+    );
+    assert!(world.registry_marker_exists());
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, FRAMEWORK)
+            .expect("cleanup receipt")
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+    assert!(
+        inspect_argv(&argv_lines(&world.argv_log())).is_none(),
+        "do not verify after activation fails"
+    );
+    guard.unset("FAKE_OPENCLAW_FAIL");
+    assert!(
+        manager
+            .disable(COMPONENT, Some(FRAMEWORK), false)
+            .expect("cleanup")
+            .claim_removed
+    );
 }
 
 #[test]
