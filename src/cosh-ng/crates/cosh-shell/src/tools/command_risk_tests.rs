@@ -568,10 +568,18 @@ fn null_redirection_keeps_remaining_command_risk_and_boundaries() {
     assert!(delete.reasons.contains(&"filesystem-delete"));
     assert!(delete.reasons.contains(&"output-suppressed"));
 
-    // V-M10: the execution boundary is never widened.
+    // Issue #1752 Layer 2: stderr-only suppression keeps the stdout
+    // evidence chain observable, so the auto-allow boundary re-opens
+    // for it — with broker evidence rebuilt on the stripped argv, never
+    // a silent auto-allow without evidence.
     let auto_policy = auto("ps aux 2>/dev/null");
-    assert_eq!(auto_policy.execution, ExecutionDecision::AskUser);
-    assert!(auto_policy.auto_allow.is_none());
+    assert_eq!(auto_policy.execution, ExecutionDecision::AutoAllow);
+    assert_eq!(
+        auto_policy.auto_allow,
+        Some(AutoAllowEvidence::DirectReadonlyBroker)
+    );
+    assert!(auto_policy.reasons.contains(&"output-suppressed"));
+    assert!(auto_policy.reasons.contains(&"bounded-readonly"));
 }
 
 #[test]
@@ -1020,11 +1028,14 @@ fn fd_duplication_is_not_redirection_write() {
         );
     }
 
-    // V-F5: close
-    // forms that hit an output stream (bare default, fd 1, fd 2)
-    // suppress user-visible output, so they join the issue #1667
+    // V-F5: close forms that hit an output stream (bare default, fd 1,
+    // fd 2) suppress user-visible output, so they join the issue #1667
     // null-sink channel: still not a write, but annotated
-    // `output-suppressed` and never auto-allowed.
+    // `output-suppressed`. Issue #1752 Layer 2 then routes by channel:
+    // closing fd 2 only suppresses stderr and keeps the stdout evidence
+    // chain observable, so it re-opens the auto-allow boundary, while
+    // closing fd 1 or the bare default suppresses stdout and stays
+    // AskUser.
     for command in ["ls 2>&-", "ls 1>&-", "ls >&-"] {
         let assessment = ask(command);
         assert_ne!(assessment.impact, RiskImpact::High, "{command}");
@@ -1038,6 +1049,14 @@ fn fd_duplication_is_not_redirection_write() {
             "{command}: {:?}",
             assessment.reasons
         );
+    }
+    let stderr_close = auto("ls 2>&-");
+    assert_eq!(stderr_close.execution, ExecutionDecision::AutoAllow);
+    assert_eq!(
+        stderr_close.auto_allow,
+        Some(AutoAllowEvidence::DirectReadonlyBroker)
+    );
+    for command in ["ls 1>&-", "ls >&-"] {
         let auto_policy = auto(command);
         assert_eq!(
             auto_policy.execution,

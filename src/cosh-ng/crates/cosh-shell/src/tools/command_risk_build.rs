@@ -505,16 +505,28 @@ pub(super) fn basename(program: &str) -> &str {
 
 /// Post-processing for assessments whose command carried stripped
 /// null-suppression redirections (issue #1667): append the informational
-/// reason and keep the execution boundary unchanged. Risk itself is fully
-/// decided by the shape/segment assessment paths.
+/// reason, then split by suppressed channel (issue #1752 Layer 2).
+/// Risk itself is fully decided by the shape/segment assessment paths.
 ///
-/// Note (issue #1752): this policy deliberately keeps null-redirection
-/// commands at AskUser — the issue's auto-approve request was not granted
-/// by that fix; adjusting the Layer 2 suppression policy is a separate
-/// discussion, see #1752.
-pub(super) fn apply_null_redirection_policy(result: &mut CommandAssessment) {
+/// Stderr-only suppression (`2>/dev/null`, `2>>/dev/null`, `2>&-`)
+/// keeps the assessment untouched: the suppressed stream is diagnostic
+/// noise, while the stdout evidence chain — transcript output and audit
+/// trail — stays complete, so an auto-allow verdict and its evidence
+/// remain valid.
+///
+/// Any stdout-side suppression (the default `>`, `1>`, auxiliary fds,
+/// fd-closes that silence stdout, and mixed forms) keeps the AskUser
+/// boundary: after auto-execution the transcript would record no
+/// reviewable output for the command, so the verdict is downgraded and
+/// the auto-allow evidence cleared. This stays defensive even though
+/// the evidence paths already withhold evidence for stdout-suppressed
+/// commands: any future grant is still clamped here.
+pub(super) fn apply_null_redirection_policy(result: &mut CommandAssessment, stderr_only: bool) {
     result.reasons.push("output-suppressed");
     result.reasons = dedupe_reasons(std::mem::take(&mut result.reasons));
+    if stderr_only {
+        return;
+    }
     if result.execution == ExecutionDecision::AutoAllow {
         result.execution = ExecutionDecision::AskUser;
     }

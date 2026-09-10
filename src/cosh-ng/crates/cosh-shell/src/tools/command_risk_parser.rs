@@ -17,7 +17,37 @@ use super::command_risk::CommandShape;
 /// RedirectionWrite high-risk path. Extending this table requires
 /// revisiting the issue #1667 boundaries and the decision-matrix tests
 /// in `command_risk_tests.rs`.
+///
+/// Stripped sink redirections are additionally classified by suppressed
+/// channel (issue #1752 Layer 2): stderr-only suppression (fd 2) keeps
+/// the auto-allow verdict, stdout-side suppression stays at AskUser —
+/// see [`NullRedirectionChannel`].
 const SAFE_OUTPUT_SINKS: &[&str] = &["/dev/null"];
+
+/// Output channel suppressed by a stripped null-suppression redirection
+/// (issue #1752 Layer 2). `Stderr` (fd 2 only) leaves the stdout evidence
+/// chain — transcript output and audit trail — intact, so such commands
+/// may keep an auto-allow verdict. `Stdout` covers every other channel:
+/// the default stdout fd, fd 1, auxiliary fds, and fd-closes that silence
+/// stdout; the transcript-recorded output is gone or uncertain there, so
+/// those commands stay at AskUser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NullRedirectionChannel {
+    Stderr,
+    Stdout,
+}
+
+/// Classifies a stripped null-suppression redirection by its fd word:
+/// fd 2 suppresses stderr only; the default (stdout), fd 1, and any
+/// other numeric fd suppress or leave uncertain the recorded stdout
+/// evidence, so they take the conservative Stdout channel.
+fn null_redirection_channel(fd_candidate: bool, token: &str) -> NullRedirectionChannel {
+    if fd_candidate && token == "2" {
+        NullRedirectionChannel::Stderr
+    } else {
+        NullRedirectionChannel::Stdout
+    }
+}
 
 /// Segment separator kind recorded at each `&&`/`||`/`;`/newline break.
 /// A single `&` also records a mark (background list separator) but the
@@ -34,7 +64,10 @@ pub(crate) enum SegmentConnector {
 pub(super) struct ParsedCommand {
     pub(super) shape: CommandShape,
     pub(super) stages: Vec<Vec<String>>,
-    pub(super) null_redirections: usize,
+    /// Every null-suppression redirection stripped while parsing, in
+    /// source order, classified by suppressed channel (issue #1752
+    /// Layer 2). Empty when none were stripped.
+    pub(super) null_redirections: Vec<NullRedirectionChannel>,
     /// Command segments split at `&&`, `||`, `;`, and newlines; each
     /// segment holds its own pipeline stages. Only populated when the
     /// command contains segment separators (used by the stripped-compound
@@ -48,12 +81,26 @@ pub(super) struct ParsedCommand {
     pub(super) segment_connectors: Vec<SegmentConnector>,
 }
 
+impl ParsedCommand {
+    /// Returns true when at least one null-suppression redirection was
+    /// stripped and every one of them suppressed stderr only (fd 2):
+    /// the stdout evidence chain stays complete, so the assessment may
+    /// keep its auto-allow verdict and evidence (issue #1752 Layer 2).
+    pub(super) fn null_redirections_stderr_only(&self) -> bool {
+        !self.null_redirections.is_empty()
+            && self
+                .null_redirections
+                .iter()
+                .all(|channel| matches!(channel, NullRedirectionChannel::Stderr))
+    }
+}
+
 pub(super) fn parse_command(command: &str) -> ParsedCommand {
     if command.is_empty() {
         return ParsedCommand {
             shape: CommandShape::Empty,
             stages: Vec::new(),
-            null_redirections: 0,
+            null_redirections: Vec::new(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };
@@ -62,7 +109,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
-            null_redirections: 0,
+            null_redirections: Vec::new(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };
@@ -73,7 +120,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     let mut stages: Vec<Vec<String>> = Vec::new();
     let mut shape = CommandShape::Simple;
     let mut quote: Option<char> = None;
-    let mut null_redirections = 0usize;
+    let mut null_redirections: Vec<NullRedirectionChannel> = Vec::new();
     let mut amp_redirect_guard = false;
     // Segment breaks recorded as (stage index, token offset, connector)
     // at each `&&`/`||`/`;`/newline, resolved into `segments` after
@@ -231,17 +278,18 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                         // stay annotation-free like duplications.
                         let closes_output_stream =
                             has_dash && (!fd_candidate || token == "1" || token == "2");
+                        // Output-closing forms join the issue #1667
+                        // null-sink channel (`output-suppressed` reason +
+                        // auto-allow fallback). The fd word is classified
+                        // before it is cleared from the token buffer.
+                        if closes_output_stream {
+                            null_redirections.push(null_redirection_channel(fd_candidate, &token));
+                        }
                         if fd_candidate {
                             // The IO_NUMBER prefix (the `2` in `2>&1`)
                             // belongs to the redirection syntax, not argv.
                             token.clear();
                             token_quoted = false;
-                        }
-                        // Output-closing forms join the issue #1667
-                        // null-sink channel (`output-suppressed` reason +
-                        // auto-allow fallback).
-                        if closes_output_stream {
-                            null_redirections += 1;
                         }
                         continue;
                     }
@@ -322,6 +370,8 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                                     )
                                 });
                             if word_ends && SAFE_OUTPUT_SINKS.contains(&quoted_target.as_str()) {
+                                null_redirections
+                                    .push(null_redirection_channel(fd_candidate, &token));
                                 if fd_candidate {
                                     token.clear();
                                     token_quoted = false;
@@ -329,7 +379,6 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                                 for _ in 0..consumed + quoted_consumed {
                                     chars.next();
                                 }
-                                null_redirections += 1;
                                 continue;
                             }
                         }
@@ -353,6 +402,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     consumed += 1;
                 }
                 if !guarded && literal && SAFE_OUTPUT_SINKS.contains(&target.as_str()) {
+                    null_redirections.push(null_redirection_channel(fd_candidate, &token));
                     if fd_candidate {
                         token.clear();
                         token_quoted = false;
@@ -360,7 +410,6 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     for _ in 0..consumed {
                         chars.next();
                     }
-                    null_redirections += 1;
                 } else {
                     if fd_candidate {
                         push_token(&mut tokens, &mut token, &mut token_quoted);
@@ -402,7 +451,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         return ParsedCommand {
             shape: CommandShape::Unparseable,
             stages: Vec::new(),
-            null_redirections: 0,
+            null_redirections: Vec::new(),
             segments: Vec::new(),
             segment_connectors: Vec::new(),
         };

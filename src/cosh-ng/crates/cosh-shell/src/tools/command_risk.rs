@@ -1,4 +1,4 @@
-use super::broker::can_run_approved_bash_tool;
+use super::broker::{can_run_approved_bash_tool, configured_readonly_command};
 use super::command_risk_build::{
     apply_null_redirection_policy, assessment, basename, command_requires_tty, dedupe_reasons,
     downloaded_program_file, has_interpreter_inline_code, has_tty_arg, high_risk_program,
@@ -79,8 +79,11 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
         return high_shell_syntax(policy.source, command, parsed.shape, "redirection-write");
     }
 
-    let null_redirections = parsed.null_redirections;
-    if null_redirections > 0 && parsed.shape == CommandShape::Complex {
+    // Extracted before the shape match moves `parsed` into the
+    // per-shape assessment paths.
+    let has_null_redirections = !parsed.null_redirections.is_empty();
+    let null_redirections_stderr_only = parsed.null_redirections_stderr_only();
+    if has_null_redirections && parsed.shape == CommandShape::Complex {
         // Subshells, brace groups, and background syntax cannot be
         // reliably segmented; keep the pre-fix fail-closed classification
         // for redirection-carrying complex commands.
@@ -130,8 +133,8 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
             | CommandShape::RedirectionWrite => unreachable!("handled above"),
         }
     };
-    if null_redirections > 0 {
-        apply_null_redirection_policy(&mut result);
+    if has_null_redirections {
+        apply_null_redirection_policy(&mut result, null_redirections_stderr_only);
     }
     result
 }
@@ -229,7 +232,9 @@ pub(super) fn assess_simple_command(
     }
 
     let mut stage = stage_assessment(&program, command_tokens);
-    if let Some(readonly) = direct_readonly_evidence(command) {
+    if let Some(readonly) = direct_readonly_evidence(command)
+        .or_else(|| stderr_suppressed_readonly_evidence(&parsed, &tokens))
+    {
         stage.impact = RiskImpact::Low;
         stage.confidence = AssessmentConfidence::High;
         stage.reasons.insert(0, readonly.reason_code());
@@ -270,6 +275,25 @@ fn direct_readonly_evidence(command: &str) -> Option<ReadonlyEvidence> {
         .then_some(ReadonlyEvidence::DirectReadonlyBroker)
 }
 
+/// Issue #1752 Layer 2: re-opens the direct-readonly evidence channel
+/// for a command whose only stripped null redirections suppress stderr
+/// (fd 2). The text-based broker gate above rejects the raw command
+/// because it carries `2>`, so eligibility is re-checked on the parser's
+/// stripped argv — what the real shell executes after quote removal,
+/// plus a stderr suppression that cannot add side effects. The full
+/// stage tokens (including env-assignment prefixes) are checked,
+/// matching the text gate, which also rejects them.
+fn stderr_suppressed_readonly_evidence(
+    parsed: &ParsedCommand,
+    tokens: &[String],
+) -> Option<ReadonlyEvidence> {
+    if parsed.null_redirections_stderr_only() && configured_readonly_command(tokens) {
+        Some(ReadonlyEvidence::DirectReadonlyBroker)
+    } else {
+        None
+    }
+}
+
 fn assess_first_stage(
     command: &str,
     parsed: &ParsedCommand,
@@ -282,7 +306,7 @@ fn assess_first_stage(
             CommandShape::Simple
         },
         stages: parsed.stages.first().cloned().into_iter().collect(),
-        null_redirections: 0,
+        null_redirections: Vec::new(),
         segments: Vec::new(),
         segment_connectors: Vec::new(),
     };
