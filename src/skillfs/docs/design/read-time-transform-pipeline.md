@@ -24,18 +24,21 @@ source, even if a stage errors; a `Hidden` skill is never read or transformed.
 
 ### Pinned open handles
 
-An open read handle captures the skill's `ActiveTarget` at open time and stores
-it on the handle. Subsequent reads resolve against that pinned target rather
-than re-consulting the live resolver, so a resolver change after open cannot
-re-point an in-flight read (a `Snapshot` handle keeps reading the snapshot; a
-`Current` handle stays readable if the skill is later hidden). Flat and Hermes
-nested `SKILL.md` share this contract via the same pinned-resolution helper.
+A non-mutating read-only open of a transformed flat or Hermes `SKILL.md`
+captures the complete transformed UTF-8 bytes after selecting activation once.
+Reads slice that immutable result until close, including after Current edits,
+atomic replacement, activation changes, or removal of the selected snapshot.
+A new open reads the newly selected source; a missing snapshot fails without
+live fallback. Empty pipelines, writable or truncating opens, staging, pending
+installs, passthrough files, and skill-discover retain their existing behavior.
 
-`getattr` operates on the inode and is not handle-pinned: after an activation
-change, a fresh `stat` reflects the new target's transformed size. Open handles
-continue to serve their pinned target's bytes; only the kernel's cached size may
-change. Within a stable activation state, `getattr` size, offset/partial reads,
-and full reads all agree on the transformed bytes.
+Captured handles use FUSE direct I/O so the inode's shared page cache cannot
+mix different open-time versions. This bypasses kernel readahead and does not
+enable shared mmap for these handles. `getattr` remains an inode operation:
+it reports the currently selected target's transformed length, not necessarily
+an old handle's length. Reads and EOF on a captured handle use its own bytes.
+Linux may omit the handle even for `fstat`; inode-only queries must not choose
+an arbitrary open handle as the size authority.
 
 ## 2. Optional stages, fixed order
 
@@ -210,8 +213,5 @@ suppressed to avoid audit flooding.
 
 ## 8. Out of scope (tracked by #1488)
 
-This change does not store transformed bytes in `HandleEntry`, add a per-open
-cache, add a cross-open LRU, or change the existing `getattr`/`read`
-recomputation behavior. Those cache and handle-lifetime changes are tracked by
-#1488. Additional text-file types, script transforms, LLM/network calls in the
+Cross-open LRU reuse remains separate from the captured-handle contract. Additional text-file types, script transforms, LLM/network calls in the
 read path, and rule hot-reload without a remount also remain out of scope.

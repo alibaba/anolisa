@@ -3,6 +3,7 @@
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
+use fuser::consts::FOPEN_DIRECT_IO;
 use fuser::{FUSE_ROOT_ID, ReplyData, ReplyEmpty, ReplyOpen, Request};
 use tracing::{debug, warn};
 
@@ -27,6 +28,22 @@ impl SkillFs {
         reply: ReplyData,
     ) {
         debug!(ino, offset, size, "read");
+
+        if offset < 0 {
+            reply.error(libc::EINVAL);
+            return;
+        }
+        // Captured reads must survive source and namespace changes after open.
+        if let Some(content) = self
+            .handles
+            .with_handle(fh, |entry| entry.transformed.clone())
+            .flatten()
+        {
+            let start = (offset as usize).min(content.len());
+            let end = start.saturating_add(size as usize).min(content.len());
+            reply.data(&content.as_bytes()[start..end]);
+            return;
+        }
 
         let path = match self.inodes.get_path(ino) {
             Some(p) => p,
@@ -511,6 +528,9 @@ impl SkillFs {
                             if policy_decided {
                                 self.metric_policy_fallback();
                             }
+                            if matches!(&path_type, PathType::SkillMd { .. }) {
+                                physical = dir.join("SKILL.md");
+                            }
                             if let PathType::Passthrough { relative_path, .. } = &path_type {
                                 // I4: grace bypass — if the path matches the
                                 // post-publish whitelist, open from physical
@@ -652,6 +672,69 @@ impl SkillFs {
                 reply.error(libc::EROFS);
                 return;
             }
+        }
+
+        let transformed_skill = match &path_type {
+            PathType::SkillMd { skill_name } => Some(skill_name.clone()),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => Some(Self::hermes_skill_id(category, skill_name)),
+            _ => None,
+        };
+        if let Some(skill_name) = transformed_skill.filter(|name| {
+            !is_mutating_open
+                && !self.transform_pipeline.is_empty()
+                && !self.is_staging_skill_root(name)
+                && !self.is_pending_install(name)
+        }) {
+            let content =
+                match self.capture_transformed(&skill_name, &physical, pinned_target.as_ref()) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        let err = errno(&error);
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Open,
+                            SkillEventAction::Failed,
+                            Some(err),
+                            None,
+                        );
+                        reply.error(err);
+                        return;
+                    }
+                };
+            let fh = match self
+                .handles
+                .allocate_captured(ino, flags, pinned_target, content)
+            {
+                Ok(fh) => fh,
+                Err(err) => {
+                    self.emit_op_event(
+                        req,
+                        &path_type,
+                        SkillEventKind::Open,
+                        SkillEventAction::Failed,
+                        Some(err),
+                        None,
+                    );
+                    reply.error(err);
+                    return;
+                }
+            };
+            self.emit_op_event_with_detail(
+                req,
+                &path_type,
+                SkillEventKind::Open,
+                SkillEventAction::Allowed,
+                None,
+                None,
+                self.os_adapter_open_detail(),
+            );
+            // An inode's page cache cannot represent different per-open versions.
+            reply.opened(fh, FOPEN_DIRECT_IO);
+            return;
         }
 
         // SKILL.md: virtual read, physical write

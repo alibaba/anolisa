@@ -132,6 +132,11 @@ impl TransformPipeline {
         self.os_adapter = Some(stage);
     }
 
+    /// Whether reads bypass all transformation stages.
+    pub fn is_empty(&self) -> bool {
+        self.directive.is_none() && self.os_adapter.is_none()
+    }
+
     /// Run every enabled stage in order and return the final Agent-visible
     /// bytes. Returns the input unchanged when no stage is enabled.
     pub fn run(&self, input: &str) -> String {

@@ -847,3 +847,195 @@ fn hermes_snapshot_to_current_after_open_stays_snapshot() {
         "fresh open should read live: {fresh}"
     );
 }
+
+#[test]
+fn captured_current_survives_edits_and_replacement() {
+    use std::os::unix::fs::FileExt;
+    skip_if_no_fuse!();
+    for layout in [
+        skillfs_fuse::SkillLayout::Flat,
+        skillfs_fuse::SkillLayout::Hermes,
+    ] {
+        let source = tempfile::tempdir().unwrap();
+        let mountpoint = tempfile::tempdir().unwrap();
+        let id = if layout == skillfs_fuse::SkillLayout::Flat {
+            "web"
+        } else {
+            "cloud/web"
+        };
+        let original = UBUNTU_SKILL_MD.repeat(200);
+        seed_skill(source.path(), id, &original);
+        let physical = source.path().join(id).join("SKILL.md");
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let (_rules, stage) = stage_for(OsTarget::Alinux);
+        let expected = ALINUX_SKILL_MD.repeat(200);
+        let _mount = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            Arc::new(RwLock::new(store)),
+            MountOptions::default(),
+            false,
+            MountConfig {
+                skill_layout: Some(layout),
+                os_adapter: Some(stage),
+                ..MountConfig::default()
+            },
+        )
+        .unwrap();
+        let path = mountpoint.path().join("skills").join(id).join("SKILL.md");
+        let old = std::fs::File::open(&path).unwrap();
+        let mut first = [0; 17];
+        assert_eq!(old.read_at(&mut first, 0).unwrap(), first.len());
+        assert_eq!(&first, &expected.as_bytes()[..17]);
+        // Same-size in-place modification, then shrink, then atomic growth.
+        for (replacement, atomic) in [
+            ("X".repeat(original.len()), false),
+            ("short\n".into(), false),
+            ("long\n".repeat(10000), true),
+        ] {
+            if atomic {
+                let next = physical.with_file_name("next");
+                std::fs::write(&next, &replacement).unwrap();
+                std::fs::rename(next, &physical).unwrap();
+            } else {
+                std::fs::write(&physical, &replacement).unwrap();
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), replacement);
+            // A fresh open must not overwrite the old handle's cached pages.
+            let mut got = Vec::new();
+            let mut block = [0; 997];
+            for _ in 0..100 {
+                let n = old.read_at(&mut block, got.len() as u64).unwrap();
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&block[..n]);
+            }
+            assert_eq!(got, expected.as_bytes());
+            assert_eq!(
+                old.read_at(&mut block, expected.len() as u64 + 10).unwrap(),
+                0
+            );
+            assert_eq!(old.read_at(&mut [], 0).unwrap(), 0);
+        }
+    }
+}
+
+#[test]
+fn captured_snapshot_survives_removal_without_live_fallback() {
+    skip_if_no_fuse!();
+    let mount = AdapterMount::new(
+        OsTarget::Alinux,
+        |src| {
+            seed_skill(src, "web", "LIVE\n");
+            seed_skill(src, "web/.skill-meta/versions/v1", UBUNTU_SKILL_MD);
+        },
+        |root| {
+            let resolver = Arc::new(ActiveSkillResolver::new(root.to_path_buf()));
+            resolver.set(
+                "web",
+                ActiveTarget::Snapshot {
+                    snapshot_dir: root.join("web/.skill-meta/versions/v1"),
+                    version: "v1".into(),
+                },
+            );
+            Some(resolver)
+        },
+    );
+    let mut old = std::fs::File::open(mount.skill_md("web")).unwrap();
+    std::fs::remove_file(
+        mount
+            .source
+            .path()
+            .join("web/.skill-meta/versions/v1/SKILL.md"),
+    )
+    .unwrap();
+    assert!(std::fs::File::open(mount.skill_md("web")).is_err());
+    mount.resolver.as_ref().unwrap().set(
+        "web",
+        ActiveTarget::Current {
+            source_dir: mount.source.path().join("web"),
+        },
+    );
+    assert_eq!(
+        std::fs::read_to_string(mount.skill_md("web")).unwrap(),
+        "LIVE\n"
+    );
+    let mut got = String::new();
+    old.read_to_string(&mut got).unwrap();
+    assert_eq!(got, ALINUX_SKILL_MD);
+}
+
+#[test]
+fn repeated_versions_hit_captured_budget_then_recover_after_close() {
+    use std::os::unix::fs::FileExt;
+    skip_if_no_fuse!();
+    // Stay just below the LRU per-entry ceiling, but keep more historical
+    // versions alive than the LRU can retain. Only eight fit the handle budget.
+    let payload_size = 8 * 1024 * 1024 - 64;
+    let fixture = MountFixture::normal(|src| {
+        seed_skill(src, "web", "# Initial\n");
+        seed_skill(src, "other", "# Initial\n");
+    });
+    let physical = fixture.source_skill_path("web").join("SKILL.md");
+    let path = fixture.skill_path("web").join("SKILL.md");
+    std::fs::write(
+        fixture.source_skill_path("other").join("SKILL.md"),
+        "Z".repeat(payload_size),
+    )
+    .unwrap();
+    let mut held = Vec::new();
+    for version in 0..24u8 {
+        let payload = vec![b'A' + version; payload_size];
+        if version % 2 == 0 {
+            std::fs::write(&physical, &payload).unwrap();
+        } else {
+            let next = physical.with_file_name("next");
+            std::fs::write(&next, &payload).unwrap();
+            std::fs::rename(next, &physical).unwrap();
+        }
+        match std::fs::File::open(&path) {
+            Ok(file) => {
+                assert!(version < 8);
+                held.push(file);
+            }
+            Err(error) => {
+                assert!(version >= 8, "version {version}: {error}");
+                assert_eq!(error.raw_os_error(), Some(libc::ENOMEM));
+            }
+        }
+    }
+    assert_eq!(held.len(), 8);
+    assert_eq!(
+        std::fs::File::open(fixture.skill_path("other").join("SKILL.md"))
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ENOMEM)
+    );
+    for (version, file) in held.iter().enumerate() {
+        let mut byte = [0];
+        assert_eq!(
+            file.read_at(&mut byte, (payload_size - 1) as u64).unwrap(),
+            1
+        );
+        assert_eq!(byte[0], b'A' + version as u8);
+    }
+    drop(held.pop());
+    // FUSE release can be asynchronous to close; allow a bounded dispatch delay.
+    let mut reopened = None;
+    for _ in 0..100 {
+        match std::fs::File::open(&path) {
+            Ok(file) => {
+                reopened = Some(file);
+                break;
+            }
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENOMEM)),
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let file = reopened.expect("closing a captured handle restores admission capacity");
+    let mut byte = [0];
+    assert_eq!(file.read_at(&mut byte, 0).unwrap(), 1);
+    assert_eq!(byte[0], b'X');
+}

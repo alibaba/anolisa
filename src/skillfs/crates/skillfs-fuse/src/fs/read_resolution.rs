@@ -11,6 +11,7 @@
 //! design.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::SkillFs;
 use crate::security::ActiveTarget;
@@ -38,6 +39,16 @@ pub(super) enum ReadResolution {
 }
 
 impl SkillFs {
+    pub(super) fn capture_transformed(
+        &self,
+        _skill_name: &str,
+        physical: &Path,
+        _target: Option<&ActiveTarget>,
+    ) -> std::io::Result<Arc<str>> {
+        let raw = std::fs::read_to_string(physical)?;
+        Ok(self.transform_pipeline.run(&raw).into())
+    }
+
     /// Read and compile a skill's SKILL.md content.
     ///
     /// In in-place mode reads via `/proc/self/fd/{n}` to bypass FUSE.
