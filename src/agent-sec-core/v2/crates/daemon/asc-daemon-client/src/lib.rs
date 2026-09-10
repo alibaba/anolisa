@@ -101,13 +101,21 @@ fn read_response(
 ) -> Result<DaemonResponse, ClientError> {
     let mut frame = Vec::new();
     let mut chunk = [0_u8; 8192];
+    // A fixed SO_RCVTIMEO restarts for every read, letting a partial response
+    // consume the original timeout again. Reapplying it per read is not portable:
+    // macOS rejects that setsockopt after a peer closes an EOF-terminated frame.
+    // Nonblocking reads plus a short bounded wait enforce one deadline on every
+    // platform without touching socket options after the response begins.
+    stream.set_nonblocking(true).map_err(ClientError::Io)?;
     loop {
-        stream
-            .set_read_timeout(Some(remaining(deadline, true)?))
-            .map_err(ClientError::Io)?;
         let count = match stream.read(&mut chunk) {
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let wait = remaining(deadline, true)?.min(Duration::from_millis(1));
+                std::thread::sleep(wait);
+                continue;
+            }
             Err(error) => return Err(transport_error(error, true)),
         };
         if count == 0 {
@@ -122,6 +130,9 @@ fn read_response(
         if newline.is_some() {
             break;
         }
+        // The socket timeout bounds one read; this bounds their sum so a slow
+        // trickle of chunks cannot outlast the shared deadline.
+        remaining(deadline, true)?;
     }
     if frame.is_empty() {
         return Err(ClientError::EmptyResponse);

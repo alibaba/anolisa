@@ -76,8 +76,16 @@ async fn start(
         .await
         .unwrap();
     });
+    // Binding publishes the socket file slightly before the listener starts
+    // accepting, so waiting for the path to exist can hand back an endpoint that
+    // still refuses connections. Probing with a real connect is what makes the
+    // readiness signal trustworthy; the probe closes immediately.
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !socket.exists() {
+        loop {
+            if let Ok(probe) = tokio::net::UnixStream::connect(socket).await {
+                drop(probe);
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })

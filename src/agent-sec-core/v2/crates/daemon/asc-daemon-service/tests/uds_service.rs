@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -169,7 +169,17 @@ fn config() -> ServiceConfig {
 }
 
 fn unique_directory(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+    // Root at /tmp rather than TMPDIR: a socket bound inside this directory must
+    // fit sun_path, which caps the address at 104 bytes on macOS. TMPDIR there
+    // is a ~49-byte /var/folders/... path that overruns the cap once this
+    // labelled directory name and /daemon.sock are appended.
+    let base = Path::new("/tmp");
+    let base = if base.is_dir() {
+        base.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    base.join(format!(
         "asc-daemon-service-e2e-{label}-{}-{}",
         std::process::id(),
         DIRECTORY_ID.fetch_add(1, Ordering::Relaxed)

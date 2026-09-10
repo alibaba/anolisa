@@ -35,12 +35,13 @@ fn all_fifteen_commands_match_frozen_wire_parameters() {
 }
 
 #[test]
-fn equals_syntax_option_looking_values_and_os_native_paths_are_preserved() {
-    use std::os::unix::ffi::OsStringExt as _;
+fn equals_syntax_option_looking_values_and_awkward_paths_are_preserved() {
+    // The file name carries a space and an `=` because both survive on every
+    // filesystem this CLI runs on. Non-UTF-8 names cannot be created on macOS,
+    // where the filesystem enforces UTF-8, so byte preservation for those is
+    // asserted against the parsed path in the crate's own tests instead.
     let directory = common::Directory::new();
-    let file = directory
-        .0
-        .join(OsString::from_vec(b"policy-\xff.json".to_vec()));
+    let file = directory.0.join("policy=a b.json");
     std::fs::write(
         &file,
         br#"{"kind":"prevent_file_deletion","files":["/work/a b"]}"#,

@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use asc_daemon_client::{ClientError, MAX_FRAME_BYTES, call};
 use asc_daemon_protocol::{DaemonRequest, DaemonResponse};
 use serde_json::json;
+// Only the Linux-gated connect-queue test builds a socket by hand.
+#[cfg(target_os = "linux")]
 use socket2::{Domain, SockAddr, Socket, Type};
 use uuid::Uuid;
 
@@ -18,7 +20,18 @@ struct Endpoint {
 
 impl Endpoint {
     fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("asc-client-{}", Uuid::new_v4()));
+        // `sun_path` caps a socket address at 104 bytes on macOS against 108 on
+        // Linux, and `TMPDIR` there expands to a ~49-byte `/var/folders/...`
+        // path that overruns the cap once a UUID-named directory and file name
+        // are appended. Rooting at `/tmp` keeps the address near 60 bytes on
+        // both systems instead of depending on the caller's `TMPDIR`.
+        let base = std::path::Path::new("/tmp");
+        let base = if base.is_dir() {
+            base.to_path_buf()
+        } else {
+            std::env::temp_dir()
+        };
+        let directory = base.join(format!("asc-client-{}", Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -35,6 +48,11 @@ impl Endpoint {
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
+                    // Accepted sockets inherit the listener's non-blocking flag on
+                    // macOS but not on Linux. Left inherited, the flag overrides
+                    // the timeouts set below and every read or write on this
+                    // stream fails with `WouldBlock` instead of waiting.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .unwrap();
@@ -65,13 +83,24 @@ impl Endpoint {
         timeout: Duration,
         server: impl FnOnce(&Self) -> T + Send,
     ) -> Result<DaemonResponse, ClientError> {
+        self.timed_exchange(input, timeout, server).0
+    }
+
+    fn timed_exchange<T: Send>(
+        &self,
+        input: &DaemonRequest,
+        timeout: Duration,
+        server: impl FnOnce(&Self) -> T + Send,
+    ) -> (Result<DaemonResponse, ClientError>, Duration) {
         let result = thread::scope(|scope| {
             let server = scope.spawn(|| server(self));
+            let started = Instant::now();
             let result = call(&self.path, input, timeout);
+            let elapsed = started.elapsed();
             // A returned peer stays open until after call finishes, allowing
             // tests to prove LF completion and deadlines without relying on EOF.
             let _peer = server.join().unwrap();
-            result
+            (result, elapsed)
         });
         self.no_connection();
         result
@@ -214,6 +243,28 @@ fn deadline_does_not_reset_for_each_response_chunk() {
             request_may_have_executed: true
         })
     ));
+}
+
+#[test]
+fn deadline_is_not_extended_after_a_partial_response() {
+    let (result, elapsed) =
+        Endpoint::new().timed_exchange(&request(), Duration::from_millis(100), |endpoint| {
+            let (mut stream, _) = read_request(endpoint.accept());
+            thread::sleep(Duration::from_millis(70));
+            stream.get_mut().write_all(b"{").unwrap();
+            thread::sleep(Duration::from_millis(200));
+            stream
+        });
+    assert!(matches!(
+        result,
+        Err(ClientError::Timeout {
+            request_may_have_executed: true
+        })
+    ));
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "partial response extended the deadline: {elapsed:?}"
+    );
 }
 
 #[test]
