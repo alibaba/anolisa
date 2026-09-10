@@ -48,6 +48,15 @@
         "minimum": 1,
         "maximum": 4294967296,
         "description": "Maximum bytes for a single mem_write call. Default: 16777216 (16 MiB). Hard cap: 4 GiB."
+      },
+      "sessionId": {
+        "type": "string",
+        "maxLength": 128,
+        "description": "Session id pinned for this plugin's lifetime and forwarded as MEMORY_SESSION_ID on every spawn, so respawns reuse the same session directory and mem_promote finds prior scratch. Default: env MEMORY_SESSION_ID, else a generated ses_<random>. Validated with the same rules as userId."
+      },
+      "sessionDir": {
+        "type": "string",
+        "description": "Base directory for per-session scratch and log, forwarded as MEMORY_SESSION_DIR. Default: env MEMORY_SESSION_DIR, else /run/anolisa/sessions (created 0700 by the shipped tmpfiles.d snippet)."
       }
     }
   },
@@ -73,6 +82,16 @@
     "maxWriteBytes": {
       "label": "Max Write Bytes",
       "help": "Maximum bytes accepted by a single write call. Caps disk and buffer growth.",
+      "advanced": true
+    },
+    "sessionId": {
+      "label": "Session ID",
+      "help": "Pin one session id so plugin respawns reuse the same session scratch. Leave empty to use MEMORY_SESSION_ID or a generated ses_<random>.",
+      "advanced": true
+    },
+    "sessionDir": {
+      "label": "Session Directory",
+      "help": "Root for per-session scratch and log files. Defaults to /run/anolisa/sessions.",
       "advanced": true
     }
   }
