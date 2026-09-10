@@ -1957,6 +1957,7 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             }
         }
 
+        let mut failed: usize = 0;
         for ws in &workspaces {
             let req = Request::Recover {
                 workspace: ws.path.clone(),
@@ -1971,13 +1972,28 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
                         "\x1b[31mError [{:?}] recovering {}: {}\x1b[0m",
                         code, ws.path, message
                     );
+                    failed += 1;
                 }
                 _ => {
                     eprintln!("\x1b[33mUnexpected response for {}\x1b[0m", ws.path);
+                    failed += 1;
                 }
             }
         }
-        println!("All workspaces recovered.");
+        if failed == 0 {
+            println!("All workspaces recovered.");
+        } else {
+            // RPM %preun and other automation chain destructive cleanup off
+            // this exit code; a partially failed batch must not look successful.
+            let summary = format!(
+                "Recover failed for {}/{} workspace(s); failed workspaces \
+                 and their snapshots are preserved for retry.",
+                failed,
+                workspaces.len(),
+            );
+            eprintln!("\x1b[31m{}\x1b[0m", summary);
+            process::exit(1);
+        }
     } else {
         // Single workspace mode
         let ws_arg = resolve_workspace_arg(workspace.as_deref().unwrap());
