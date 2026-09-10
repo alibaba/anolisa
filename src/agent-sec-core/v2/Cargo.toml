@@ -5,6 +5,7 @@ resolver = "3"
 members = [
     "apps/asc-cli",
     "apps/asc-daemon",
+    "crates/action/capabilities/asc-capability-code-scan",
     "crates/daemon/asc-daemon-client",
     "crates/daemon/asc-daemon-core",
     "crates/daemon/asc-daemon-handler",
@@ -32,6 +33,7 @@ publish = false
 
 [workspace.dependencies]
 asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
+asc-capability-code-scan = { path = "crates/action/capabilities/asc-capability-code-scan" }
 asc-daemon = { path = "apps/asc-daemon" }
 asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }
 asc-daemon-core = { path = "crates/daemon/asc-daemon-core" }
@@ -48,6 +50,7 @@ asc-policy-target-contracts = { path = "crates/policy/asc-policy-target-contract
 asc-policy-repository = { path = "crates/policy/asc-policy-repository" }
 asc-policy-types = { path = "crates/policy/asc-policy-types" }
 clap = { version = "4.6", features = ["derive"] }
+fancy-regex = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = "0.6"
@@ -57,6 +60,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+yaml-rust2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

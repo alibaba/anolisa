@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod action;
 mod dispatcher;
 mod pap;
 mod rejection;

@@ -8,11 +8,13 @@ use asc_daemon_protocol::method::{self, AccessPolicy, MethodId};
 use asc_daemon_protocol::{DaemonRequest, DaemonResponse, RequestId, error_code};
 use asc_daemon_service::{DispatchError, DispatchRequest, RequestDispatcher, ResponseDisposition};
 
+use crate::action::CodeScanHandler;
 use crate::pap::PapHandler;
 
 /// Protocol router composed over daemon application use cases.
 pub struct DaemonDispatcher {
     pap: PapHandler,
+    code_scan: CodeScanHandler,
     principal_policy: Arc<dyn PrincipalPolicy>,
 }
 
@@ -27,6 +29,7 @@ impl DaemonDispatcher {
     ) -> Self {
         Self {
             pap: PapHandler::new(application),
+            code_scan: CodeScanHandler::new(),
             principal_policy,
         }
     }
@@ -55,15 +58,25 @@ impl DaemonDispatcher {
                 "principal is not authorized to administer policy",
             );
         }
-        let MethodId::Pap(method) = method_id;
-        self.pap
-            .handle(request_id, &principal, method, request.params)
+        match method_id {
+            MethodId::Pap(method) => {
+                self.pap
+                    .handle(request_id, &principal, method, request.params)
+            }
+            MethodId::Action(method) => match method {
+                method::ActionMethod::CodeScan => self.code_scan.handle(request_id, request.params),
+            },
+        }
     }
 }
 
 fn is_authorized(principal: &Principal, access: AccessPolicy) -> bool {
     match access {
         AccessPolicy::PolicyAdministrator => principal.role() == PrincipalRole::PolicyAdministrator,
+        // Any kernel-authenticated peer is a local user; the transport rejects
+        // unauthenticated peers before dispatch, so reaching here already means
+        // the peer is authenticated.
+        AccessPolicy::LocalUser => true,
     }
 }
 
