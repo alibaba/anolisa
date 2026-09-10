@@ -1957,6 +1957,7 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
             }
         }
 
+        let mut failed: usize = 0;
         for ws in &workspaces {
             let req = Request::Recover {
                 workspace: ws.path.clone(),
@@ -1971,26 +1972,50 @@ async fn handle_recover(workspace: Option<String>, all: bool, force: bool) -> Re
                         "\x1b[31mError [{:?}] recovering {}: {}\x1b[0m",
                         code, ws.path, message
                     );
+                    failed += 1;
                 }
                 _ => {
                     eprintln!("\x1b[33mUnexpected response for {}\x1b[0m", ws.path);
+                    failed += 1;
                 }
             }
         }
-        println!("All workspaces recovered.");
+        if failed == 0 {
+            println!("All workspaces recovered.");
+        } else {
+            // RPM %preun and other automation chain destructive cleanup off
+            // this exit code; a partially failed batch must not look successful.
+            let summary = format!(
+                "Recover failed for {}/{} workspace(s); failed workspaces \
+                 and their snapshots are preserved for retry.",
+                failed,
+                workspaces.len(),
+            );
+            eprintln!("\x1b[31m{}\x1b[0m", summary);
+            process::exit(1);
+        }
     } else {
         // Single workspace mode
         let ws_arg = resolve_workspace_arg(workspace.as_deref().unwrap());
 
-        // Get status for snapshot count
-        let status_req = Request::Status {
-            workspace: Some(ws_arg.clone()),
-        };
+        // Snapshot count comes from the GLOBAL status, not `Status -w`: the
+        // per-workspace form now refuses detached registrations (the very
+        // state recover exists to repair), which would abort this flow before
+        // the Recover request is ever sent. Global status lists detached
+        // workspaces too, so the confirm prompt keeps its metadata either way.
+        // Match both path and ws_id: the daemon resolves `recover -w` either
+        // way, and a count of 0 for the ID form would understate what the
+        // confirmation is about to delete.
+        let status_req = Request::Status { workspace: None };
         let status_resp = send_request_to_daemon(&status_req).await?;
         let snapshot_count = match &status_resp {
             Response::StatusOk { report } => report
                 .workspaces
-                .first()
+                .iter()
+                .find(|w| {
+                    w.ws_id == ws_arg
+                        || w.path.trim_end_matches('/') == ws_arg.trim_end_matches('/')
+                })
                 .map(|w| w.snapshot_count)
                 .unwrap_or(0),
             Response::Error { code, message } => {
