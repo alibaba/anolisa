@@ -71,6 +71,11 @@ else
 	install -d -m 0755 "$(DESTDIR)$(CONFIG_DIR)"
 	install -p -m 0644 src/config.toml.sample \
 		"$(DESTDIR)$(CONFIG_DIR)/config.toml.sample"
+	@# Mirror RPM %config(noreplace): never clobber an existing live config
+	@if [ ! -f "$(DESTDIR)$(CONFIG_DIR)/config.toml" ]; then \
+		install -p -m 0644 src/config.toml.sample \
+			"$(DESTDIR)$(CONFIG_DIR)/config.toml"; \
+	fi
 	@# 2. Post-install: reload+enable+restart daemon (skip when staging)
 	@if [ -z "$(DESTDIR)" ]; then \
 		systemctl daemon-reload; \
@@ -104,6 +109,16 @@ else
 	rm -rf "$(DESTDIR)$(PLUGINS_DIR)"
 	rm -f "$(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/ws-ckpt.service"
 	rm -f "$(DESTDIR)$(CONFIG_DIR)/config.toml.sample"
+	@# Mirror RPM erase semantics for %config(noreplace): keep a backup only
+	@# when the live config was modified from the packaged default.
+	@if [ -f "$(DESTDIR)$(CONFIG_DIR)/config.toml" ]; then \
+		if cmp -s "$(DESTDIR)$(CONFIG_DIR)/config.toml" src/config.toml.sample; then \
+			rm -f "$(DESTDIR)$(CONFIG_DIR)/config.toml"; \
+		else \
+			mv "$(DESTDIR)$(CONFIG_DIR)/config.toml" \
+				"$(DESTDIR)$(CONFIG_DIR)/config.toml.rpmsave"; \
+		fi; \
+	fi
 	@# 3. Post-removal: cleanup BtrfsLoop backend (skip when staging)
 	@if [ -z "$(DESTDIR)" ]; then \
 		umount /mnt/btrfs-workspace 2>/dev/null || true; \

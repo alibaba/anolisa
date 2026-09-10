@@ -1,9 +1,8 @@
-# ws-ckpt configuration sample
+# ws-ckpt configuration
 #
-# This file is a reference. To customize ws-ckpt, copy it to
-# /etc/ws-ckpt/config.toml and uncomment/edit fields you care about:
-#
-#     cp /etc/ws-ckpt/config.toml.sample /etc/ws-ckpt/config.toml
+# The package installs this file as the live /etc/ws-ckpt/config.toml.
+# Uncomment/edit fields in place — the copy at config.toml.sample stays
+# as the canonical commented reference.
 #
 # Any field left unset falls back to its built-in default; a missing
 # /etc/ws-ckpt/config.toml is equivalent to all defaults.

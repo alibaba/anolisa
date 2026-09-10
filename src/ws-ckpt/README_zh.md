@@ -23,7 +23,7 @@
 ws-ckpt/
 ├── src/                       # Rust Cargo workspace
 │   ├── Cargo.toml
-│   ├── config.toml.sample     # 配置示例（安装到 /etc/ws-ckpt/；复制为 config.toml 启用）
+│   ├── config.toml.sample     # 默认配置（安装为 /etc/ws-ckpt/config.toml，%config(noreplace)，另附 .sample 参考）
 │   ├── crates/
 │   │   ├── common/            # 共享类型、IPC 协议编解码
 │   │   ├── daemon/            # 守护进程核心逻辑

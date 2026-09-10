@@ -23,7 +23,7 @@ Btrfs-based workspace snapshot system for AI Agents, providing sub-second checkp
 ws-ckpt/
 ├── src/                       # Rust Cargo workspace
 │   ├── Cargo.toml
-│   ├── config.toml.sample     # Config template (installed to /etc/ws-ckpt/)
+│   ├── config.toml.sample     # Default config (shipped as /etc/ws-ckpt/config.toml, %config(noreplace), plus .sample reference)
 │   ├── crates/
 │   │   ├── common/            # Shared types, IPC protocol codec
 │   │   ├── daemon/            # Daemon core logic
