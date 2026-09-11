@@ -203,6 +203,10 @@ bump_file "$PROJECT_ROOT/.anolisa/component.toml" \
     "^version = \"$OLD_VERSION\"" \
     "version = \"$NEW_VERSION\"" \
     ".anolisa/component.toml"
+bump_file "$PROJECT_ROOT/.anolisa/component-v2.toml" \
+    "^version = \"$OLD_VERSION\"" \
+    "version = \"$NEW_VERSION\"" \
+    ".anolisa/component-v2.toml"
 
 # -----------------------------------------------------------------------------
 # 10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json

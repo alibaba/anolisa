@@ -8,7 +8,7 @@ use crate::BootstrapConfig;
 const HELP: &str = "Usage: agent-sec-daemon [serve] [--socket <ABSOLUTE_PATH>] [--policy-admin-uid <UID>]...\n\
 \n\
 Runs the AgentSecCore V2 UDS service with PAP administration methods.\n\
-Without --socket, uses $XDG_RUNTIME_DIR/agent-sec-core/daemon.sock.\n\
+Without --socket, uses AGENT_SEC_DAEMON_SOCKET or /run/agent-sec-core/daemon.sock.\n\
 Root is always authorized. --policy-admin-uid adds an administrator at startup.\n\
 Repeat this option for multiple UIDs; omitted means root only.\n\
 PAP state is process-local until durable Repository integration lands.\n";
@@ -35,24 +35,14 @@ impl Cli {
     /// Parses an argv sequence including the binary name.
     ///
     /// Accepts both direct and explicit `serve` forms. When `--socket` is
-    /// omitted, the V1-compatible systemd contract resolves the endpoint below
-    /// `$XDG_RUNTIME_DIR`; explicit paths remain available for tests and tools.
+    /// omitted, uses nonempty `AGENT_SEC_DAEMON_SOCKET` or the system endpoint.
+    /// An explicit socket selects an
+    /// isolated runtime directory for development; `XDG_RUNTIME_DIR` is ignored.
     ///
     /// # Errors
     /// Returns a stable parse error for a missing value, unknown option, repeated
     /// socket, invalid administrator UID, non-Unicode option, or invalid runtime path.
     pub fn parse_from<I, T>(arguments: I) -> Result<ParseOutcome, CliError>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<OsString>,
-    {
-        Self::parse_from_with_runtime_dir(arguments, std::env::var_os("XDG_RUNTIME_DIR"))
-    }
-
-    fn parse_from_with_runtime_dir<I, T>(
-        arguments: I,
-        runtime_dir: Option<OsString>,
-    ) -> Result<ParseOutcome, CliError>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
@@ -109,23 +99,21 @@ impl Cli {
             return Err(CliError::UnknownArgument(rendered));
         }
 
-        let socket_path = if let Some(path) = socket_path {
-            path
-        } else {
-            let runtime_dir = runtime_dir
-                .filter(|path| !path.is_empty())
-                .ok_or(CliError::MissingSocketAndRuntimeDirectory)?;
-            let runtime_dir = PathBuf::from(runtime_dir);
-            if !runtime_dir.is_absolute() {
-                return Err(CliError::RelativeRuntimeDirectory);
-            }
-            runtime_dir.join("agent-sec-core").join("daemon.sock")
-        };
+        let socket_path = socket_path
+            .or_else(|| {
+                std::env::var_os("AGENT_SEC_DAEMON_SOCKET")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| PathBuf::from("/run/agent-sec-core/daemon.sock"));
         if !socket_path.is_absolute() {
             return Err(CliError::RelativeSocket);
         }
+        let mut bootstrap = BootstrapConfig::new(socket_path);
+        // The host service accepts local users; embedders retain a private default.
+        bootstrap.socket_mode = 0o666;
         Ok(ParseOutcome::Serve(Self {
-            bootstrap: BootstrapConfig::new(socket_path),
+            bootstrap,
             policy_admin_uids,
         }))
     }
@@ -140,12 +128,6 @@ pub enum CliError {
     /// Kernel UIDs are unsigned 32-bit decimal values.
     #[error("--policy-admin-uid must be a decimal integer between 0 and 4294967295")]
     InvalidAdminUid,
-    /// Neither an explicit socket nor the V1-compatible runtime root is available.
-    #[error("--socket <ABSOLUTE_PATH> or XDG_RUNTIME_DIR is required")]
-    MissingSocketAndRuntimeDirectory,
-    /// The inherited runtime root cannot safely form an absolute socket path.
-    #[error("XDG_RUNTIME_DIR must be an absolute path")]
-    RelativeRuntimeDirectory,
     /// `--socket` was not followed by a value.
     #[error("--socket requires a value")]
     MissingSocketValue,
@@ -179,44 +161,29 @@ mod tests {
     }
 
     #[test]
-    fn socket_uses_the_v1_runtime_default_or_an_explicit_absolute_path() {
-        let ParseOutcome::Serve(default) = Cli::parse_from_with_runtime_dir(
-            ["agent-sec-daemon", "serve"],
-            Some(OsString::from("/run/user/1000")),
-        )
-        .unwrap() else {
+    fn socket_defaults_to_the_system_namespace() {
+        let ParseOutcome::Serve(default) = Cli::parse_from(["agent-sec-daemon", "serve"]).unwrap()
+        else {
             panic!("expected daemon invocation");
         };
+        assert_eq!(default.bootstrap.socket_mode, 0o666);
+        assert_eq!(BootstrapConfig::new("/run/private.sock").socket_mode, 0o600);
         assert_eq!(
             default.bootstrap.socket_path,
-            PathBuf::from("/run/user/1000/agent-sec-core/daemon.sock")
+            PathBuf::from("/run/agent-sec-core/daemon.sock")
         );
         assert_eq!(
-            Cli::parse_from_with_runtime_dir(["agent-sec-daemon"], None),
-            Err(CliError::MissingSocketAndRuntimeDirectory)
-        );
-        assert_eq!(
-            Cli::parse_from_with_runtime_dir(
-                ["agent-sec-daemon"],
-                Some(OsString::from("relative")),
-            ),
-            Err(CliError::RelativeRuntimeDirectory)
-        );
-        assert_eq!(
-            Cli::parse_from_with_runtime_dir(["agent-sec-daemon", "--socket", "daemon.sock"], None,),
+            Cli::parse_from(["agent-sec-daemon", "--socket", "daemon.sock"]),
             Err(CliError::RelativeSocket)
         );
         assert_eq!(
-            Cli::parse_from_with_runtime_dir(
-                [
-                    "agent-sec-daemon",
-                    "--socket",
-                    "/run/one.sock",
-                    "--socket",
-                    "/run/two.sock",
-                ],
-                None,
-            ),
+            Cli::parse_from([
+                "agent-sec-daemon",
+                "--socket",
+                "/run/one.sock",
+                "--socket",
+                "/run/two.sock"
+            ]),
             Err(CliError::RepeatedSocket)
         );
     }

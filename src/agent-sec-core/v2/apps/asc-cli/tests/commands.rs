@@ -89,7 +89,6 @@ fn invalid_and_ambiguous_options_are_usage_errors() {
         let error = Cli::parse_from(args.clone()).unwrap_err();
         assert!(error.use_stderr(), "{args:?} unexpectedly produced help");
     }
-    assert!(Cli::parse_from(["agent-sec-cli", "policy", "list"]).is_err());
     assert!(
         Cli::parse_from([
             "agent-sec-cli",
@@ -258,7 +257,6 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
             1,
             "connection unavailable",
         ),
-        (vec!["policy", "list"], 2, "--socket"),
         (
             vec![
                 "--socket",
@@ -296,4 +294,13 @@ fn binary_help_version_and_failures_have_stable_exit_codes() {
         }
     }
     assert!(!socket.exists());
+}
+
+#[test]
+fn default_socket_matches_the_system_service() {
+    let cli = asc_cli::Cli::parse_from(["agent-sec-cli", "policy", "list"]).unwrap();
+    assert_eq!(
+        cli.socket,
+        std::path::PathBuf::from("/run/agent-sec-core/daemon.sock")
+    );
 }

@@ -102,8 +102,8 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
 	@command -v agent-sec-daemon >/dev/null 2>&1 || { echo "ERROR: agent-sec-daemon not found on PATH"; exit 1; }
 	@command -v pytest >/dev/null 2>&1 || pip3 install --quiet pytest
-	python3 -m pytest tests/e2e/ tests/v2/e2e/ \
-		--import-mode=importlib \
+	python3 -m pytest tests/e2e/ tests/v2/ \
+		--import-mode=importlib -ra \
 		--ignore=tests/e2e/cli/test_capabilities_e2e.py \
 		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
@@ -227,7 +227,7 @@ endef
 # target is prepended by each aggregate.
 RPM_INSTALL_COMMON_TARGETS := install-cosh-hook install-codex-plugin install-qoder-plugin \
 	install-openclaw-plugin install-hermes-plugin install-qwen-code-extension \
-	install-skills install-component-manifest install-systemd-user
+	install-skills install-component-manifest
 
 # V2 Rust binaries are collected here by build-cli-v2 and consumed by
 # install-cli-v2, mirroring the build/install split used for linux-sandbox.
@@ -317,10 +317,12 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/tools
 	cp -p tools/sign-skill.sh $(BUILD_DIR)/tools/
 
+COMPONENT_MANIFEST ?= .anolisa/component.toml
+
 .PHONY: stage-component-manifest
 stage-component-manifest: ## Stage component.toml into BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/share/anolisa/components/sec-core
-	install -p -m 0644 .anolisa/component.toml \
+	install -p -m 0644 $(COMPONENT_MANIFEST) \
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
@@ -328,6 +330,7 @@ build-all: $(call component_build_targets,build-cli) ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: build-all-v2
+build-all-v2: COMPONENT_MANIFEST := .anolisa/component-v2.toml
 build-all-v2: $(call component_build_targets,build-cli-v2) ## Build all components with the V2 Rust CLI/daemon
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
@@ -456,6 +459,8 @@ SYSTEMD_USER_UNIT_DIR ?= /usr/lib/systemd/user
 SYSTEMD_USER_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core.service.in
 SYSTEMD_SERVICE_BINDIR ?= /usr/bin
 SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
+SYSTEMD_SYSTEM_UNIT_DIR ?= /usr/lib/systemd/system
+SYSTEMD_SYSTEM_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core-v2.service.in
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -573,7 +578,7 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 .PHONY: install-component-manifest
 install-component-manifest: ## Install component.toml to DESTDIR
 	install -d -m 0755 $(DESTDIR)$(COMPONENT_DIR)
-	install -m 0644 .anolisa/component.toml \
+	install -m 0644 $(COMPONENT_MANIFEST) \
 		$(DESTDIR)$(COMPONENT_DIR)/component.toml
 
 .PHONY: install-systemd-user
@@ -595,17 +600,26 @@ install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site $(RPM_INSTALL_COMMON_TARGETS) install-systemd-user ## Install all (RPM build)
 
-# V2 differs from install-all-for-rpmbuild only in the CLI/daemon implementation;
-# both versions install the same systemd unit contract.
+# V2 installs a system-scope unit; the V1 raw/RPM user unit remains separate.
 .PHONY: install-all-for-rpmbuild-v2
+install-all-for-rpmbuild-v2: COMPONENT_MANIFEST := .anolisa/component-v2.toml
 install-all-for-rpmbuild-v2: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild-v2: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild-v2: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) ## Install all (V2 RPM build)
+install-all-for-rpmbuild-v2: install-cli-v2 $(RPM_INSTALL_COMMON_TARGETS) install-systemd-system ## Install all (V2 RPM build)
+
+.PHONY: install-systemd-system
+install-systemd-system: ## Stage V2 system unit and service-account definition
+	install -d -m 0755 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR) $(DESTDIR)/usr/lib/sysusers.d
+	sed -e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' $(SYSTEMD_SYSTEM_UNIT_TEMPLATE) \
+		> $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_UNIT_DIR)/agent-sec-core.service
+	install -m 0644 packaging/systemd/agent-sec-core-v2.sysusers \
+		$(DESTDIR)/usr/lib/sysusers.d/agent-sec-core.conf
 
 # =============================================================================
 # UNINSTALL

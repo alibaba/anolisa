@@ -1,3 +1,7 @@
+mod runtime_path;
+
+use runtime_path::RuntimeLease;
+
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,16 +17,7 @@ use asc_policy_engine::PolicyTemplateCompiler;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
-    match run_with_shutdown_timeout(run(), RUNTIME_SHUTDOWN_TIMEOUT) {
-        Ok(exit_code) => exit_code,
-        Err(problem) => {
-            report_error(&problem);
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn run() -> ExitCode {
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
     let outcome = match Cli::parse_from(std::env::args_os()) {
         Ok(outcome) => outcome,
         Err(problem) => {
@@ -38,6 +33,28 @@ async fn run() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
+    let lease = match RuntimeLease::acquire(&cli.bootstrap.socket_path) {
+        Ok(lease) => lease,
+        Err(problem) => {
+            report_error(&problem);
+            return ExitCode::FAILURE;
+        }
+    };
+    // Retain the singleton through the outer Tokio blocking-task shutdown window.
+    match run_with_shutdown_timeout(run(cli, &lease), RUNTIME_SHUTDOWN_TIMEOUT) {
+        Ok(exit_code) => exit_code,
+        Err(problem) => {
+            report_error(&problem);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli, lease: &RuntimeLease) -> ExitCode {
+    if let Err(problem) = lease.prepare_socket().await {
+        report_error(&problem);
+        return ExitCode::FAILURE;
+    }
     let signals = match ProcessSignals::install() {
         Ok(signals) => signals,
         Err(problem) => {

@@ -13,6 +13,7 @@ name = "agent-sec-daemon"
 path = "src/main.rs"
 
 [dependencies]
+rustix.workspace = true
 asc-daemon-core = { workspace = true }
 asc-daemon-handler = { workspace = true }
 asc-daemon-service = { workspace = true }

@@ -23,8 +23,6 @@ def test_transport_failure_when_daemon_absent(cli, tmp_path):
 
 def test_usage_errors_exit_two_without_a_daemon(cli):
     usage_cases = [
-        # Missing required --socket.
-        ("policy", "list"),
         # --socket must be absolute.
         ("--socket", "relative.sock", "policy", "list"),
         # Repeated --socket at different levels is ambiguous.

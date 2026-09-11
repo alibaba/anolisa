@@ -15,7 +15,7 @@ use commands::Command;
 /// Parsed invocation. Only Policy administration commands are currently exposed.
 #[derive(Debug)]
 pub struct Cli {
-    /// Absolute endpoint of an already-running daemon.
+    /// Absolute endpoint; otherwise `AGENT_SEC_DAEMON_SOCKET` or the system default.
     pub socket: PathBuf,
     timeout_ms: u32,
     command: Command,
@@ -28,7 +28,7 @@ pub struct Cli {
     about = "Manage Policy, Scope and Binding through asc-daemon"
 )]
 struct Arguments {
-    /// Absolute endpoint of an already-running daemon.
+    /// Absolute endpoint; otherwise `AGENT_SEC_DAEMON_SOCKET` or the system default.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     /// Total connect/write/read deadline in milliseconds; requests are never retried.
@@ -69,12 +69,14 @@ impl Cli {
                 ));
             }
         }
-        let socket = arguments.socket.ok_or_else(|| {
-            clap::Error::raw(
-                clap::error::ErrorKind::MissingRequiredArgument,
-                "--socket <ABSOLUTE_PATH> is required",
-            )
-        })?;
+        let socket = arguments
+            .socket
+            .or_else(|| {
+                std::env::var_os("AGENT_SEC_DAEMON_SOCKET")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| PathBuf::from("/run/agent-sec-core/daemon.sock"));
         if !socket.is_absolute() {
             return Err(clap::Error::raw(
                 clap::error::ErrorKind::ValueValidation,

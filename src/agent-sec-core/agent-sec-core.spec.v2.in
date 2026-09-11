@@ -1,31 +1,13 @@
-
 %define anolis_release 1
 %global debug_package %{nil}
 
-# Disable stripping of ELF binaries.  Bundled .so files (the crate-backed
-# agent_sec_cli._native extension and prebuilt wheel extensions such as
-# cryptography and pydantic-core) have precise ELF segment alignment that
-# `strip` breaks, causing "ELF load command address/offset not page-aligned"
-# at runtime.
-%global __strip /bin/true
-
-# Use default zstd compression (level 3) instead of -19 to speed up packaging
-# of bundled native extensions; -19 takes noticeably longer with no real gain.
+# Use default zstd compression for the Rust/component payload.
 %define _binary_payload w.zstdio
 %define _source_payload w.zstdio
-%{!?_userunitdir:%global _userunitdir /usr/lib/systemd/user}
+%{!?_unitdir:%global _unitdir /usr/lib/systemd/system}
 
 # Preserve original shebang (#!/usr/bin/env bash) for cross-platform compatibility
 %undefine __brp_mangle_shebangs
-
-# Exclude bundled site-packages from RPM auto-dependency scanning.
-# Prebuilt wheel .so files reference host system libraries or use hash-named
-# internal libraries, neither of which must become hard RPM
-# Requires/Provides.
-# Using path-based exclusion instead of AutoReqProv:no so that other subpackages
-# (e.g. linux-sandbox in agent-sec-cosh-hook) retain proper auto-dependency detection.
-%global __requires_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
-%global __provides_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
 
 Name:           agent-sec-core
 Version:        @VERSION@
@@ -47,9 +29,9 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 
-%{!?systemd_user_post:%{error:missing %%systemd_user_post; install systemd-rpm-macros in the rpmbuild environment}}
-%{!?systemd_user_preun:%{error:missing %%systemd_user_preun; install systemd-rpm-macros in the rpmbuild environment}}
-%{!?systemd_user_postun:%{error:missing %%systemd_user_postun; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_post:%{error:missing %%systemd_post; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_preun:%{error:missing %%systemd_preun; install systemd-rpm-macros in the rpmbuild environment}}
+%{!?systemd_postun_with_restart:%{error:missing %%systemd_postun_with_restart; install systemd-rpm-macros in the rpmbuild environment}}
 
 # Metapackage: pull all subpackages
 Requires:       agent-sec-cli = %{version}-%{release}
@@ -70,12 +52,8 @@ This metapackage installs all agent-sec-core components including CLI, hooks, an
 # =============================================================================
 %package -n agent-sec-cli
 Summary:        Agent Security CLI tool (Rust, daemon client)
-Requires:       python3 >= 3.11
-Requires:       python3 < 3.12
-Requires:       gnupg2 >= 2.0
-Requires:       loongshield >= 1.2.0
 Requires:       systemd
-Recommends:     python3-pgpy >= 0.5
+Requires(pre):  /usr/bin/systemd-sysusers
 
 %description -n agent-sec-cli
 Agent-sec-cli provides Policy, Scope and Binding administration commands.
@@ -86,21 +64,28 @@ domain socket and carries no Python runtime of its own.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 %attr(0755,root,root) /usr/bin/agent-sec-daemon
-%{_userunitdir}/agent-sec-core.service
+%{_unitdir}/agent-sec-core.service
+/usr/lib/sysusers.d/agent-sec-core.conf
 %dir %{_datadir}/anolisa
 %dir %{_datadir}/anolisa/components
 %dir %{_datadir}/anolisa/components/sec-core
 %{_datadir}/anolisa/components/sec-core/component.toml
 %license LICENSE
 
+# Create the account before the service can be enabled by package policy.
+%pre -n agent-sec-cli
+systemd-sysusers - <<'AGENT_SEC_SYSUSERS'
+u agent-sec - "AgentSec daemon" /nonexistent /sbin/nologin
+AGENT_SEC_SYSUSERS
+
 %post -n agent-sec-cli
-%systemd_user_post agent-sec-core.service
+%systemd_post agent-sec-core.service
 
 %preun -n agent-sec-cli
-%systemd_user_preun agent-sec-core.service
+%systemd_preun agent-sec-core.service
 
 %postun -n agent-sec-cli
-%systemd_user_postun_with_restart agent-sec-core.service
+%systemd_postun_with_restart agent-sec-core.service
 
 # =============================================================================
 # Subpackage 2: agent-sec-cosh-hook
@@ -149,6 +134,8 @@ Hooks into OpenClaw to perform code scanning before tool execution.
 Summary:        Hermes Agent plugin for agent security
 Requires:       agent-sec-cli = %{version}-%{release}
 Requires:       jq
+Requires:       python3 >= 3.11
+Requires:       python3 < 3.12
 
 %description -n agent-sec-hermes-hook
 Hermes Agent security plugin powered by agent-sec-core.
