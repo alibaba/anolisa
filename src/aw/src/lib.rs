@@ -7,6 +7,8 @@
 
 pub mod canonical;
 pub mod registry;
+pub mod validation;
+
 pub use registry::Registry;
 
 /// Contract failures deliberately omit potentially sensitive payload values.
@@ -27,4 +29,12 @@ pub enum Error {
     /// Two otherwise well-shaped records violate a semantic invariant.
     #[error("contract invariant failed: {0}")]
     Invariant(&'static str),
+}
+
+pub(crate) fn require(condition: bool, invariant: &'static str) -> Result<(), Error> {
+    if condition {
+        Ok(())
+    } else {
+        Err(Error::Invariant(invariant))
+    }
 }
