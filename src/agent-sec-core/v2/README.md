@@ -61,6 +61,10 @@ The current crates are:
   server dependencies are test-only. `commands.rs` registers and dispatches the
   top-level commands; `commands/{policy,scope,binding}.rs` own their arguments and
   request mappings, with pagination and encoding helpers in `commands/common.rs`.
+  `capabilities.rs` adds the V1-compatible environment-variable capability view,
+  which is rendered locally without a daemon endpoint; its migration contract and
+  the remaining gaps are recorded in
+  [`V2_CAPABILITY_VIEW_MIGRATION_zh.md`](../docs/design/V2_CAPABILITY_VIEW_MIGRATION_zh.md).
 - `asc-daemon`: foreground process and composition root that configures and
   injects concrete adapters into the daemon service.
 

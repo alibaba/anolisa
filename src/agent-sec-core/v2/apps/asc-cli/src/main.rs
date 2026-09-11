@@ -2,7 +2,8 @@ use std::io;
 use std::process::ExitCode;
 
 use asc_cli::{
-    Cli, InputError,
+    Cli, InputError, Plan,
+    capabilities::Environment,
     output::{render_policy, render_scan_code},
 };
 
@@ -32,9 +33,23 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<u8, RunError> {
+    let socket = match cli.plan() {
+        // The capability view describes the environment this process inherited,
+        // so it must resolve it here rather than through a daemon.
+        Plan::Local(command) => {
+            return command
+                .render(
+                    &std::env::vars().collect::<Environment>(),
+                    &mut io::stdout().lock(),
+                    &mut io::stderr().lock(),
+                )
+                .map_err(RunError::Output);
+        }
+        Plan::Daemon { socket } => socket,
+    };
     let request = cli.request().map_err(RunError::Input)?;
     let response =
-        asc_daemon_client::call(&cli.socket, &request, cli.timeout()).map_err(RunError::Client)?;
+        asc_daemon_client::call(socket, &request, cli.timeout()).map_err(RunError::Client)?;
     if cli.is_scan_code() {
         render_scan_code(
             &response,

@@ -201,7 +201,9 @@ fn repeated_socket_options_reject_non_utf8_inline_paths_at_every_level() {
     ])
     .unwrap();
     assert_eq!(
-        cli.socket.into_os_string(),
+        cli.socket()
+            .expect("policy list needs an endpoint")
+            .as_os_str(),
         OsString::from_vec(b"/run/asc-\xff.sock".to_vec())
     );
 }
