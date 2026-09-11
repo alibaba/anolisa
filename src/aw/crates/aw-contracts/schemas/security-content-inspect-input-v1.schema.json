@@ -13,8 +13,9 @@
       "properties": {
         "id": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 128
+          "minLength": 40,
+          "maxLength": 40,
+          "pattern": "^art_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         },
         "digest": {
           "type": "string",
@@ -26,7 +27,8 @@
         "media_type": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
         },
         "origin": {
           "enum": [
@@ -39,7 +41,8 @@
         "tool_name": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
         }
       }
     },

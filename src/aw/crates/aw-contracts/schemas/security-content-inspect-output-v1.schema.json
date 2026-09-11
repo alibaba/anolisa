@@ -50,7 +50,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
+                "minimum": 1,
                 "maximum": 4294967295
               }
             }
@@ -58,12 +58,53 @@
         },
         "scanned_bytes": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Exact UTF-8 bytes inspected. Core requires complete results to equal the submitted input length and truncated risk facts to cover a strict non-empty prefix."
         },
         "truncated": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "True only for a partial suspicious or sensitive fact; a clean result must be complete."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "clean"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "maxItems": 0
+              },
+              "truncated": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["suspicious", "sensitive"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
