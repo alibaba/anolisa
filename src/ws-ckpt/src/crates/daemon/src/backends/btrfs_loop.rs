@@ -190,6 +190,7 @@ impl StorageBackend for BtrfsLoopBackend {
                 &subvol_path,
                 &snap_dir,
                 backup_owned,
+                &self.mount_path,
             )
             .await;
             return Err(e);
@@ -238,8 +239,13 @@ impl StorageBackend for BtrfsLoopBackend {
             }
         }
 
-        // Clean up old subvolume (non-fatal)
-        if let Err(e) = btrfs_common::delete_subvolume(&tmp_path).await {
+        // Clean up old subvolume (non-fatal). Space-aware: on a nearly-full
+        // backend the async cleaner may stall (ENOSPC) and leave a DELETED
+        // zombie pinning all space, so the guarded path pushes it synchronously
+        // and warns loudly with recovery guidance when it cannot (#3053).
+        if let Err(e) =
+            btrfs_common::delete_subvolume_space_aware(&tmp_path, &self.mount_path).await
+        {
             warn!("failed to delete old subvolume (non-fatal): {}", e);
         }
 
@@ -248,7 +254,7 @@ impl StorageBackend for BtrfsLoopBackend {
 
     async fn delete_snapshot(&self, ws_id: &str, snapshot_id: &str) -> anyhow::Result<()> {
         let snap_path = self.snapshots_dir.join(ws_id).join(snapshot_id);
-        btrfs_common::delete_subvolume(&snap_path).await
+        btrfs_common::delete_subvolume_space_aware(&snap_path, &self.mount_path).await
     }
 
     async fn recover_workspace(&self, ws_id: &str, original_path: &str) -> anyhow::Result<()> {
@@ -314,12 +320,19 @@ impl StorageBackend for BtrfsLoopBackend {
             info!("restored workspace contents to {}", original_path);
         }
 
+        // Assess backend fullness once for the whole teardown (#3053); see
+        // cleanup_snapshots for why deletes are guarded on a full backend.
+        let risk = btrfs_common::assess_space_risk(&self.mount_path).await;
+
         // 3. Delete all snapshot subvolumes by scanning the filesystem directory
         if let Ok(mut entries) = tokio::fs::read_dir(&snap_base).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.is_dir() {
-                    if let Err(e) = btrfs_common::delete_subvolume(&path).await {
+                    if let Err(e) =
+                        btrfs_common::delete_subvolume_with_risk(&path, &self.mount_path, risk)
+                            .await
+                    {
                         warn!("failed to delete snapshot subvolume {:?}: {:#}", path, e);
                     }
                 }
@@ -327,7 +340,9 @@ impl StorageBackend for BtrfsLoopBackend {
         }
 
         // 4. Delete workspace subvolume
-        if let Err(e) = btrfs_common::delete_subvolume(&subvol_path).await {
+        if let Err(e) =
+            btrfs_common::delete_subvolume_with_risk(&subvol_path, &self.mount_path, risk).await
+        {
             warn!("failed to delete workspace subvolume {}: {:#}", ws_id, e);
         }
 
@@ -363,7 +378,8 @@ impl StorageBackend for BtrfsLoopBackend {
             Some(id) => btrfs_common::diff_between_snapshots(&snap_from, &snap_base.join(id)).await,
             None => {
                 let live = self.data_root().join(ws_id);
-                btrfs_common::diff_against_live(&snap_from, &live, &snap_base).await
+                btrfs_common::diff_against_live(&snap_from, &live, &snap_base, &self.mount_path)
+                    .await
             }
         }
     }
@@ -374,10 +390,15 @@ impl StorageBackend for BtrfsLoopBackend {
         snapshot_ids: &[String],
     ) -> anyhow::Result<Vec<String>> {
         let snap_dir = self.snapshots_dir.join(ws_id);
+        // Assess backend fullness once for the whole batch (#3053): on a
+        // nearly-full backend each delete waits on the cleaner so the freed
+        // space actually lands instead of turning into zombie subvolumes.
+        let risk = btrfs_common::assess_space_risk(&self.mount_path).await;
         let mut removed = Vec::new();
         for snap_id in snapshot_ids {
             let snap_path = snap_dir.join(snap_id);
-            match btrfs_common::delete_subvolume(&snap_path).await {
+            match btrfs_common::delete_subvolume_with_risk(&snap_path, &self.mount_path, risk).await
+            {
                 Ok(()) => {
                     removed.push(snap_id.clone());
                     info!("cleanup: removed snapshot {}", snap_id);
@@ -453,6 +474,10 @@ impl StorageBackend for BtrfsLoopBackend {
             })
     }
 
+    async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+        btrfs_common::list_deleted_subvolumes(&self.mount_path).await
+    }
+
     async fn bootstrap(&self, config: &DaemonConfig) -> anyhow::Result<()> {
         btrfs_common::ensure_btrfs_support()
             .await
@@ -525,6 +550,17 @@ impl StorageBackend for BtrfsLoopBackend {
             }
             info!("Mounted {} at {}", loop_device, mount_path_str);
         }
+
+        // Zombie sweep (#3053): a previous run may have deleted subvolumes the
+        // kernel cleaner could not reclaim under ENOSPC. The daemon reuses this
+        // mount across restarts by design (#2809), so no mount cycle ever kicks
+        // the cleaner on its own — push it explicitly before anything else
+        // (including img size reconcile) makes decisions based on used space.
+        btrfs_common::sweep_zombie_subvolumes(
+            &self.mount_path,
+            btrfs_common::BOOTSTRAP_ZOMBIE_SWEEP_TIMEOUT,
+        )
+        .await;
 
         if img_existed_before {
             if let Err(e) = reconcile_img_size(&img_path_str, &mount_path_str, config).await {

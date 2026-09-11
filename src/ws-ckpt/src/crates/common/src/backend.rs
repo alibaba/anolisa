@@ -121,6 +121,15 @@ pub trait StorageBackend: Send + Sync {
     /// Get filesystem usage (total, used) in bytes
     async fn get_usage(&self) -> anyhow::Result<(u64, u64)>;
 
+    /// IDs of subvolumes that were deleted but not yet reclaimed by the
+    /// btrfs cleaner ("zombie" subvolumes). They keep pinning backend space
+    /// until drained — under ENOSPC the cleaner stalls and even daemon
+    /// restarts do not free them, because the mount is reused by design
+    /// (#2809, #3053). Backends without this failure mode return empty.
+    async fn deleted_subvolume_ids(&self) -> anyhow::Result<Vec<u64>> {
+        Ok(Vec::new())
+    }
+
     /// Prepare the backend for workspace operations.
     async fn bootstrap(&self, _config: &crate::DaemonConfig) -> anyhow::Result<()> {
         Ok(())
