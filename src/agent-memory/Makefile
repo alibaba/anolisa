@@ -270,8 +270,21 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 	@mkdir -p dist
 	# Top-level dir is $(NAME)-$(VERSION) so it matches the spec's
 	# `%setup -n %{name}-%{version}` and the CI archive shape.
+	#
+	# `examples/` belongs in the copy list because Cargo.toml declares
+	# `[[example]] mcp-harness` with an explicit path, and cargo refuses
+	# to build a declared target whose file is missing — an archive
+	# without it breaks `cargo test` and `cargo build --examples` inside
+	# the unpacked source. The spec's own `%build` runs a plain
+	# `cargo build --release`, which does not select examples, so rpmbuild
+	# cannot catch that omission.
+	#
+	# `docs/` is deliberately not copied: the component manuals moved to
+	# the repository-level docs/user-guide tree (a46aea8d) and the spec
+	# packages CHANGELOG.md only. Listing the removed directory made
+	# `cp -R` exit non-zero, so this target failed outright.
 	@rm -rf dist/$(NAME)-$(VERSION) && mkdir -p dist/$(NAME)-$(VERSION)
-	@cp -R Cargo.toml Cargo.lock src config tests docs \
+	@cp -R Cargo.toml Cargo.lock src examples config tests \
 		Makefile agent-memory.spec.in CHANGELOG.md LICENSE \
 		.gitignore .anolisa dist/$(NAME)-$(VERSION)/
 	@mkdir -p dist/$(NAME)-$(VERSION)/.cargo
@@ -284,6 +297,29 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 		--exclude='.tsbuildinfo' \
 		--exclude='tests' \
 		. | tar -xf - -C dist/$(NAME)-$(VERSION)/$(ADAPTER_SRC_DIR)/
+	# Fail here rather than inside rpmbuild: every path the spec's %build
+	# and %install read, plus every target path Cargo.toml declares, must
+	# be in the staged tree. A copy list that silently rots is what broke
+	# this target the first time.
+	@set -e; \
+	staged="dist/$(NAME)-$(VERSION)"; \
+	for f in src/main.rs src/lib.rs examples/mcp_harness.rs \
+			config/default.toml config/mcp-server.json \
+			config/systemd/anolisa-memory@.service \
+			config/systemd/anolisa-memory-tmpfiles.conf \
+			$(ADAPTER_SRC_DIR)/manifest.json \
+			$(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
+			$(OPENCLAW_PLUGIN_SRC_DIR)/openclaw.plugin.json \
+			$(OPENCLAW_PLUGIN_SRC_DIR)/package.json \
+			$(OPENCLAW_PLUGIN_SRC_DIR)/scripts/detect.sh \
+			$(OPENCLAW_PLUGIN_SRC_DIR)/scripts/install.sh \
+			$(OPENCLAW_PLUGIN_SRC_DIR)/scripts/uninstall.sh \
+			$(COMPONENT_CONTRACT) CHANGELOG.md LICENSE; do \
+		test -e "$$staged/$$f" || { \
+			echo "ERROR: $$f is missing from $$staged but agent-memory.spec.in or Cargo.toml requires it" >&2; \
+			exit 1; \
+		}; \
+	done
 	tar czf dist/$(NAME)-$(VERSION).tar.gz -C dist $(NAME)-$(VERSION)
 	@echo "==> Creating $(NAME)-$(VERSION)-vendor.tar.gz..."
 	# Top-level dir is `vendor/` (no $(NAME)-vendor wrapper) so that
