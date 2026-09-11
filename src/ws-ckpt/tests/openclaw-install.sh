@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Behavioral tests for scripts/openclaw/install-openclaw.sh capability gating.
+# Behavioral tests for scripts/openclaw/install-openclaw.sh: capability gating
+# plus the tools.alsoAllow pre-write through `openclaw config set`.
 
 set -euo pipefail
 
@@ -22,6 +23,8 @@ mkdir -p "$FAKE_TARGET_DIR/share/anolisa/runtime/ws-ckpt/plugins/openclaw"
 # installer to its dry-run branch and leave the argv log empty.
 export ANOLISA_DRY_RUN=1
 export ANOLISA_TARGET_DIR="$FAKE_TARGET_DIR"
+
+ALL_TOOLS_JSON='["ws-ckpt-checkpoint","ws-ckpt-rollback","ws-ckpt-list","ws-ckpt-delete","ws-ckpt-diff","ws-ckpt-config","ws-ckpt-status"]'
 
 cat >"$FAKE_OPENCLAW" <<'EOF'
 #!/usr/bin/env bash
@@ -53,46 +56,118 @@ run_case() {
         "$INSTALL_SCRIPT" >/dev/null
 }
 
-# The installer must invoke openclaw exactly three times, in order: capability
-# probe, plugin install, plugin enable. Exact-line comparison catches a
-# missing, trailing, or duplicated --accept-capabilities token and any extra
-# or repeated install call.
-assert_install() {
-    local with_flag="$1"  # "flag" or "noflag"
+# Arrange the on-disk openclaw.json the pre-write merge will read.
+setup_config() {
+    local mode="$1"
+    local cfg="$TMPDIR_TEST/state/openclaw.json"
+    rm -rf "$TMPDIR_TEST/state"
+    case "$mode" in
+        absent) : ;;
+        complete)
+            mkdir -p "$TMPDIR_TEST/state"
+            printf '%s\n' "{\"tools\":{\"alsoAllow\":$ALL_TOOLS_JSON}}" >"$cfg"
+            ;;
+        partial)
+            mkdir -p "$TMPDIR_TEST/state"
+            printf '%s\n' '{"tools":{"alsoAllow":["custom-tool","ws-ckpt-list"]}}' >"$cfg"
+            ;;
+        malformed)
+            mkdir -p "$TMPDIR_TEST/state"
+            printf '%s\n' '{not json' >"$cfg"
+            ;;
+        json5)
+            mkdir -p "$TMPDIR_TEST/state"
+            cat >"$cfg" <<'JSON5'
+{
+  // hand-edited comment
+  "tools": {
+    "alsoAllow": [
+      "custom-tool",
+      "https://example.com/a//b", /* URL keeps its // */
+    ],
+  },
+}
+JSON5
+            ;;
+        *) echo "FAIL: unknown setup_config mode: $mode" >&2; exit 1 ;;
+    esac
+}
+
+# Exact-line comparison against the full invocation sequence: catches a
+# missing, reordered, or duplicated call (config set, install, enable).
+assert_calls() {
+    local desc="$1"; shift
+    local expected=("$@")
     mapfile -t calls <"$ARGV_LOG"
 
-    if [ "${#calls[@]}" -ne 3 ]; then
-        echo "FAIL: expected 3 openclaw invocations (probe/install/enable), got ${#calls[@]}:" >&2
+    if [ "${#calls[@]}" -ne "${#expected[@]}" ]; then
+        echo "FAIL ($desc): expected ${#expected[@]} openclaw invocations, got ${#calls[@]}:" >&2
         printf '  %s\n' "${calls[@]}" >&2
         exit 1
     fi
-    if [ "${calls[0]}" != "plugins install --help" ]; then
-        echo "FAIL: unexpected probe call: ${calls[0]}" >&2
-        exit 1
-    fi
-    if [ "${calls[2]}" != "plugins enable ws-ckpt" ]; then
-        echo "FAIL: unexpected enable call: ${calls[2]}" >&2
-        exit 1
-    fi
-
-    local expected="plugins install $PLUGIN_SRC --force"
-    if [ "$with_flag" = "flag" ]; then
-        expected="$expected --accept-capabilities"
-    fi
-    if [ "${calls[1]}" != "$expected" ]; then
-        echo "FAIL: install invocation mismatch" >&2
-        echo "  expected: $expected" >&2
-        echo "  actual:   ${calls[1]}" >&2
-        exit 1
-    fi
+    local i
+    for i in "${!expected[@]}"; do
+        if [ "${calls[$i]}" != "${expected[$i]}" ]; then
+            echo "FAIL ($desc): call #$((i + 1)) mismatch" >&2
+            echo "  expected: ${expected[$i]}" >&2
+            echo "  actual:   ${calls[$i]}" >&2
+            exit 1
+        fi
+    done
 }
 
-run_case modern
-assert_install flag
-
-for mode in legacy near-miss failure; do
+# Case 1: no config file yet — the pre-write must config-set all 7 tools
+# between the capability probe and the plugin install, in every help mode.
+for mode in modern legacy near-miss failure; do
+    setup_config absent
     run_case "$mode"
-    assert_install noflag
+
+    expected=(
+        "plugins install --help"
+        "config set tools.alsoAllow $ALL_TOOLS_JSON --strict-json"
+    )
+    install_expected="plugins install $PLUGIN_SRC --force"
+    if [ "$mode" = "modern" ]; then
+        install_expected="$install_expected --accept-capabilities"
+    fi
+    expected+=("$install_expected" "plugins enable ws-ckpt")
+    assert_calls "absent/$mode" "${expected[@]}"
 done
+
+# Case 2: all tools already allowlisted — pre-write is skipped entirely.
+setup_config complete
+run_case modern
+assert_calls "complete" \
+    "plugins install --help" \
+    "plugins install $PLUGIN_SRC --force --accept-capabilities" \
+    "plugins enable ws-ckpt"
+
+# Case 3: existing user entries are preserved; missing ws-ckpt tools append.
+setup_config partial
+run_case modern
+assert_calls "partial" \
+    "plugins install --help" \
+    "config set tools.alsoAllow [\"custom-tool\",\"ws-ckpt-list\",\"ws-ckpt-checkpoint\",\"ws-ckpt-rollback\",\"ws-ckpt-delete\",\"ws-ckpt-diff\",\"ws-ckpt-config\",\"ws-ckpt-status\"] --strict-json" \
+    "plugins install $PLUGIN_SRC --force --accept-capabilities" \
+    "plugins enable ws-ckpt"
+
+# Case 4: malformed config — pre-write is skipped (never clobber a config we
+# cannot parse), install still proceeds.
+setup_config malformed
+run_case modern
+assert_calls "malformed" \
+    "plugins install --help" \
+    "plugins install $PLUGIN_SRC --force --accept-capabilities" \
+    "plugins enable ws-ckpt"
+
+# Case 5: JSON5 config (comments + trailing commas) — openclaw.json is JSON5,
+# so the merge must tolerate it; string contents (the URL) stay intact.
+setup_config json5
+run_case modern
+assert_calls "json5" \
+    "plugins install --help" \
+    "config set tools.alsoAllow [\"custom-tool\",\"https://example.com/a//b\",\"ws-ckpt-checkpoint\",\"ws-ckpt-rollback\",\"ws-ckpt-list\",\"ws-ckpt-delete\",\"ws-ckpt-diff\",\"ws-ckpt-config\",\"ws-ckpt-status\"] --strict-json" \
+    "plugins install $PLUGIN_SRC --force --accept-capabilities" \
+    "plugins enable ws-ckpt"
 
 echo "OpenClaw install script tests passed"
