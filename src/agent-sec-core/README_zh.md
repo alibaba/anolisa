@@ -98,7 +98,7 @@ agent-sec-core/
 ├── qwen-code-extension/       # Qwen Code hooks
 ├── qoder-plugin/              # Qoder CLI hooks
 ├── codex-plugin/              # Codex hooks
-├── skills/                    # 安全 skill：code-scanner、prompt-scanner、skill-ledger
+├── skills/                    # 随包提供的安全扫描与审计 Skill
 ├── tools/                     # sign-skill.sh — PGP 技能签名工具
 ├── packaging/                 # raw 包构建 + systemd unit 模板
 ├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
@@ -317,6 +317,9 @@ shell 历史和集群凭证模式，例如 `/etc/kubernetes/` 与 `kubeconfig`�
 ## PII Checker
 
 检测个人数据与凭证，可输出脱敏文本。
+
+随包提供的 [pii-checker Skill](skills/pii-checker/SKILL.md) 支持 Agent 通过 V1 CLI
+检查指定文本或文件，并生成脱敏文本。
 
 ```bash
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual

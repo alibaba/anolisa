@@ -102,7 +102,7 @@ agent-sec-core/
 ├── qwen-code-extension/       # Qwen Code hooks
 ├── qoder-plugin/              # Qoder CLI hooks
 ├── codex-plugin/              # Codex hooks
-├── skills/                    # Security skills: code-scanner, prompt-scanner, skill-ledger
+├── skills/                    # Bundled security scanning and audit skills
 ├── tools/                     # sign-skill.sh — PGP skill signing utility
 ├── packaging/                 # raw package build + systemd unit template
 ├── scripts/                   # CLI/daemon wrappers and CI helpers
@@ -335,6 +335,9 @@ Host hook modes: [Code Scanner Hook Configuration](../../docs/user-guide/en/agen
 ## PII Checker
 
 Detects personal data and credentials, and can emit redacted text.
+
+The bundled [pii-checker Skill](skills/pii-checker/SKILL.md) lets an Agent scan
+specified text or files and generate redacted text with the V1 CLI.
 
 ```bash
 agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
