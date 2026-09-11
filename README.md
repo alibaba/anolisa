@@ -32,6 +32,7 @@ Agent framework, and sandbox you already run.
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/alibaba/anolisa/blob/main/LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/docs/user-guide/installation/)
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders)
+[![OWASP ASI Mapped](https://img.shields.io/badge/OWASP%20ASI-Mapped-blue.svg)](docs/user-guide/en/agent-security/owasp-agentic-top10.md)
 
 </div>
 
@@ -238,6 +239,7 @@ calls from an existing Agent without changing its framework.
 | Standard / Framework | Status and details |
 |---|---|
 | [AARM](https://aarm.dev/builders) | **Aligned** · Registry entry: AgentSecCore (ANOLISA) |
+| [OWASP Agentic Top 10 (2026)](docs/user-guide/en/agent-security/owasp-agentic-top10.md) | All 10 ASI risk categories mapped to security controls |
 
 ## Documentation
 

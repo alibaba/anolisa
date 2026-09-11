@@ -31,6 +31,7 @@
 [![许可证](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/alibaba/anolisa/blob/main/LICENSE)
 [![平台](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)](https://agentic-os.sh/zh/docs/user-guide/installation/)
 [![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders)
+[![OWASP ASI Mapped](https://img.shields.io/badge/OWASP%20ASI-Mapped-blue.svg)](docs/user-guide/zh/agent-security/owasp-agentic-top10.md)
 
 </div>
 
@@ -230,6 +231,7 @@ anolisa install tokenless
 | 标准／框架 | 状态与说明 |
 |---|---|
 | [AARM](https://aarm.dev/builders) | **Aligned** · 登记条目：AgentSecCore (ANOLISA) |
+| [OWASP Agentic Top 10 (2026)](docs/user-guide/zh/agent-security/owasp-agentic-top10.md) | 全部 10 类 ASI 风险均已映射至安全控制 |
 
 ## 文档
 
