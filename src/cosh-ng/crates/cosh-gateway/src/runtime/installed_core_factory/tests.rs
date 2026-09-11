@@ -25,7 +25,7 @@ fn executable(directory: &Path, name: &str, marker: &Path) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s|%s' \"$*\" \"$UNTRUSTED_SECRET\" > \"{}\"\nwhile read line; do :; done\n",
+            "#!/bin/sh\nprintf '%s|%s|%s|%s|%s' \"$*\" \"$UNTRUSTED_SECRET\" \"$COSH_SYSOM_ENDPOINT\" \"$COSH_SYSOM_VPC_PROXY_HOST\" \"$COSH_SYSOM_PROBE_TIMEOUT_MS\" > \"{}\"\nwhile read line; do :; done\n",
             marker.display()
         ),
     )
@@ -84,6 +84,18 @@ fn admitted_with_profile(
         BTreeMap::from([
             (OsString::from("HOME"), OsString::from("/tmp/test-home")),
             (
+                OsString::from("COSH_SYSOM_ENDPOINT"),
+                OsString::from("https://sysom.example.com:8443"),
+            ),
+            (
+                OsString::from("COSH_SYSOM_VPC_PROXY_HOST"),
+                OsString::from("probe.example.com:443"),
+            ),
+            (
+                OsString::from("COSH_SYSOM_PROBE_TIMEOUT_MS"),
+                OsString::from("1"),
+            ),
+            (
                 OsString::from("UNTRUSTED_SECRET"),
                 OsString::from("must-not-cross"),
             ),
@@ -137,7 +149,7 @@ fn factory_launches_only_the_exact_profile_with_filtered_environment() {
     }
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
-        "--headless --execution-profile gateway-brokered-v1|"
+        "--headless --execution-profile gateway-brokered-v1||https://sysom.example.com:8443||"
     );
     drop(port);
 }
@@ -218,7 +230,7 @@ fn factory_maps_the_checkpoint_selector_to_the_private_core_launch_profile() {
     }
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
-        "--headless --execution-profile gateway-brokered-checkpoint-v1|"
+        "--headless --execution-profile gateway-brokered-checkpoint-v1||https://sysom.example.com:8443||"
     );
     drop(port);
 }
@@ -259,7 +271,7 @@ fn workspace_write_profile_requires_exact_selector_manifest_and_private_argv() {
     }
     assert_eq!(
         fs::read_to_string(marker).unwrap(),
-        "--headless --execution-profile gateway-brokered-workspace-write-v1|"
+        "--headless --execution-profile gateway-brokered-workspace-write-v1||https://sysom.example.com:8443||"
     );
     drop(port);
 }
