@@ -3,9 +3,9 @@
 //! Uses `rpm -q` for installed packages and `dnf repoquery` for available
 //! candidates. Output is parsed from a stable `--qf` pipe-delimited format
 //! rather than the locale-sensitive default `nevra` string, so field
-//! extraction does not depend on the host locale. The not-installed signal
-//! still relies on an English message marker, which is pinned by
-//! [`SystemCommandRunner`]'s `LC_ALL=C`.
+//! extraction does not depend on the host locale. A normal miss requires exit
+//! 1, blank stderr, and the complete English response for the queried argument,
+//! pinned by [`SystemCommandRunner`]'s `LC_ALL=C`.
 
 use crate::command::{CommandOutput, CommandRunner, SystemCommandRunner};
 use crate::pkg_files::{
@@ -284,6 +284,11 @@ fn unexpected_file_inventory(detail: &str) -> PackageQueryError {
     }
 }
 
+fn is_expected_miss(out: &CommandOutput, expected: &[&str]) -> bool {
+    // RPM can emit a missing notice even when opening its database failed.
+    out.code == Some(1) && out.stderr.trim().is_empty() && expected.contains(&out.stdout.trim())
+}
+
 impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
         let out = self
@@ -295,11 +300,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
             return parse_installed(&out);
         }
 
-        // Non-zero exit: distinguish "not installed" from a real failure.
-        // rpm writes the not-installed notice to stdout (structural signal:
-        // hard errors go to stderr with stdout empty), and under LC_ALL=C the
-        // English marker is stable. Both signals agree here.
-        if out.stdout.contains("is not installed") {
+        if is_expected_miss(&out, &[&format!("package {package} is not installed")]) {
             return Ok(None);
         }
 
@@ -376,13 +377,13 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
             return Ok(names);
         }
 
-        // "Nothing provides it" is a normal empty result, but only for rpm's
-        // expected miss exit. File path lookups use a separate unowned-file
-        // marker from virtual capabilities.
-        let expected_miss = out.code == Some(1)
-            && (out.stdout.contains("no package provides")
-                || out.stdout.contains("is not owned by any package"));
-        if expected_miss {
+        if is_expected_miss(
+            &out,
+            &[
+                &format!("no package provides {capability}"),
+                &format!("file {capability} is not owned by any package"),
+            ],
+        ) {
             return Ok(Vec::new());
         }
 
@@ -429,7 +430,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
             return Ok(dedup_nonempty_lines(&out.stdout));
         }
 
-        if out.stdout.contains("is not installed") {
+        if is_expected_miss(&out, &[&format!("package {package} is not installed")]) {
             return Ok(Vec::new());
         }
 
@@ -880,6 +881,132 @@ mod tests {
         );
         assert_eq!(q.query_installed("tokenless").unwrap(), None);
         assert!(!q.is_installed("tokenless").unwrap());
+    }
+
+    #[test]
+    fn installed_queries_require_complete_clean_miss_evidence() {
+        use std::cell::RefCell;
+
+        struct SingleQueryRunner<'a> {
+            args: &'a [&'a str],
+            reply: RefCell<Option<io::Result<CommandOutput>>>,
+        }
+
+        impl CommandRunner for SingleQueryRunner<'_> {
+            fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+                assert_eq!(program, RPM);
+                assert_eq!(args, self.args);
+                self.reply.borrow_mut().take().expect("exactly one query")
+            }
+        }
+
+        let cases: &[(&[&str], &str, &str)] = &[
+            (
+                &["-q", "--qf", INSTALLED_QF, "ghost"],
+                "package ghost is not installed",
+                "ghost|(none)|1.0|1.al4|x86_64\n",
+            ),
+            (
+                &["-q", "--provides", "ghost"],
+                "package ghost is not installed",
+                "ghost = 1.0\nghost = 1.0\n",
+            ),
+            (
+                &["-q", "--whatprovides", "--qf", PROVIDES_NAME_QF, "ghost"],
+                "no package provides ghost",
+                "ghost\nghost\n",
+            ),
+            (
+                &["-q", "--whatprovides", "--qf", PROVIDES_NAME_QF, "/ghost"],
+                "file /ghost is not owned by any package",
+                "ghost\nghost\n",
+            ),
+        ];
+        for (kind, &(args, missing, present)) in cases.iter().enumerate() {
+            let lookup = |query: &RpmPackageQuery<SingleQueryRunner<'_>>| match kind {
+                0 => query.query_installed("ghost").map(|info| info.is_none()),
+                1 => query.provided_capabilities_installed("ghost").map(|items| {
+                    assert!(items.len() <= 1, "preserve deduplication");
+                    items.is_empty()
+                }),
+                _ => query.what_provides_installed(args[4]).map(|items| {
+                    assert!(items.len() <= 1, "preserve deduplication");
+                    items.is_empty()
+                }),
+            };
+            for (code, stdout, stderr, expected_missing) in [
+                (
+                    Some(0),
+                    present.to_string(),
+                    "warning: existing behavior",
+                    Some(false),
+                ),
+                (Some(1), missing.to_string(), "", Some(true)),
+                (Some(1), format!(" \n{missing}\n\t"), " \n\t", Some(true)),
+                (
+                    Some(1),
+                    missing.to_string(),
+                    "error: cannot open Packages database in /dev/null\n",
+                    None,
+                ),
+                (
+                    Some(1),
+                    missing.to_string(),
+                    "warning: database issue\n",
+                    None,
+                ),
+                (Some(2), missing.to_string(), "", None),
+                (Some(100), missing.to_string(), "", None),
+                (None, missing.to_string(), "", None),
+                (Some(1), missing.replace("ghost", "other"), "", None),
+                (Some(1), format!("{missing}\nextra output"), "", None),
+                (Some(1), format!("prefix {missing} suffix"), "", None),
+                (Some(1), String::new(), "", None),
+                (Some(1), String::new(), "  rpmdb failure\n \n", None),
+            ] {
+                let query = RpmPackageQuery::with_runner(SingleQueryRunner {
+                    args,
+                    reply: RefCell::new(Some(Ok(CommandOutput {
+                        code,
+                        stdout: stdout.clone(),
+                        stderr: stderr.to_string(),
+                    }))),
+                });
+                let result = lookup(&query);
+                assert!(query.runner.reply.borrow().is_none());
+                match expected_missing {
+                    Some(expected) => assert_eq!(result.unwrap(), expected),
+                    None => assert!(
+                        matches!(result, Err(PackageQueryError::QueryFailed { command, code: actual_code, stderr: actual_stderr })
+                            if command == RPM && actual_code == code && actual_stderr == stderr),
+                        "kind={kind}, code={code:?}, stdout={stdout:?}, stderr={stderr:?}"
+                    ),
+                }
+            }
+            for error in [
+                io::ErrorKind::NotFound,
+                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::Other,
+            ] {
+                let query = RpmPackageQuery::with_runner(SingleQueryRunner {
+                    args,
+                    reply: RefCell::new(Some(Err(io::Error::new(error, "spawn failed")))),
+                });
+                let result = lookup(&query).unwrap_err();
+                assert!(query.runner.reply.borrow().is_none());
+                match error {
+                    io::ErrorKind::NotFound => assert!(
+                        matches!(result, PackageQueryError::CommandMissing { command } if command == RPM)
+                    ),
+                    io::ErrorKind::PermissionDenied => assert!(
+                        matches!(result, PackageQueryError::PermissionDenied { command } if command == RPM)
+                    ),
+                    _ => assert!(
+                        matches!(result, PackageQueryError::QueryFailed { command, code: None, stderr } if command == RPM && stderr == "spawn failed")
+                    ),
+                }
+            }
+        }
     }
 
     #[test]
