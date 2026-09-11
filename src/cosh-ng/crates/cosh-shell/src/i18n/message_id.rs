@@ -112,4 +112,5 @@ collect_message_ids!([
     hook_action_ids,
     enhanced_routing_mode_ids,
     managed_task_ids,
+    composer_control_submit_ids,
 ],);

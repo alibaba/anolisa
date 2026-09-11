@@ -53,7 +53,7 @@ infer routing from the first character of user text.
 | None | Native | Child Shell | Every byte goes directly to the PTY. Cosh does not decorate the user's original prompt or observe command events. |
 | `◌` | Enhanced Shell-only | Child Shell, observed by Cosh | Ordinary input, including `hello`, `/`, and `??`, remains Shell input. Enhanced marker integration stays loaded so post-command insights and safe switching remain available. |
 | `◇` | Enhanced Assisted | Shell executes, Cosh may route | Cosh may observe, classify, or route the submitted line before Shell execution. |
-| `◆` | Agent | Agent runtime | `/agent` opens a borderless inline Composer that continuously shows `◆ ` before editable text. Any text, including `ls`, is an Agent request. |
+| `◆` | Agent | Agent runtime | `/agent` opens a borderless inline Composer that continuously shows `◆ ` before editable text. Ordinary text, including `ls`, is an Agent request; leading slash controls dispatch locally. |
 | `/` | Cosh Command | Cosh control plane | Explicit slash command, intercepted only in Enhanced Assisted. |
 
 `◇ ` and `◌ ` are outer-terminal decorations anchored to the Enhanced hook's
@@ -80,6 +80,27 @@ input ownership and background analysis are orthogonal states.
 Native input bypasses candidate buffering, prompt ghosts, slash routing, and
 card capture. Terminal control such as signals, resizing, and EOF still follows
 the PTY lifecycle.
+
+## Composer Command Submission
+
+The Composer capture explicitly carries its Agent input origin. Command
+candidates reuse public registry names, deduplicate by name, and retain the
+complete set while rendering the selected six-row window. The input thread
+computes slash candidates synchronously from the live editor text and cursor,
+so Tab or Enter in the same read chunk cannot accept a stale candidate. Enter
+reuses completion before submission only for a single-line, single-token command
+draft, emitting the updated editor snapshot before the submit event. Arguments
+and multiline drafts retain their text. Runtime path
+and Skill completions must match their text and cursor snapshot before acceptance.
+
+The capture and submit event retain the Composer's workspace snapshot. The input
+bridge attaches it to the slash intercept's cwd, independent of ShellReady timing
+or the global prompt cwd cache. The submit event carries a slash routing flag;
+the input bridge emits exactly one slash or Agent intercept. Slash submissions
+leave no pending Composer request metadata. Existing slash/control consumers own
+parsing, confirmation, execution, and prompt restoration. Rendering never executes commands or reopens
+the Composer over a subsequent card. Ordinary drafts and shell path completion
+keep their existing routing.
 
 ## Output Event Cards
 
