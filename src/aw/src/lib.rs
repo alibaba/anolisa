@@ -6,6 +6,8 @@
 //! ownership, scanner correctness, durable storage or remote model consumption.
 
 pub mod canonical;
+pub mod registry;
+pub use registry::Registry;
 
 /// Contract failures deliberately omit potentially sensitive payload values.
 #[derive(Debug, thiserror::Error)]
