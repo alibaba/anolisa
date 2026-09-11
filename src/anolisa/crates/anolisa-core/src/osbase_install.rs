@@ -242,25 +242,16 @@ fn run_dnf_remove(packages: &[String], runner: &impl CommandRunner) -> Result<St
         Ok(format!("uninstalled: {}", packages.join(" ")))
     } else {
         let stderr = output.stderr;
-        let stdout = output.stdout;
-        let combined = format!("{stdout}\n{stderr}");
-        // "No match" or already not installed is not a real failure
-        if combined.contains("No packages marked for removal")
-            || combined.contains("No match for argument")
-        {
-            Ok(format!("packages already absent: {}", packages.join(" ")))
-        } else {
-            // Print stderr on failure for diagnostics
-            let stderr_str = stderr.trim();
-            if !stderr_str.is_empty() {
-                eprintln!("[osbase] dnf stderr:\n{stderr_str}");
-            }
-            Err(format!(
-                "dnf remove failed (exit={}): {}",
-                output.code.unwrap_or(-1),
-                stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-            ))
+        // Print stderr on failure for diagnostics
+        let stderr_str = stderr.trim();
+        if !stderr_str.is_empty() {
+            eprintln!("[osbase] dnf stderr:\n{stderr_str}");
         }
+        Err(format!(
+            "dnf remove failed (exit={}): {}",
+            output.code.unwrap_or(-1),
+            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+        ))
     }
 }
 
@@ -934,27 +925,16 @@ fn run_dnf_install(packages: &[String], runner: &impl CommandRunner) -> Result<S
         Ok(format!("installed: {}", packages.join(" ")))
     } else {
         let stderr = output.stderr;
-        let stdout = output.stdout;
-        // Check if packages are already installed (dnf exits 0 for already-installed,
-        // but let's handle the "nothing to do" case gracefully)
-        let combined = format!("{stdout}\n{stderr}");
-        if combined.contains("Nothing to do") || combined.contains("already installed") {
-            Ok(format!(
-                "packages already installed: {}",
-                packages.join(" ")
-            ))
-        } else {
-            // Print stderr on failure for diagnostics
-            let stderr_str = stderr.trim();
-            if !stderr_str.is_empty() {
-                eprintln!("[osbase] dnf stderr:\n{stderr_str}");
-            }
-            Err(format!(
-                "dnf install failed (exit={}): {}",
-                output.code.unwrap_or(-1),
-                stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-            ))
+        // Print stderr on failure for diagnostics
+        let stderr_str = stderr.trim();
+        if !stderr_str.is_empty() {
+            eprintln!("[osbase] dnf stderr:\n{stderr_str}");
         }
+        Err(format!(
+            "dnf install failed (exit={}): {}",
+            output.code.unwrap_or(-1),
+            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+        ))
     }
 }
 
@@ -1228,7 +1208,11 @@ mod tests {
             ScriptedCommand::new(
                 "dnf",
                 &["remove", "-y", "-q", "pkg-a", "pkg-b"],
-                output(Some(1), "ignored stdout", "  failure detail\n \n"),
+                output(
+                    Some(1),
+                    "No match for argument: pkg-a",
+                    "  failure detail\n \n",
+                ),
             ),
             ScriptedCommand::new(
                 "dnf",
@@ -1286,7 +1270,7 @@ mod tests {
             rest = &rest[index + expected.len()..];
         }
         assert!(!stderr.contains("hidden second line"));
-        assert!(!stderr.contains("ignored stdout"));
+        assert!(!stderr.contains("No match for argument: pkg-a"));
     }
 
     #[test]
@@ -1362,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn dnf_results_preserve_legacy_classification_and_diagnostics() {
+    fn dnf_results_use_exit_status_and_preserve_diagnostics() {
         for action in ["install", "remove"] {
             let success = if action == "install" {
                 "installed: pkg-a pkg-b"
@@ -1405,14 +1389,13 @@ mod tests {
                 runner.assert_finished();
             }
 
-            // Characterize existing nonzero-success behavior; tightening it is a separate fix.
             let markers = if action == "install" {
                 ["Nothing to do", "already installed"]
             } else {
                 ["No packages marked for removal", "No match for argument"]
             };
             for marker in markers {
-                for code in [Some(1), None] {
+                for code in [Some(0), Some(1), Some(3), Some(100), Some(200), None] {
                     for marker_in_stdout in [false, true] {
                         let (stdout, stderr) = if marker_in_stdout {
                             (marker, "another package failed")
@@ -1425,15 +1408,22 @@ mod tests {
                             output(code, stdout, stderr),
                         )]);
                         let packages = vec!["pkg-a".into(), "pkg-b".into()];
-                        let (actual, state) = if action == "install" {
-                            (run_dnf_install(&packages, &runner), "installed")
+                        let actual = if action == "install" {
+                            run_dnf_install(&packages, &runner)
                         } else {
-                            (run_dnf_remove(&packages, &runner), "absent")
+                            run_dnf_remove(&packages, &runner)
                         };
-                        assert_eq!(
-                            actual.unwrap(),
-                            format!("packages already {state}: pkg-a pkg-b")
-                        );
+                        if code == Some(0) {
+                            assert_eq!(actual.unwrap(), success);
+                        } else {
+                            assert_eq!(
+                                actual.unwrap_err(),
+                                format!(
+                                    "dnf {action} failed (exit={}): {stderr}",
+                                    code.unwrap_or(-1)
+                                )
+                            );
+                        }
                         runner.assert_finished();
                     }
                 }
@@ -1718,6 +1708,69 @@ mod tests {
         }
         assert!(layout.state_dir.join("installed.toml").exists());
         runner.assert_finished();
+    }
+
+    #[test]
+    fn dnf_failure_markers_cannot_advance_install_or_succeed_uninstall() {
+        for code in [Some(1), Some(3), Some(200), None] {
+            let tmp = tempfile::tempdir().unwrap();
+            let layout = FsLayout::system(Some(tmp.path().join("system")));
+            let manifest = fixture_manifest();
+            let mut request = req(OsbaseDomain::Sandbox, "fixture");
+            request.dry_run = false;
+            let runner = ScriptedRunner::new([ScriptedCommand::new(
+                "dnf",
+                &["install", "-y", "-q", "pkg-a", "pkg-b"],
+                output(
+                    code,
+                    "Package pkg-a is already installed.\nNothing to do.",
+                    "pkg-b failed",
+                ),
+            )]);
+            let outcome = sandbox_dispatch_with(
+                &request,
+                &root_env(),
+                &layout,
+                &HostManifestInstallRuntime { runner: &runner },
+                &manifest,
+            )
+            .unwrap();
+            assert_eq!(outcome.exit_code, 1);
+            assert_eq!(
+                outcome
+                    .phases
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["preflight", "packages"]
+            );
+            assert_eq!(outcome.phases[1].status, PhaseStatus::Failed);
+            assert_eq!(
+                outcome.phases[1].message,
+                Some(format!(
+                    "dnf install failed (exit={}): pkg-b failed",
+                    code.unwrap_or(-1)
+                ))
+            );
+            assert!(!layout.state_dir.join("installed.toml").exists());
+            assert!(outcome.warnings.is_empty());
+            runner.assert_finished();
+
+            let runner = ScriptedRunner::new([ScriptedCommand::new(
+                "dnf",
+                &["remove", "-y", "-q", "pkg-a", "pkg-b"],
+                output(
+                    code,
+                    "No match for argument: pkg-a\nNo packages marked for removal.",
+                    "pkg-b failed",
+                ),
+            )]);
+            let err = execute_uninstall_with("fixture", false, &manifest, &runner).unwrap_err();
+            assert!(
+                matches!(err, OsbaseInstallError::PhaseFailed { phase, message } if phase == "uninstall" && message == format!("dnf remove failed (exit={}): pkg-b failed", code.unwrap_or(-1)))
+            );
+            runner.assert_finished();
+        }
     }
 
     #[test]
