@@ -3,6 +3,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::bench::BenchResult;
@@ -272,13 +273,31 @@ fn load_rollback() -> RollbackData {
     }
 }
 
-/// Write `content` to `path` atomically (tmp file + rename) so a concurrent
-/// reader or a crash mid-write never sees a truncated file.
-fn write_atomic(path: &str, content: &[u8]) -> Result<()> {
+/// Write `content` to `path` atomically with the exact final `mode`: write a
+/// tmp sibling, chmod it to `mode`, then rename over the target. A concurrent
+/// reader or a crash mid-write never sees a truncated file, and the target
+/// path never holds a wrong-mode file: chmod-before-rename closes both the
+/// fresh-file window (umask 000 would briefly expose 0666) and the
+/// pre-planted wide-file case (rename swaps the inode wholesale, so an fd
+/// held on the old file keeps pointing at the orphaned inode).
+fn write_atomic(path: &str, content: &[u8], mode: u32) -> Result<()> {
     let pid = unsafe { libc::getpid() };
     let tmp = format!("{path}.tmp.{pid}");
     fs::write(&tmp, content).with_context(|| format!("写入临时文件 {tmp} 失败"))?;
-    fs::rename(&tmp, path).with_context(|| format!("替换 {path} 失败"))?;
+    // chmod before rename: setting permissions only after the rename leaves a
+    // window where the destination briefly exists with default (umask) perms.
+    // Cleanup on failure is best-effort: the chmod/rename error is the one
+    // worth reporting, so a failure while removing the tmp sibling is ignored.
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("设置临时文件权限 {tmp} 失败"))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("替换 {path} 失败"))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })?;
     Ok(())
 }
 
@@ -302,6 +321,8 @@ where
 {
     let dir = Path::new(ROLLBACK_PATH).parent().unwrap();
     fs::create_dir_all(dir).context("创建 rollback 目录失败")?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("设置 {} 权限 0700 失败", dir.display()))?;
 
     let mut data = load_rollback();
     for (param, previous, applied) in entries {
@@ -317,7 +338,28 @@ where
     }
 
     let json = serde_json::to_string_pretty(&data)?;
-    write_atomic(ROLLBACK_PATH, json.as_bytes()).context("保存 rollback 文件失败")?;
+    write_atomic(ROLLBACK_PATH, json.as_bytes(), 0o600).context("保存 rollback 文件失败")?;
+    Ok(())
+}
+
+/// Value check for imported (untrusted) params: format guard + sysrq
+/// allowlist. Pure (no filesystem access) so tests can exercise allowed
+/// sysrq values without writing /proc/sys or polluting the rollback ledger.
+fn validate_import_value(param: &str, value: &str) -> Result<()> {
+    // Format safety guard: reject empty, multi-line, or excessively long values.
+    if value.is_empty() || value.contains('\n') || value.len() > 256 {
+        anyhow::bail!("invalid value for {param}: empty, contains newline, or exceeds 256 bytes");
+    }
+    // Restricted parameter value allowlist. Resolve the parameter the same
+    // way the write path does, so `kernel/sysrq` (and other separator
+    // spellings that map to the same file) cannot slip past the dot-form
+    // comparison.
+    if canonicalize_path(&param_to_path(param)) == "/proc/sys/kernel/sysrq" {
+        let v: u32 = value.trim().parse().unwrap_or(u32::MAX);
+        if v != 0 && v != 176 {
+            anyhow::bail!("kernel.sysrq import restricted to 0 or 176, got {value}");
+        }
+    }
     Ok(())
 }
 
@@ -329,6 +371,7 @@ where
 /// with no way back. `current` is the pre-write value: rollback is only
 /// recorded when it is known, so we never record a bogus "" original to restore.
 pub fn apply_import(param: &str, value: &str, current: Option<&str>) -> Result<()> {
+    validate_import_value(param, value)?;
     write_and_verify(param, value)?;
     if let Some(prev) = current {
         merge_rollback(std::iter::once((
@@ -375,18 +418,20 @@ fn persist_from_rollback() -> Result<()> {
     }
 
     if has_sysctl {
-        write_atomic(SYSCTL_PERSIST_PATH, sysctl_content.as_bytes())
+        // sysctl.d convention: world-readable, same as the systemd service
+        // file below; write_atomic lands the mode before the rename so no
+        // 0600 intermediate is ever visible at the final path.
+        write_atomic(SYSCTL_PERSIST_PATH, sysctl_content.as_bytes(), 0o644)
             .context("持久化 sysctl 配置失败（需要 root 权限？）")?;
     }
 
     if has_nonsysctl {
         let dir = Path::new(NONSYSCTL_SCRIPT_PATH).parent().unwrap();
         fs::create_dir_all(dir).ok();
-        fs::write(NONSYSCTL_SCRIPT_PATH, &nonsysctl_script)
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("设置 {} 权限 0755 失败", dir.display()))?;
+        write_atomic(NONSYSCTL_SCRIPT_PATH, nonsysctl_script.as_bytes(), 0o755)
             .context("写入非 sysctl 持久化脚本失败")?;
-
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(NONSYSCTL_SCRIPT_PATH, fs::Permissions::from_mode(0o755)).ok();
 
         let service = format!(
             "[Unit]\n\
@@ -400,7 +445,8 @@ fn persist_from_rollback() -> Result<()> {
              WantedBy=multi-user.target\n"
         );
 
-        fs::write(NONSYSCTL_SERVICE_PATH, &service).context("写入 systemd service 失败")?;
+        write_atomic(NONSYSCTL_SERVICE_PATH, service.as_bytes(), 0o644)
+            .context("写入 systemd service 失败")?;
 
         systemctl_quiet(&["daemon-reload"]);
         systemctl_quiet(&["enable", "ktuner-nonsysctl.service"]);
@@ -880,6 +926,108 @@ mod tests {
     }
 
     #[test]
+    fn test_write_atomic_sets_exact_mode() {
+        // Every mode the persist paths use must land on disk exactly, both
+        // for a fresh target and for a pre-planted 0666 file — the
+        // write-then-chmod bug only reached the final mode after an
+        // attacker-observable window on the target path.
+        for mode in [0o600u32, 0o644, 0o755] {
+            for preexisting in [false, true] {
+                let target = std::env::temp_dir()
+                    .join(format!(
+                        "ktuner_write_atomic_mode_{mode}_{preexisting}_{}",
+                        std::process::id()
+                    ))
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                if preexisting {
+                    fs::write(&target, b"stale").unwrap();
+                    fs::set_permissions(&target, fs::Permissions::from_mode(0o666)).unwrap();
+                }
+
+                write_atomic(&target, b"payload", mode).expect("write_atomic must succeed");
+
+                let got = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    got, mode,
+                    "on-disk mode for {target} (preexisting={preexisting})"
+                );
+                assert_eq!(fs::read_to_string(&target).unwrap(), "payload");
+                fs::remove_file(&target).ok();
+            }
+        }
+    }
+
+    #[test]
+    fn test_write_atomic_orphans_stale_fd() {
+        // The rename must swap the inode wholesale: a stale fd opened on the
+        // pre-planted 0666 file keeps pointing at the orphaned inode, so
+        // writes through it cannot pollute the replacement. A write-then-chmod
+        // regression (truncating the same inode in place) would alias the fd
+        // to the live target and leak the appended bytes into it.
+        use std::io::Write;
+
+        let target = std::env::temp_dir()
+            .join(format!(
+                "ktuner_write_atomic_stale_fd_{}",
+                std::process::id()
+            ))
+            .to_str()
+            .unwrap()
+            .to_string();
+        fs::write(&target, b"old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o666)).unwrap();
+
+        let mut stale_fd = fs::OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .expect("open stale fd must succeed");
+
+        write_atomic(&target, b"new", 0o600).expect("write_atomic must succeed");
+
+        stale_fd.write_all(b"evil").expect("append via stale fd");
+        stale_fd.flush().unwrap();
+        drop(stale_fd);
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "new",
+            "stale-fd append must not pollute the replaced target"
+        );
+        let got = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(got, 0o600);
+        fs::remove_file(&target).ok();
+    }
+
+    #[test]
+    fn test_write_atomic_cleans_tmp_on_failure() {
+        // rename() onto an existing directory fails with EISDIR — the easiest
+        // failure to stage without root. The failed write must remove the tmp
+        // sibling instead of littering the target directory.
+        let target = std::env::temp_dir()
+            .join(format!(
+                "ktuner_write_atomic_cleanup_dir_{}",
+                std::process::id()
+            ))
+            .to_str()
+            .unwrap()
+            .to_string();
+        fs::create_dir_all(&target).unwrap();
+
+        let result = write_atomic(&target, b"payload", 0o600);
+        assert!(result.is_err(), "rename onto a directory must fail");
+
+        // Same process as write_atomic, so the pid suffix matches.
+        let tmp = format!("{target}.tmp.{}", std::process::id());
+        assert!(
+            !Path::new(&tmp).exists(),
+            "failed write must not leave the tmp sibling behind"
+        );
+        fs::remove_dir_all(&target).ok();
+    }
+
+    #[test]
     fn test_readback_matches() {
         // Bracketed sysfs list files: the active option is inside [ ], not first.
         assert!(readback_matches("never", "always madvise [never]"));
@@ -916,5 +1064,78 @@ mod tests {
         assert_eq!(canonicalize_path("/a/b/../c"), "/a/c");
         assert_eq!(canonicalize_path("/a/b/../../c"), "/c");
         assert_eq!(canonicalize_path("/"), "/");
+    }
+    #[test]
+    fn test_validate_import_value_rejects_dangerous_values() {
+        // kernel.sysrq restricted to 0 or 176
+        let err = validate_import_value("kernel.sysrq", "1").unwrap_err();
+        assert!(
+            err.to_string().contains("restricted"),
+            "expected 'restricted' in error, got: {err}"
+        );
+        let err = validate_import_value("kernel.sysrq", "511").unwrap_err();
+        assert!(err.to_string().contains("restricted"));
+
+        // Slash-separated spelling resolves to the same file and must hit the
+        // same restriction.
+        let err = validate_import_value("kernel/sysrq", "1").unwrap_err();
+        assert!(
+            err.to_string().contains("restricted"),
+            "slash spelling bypassed the sysrq restriction: {err}"
+        );
+
+        // Empty value rejected
+        let err = validate_import_value("any.param", "").unwrap_err();
+        assert!(err.to_string().contains("invalid value"));
+
+        // Newline in value rejected
+        let err = validate_import_value("any.param", "val\nue").unwrap_err();
+        assert!(err.to_string().contains("invalid value"));
+
+        // Over-long value rejected
+        let err = validate_import_value("any.param", &"x".repeat(257)).unwrap_err();
+        assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn test_validate_import_value_accepts_safe_values() {
+        // Pure checks only: no write to /proc/sys and no rollback ledger
+        // entry, so these stay side-effect-free even when run as root
+        // (previously the accept path really wrote kernel.sysrq).
+        assert!(validate_import_value("kernel.sysrq", "0").is_ok());
+        assert!(validate_import_value("kernel.sysrq", "176").is_ok());
+        // Slash spelling of an allowed value passes the same check.
+        assert!(validate_import_value("kernel/sysrq", "176").is_ok());
+        // Params outside the restricted set are untouched by the allowlist.
+        assert!(validate_import_value("vm.swappiness", "10").is_ok());
+    }
+
+    #[test]
+    fn test_apply_import_runs_validation_before_write() {
+        // Wiring: apply_import must run validate_import_value before
+        // write_and_verify. The param never exists, so "invalid value" can
+        // only come from validation — without it the error would be the
+        // path-not-found write failure.
+        let err = apply_import("vm.ktuner_test_nonexistent", "", None).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid value"),
+            "apply_import skipped validation: {err}"
+        );
+    }
+
+    #[test]
+    fn test_apply_import_accepts_normal_values() {
+        // Use a nonexistent parameter: when the tests run as root with a
+        // writable /proc/sys, applying a real sysctl (e.g. vm.swappiness)
+        // would actually mutate the host. A path that never exists exercises
+        // the same write path with zero side effects; its failure is the
+        // expected path-not-found, never a validation rejection.
+        let r_normal = apply_import("vm.ktuner_test_nonexistent", "10", None);
+        if let Err(e) = &r_normal {
+            assert!(
+                !e.to_string().contains("invalid value"),
+                "normal value wrongly rejected: {e}"
+            );
+        }
     }
 }
