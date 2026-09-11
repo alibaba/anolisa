@@ -58,7 +58,7 @@
               },
               "count": {
                 "type": "integer",
-                "minimum": 0,
+                "minimum": 1,
                 "maximum": 4294967295
               }
             }
@@ -66,9 +66,52 @@
         },
         "scanned_bytes": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Exact UTF-8 bytes inspected; Core requires this value to equal the submitted command length before accepting a gate verdict."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "allow"
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "reasons": {
+                "maxItems": 0
+              },
+              "findings": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": ["warn", "deny"]
+              }
+            },
+            "required": ["verdict"]
+          },
+          "then": {
+            "properties": {
+              "reasons": {
+                "minItems": 1
+              },
+              "findings": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

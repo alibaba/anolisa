@@ -24,7 +24,8 @@
         "tool_name": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
         }
       }
     },
