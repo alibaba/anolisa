@@ -2,8 +2,8 @@
 //! Callers own lifecycle, retry and observation rules; storage owns atomicity.
 #![forbid(unsafe_code)]
 use asc_foundation_types::{ResourceId, Revision};
-use asc_policy_types::binding::BindingView;
-use asc_policy_types::target::{Failure, PreparedApply, Presence, TargetBindingPlan, TargetRef};
+use asc_policy_types::binding::{BindingStatus, BindingView};
+use asc_policy_types::target::{Failure, Presence, TargetRef};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,15 +14,6 @@ pub struct Deployment {
     pub revision: Revision,
     pub presence: Presence,
     pub last_confirmed: Option<Presence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SavedApply {
-    pub revision: Revision,
-    pub is_update: bool,
-    pub plan: TargetBindingPlan,
-    pub prepared: PreparedApply,
 }
 
 /// Caller-supplied time is monotonic milliseconds within this process.
@@ -41,7 +32,6 @@ pub struct RuntimeState {
     pub next_attempt_at: Option<u64>,
     pub retry_policy: Option<RetryPolicy>,
     pub last_error: Option<Failure>,
-    pub prepared: Option<SavedApply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,20 +44,28 @@ pub struct BindingStateSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
+    /// A bounded CAS retry loop exhausted its budget; this does not imply a storage outage.
+    #[error("reconciliation CAS contention exhausted")]
+    Contended,
     #[error("reconciliation storage unavailable")]
     Unavailable,
     #[error("invalid reconciliation transaction")]
     Invalid,
 }
 
-/// A conditional replacement or removal of an existing aggregate, with an idempotency key.
-/// The authoritative Binding is the same record used by PAP; there is no second authoritative
-/// Binding record. Callers preserve the spec unless admitting a new intent.
+/// Field-scoped reconciliation update. There is deliberately no spec field.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReconciliationPatch {
+    pub status: Option<BindingStatus>,
+    pub runtime: Option<RuntimeState>,
+    pub deployments: Option<Vec<Deployment>>,
+}
+
+/// Conditional reconciliation transaction. None removes the whole aggregate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingStateWrite {
     pub write_id: Uuid,
-    /// `None` atomically removes the Binding and all associated runtime data.
-    pub next: Option<BindingStateSnapshot>,
+    pub next: Option<ReconciliationPatch>,
 }
 impl BindingStateWrite {
     pub fn delete() -> Self {
@@ -76,7 +74,15 @@ impl BindingStateWrite {
             next: None,
         }
     }
+    /// Selects reconciliation fields only; the supplied spec is never written.
     pub fn new(next: BindingStateSnapshot) -> Self {
+        Self::patch(ReconciliationPatch {
+            status: Some(next.binding.status),
+            runtime: Some(next.runtime),
+            deployments: Some(next.deployments),
+        })
+    }
+    pub fn patch(next: ReconciliationPatch) -> Self {
         Self {
             write_id: Uuid::new_v4(),
             next: Some(next),
@@ -90,17 +96,11 @@ pub enum WriteResult {
     Conflict,
 }
 
-/// Operations are atomic with PAP writes, including on unwind. Reads return a
-/// consistent aggregate. Errors leave storage unchanged. CAS compares the entire
-/// snapshot (including runtime and deployments), not only public revision/status.
-/// An exact replay of the latest committed write returns `AlreadyApplied` even
-/// after intervening PAP writes. Reusing its ID with different contents is Invalid.
-/// Callers serialize writes per Binding until any ambiguous result is acknowledged;
-/// this bounded receipt is not an arbitrary historical deduplication log.
-/// `next: None` removes the Binding, runtime, deployments and receipt atomically.
-/// Removing an already absent ID returns `AlreadyApplied`; replacing an absent
-/// ID returns `Conflict` and never inserts. Binding IDs are server-generated and
-/// never reused, so absence acknowledges removal without a permanent tombstone.
+/// Reads are consistent; writes are atomic with PAP and never replace spec.
+/// Compare revision/status and only the runtime/deployment fields being written.
+/// Removal compares all reconciliation fields. Exact latest-write replay may be
+/// acknowledged within the current call, even after an intervening PAP write.
+/// Errors never establish target absence; no transaction spans remote I/O.
 pub trait BindingStateRepository: Send + Sync {
     /// # Errors
     /// Returns storage failure distinctly from absence.
@@ -115,4 +115,23 @@ pub trait BindingStateRepository: Send + Sync {
         expected: &BindingStateSnapshot,
         write: &BindingStateWrite,
     ) -> Result<WriteResult, StoreError>;
+}
+
+/// Lightweight Binding metadata for a bounded stable-ID page, including terminal records.
+#[derive(Debug, Clone)]
+pub struct ReconcileCandidate {
+    pub id: ResourceId,
+    pub status: BindingStatus,
+    pub next_attempt_at: Option<u64>,
+}
+pub trait BindingReconcileCatalog: Send + Sync {
+    /// # Errors
+    /// Returns a storage error; callers retain the cursor and retry with backoff.
+    /// Pages include terminal records so traversal work is bounded even when
+    /// most Bindings are inactive. The scheduler filters executable states.
+    fn scan_reconciliation(
+        &self,
+        after: Option<&ResourceId>,
+        limit: usize,
+    ) -> Result<Vec<ReconcileCandidate>, StoreError>;
 }

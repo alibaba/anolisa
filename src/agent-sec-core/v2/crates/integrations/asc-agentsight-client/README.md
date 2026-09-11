@@ -1,8 +1,15 @@
 # AgentSight Client and Reconciler integration
 
 `AgentSightClient<T, R>` implements `asc_policy_target_contracts::TargetDeploymentClient` directly.
-The composition root can put `Arc<AgentSightClient<_, _>>` in the Reconciler's
-Client registry as `Arc<dyn TargetDeploymentClient>`. No PEP-specific logic is
+The composition root registers `AgentSightClientFactory::default()` in the
+Reconciler's `TargetDeploymentClientFactory` registry. Registration performs no
+credential or network I/O. Each attempt opens a Client, reads the current token
+file and reuses that instance for preparation and create/update, or deletion.
+Missing/unreadable/invalid credentials are retryable with sanitized codes
+`AGENTSIGHT_CREDENTIAL_UNAVAILABLE` or `AGENTSIGHT_INVALID_CREDENTIAL`. Invalid
+endpoint configuration is rejected as `AGENTSIGHT_INVALID_BASE_URL`. Credential
+changes take effect on the next attempt; retry remains bounded by the core policy.
+Tests can inject closures returning scripted Clients. No PEP-specific logic is
 added to the Reconciler, and the Client never reads or writes a repository.
 
 ## Operations
@@ -17,11 +24,11 @@ added to the Reconciler, and the Client never reads or writes a repository.
 The trait's `delete(targets)` delegates to `delete_targets`. All deployments use
 the prepared-replay path; the former `apply(plan)` and
 `delete(binding_id, revision)` convenience APIs have been removed. Callers must
-prepare and save the request/target before `create` or `update`, then pass saved
+prepare a call-local request and register its target before `create` or `update`, then pass saved
 target references to deletion. The former convenience-result enum
 `AgentSightDeploymentState` is now private; mutation results use
-`DeploymentReport`. The HTTP protocol and prepared artifacts are unchanged by
-this internal API cleanup.
+`DeploymentReport`. The HTTP protocol is unchanged. The unreleased cleanup schema
+remains version 1 and contains only Binding ID/revision for deletion.
 
 The default target route is `agentsight`. `with_reconcile_route("host-primary")`
 selects another bounded non-secret configuration identity. The registry key must
@@ -55,10 +62,13 @@ instead of `localhost` for local HTTP, avoiding reliance on name resolution.
 Certificate verification remains enabled and redirects remain disabled.
 
 Format: `agentsight.enforcement.apply.v1`. Opaque content contains schema version
-1, boot ID, exact POST body bytes and their SHA-256 digest. Cleanup contains schema
-version 1 and the source Binding ID/revision; the Client validates that these
-derive the recorded target UUID. Credentials are supplied by the transport and
-are never inserted into either artifact. Reconciler only stores/passes these bytes.
+1, boot ID, exact POST body bytes and their SHA-256 digest. Cleanup contains only
+schema version 1 and Binding ID/revision. It does not store process identity or
+request digests. Prepared content is call-local and is not persisted.
+
+Each retry prepares against the current process identity. Cleanup does not compare
+that identity with a previous attempt. The checks below protect the identity
+captured by this particular preparation, not identity continuity across attempts.
 
 Replays check boot ID and `/proc/<pid>/stat` start time without regenerating the
 body. PID reuse, process exit or a different boot rejects Apply. Temporary
@@ -123,5 +133,10 @@ connects Adapter, Reconciler, Client, Ureq and memory repository to an HTTP mock
 and checks exact requests and registration before modification.
 
 This establishes real Client/transport wiring, not live AgentSight or kernel
-enforcement. PAP notifications, worker timers, daemon configuration and SQL
-recovery remain separate integration work; the daemon is not wired here.
+enforcement. PAP notifications and worker timers live in `asc-policy-runtime`; the daemon
+composes them when target credentials are configured. SQL recovery and full
+real-process E2E remain separate work.
+
+`tests/factory.rs` verifies deferred credential loading, retryable credential failures,
+and actual HTTP authorization using separate Client instances before and after
+a token-file update. No daemon/CLI token configuration option is added.

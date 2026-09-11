@@ -94,6 +94,7 @@ dependencies = [
 name = "asc-daemon"
 version = "0.12.0"
 dependencies = [
+ "asc-agentsight-client",
  "asc-daemon-core",
  "asc-daemon-handler",
  "asc-daemon-protocol",
@@ -101,8 +102,11 @@ dependencies = [
  "asc-foundation-types",
  "asc-pap",
  "asc-pap-repository-memory",
+ "asc-pcp",
+ "asc-policy-adapter-agentsight",
  "asc-policy-engine",
  "asc-policy-repository",
+ "asc-policy-runtime",
  "asc-policy-types",
  "serde_json",
  "thiserror",
@@ -240,6 +244,20 @@ dependencies = [
  "serde",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "asc-policy-runtime"
+version = "0.12.0"
+dependencies = [
+ "asc-foundation-types",
+ "asc-pap",
+ "asc-pap-repository-memory",
+ "asc-pcp",
+ "asc-policy-engine",
+ "asc-policy-repository",
+ "asc-policy-types",
+ "serde_json",
 ]
 
 [[package]]

@@ -5,9 +5,8 @@ use asc_pap::PapRepository;
 use super::ReconcileState;
 use crate::*;
 use asc_policy_types::binding::{BindingStatus, BindingView};
-use asc_policy_types::target::TargetBindingPlan;
 
-use crate::test_store::TestStore;
+use crate::test_store::TestAdmission;
 
 fn initial() -> ReconcileRecord {
     ReconcileRecord {
@@ -31,14 +30,10 @@ fn policy() -> RetryPolicy {
     }
 }
 
-fn saved(record: &ReconcileRecord) -> SavedApply {
-    SavedApply {
+fn saved(record: &ReconcileRecord) -> PreparedAttempt {
+    PreparedAttempt {
         revision: record.binding.spec.binding_revision,
         is_update: false,
-        plan: TargetBindingPlan {
-            format: "test.plan.v1".into(),
-            content: vec![255, 0],
-        },
         prepared: PreparedApply {
             target: TargetRef {
                 route: "test".into(),
@@ -51,7 +46,7 @@ fn saved(record: &ReconcileRecord) -> SavedApply {
     }
 }
 
-fn claimed() -> (TestRepository, ReconcileRecord, SavedApply) {
+fn claimed() -> (TestRepository, ReconcileRecord, PreparedAttempt) {
     let record = initial();
     let repository = TestRepository::with_binding_states(vec![record.clone()]).unwrap();
     let record = repository
@@ -78,6 +73,83 @@ fn outcome(record: &ReconcileRecord, observations: Vec<Observation>) -> AttemptO
         next_status: BindingStatus::Ready,
         next_attempt_at: None,
         error: None,
+    }
+}
+
+#[test]
+fn bounded_cas_contention_is_distinct_from_storage_failure_and_preserves_state() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Conflicts {
+        inner: Arc<asc_pap_repository_memory::ProcessLocalPapRepository>,
+        calls: AtomicUsize,
+    }
+    impl BindingStateRepository for Conflicts {
+        fn get_binding_state(
+            &self,
+            id: &asc_foundation_types::ResourceId,
+        ) -> Result<Option<BindingStateSnapshot>, StoreError> {
+            self.inner.get_binding_state(id)
+        }
+        fn compare_exchange_binding_state(
+            &self,
+            expected: &BindingStateSnapshot,
+            write: &BindingStateWrite,
+        ) -> Result<WriteResult, StoreError> {
+            // Exercise the retry bound deterministically; this does not claim
+            // that ordinary PAP requests can produce this many conflicts.
+            if self.calls.fetch_add(1, Ordering::SeqCst) < 16 {
+                Ok(WriteResult::Conflict)
+            } else {
+                self.inner.compare_exchange_binding_state(expected, write)
+            }
+        }
+    }
+    for registration in [true, false] {
+        let (repo, record, saved) = claimed();
+        let before = repo.read(&record.binding.spec.binding_id).unwrap();
+        let wrapped = Arc::new(Conflicts {
+            inner: repo.inner.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let state = ReconcileState {
+            repository: wrapped.clone(),
+        };
+        let mut completion = None;
+        let result = outcome(
+            &record,
+            vec![Observation {
+                target: saved.prepared.target.clone(),
+                presence: Presence::Present,
+            }],
+        );
+        let mut attempt = || {
+            if registration {
+                state.register(
+                    &result.expected,
+                    Some(&saved),
+                    std::slice::from_ref(&saved.prepared.target),
+                )
+            } else {
+                state.finish(&result, &mut completion)
+            }
+        };
+        assert_eq!(attempt(), Err(StoreError::Contended));
+        assert_eq!(wrapped.calls.load(Ordering::SeqCst), 16);
+        assert_eq!(repo.read(&record.binding.spec.binding_id).unwrap(), before);
+        assert_eq!(attempt(), Ok(true));
+        assert_eq!(wrapped.calls.load(Ordering::SeqCst), 17);
+        assert!(completion.is_none());
+        let mut expected = before.unwrap();
+        if !registration {
+            expected.binding.status = BindingStatus::Ready;
+            expected.deployments[0].presence = Presence::Present;
+            expected.deployments[0].last_confirmed = Some(Presence::Present);
+        }
+        assert_eq!(
+            repo.read(&record.binding.spec.binding_id).unwrap(),
+            Some(expected)
+        );
     }
 }
 
@@ -267,23 +339,6 @@ fn retry_noop_does_not_reset_attempts_and_bad_cas_does_not_mutate() {
 }
 
 #[test]
-fn execution_slots_are_shared_but_distinct_bindings_are_independent() {
-    let record = initial();
-    let id = record.binding.spec.binding_id.clone();
-    let mut other_record = record.clone();
-    let other_id = serde_json::from_str("\"10000000-0000-4000-8000-000000000002\"").unwrap();
-    other_record.binding.spec.binding_id = other_id;
-    let other_id = other_record.binding.spec.binding_id.clone();
-    let repository = TestRepository::with_binding_states(vec![record, other_record]).unwrap();
-    let first = repository.execution.slot(&id).unwrap();
-    let second = repository.execution.slot(&id).unwrap();
-    assert!(Arc::ptr_eq(&first, &second));
-    let other = repository.execution.slot(&other_id).unwrap();
-    let _guard = first.lock().unwrap();
-    assert!(other.try_lock().is_ok());
-}
-
-#[test]
 fn bounded_codes_and_backoff_reject_invalid_configuration() {
     assert_eq!(
         Failure::new(FailureKind::Rejected, "secret body\n").code,
@@ -302,7 +357,6 @@ fn bounded_codes_and_backoff_reject_invalid_configuration() {
 struct TestRepository {
     inner: Arc<asc_pap_repository_memory::ProcessLocalPapRepository>,
     state: ReconcileState,
-    execution: ReconcileExecution,
     completion: std::sync::Mutex<Option<crate::model::PendingWrite>>,
 }
 impl std::ops::Deref for TestRepository {
@@ -321,7 +375,6 @@ impl TestRepository {
                 repository: inner.clone(),
             },
             inner,
-            execution: ReconcileExecution::default(),
             completion: std::sync::Mutex::new(None),
         })
     }
@@ -348,7 +401,7 @@ impl TestRepository {
     fn register(
         &self,
         expected: &ExpectedBinding,
-        prepared: Option<&SavedApply>,
+        prepared: Option<&PreparedAttempt>,
         targets: &[TargetRef],
     ) -> Result<bool, StoreError> {
         self.state.register(expected, prepared, targets)
@@ -360,7 +413,7 @@ impl TestRepository {
 }
 
 #[test]
-fn registration_retries_runtime_cas_conflict_without_losing_concurrent_fields() {
+fn deployment_only_registration_preserves_concurrent_runtime_without_conflict() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ConcurrentWrite {
@@ -424,7 +477,7 @@ fn registration_retries_runtime_cas_conflict_without_losing_concurrent_fields() 
             "CONCURRENT_DIAGNOSTIC"
         ))
     );
-    assert_eq!(current.runtime.prepared, Some(saved));
+    assert_eq!(current.deployments[0].target, saved.prepared.target);
     assert_eq!(current.deployments[0].presence, Presence::Unknown);
-    assert_eq!(wrapped.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(wrapped.calls.load(Ordering::SeqCst), 1);
 }

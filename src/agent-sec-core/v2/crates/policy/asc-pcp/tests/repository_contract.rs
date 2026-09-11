@@ -69,11 +69,21 @@ fn concurrent_writes_from_one_snapshot_have_exactly_one_winner() {
     assert_eq!(
         repo.get_binding_state(&before.binding.spec.binding_id)
             .unwrap(),
-        winner.next.clone()
+        Some(BindingStateSnapshot {
+            binding: BindingView {
+                spec: before.binding.spec.clone(),
+                status: winner.next.as_ref().unwrap().status.unwrap()
+            },
+            runtime: winner.next.as_ref().unwrap().runtime.clone().unwrap(),
+            deployments: winner.next.as_ref().unwrap().deployments.clone().unwrap(),
+        })
     );
     assert_eq!(
         repo.get_binding(&before.binding.spec.binding_id).unwrap(),
-        winner.next.as_ref().unwrap().binding
+        BindingView {
+            spec: before.binding.spec.clone(),
+            status: winner.next.as_ref().unwrap().status.unwrap()
+        }
     );
 }
 
@@ -131,8 +141,11 @@ fn replay_after_pap_write_is_acknowledged_without_overwriting_new_intent() {
         WriteResult::Applied
     );
     let new_intent = before.binding.clone();
-    repo.update_binding(Some(&write.next.as_ref().unwrap().binding), &new_intent)
-        .unwrap();
+    repo.update_binding(
+        Some(&repo.get_binding(&before.binding.spec.binding_id).unwrap()),
+        &new_intent,
+    )
+    .unwrap();
     let current = repo
         .get_binding_state(&before.binding.spec.binding_id)
         .unwrap();
@@ -142,7 +155,14 @@ fn replay_after_pap_write_is_acknowledged_without_overwriting_new_intent() {
         WriteResult::AlreadyApplied
     );
     let mut reused = write.clone();
-    reused.next.as_mut().unwrap().runtime.attempts_started = 99;
+    reused
+        .next
+        .as_mut()
+        .unwrap()
+        .runtime
+        .as_mut()
+        .unwrap()
+        .attempts_started = 99;
     assert_eq!(
         repo.compare_exchange_binding_state(&before, &reused),
         Err(StoreError::Invalid)
@@ -159,7 +179,7 @@ fn replay_after_pap_write_is_acknowledged_without_overwriting_new_intent() {
 }
 
 #[test]
-fn mismatched_identity_cannot_partially_write_an_aggregate() {
+fn reconciliation_patch_cannot_write_a_spec_or_change_identity() {
     let before = initial();
     let repo = ProcessLocalPapRepository::with_binding_states(vec![before.clone()]).unwrap();
     let mut next = before.clone();
@@ -167,14 +187,16 @@ fn mismatched_identity_cannot_partially_write_an_aggregate() {
         asc_foundation_types::ResourceId::new("10000000-0000-4000-8000-000000000002").unwrap();
     next.runtime.attempts_started = 5;
     assert_eq!(
-        repo.compare_exchange_binding_state(&before, &BindingStateWrite::new(next)),
-        Err(StoreError::Invalid)
-    );
-    assert_eq!(
-        repo.get_binding_state(&before.binding.spec.binding_id)
+        repo.compare_exchange_binding_state(&before, &BindingStateWrite::new(next))
             .unwrap(),
-        Some(before)
+        WriteResult::Applied
     );
+    let current = repo
+        .get_binding_state(&before.binding.spec.binding_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.binding, before.binding);
+    assert_eq!(current.runtime.attempts_started, 5);
 }
 
 #[test]

@@ -44,7 +44,6 @@
     },
     "trace": [
       "read",
-      "read",
       "claim",
       "claim:matched",
       "adapter",
@@ -124,7 +123,6 @@
     },
     "expected": null,
     "trace": [
-      "read",
       "read",
       "claim",
       "claim:matched",

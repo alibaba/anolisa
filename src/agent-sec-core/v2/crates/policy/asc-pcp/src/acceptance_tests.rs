@@ -21,7 +21,7 @@ mod concurrency;
 mod fixtures;
 use crate::test_store as store;
 use fixtures::expand;
-use store::TestStore;
+use store::{TestAdmission, TestStore};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -267,7 +267,11 @@ fn complete_serialized_core_cases() {
         let reconciler = BindingReconciler::new(
             harness.clone(),
             harness.clone(),
-            BTreeMap::from([("test".into(), client)]),
+            BTreeMap::from([(
+                "test".into(),
+                Arc::new(move || Ok(client.clone()))
+                    as Arc<dyn crate::TargetDeploymentClientFactory>,
+            )]),
             "test".into(),
             harness.clone(),
             RetryPolicy {
@@ -275,7 +279,6 @@ fn complete_serialized_core_cases() {
                 base_delay_ms: 100,
                 max_delay_ms: 150,
             },
-            Arc::new(ReconcileExecution::default()),
         )
         .unwrap();
         for (index, step) in case.steps.into_iter().enumerate() {
@@ -345,14 +348,6 @@ fn actual_agentsight_adapter_uses_the_core_port_without_interface_changes() {
     };
     step.calls[0].output = json!({"kind": "translated", "plan": plan});
     step.calls[1].input = json!(plan);
-    step.expected
-        .as_mut()
-        .unwrap()
-        .runtime
-        .prepared
-        .as_mut()
-        .unwrap()
-        .plan = plan;
     let harness = Arc::new(Harness {
         repository: ProcessLocalPapRepository::with_binding_states(
             case.initial.into_iter().collect(),
@@ -378,10 +373,11 @@ fn actual_agentsight_adapter_uses_the_core_port_without_interface_changes() {
     let reconciler = BindingReconciler::new(
         harness.clone(),
         Arc::new(adapter),
-        BTreeMap::from([(
-            "test".into(),
-            harness.clone() as Arc<dyn TargetDeploymentClient>,
-        )]),
+        BTreeMap::from([("test".into(), {
+            let client = harness.clone();
+            Arc::new(move || Ok(client.clone() as Arc<dyn TargetDeploymentClient>))
+                as Arc<dyn crate::TargetDeploymentClientFactory>
+        })]),
         "test".into(),
         harness.clone(),
         RetryPolicy {
@@ -389,7 +385,6 @@ fn actual_agentsight_adapter_uses_the_core_port_without_interface_changes() {
             base_delay_ms: 100,
             max_delay_ms: 150,
         },
-        Arc::new(ReconcileExecution::default()),
     )
     .unwrap();
     assert_eq!(

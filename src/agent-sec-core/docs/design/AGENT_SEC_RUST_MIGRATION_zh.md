@@ -253,6 +253,13 @@ asc-foundation-types 只承载真正跨多个 bounded context 的稳定值类型
 common/utils。具体 capability 不依赖 daemon-core；Action Runtime 不依赖具体 capability；
 composition root 负责注入。
 
+Policy reconciliation 的具体目录与边界见
+[调度、存储与恢复设计](BINDING_RECONCILER_RUNTIME_DESIGN_zh.md)：拟建
+`v2/crates/policy/asc-policy-runtime/src/reconciliation/` 承载 WorkQueue、worker 和恢复调度，
+`asc-pcp` 每次重新读取并从头执行，不保留跨调用计算缓存；共享 Repository 定义局部条件写，未来
+`v2/crates/data/asc-persistence-sqlite/` 实现持久化。daemon 只装配并管理进程生命周期。
+这是目标实施位置，不代表相应 crate、后台接线或恢复已交付。
+
 ### 5.3 Integration slices
 
 - **Action Slice**：daemon-core + action-runtime + 一个 capability + security-events；

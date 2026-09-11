@@ -61,12 +61,6 @@ impl BindingStateRepository for ProcessLocalPapRepository {
         write: &BindingStateWrite,
     ) -> Result<WriteResult, StoreError> {
         let id = expected.binding.spec.binding_id.as_str();
-        if let Some(next) = &write.next {
-            if next.binding.spec.binding_id != expected.binding.spec.binding_id {
-                return Err(StoreError::Invalid);
-            }
-            next.binding.validate().map_err(|_| StoreError::Invalid)?;
-        }
         let mut state = self.state.lock().map_err(|_| StoreError::Unavailable)?;
         if let Some(last) = state
             .binding_states
@@ -84,11 +78,49 @@ impl BindingStateRepository for ProcessLocalPapRepository {
         if current.is_none() && write.next.is_none() {
             return Ok(WriteResult::AlreadyApplied);
         }
-        if current.as_ref() != Some(expected) {
+        let Some(current) = current else {
+            return Ok(WriteResult::Conflict);
+        };
+        let patch = write.next.as_ref();
+        if current.binding.spec.binding_revision != expected.binding.spec.binding_revision
+            || current.binding.status != expected.binding.status
+            || (patch.is_none_or(|p| p.runtime.is_some()) && current.runtime != expected.runtime)
+            || (patch.is_none_or(|p| p.deployments.is_some())
+                && current.deployments != expected.deployments)
+        {
             return Ok(WriteResult::Conflict);
         }
         if let Some(next) = &write.next {
-            save(&mut state, next.clone()).last_write = Some(write.clone());
+            // Validate before mutating either map.
+            if next.status == Some(asc_policy_types::binding::BindingStatus::Deleted) {
+                return Err(StoreError::Invalid);
+            }
+            if let Some(deployments) = &next.deployments {
+                for (index, deployment) in deployments.iter().enumerate() {
+                    if deployment.presence == Presence::Absent
+                        || deployments[..index]
+                            .iter()
+                            .any(|d| d.target.same_identity(&deployment.target))
+                    {
+                        return Err(StoreError::Invalid);
+                    }
+                }
+            }
+            if let Some(status) = next.status {
+                state
+                    .bindings
+                    .get_mut(id)
+                    .ok_or(StoreError::Invalid)?
+                    .status = status;
+            }
+            let data = state.binding_states.entry(id.to_owned()).or_default();
+            if let Some(runtime) = &next.runtime {
+                data.runtime.clone_from(runtime);
+            }
+            if let Some(deployments) = &next.deployments {
+                data.deployments.clone_from(deployments);
+            }
+            data.last_write = Some(write.clone());
         } else {
             state.bindings.remove(id);
             state.binding_states.remove(id);
@@ -106,11 +138,33 @@ fn snapshot(state: &State, id: &str) -> Option<BindingStateSnapshot> {
     })
 }
 
-fn save(state: &mut State, record: BindingStateSnapshot) -> &mut BindingStateData {
-    let id = record.binding.spec.binding_id.to_string();
-    state.bindings.insert(id.clone(), record.binding);
-    let data = state.binding_states.entry(id).or_default();
-    data.runtime = record.runtime;
-    data.deployments = record.deployments;
-    data
+impl asc_policy_repository::BindingReconcileCatalog for ProcessLocalPapRepository {
+    fn scan_reconciliation(
+        &self,
+        after: Option<&ResourceId>,
+        limit: usize,
+    ) -> Result<Vec<asc_policy_repository::ReconcileCandidate>, StoreError> {
+        if limit == 0 || limit > 1000 {
+            return Err(StoreError::Invalid);
+        }
+        let state = self.state.lock().map_err(|_| StoreError::Unavailable)?;
+        Ok(state
+            .bindings
+            .range((
+                after.map_or(std::ops::Bound::Unbounded, |id| {
+                    std::ops::Bound::Excluded(id.to_string())
+                }),
+                std::ops::Bound::Unbounded,
+            ))
+            .take(limit)
+            .map(|(id, binding)| asc_policy_repository::ReconcileCandidate {
+                id: binding.spec.binding_id.clone(),
+                status: binding.status,
+                next_attempt_at: state
+                    .binding_states
+                    .get(id)
+                    .and_then(|d| d.runtime.next_attempt_at),
+            })
+            .collect())
+    }
 }

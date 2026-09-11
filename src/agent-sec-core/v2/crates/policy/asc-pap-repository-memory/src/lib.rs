@@ -210,12 +210,11 @@ impl PapRepository for ProcessLocalPapRepository {
         if current != expected {
             return Err(PapError::Conflict);
         }
-        let mut same_spec = false;
         if let Some(current) = current {
             if current == binding {
                 return Ok(current.clone());
             }
-            same_spec = current.spec.policy == binding.spec.policy
+            let same_spec = current.spec.policy == binding.spec.policy
                 && current.spec.scope == binding.spec.scope;
             let permitted = if binding.status == BindingStatus::PendingDelete {
                 same_spec && current.status.request_delete() == binding.status
@@ -244,15 +243,7 @@ impl PapRepository for ProcessLocalPapRepository {
             return Err(PapError::Conflict);
         }
         if let Some(record) = state.binding_states.get_mut(&id) {
-            let prepared = if same_spec {
-                record.runtime.prepared.take()
-            } else {
-                None
-            };
-            record.runtime = asc_policy_repository::RuntimeState {
-                prepared,
-                ..Default::default()
-            };
+            record.runtime = asc_policy_repository::RuntimeState::default();
         }
         state.bindings.insert(id, binding.clone());
         Ok(binding.clone())

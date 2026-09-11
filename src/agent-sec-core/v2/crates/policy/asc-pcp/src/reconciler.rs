@@ -8,18 +8,17 @@ use asc_policy_types::target::TranslationOutcome;
 
 use crate::{
     AttemptOutcome, BindingStateRepository, Clock, DeploymentReport, Disposition, ExecutionSlot,
-    ExpectedBinding, Failure, FailureKind, Observation, Presence, ReconcileExecution,
-    ReconcileRecord, RetryPolicy, SavedApply, StoreError, TargetBindingAdapter,
-    TargetDeploymentClient, TargetRef,
+    ExpectedBinding, Failure, FailureKind, Observation, PreparedAttempt, Presence, ReconcileRecord,
+    RetryPolicy, StoreError, TargetBindingAdapter, TargetDeploymentClient,
+    TargetDeploymentClientFactory, TargetRef,
 };
 
-/// Pure orchestration over repository, Adapter and Client ports. Clones/other
-/// instances share the execution context supplied by the composition root.
+/// Pure orchestration over repository, Adapter and Client ports. The caller
+/// serializes attempts for each Binding, including across core instances.
 pub struct BindingReconciler {
     state: crate::state::ReconcileState,
-    execution: Arc<ReconcileExecution>,
     adapter: Arc<dyn TargetBindingAdapter>,
-    clients: BTreeMap<String, Arc<dyn TargetDeploymentClient>>,
+    client_factories: BTreeMap<String, Arc<dyn TargetDeploymentClientFactory>>,
     apply_route: String,
     clock: Arc<dyn Clock>,
     retry: RetryPolicy,
@@ -27,106 +26,99 @@ pub struct BindingReconciler {
 
 impl BindingReconciler {
     /// Routes are stable configuration references, never endpoint credentials.
-    /// Share one `ReconcileExecution` across all workers for a store; use separate
-    /// contexts for separate stores. Pending results survive worker replacement.
+    /// The caller must serialize all calls for a Binding in the same store.
+    /// Temporary results never survive a call.
     /// # Errors
-    /// Rejects invalid retry configuration or a missing Apply Client.
+    /// Rejects invalid retry configuration or a missing Apply Client factory.
     pub fn new(
         repository: Arc<dyn BindingStateRepository>,
         adapter: Arc<dyn TargetBindingAdapter>,
-        clients: BTreeMap<String, Arc<dyn TargetDeploymentClient>>,
+        client_factories: BTreeMap<String, Arc<dyn TargetDeploymentClientFactory>>,
         apply_route: String,
         clock: Arc<dyn Clock>,
         retry: RetryPolicy,
-        execution: Arc<ReconcileExecution>,
     ) -> Result<Self, StoreError> {
         crate::retry::validate(retry)?;
-        if !clients.contains_key(&apply_route) {
+        if !client_factories.contains_key(&apply_route) {
             return Err(StoreError::Invalid);
         }
         Ok(Self {
             state: crate::state::ReconcileState { repository },
-            execution,
             adapter,
-            clients,
+            client_factories,
             apply_route,
             clock,
             retry,
         })
     }
 
-    /// Executes at most one due attempt, or retries a previously failed result
-    /// transaction. The returned retry deadline is for the caller's timer.
+    /// Shares the exact clock used to compute retry deadlines with the scheduler.
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
+    /// Reloads current state and executes at most one due attempt from scratch.
+    /// The returned retry deadline is for the caller's timer.
     ///
     /// This synchronous call is intentionally not cancellation-safe by dropping
     /// an async wrapper: callers must retain/join their blocking task. No task is
-    /// spawned or detached here, and the core execution slot spans the entire call.
+    /// spawned or detached here. The caller must retain exclusive scheduling of
+    /// this Binding until the call returns or finishes unwinding, including panic
+    /// bookkeeping. In production, one Runtime `WorkQueue` per store owns this rule.
     /// # Errors
-    /// Storage errors never imply remote failure or success. A failed completion
-    /// stays in the shared slot; invoke again to retry bookkeeping without I/O.
+    /// Storage failure or exhausted CAS contention never implies remote failure
+    /// or success. Temporary outcomes
+    /// are discarded on return; the next call recovers from repository facts.
     /// # Panics
-    /// Resumes a port panic after attempting terminal bookkeeping and releasing
-    /// execution ownership. The caller must observe the failed task and update
-    /// service health. Unwinding never proves remote absence.
+    /// Resumes a port panic after attempting terminal bookkeeping.
+    /// The caller must catch the attempt panic, inspect committed state and finish
+    /// scheduling this ID before continuing other work. Unwinding never proves remote absence.
     pub fn reconcile(&self, id: &ResourceId) -> Result<Disposition, StoreError> {
-        let shared = if let Some(shared) = self.execution.execution_slot(id)? {
-            shared
-        } else {
-            if self.state.read(id)?.is_none() {
-                return Ok(Disposition::Skipped);
-            }
-            self.execution.slot(id)?
-        };
-        let mut slot = shared.lock().map_err(|_| StoreError::Unavailable)?;
-        // The guard stays outside the unwind boundary. A failed call cannot
-        // poison execution ownership or release it before terminal bookkeeping.
-        let result = catch_unwind(AssertUnwindSafe(|| self.reconcile_locked(id, &mut slot)));
+        let mut slot = ExecutionSlot::default();
+        // Keep call-local completion data available for panic bookkeeping.
+        // The caller retains the Running entry throughout this unwind boundary.
+        let result = catch_unwind(AssertUnwindSafe(|| self.reconcile_attempt(id, &mut slot)));
         match result {
-            Ok(result) => {
-                if slot.removed && slot.pending.is_none() && slot.completion.is_none() {
-                    self.execution.retire(id, &shared)?;
-                }
-                result
-            }
+            Ok(result) => result,
             Err(payload) => {
                 // Preserve an actual completion over the provisional panic
-                // failure. If storage fails too, retain it for bookkeeping-only
-                // retry. The repository must maintain its atomicity on unwind.
+                // failure within this call. If storage fails too, discard the
+                // temporary result on exit and recover from registered facts.
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     if let Some(outcome) = slot.pending.clone() {
-                        let disposition = self.commit(&outcome, &mut slot.completion)?;
-                        slot.removed = outcome.next_status == BindingStatus::Deleted
-                            && disposition == Disposition::Completed;
+                        self.commit(&outcome, &mut slot.completion)?;
                         slot.pending = None;
                     }
                     Ok::<_, StoreError>(())
                 }));
-                if slot.removed && slot.pending.is_none() && slot.completion.is_none() {
-                    let _ = self.execution.retire(id, &shared);
-                }
-                drop(slot);
-                // The owner still observes task failure and updates health.
+                // The owner catches this attempt failure without stopping other Bindings.
                 resume_unwind(payload)
             }
         }
     }
 
-    fn reconcile_locked(
+    fn reconcile_attempt(
         &self,
         id: &ResourceId,
         slot: &mut ExecutionSlot,
     ) -> Result<Disposition, StoreError> {
-        if let Some(outcome) = slot.pending.as_ref() {
-            let disposition = self.commit(outcome, &mut slot.completion)?;
-            slot.removed = outcome.next_status == BindingStatus::Deleted
-                && disposition == Disposition::Completed;
-            slot.pending = None;
-            return Ok(disposition);
-        }
-        let Some(record) = self.state.read(id)? else {
-            slot.removed = true;
+        let Some(mut record) = self.state.read(id)? else {
             return Ok(Disposition::Skipped);
         };
+        // Caller serialization guarantees any earlier invocation has exited.
+        // Recovery preserves budget and cannot overwrite a newer CRUD intent.
+        if record.binding.status.is_reconciling() {
+            if !self
+                .state
+                .recover(&record, self.clock.now_ms(), self.retry)?
+            {
+                return Ok(Disposition::Superseded);
+            }
+            let Some(latest) = self.state.read(id)? else {
+                return Ok(Disposition::Skipped);
+            };
+            record = latest;
+        }
         if !matches!(
             record.binding.status,
             BindingStatus::PendingApply | BindingStatus::PendingDelete
@@ -165,33 +157,15 @@ impl BindingReconciler {
                 return other.map(|_| Disposition::Superseded);
             }
         };
-        let report = match self.execute(&claimed) {
-            Ok(Some(report)) => report,
-            Ok(None) => {
-                slot.pending = None;
-                return Ok(Disposition::Superseded);
-            }
-            Err(error) => {
-                // No modifying call follows a failed registration. Keep the
-                // claimed attempt recoverable without leaving APPLYING wedged.
-                slot.pending = Some(self.outcome(
-                    &claimed,
-                    DeploymentReport {
-                        observations: vec![],
-                        error: Some(retryable("RECONCILE_STORAGE_ERROR")),
-                    },
-                ));
-                return Err(error);
-            }
+        let Some(report) = self.execute(&claimed)? else {
+            slot.pending = None;
+            return Ok(Disposition::Superseded);
         };
-        slot.pending = Some(self.outcome(&claimed, report));
+        slot.pending = Some(self.outcome(&claimed, report)?);
         let disposition = self.commit(
             slot.pending.as_ref().ok_or(StoreError::Invalid)?,
             &mut slot.completion,
         )?;
-        slot.removed = slot.pending.as_ref().is_some_and(|outcome| {
-            outcome.next_status == BindingStatus::Deleted && disposition == Disposition::Completed
-        });
         slot.pending = None;
         Ok(disposition)
     }
@@ -200,7 +174,7 @@ impl BindingReconciler {
         if record.binding.status == BindingStatus::Deleting {
             return self.delete(record);
         }
-        let saved = match self.prepare(record) {
+        let (saved, client) = match self.prepare(record) {
             Ok(saved) => saved,
             Err(error) => {
                 return Ok(Some(DeploymentReport {
@@ -210,9 +184,6 @@ impl BindingReconciler {
             }
         };
         let target = &saved.prepared.target;
-        let Some(client) = self.clients.get(&target.route) else {
-            return Ok(Some(failed("RECONCILE_TARGET_UNAVAILABLE")));
-        };
         let previous: Vec<_> = record
             .deployments
             .iter()
@@ -222,7 +193,13 @@ impl BindingReconciler {
         // Cross-route migration needs an explicit multi-PEP contract. Never
         // reinterpret old cleanup bytes with the newly configured Client.
         if previous.iter().any(|old| old.route != target.route) {
-            return Ok(Some(failed("RECONCILE_TARGET_UNAVAILABLE")));
+            return Ok(Some(DeploymentReport {
+                observations: vec![],
+                error: Some(Failure::new(
+                    FailureKind::Rejected,
+                    "RECONCILE_TARGET_UNAVAILABLE",
+                )),
+            }));
         }
         let mut touched = previous.clone();
         touched.push(target.clone());
@@ -252,12 +229,10 @@ impl BindingReconciler {
         Ok(Some(validate_report(report, &required)))
     }
 
-    fn prepare(&self, record: &ReconcileRecord) -> Result<SavedApply, Failure> {
-        if let Some(saved) = &record.runtime.prepared
-            && saved.revision == record.binding.spec.binding_revision
-        {
-            return Ok(saved.clone());
-        }
+    fn prepare(
+        &self,
+        record: &ReconcileRecord,
+    ) -> Result<(PreparedAttempt, Arc<dyn TargetDeploymentClient>), Failure> {
         let plan = match self.adapter.translate(&record.binding.spec) {
             Ok(TranslationOutcome::Translated(plan)) => plan,
             Ok(TranslationOutcome::Rejected(rejection)) => {
@@ -266,9 +241,11 @@ impl BindingReconciler {
             Err(fault) => return Err(retryable(&fault.code)),
         };
         let client = self
-            .clients
+            .client_factories
             .get(&self.apply_route)
-            .ok_or_else(|| retryable("RECONCILE_TARGET_UNAVAILABLE"))?;
+            .ok_or_else(|| retryable("RECONCILE_TARGET_UNAVAILABLE"))?
+            .open()
+            .map_err(|error| Failure::new(error.kind, &error.code))?;
         let prepared = client
             .prepare_apply(&plan)
             .map_err(|error| Failure::new(error.kind, &error.code))?;
@@ -281,12 +258,24 @@ impl BindingReconciler {
                 "RECONCILE_INVALID_PREPARED",
             ));
         }
-        Ok(SavedApply {
-            revision: record.binding.spec.binding_revision,
-            is_update: !record.deployments.is_empty(),
-            plan,
-            prepared,
-        })
+        if record.deployments.iter().any(|d| {
+            d.revision == record.binding.spec.binding_revision
+                && d.target.same_identity(&prepared.target)
+                && d.target != prepared.target
+        }) {
+            return Err(Failure::new(
+                FailureKind::Rejected,
+                "RECONCILE_TARGET_IDENTITY_CHANGED",
+            ));
+        }
+        Ok((
+            PreparedAttempt {
+                revision: record.binding.spec.binding_revision,
+                is_update: !record.deployments.is_empty(),
+                prepared,
+            },
+            client,
+        ))
     }
 
     fn delete(&self, record: &ReconcileRecord) -> Result<Option<DeploymentReport>, StoreError> {
@@ -314,9 +303,15 @@ impl BindingReconciler {
             error: None,
         };
         for (route, targets) in groups {
-            let report = self.clients.get(route).map_or_else(
+            let report = self.client_factories.get(route).map_or_else(
                 || failed("RECONCILE_TARGET_UNAVAILABLE"),
-                |client| client.delete(&targets),
+                |factory| match factory.open() {
+                    Ok(client) => client.delete(&targets),
+                    Err(error) => DeploymentReport {
+                        observations: vec![],
+                        error: Some(error),
+                    },
+                },
             );
             let required: Vec<_> = targets
                 .into_iter()
@@ -336,7 +331,11 @@ impl BindingReconciler {
         Ok(Some(aggregate))
     }
 
-    fn outcome(&self, record: &ReconcileRecord, report: DeploymentReport) -> AttemptOutcome {
+    fn outcome(
+        &self,
+        record: &ReconcileRecord,
+        report: DeploymentReport,
+    ) -> Result<AttemptOutcome, StoreError> {
         let status = record.binding.status;
         let policy = record.runtime.retry_policy.unwrap_or(self.retry);
         let (next_status, next_attempt_at) = match &report.error {
@@ -355,14 +354,14 @@ impl BindingReconciler {
             }
             Some(_) => (status.fail_reconcile(), None),
         };
-        AttemptOutcome {
+        let next_status = next_status.map_err(|_| StoreError::Invalid)?;
+        Ok(AttemptOutcome {
             expected: ExpectedBinding::from_binding(&record.binding),
             observations: report.observations,
-            // Only a successfully claimed running state reaches this function.
-            next_status: next_status.unwrap_or(status),
+            next_status,
             next_attempt_at,
             error: report.error,
-        }
+        })
     }
 
     fn commit(
@@ -413,3 +412,7 @@ fn validate_report(mut report: DeploymentReport, required: &[Observation]) -> De
     }
     report
 }
+
+#[cfg(test)]
+#[path = "reconciler_tests.rs"]
+mod tests;

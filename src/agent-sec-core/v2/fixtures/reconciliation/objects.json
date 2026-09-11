@@ -658,8 +658,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "ADAPTER_FAULT"
-      },
-      "prepared": null
+      }
     },
     "deployments": []
   },
@@ -679,8 +678,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "ADAPTER_FAULT"
-      },
-      "prepared": null
+      }
     },
     "deployments": []
   },
@@ -700,8 +698,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "ADAPTER_FAULT"
-      },
-      "prepared": null
+      }
     },
     "deployments": []
   },
@@ -718,10 +715,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-binding-id.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -747,8 +741,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -768,9 +761,6 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
       }
     },
     "deployments": [
@@ -800,9 +790,6 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "RECONCILE_INVALID_REPORT"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
       }
     },
     "deployments": [
@@ -827,8 +814,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -845,10 +831,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -874,10 +857,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -903,10 +883,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -935,8 +912,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "RECONCILE_STORAGE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": []
   },
@@ -956,9 +932,6 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
       }
     },
     "deployments": [
@@ -988,9 +961,6 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
       }
     },
     "deployments": [
@@ -1020,9 +990,6 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "RECONCILE_UNCONFIRMED"
-      },
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-7"
       }
     },
     "deployments": [
@@ -1047,8 +1014,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1063,8 +1029,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1088,8 +1053,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1113,8 +1077,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1151,8 +1114,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1176,8 +1138,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1201,8 +1162,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1239,8 +1199,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1269,8 +1228,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "REMOTE_UNKNOWN"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1299,8 +1257,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1329,8 +1286,7 @@
       "lastError": {
         "kind": "REJECTED",
         "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1359,8 +1315,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1389,8 +1344,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "DELETE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1414,8 +1368,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1444,8 +1397,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "RECONCILE_TARGET_UNAVAILABLE"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1471,10 +1423,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-non-uuid.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -1498,8 +1447,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1516,10 +1464,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.create-new-b.rev-8"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -1543,8 +1488,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1573,8 +1517,7 @@
       "lastError": {
         "kind": "REJECTED",
         "code": "UNSUPPORTED_POLICY"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1600,8 +1543,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1630,9 +1572,6 @@
       "lastError": {
         "kind": "REJECTED",
         "code": "UPDATE_ERROR"
-      },
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
       }
     },
     "deployments": [
@@ -1662,9 +1601,6 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "UPDATE_ERROR"
-      },
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
       }
     },
     "deployments": [
@@ -1689,8 +1625,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": [
       {
@@ -1719,8 +1654,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "PREPARE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1749,8 +1683,7 @@
       "lastError": {
         "kind": "REJECTED",
         "code": "PREPARE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1776,10 +1709,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -1805,10 +1735,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.update-new-b.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -1837,8 +1764,7 @@
       "lastError": {
         "kind": "RETRYABLE",
         "code": "RECONCILE_STORAGE_ERROR"
-      },
-      "prepared": null
+      }
     },
     "deployments": [
       {
@@ -1864,10 +1790,7 @@
       "retryPolicy": {
         "$ref": "retry.three-attempts"
       },
-      "lastError": null,
-      "prepared": {
-        "$ref": "saved.update-old-a.rev-7"
-      }
+      "lastError": null
     },
     "deployments": [
       {
@@ -1891,8 +1814,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1907,8 +1829,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1923,8 +1844,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1939,8 +1859,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1955,8 +1874,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -1981,8 +1899,7 @@
       "attemptsStarted": 0,
       "nextAttemptAt": null,
       "retryPolicy": null,
-      "lastError": null,
-      "prepared": null
+      "lastError": null
     },
     "deployments": []
   },
@@ -2001,37 +1918,7 @@
         "baseDelayMs": 100,
         "maxDelayMs": 150
       },
-      "lastError": null,
-      "prepared": {
-        "revision": 1,
-        "isUpdate": false,
-        "plan": {
-          "format": "test.plan.v1",
-          "content": [
-            0,
-            255,
-            65
-          ]
-        },
-        "prepared": {
-          "target": {
-            "route": "test",
-            "id": "opaque-B",
-            "cleanup": [
-              255,
-              0,
-              7
-            ]
-          },
-          "format": "test.request.v1",
-          "content": [
-            0,
-            255,
-            128,
-            42
-          ]
-        }
-      }
+      "lastError": null
     },
     "deployments": [
       {

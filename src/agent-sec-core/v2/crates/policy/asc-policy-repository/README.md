@@ -1,36 +1,37 @@
-# Binding aggregate repository contract
+# Binding reconciliation repository contract
 
-This crate defines shared storage data and two database operations, below both
-`asc-pcp` and `asc-pap-repository-memory`. It contains no worker, execution locks,
-retry calculation, Client calls or lifecycle transition decisions.
+Shared data and storage ports sit below PAP's memory repository, Reconciler and
+Policy Runtime. This crate has no Client calls, execution locks or scheduling logic.
 
 | Operation | Contract |
 |---|---|
-| `get_binding_state(id)` | Consistent optional snapshot of the authoritative Binding, runtime and deployments |
-| `compare_exchange_binding_state(expected, write)` | Compare the complete snapshot and atomically replace or remove the aggregate; return `Applied`, `AlreadyApplied` or `Conflict` |
+| `get_binding_state(id)` | Consistent Binding/spec, retry controls and deployment snapshot |
+| `compare_exchange_binding_state(expected, write)` | Atomic conditional reconciliation patch or aggregate removal |
+| `scan_reconciliation(after, limit)` | Bounded page of Binding metadata ordered by stable ID; scheduler filters pending/running |
 
-`BindingStateWrite` carries a fresh write ID and `next: Option<BindingStateSnapshot>`.
-`Some` replaces an existing aggregate; `None` removes the Binding, runtime,
-deployments and receipt atomically. A replacement never inserts an absent ID.
-A repeated removal of an absent ID returns `AlreadyApplied`: Binding IDs are
-server-generated and never reused, so removal needs no permanent tombstone.
-CAS includes runtime and deployment data: matching public revision/status alone
-cannot authorize overwriting newer runtime changes. Reconciler writes preserve
-the Binding spec; request admission belongs to PAP. The memory implementation
-shares PAP's current Binding map. A receipt copy is acknowledgement metadata,
-never a second authoritative Binding.
+`BindingStateWrite.next` contains `ReconciliationPatch`, with optional status,
+runtime and deployments fields. It cannot carry or write spec. `None` removes
+the Binding and its related records atomically. The `new(snapshot)` convenience
+constructor selects only reconciliation fields; spec remains owned by PAP.
 
-For existing aggregates, the latest CAS receipt survives PAP writes. Replaying its identical write ID and
-contents returns `AlreadyApplied` without changing current data; reusing that ID
-with different contents is invalid. Callers must share Reconciler execution
-ownership and acknowledge ambiguous results before starting another CAS writer
-for the same Binding. This is a bounded latest-write receipt, not historical
-idempotency for arbitrary out-of-order writers. Backend transaction errors commit nothing; an error/panic after a committed
-transaction may make acknowledgement ambiguous. Replaying the retained write
-acknowledges it without repeating target I/O. Unwind leaves a transaction either
-fully committed or fully uncommitted.
+A write compares Binding revision/status and only the runtime/deployment fields
+it updates. Thus a deployment-only write preserves a concurrent diagnostic update;
+it does not require a global resourceVersion. Aggregate removal compares all
+reconciliation fields. Reads and writes share the authoritative PAP Binding map.
 
-Runtime data keeps its existing serialized shape. `asc-pcp::ReconcileRecord`
-re-exports the aggregate as an alias for existing complete fixtures. The current
-implementation is process-local memory; SQL persistence and restart recovery
-remain separate work packages.
+The latest write receipt acknowledges an exact replay within a call, including
+a post-commit panic. Reusing its ID with different contents is invalid. Missing
+IDs acknowledge removal but never allow replacement to recreate a Binding. No
+permanent tombstones or historical receipts are retained. The core re-reads and
+recalculates conflicts; it does not retain a pending write across calls.
+
+`RuntimeState` contains attempts, deadline, pinned retry policy and last error.
+Plans, prepared requests and intermediate Client results are absent from storage.
+Deployments retain target identity/cleanup and observations, including UNKNOWN
+responsibility. AgentSight cleanup contains schema version and Binding ID/revision
+only; process identity and request digest remain in call-local prepared data.
+
+The implementation is process-local memory. Deadlines are monotonic process
+milliseconds; a future SQL implementation must provide durable time/recovery
+semantics rather than persisting those values unchanged. See the
+[runtime design](../../../../docs/design/BINDING_RECONCILER_RUNTIME_DESIGN_zh.md).

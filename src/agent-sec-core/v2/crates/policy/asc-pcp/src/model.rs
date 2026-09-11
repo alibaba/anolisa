@@ -1,6 +1,7 @@
 use crate::{BindingStateSnapshot, BindingStateWrite, Failure, Observation};
 use asc_foundation_types::{ResourceId, Revision};
 use asc_policy_types::binding::{BindingStatus, BindingView};
+use asc_policy_types::target::PreparedApply;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ impl ExpectedBinding {
     }
 }
 
-/// Atomic completion transaction, also retained in the execution slot on error.
+/// Temporary completion data owned by one reconcile call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AttemptOutcome {
@@ -38,13 +39,29 @@ pub(crate) struct AttemptOutcome {
     pub error: Option<Failure>,
 }
 
+/// Scheduling outcome of one reconcile call, not the Binding's lifecycle status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Disposition {
+    /// No due attempt ran: the Binding is missing, is not pending after recovery,
+    /// or its retry deadline is still in the future. The caller must preserve any
+    /// future deadline; skipping does not establish successful delivery.
     Skipped,
+    /// This call could not claim or complete the expected lifecycle, for example
+    /// after a CAS conflict or a newer intent. Reload repository state on the next
+    /// call; remote effects and recorded observations may already exist.
     Superseded,
+    /// Successful completion was committed: Apply/Update reached Ready, or Delete
+    /// confirmed all targets absent and removed the Binding aggregate.
     Completed,
-    RetryAt { at: u64 },
+    /// A retryable failure and its next deadline were committed. The caller
+    /// schedules a fresh attempt; no intermediate results survive this call.
+    RetryAt {
+        /// Deadline in milliseconds in the injected Clock's domain, not Unix time.
+        at: u64,
+    },
+    /// A terminal failure was committed because the error was rejected or the
+    /// attempt budget was exhausted. Deployment cleanup responsibility is retained.
     Failed { error: Failure },
 }
 
@@ -55,9 +72,17 @@ pub(crate) struct PendingWrite {
     pub write: BindingStateWrite,
     pub matched: bool,
 }
+/// Call-local outcome and write receipt retained only for panic bookkeeping.
 #[derive(Debug, Default)]
 pub(crate) struct ExecutionSlot {
-    pub(crate) removed: bool,
     pub(crate) pending: Option<AttemptOutcome>,
     pub(crate) completion: Option<PendingWrite>,
+}
+
+/// Preparation used only by the current attempt; never serialized or cached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedAttempt {
+    pub revision: Revision,
+    pub is_update: bool,
+    pub prepared: PreparedApply,
 }

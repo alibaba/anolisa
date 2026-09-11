@@ -15,7 +15,7 @@ mod transport;
 
 pub use client::{
     AGENTSIGHT_PREPARED_APPLY_FORMAT, AgentSightClient, AgentSightClientError,
-    AgentSightClientErrorKind, DEFAULT_AGENTSIGHT_ROUTE,
+    AgentSightClientErrorKind, AgentSightClientFactory, DEFAULT_AGENTSIGHT_ROUTE,
 };
 pub use process::{ProcProcessIdentityResolver, ProcessIdentityError, ProcessIdentityResolver};
 pub use transport::{

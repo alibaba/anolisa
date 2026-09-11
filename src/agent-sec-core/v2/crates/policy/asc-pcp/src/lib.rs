@@ -3,8 +3,8 @@
 //! The caller owns notification delivery and retry timers. A call owns its
 //! Binding execution slot through all target I/O and bookkeeping. No detached
 //! tasks are spawned; a blocking caller must join the call before shutdown.
-//! TODO(reconcile-scheduling): notification coalescing, queue capacity,
-//! throttling, fairness and periodic recovery scans belong to later integration.
+//! Notification coalescing, capacity, retry timers and compensation scanning
+//! live in asc-policy-runtime.
 //! Target identity, payload preparation and replacement semantics belong to
 //! Clients. This crate has no PAP service, concrete PEP, transport or SQL dependency.
 
@@ -24,22 +24,23 @@ mod panic_recovery_tests;
 #[path = "../tests/support/store.rs"]
 mod test_store;
 
-use model::{AttemptOutcome, ExecutionSlot};
+use model::{AttemptOutcome, ExecutionSlot, PreparedAttempt};
 pub use model::{Disposition, ExpectedBinding};
 pub use ports::*;
 pub use reconciler::BindingReconciler;
 
 // Re-export the shared contract for existing core consumers; definitions live
 // below both the runtime and concrete Clients, never in this implementation.
-pub use asc_policy_target_contracts::{TargetBindingAdapter, TargetDeploymentClient};
+pub use asc_policy_target_contracts::{
+    TargetBindingAdapter, TargetDeploymentClient, TargetDeploymentClientFactory,
+};
 pub use asc_policy_types::target::{
     DeploymentReport, Failure, FailureKind, Observation, PreparedApply, Presence, TargetRef,
 };
 
 pub use asc_policy_repository::{
     BindingStateRepository, BindingStateSnapshot, BindingStateWrite, Deployment, RetryPolicy,
-    RuntimeState, SavedApply, StoreError, WriteResult,
+    RuntimeState, StoreError, WriteResult,
 };
 /// Complete serialized state retained for existing fixture consumers.
 pub type ReconcileRecord = BindingStateSnapshot;
-pub use state::ReconcileExecution;

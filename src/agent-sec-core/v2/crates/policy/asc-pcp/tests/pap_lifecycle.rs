@@ -105,6 +105,9 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
+        Self::with_revision(1)
+    }
+    fn with_revision(revision: u32) -> Self {
         let repo = Arc::new(ProcessLocalPapRepository::default());
         let mut spec: PreparedBinding = serde_json::from_str(include_str!(
             "../../asc-policy-types/tests/fixtures/prepared-binding.json"
@@ -122,8 +125,20 @@ impl Rig {
                 spec.scope.revision,
             )
             .unwrap();
+        let mut binding = binding;
+        binding.spec.binding_revision = Revision::new(revision).unwrap();
+        let repo = Arc::new(
+            ProcessLocalPapRepository::with_binding_states(vec![ReconcileRecord {
+                binding: binding.clone(),
+                runtime: RuntimeState::default(),
+                deployments: vec![],
+            }])
+            .unwrap(),
+        );
+        repo.put_policy(&spec.policy).unwrap();
+        repo.put_scope(&spec.scope).unwrap();
+        let pap = PapService::new(repo.clone(), Arc::new(UnusedCompiler));
         let client = Arc::new(Client::default());
-        let execution = Arc::new(ReconcileExecution::default());
         let adapter = |binding: &PreparedBinding| -> Result<TranslationOutcome, AdapterFault> {
             Ok(TranslationOutcome::Translated(TargetBindingPlan {
                 format: "test.v1".into(),
@@ -133,10 +148,11 @@ impl Rig {
         let core = BindingReconciler::new(
             repo.clone(),
             Arc::new(adapter),
-            BTreeMap::from([(
-                "test".into(),
-                client.clone() as Arc<dyn TargetDeploymentClient>,
-            )]),
+            BTreeMap::from([("test".into(), {
+                let client = client.clone();
+                Arc::new(move || Ok(client.clone() as Arc<dyn TargetDeploymentClient>))
+                    as Arc<dyn asc_pcp::TargetDeploymentClientFactory>
+            })]),
             "test".into(),
             client.clone(),
             RetryPolicy {
@@ -144,7 +160,6 @@ impl Rig {
                 base_delay_ms: 100,
                 max_delay_ms: 200,
             },
-            execution,
         )
         .unwrap();
         Self {
@@ -174,7 +189,7 @@ impl Rig {
 }
 
 #[test]
-fn same_spec_failed_apply_reuses_prepared_bytes_and_resets_only_retry_controls() {
+fn same_spec_failed_apply_prepares_again_and_resets_only_retry_controls() {
     let rig = Rig::new();
     let id = &rig.binding.spec.binding_id;
     rig.client.0.lock().unwrap().reject_apply = true;
@@ -187,17 +202,11 @@ fn same_spec_failed_apply_reuses_prepared_bytes_and_resets_only_retry_controls()
     assert_eq!(rig.apply().unwrap(), rig.binding);
     let pending = rig.state();
     assert_eq!(pending.deployments, failed.deployments);
-    assert_eq!(
-        pending.runtime,
-        RuntimeState {
-            prepared: failed.runtime.prepared,
-            ..Default::default()
-        }
-    );
+    assert_eq!(pending.runtime, RuntimeState::default());
     rig.client.0.lock().unwrap().reject_apply = false;
     assert_eq!(rig.core.reconcile(id).unwrap(), Disposition::Completed);
     let script = rig.client.0.lock().unwrap();
-    assert_eq!(script.prepare_count, 1);
+    assert_eq!(script.prepare_count, 2);
     assert_eq!(script.requests.len(), 2);
     assert_eq!(script.requests[0], script.requests[1]);
     assert_eq!(rig.state().binding.spec, rig.binding.spec);
@@ -213,7 +222,7 @@ fn deletion_retry_preserves_targets_then_removes_record_and_new_create_uses_fres
     let pending = rig.pap.delete_binding(id).unwrap();
     assert_eq!(pending.spec, ready.binding.spec);
     assert_eq!(rig.state().deployments, ready.deployments);
-    assert_eq!(rig.state().runtime.prepared, ready.runtime.prepared);
+    assert_eq!(rig.state().runtime, RuntimeState::default());
     assert_eq!(rig.apply(), Err(PapError::OperationInProgress));
     rig.client.0.lock().unwrap().reject_delete = true;
     assert!(matches!(
@@ -299,14 +308,7 @@ fn spec_change_clears_prepared_but_keeps_previous_target_for_cleanup() {
 
 #[test]
 fn maximum_revision_allows_same_spec_retry_and_delete_but_rejects_spec_change() {
-    let mut rig = Rig::new();
-    let before = rig.state();
-    let mut maximum = before.clone();
-    maximum.binding.spec.binding_revision = Revision::new(u32::MAX).unwrap();
-    rig.repo
-        .compare_exchange_binding_state(&before, &BindingStateWrite::new(maximum.clone()))
-        .unwrap();
-    rig.binding = maximum.binding;
+    let rig = Rig::with_revision(u32::MAX);
     let id = &rig.binding.spec.binding_id;
     rig.client.0.lock().unwrap().reject_apply = true;
     assert!(matches!(

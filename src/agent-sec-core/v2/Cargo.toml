@@ -16,6 +16,7 @@ members = [
     "crates/policy/asc-pap",
     "crates/policy/asc-pap-repository-memory",
     "crates/policy/asc-pcp",
+    "crates/policy/asc-policy-runtime",
     "crates/policy/asc-policy-engine",
     "crates/policy/asc-policy-target-contracts",
     "crates/policy/asc-policy-types",
@@ -31,6 +32,7 @@ repository = "https://github.com/alibaba/anolisa"
 publish = false
 
 [workspace.dependencies]
+asc-policy-runtime = { path = "crates/policy/asc-policy-runtime" }
 asc-agentsight-client = { path = "crates/integrations/asc-agentsight-client" }
 asc-daemon = { path = "apps/asc-daemon" }
 asc-daemon-client = { path = "crates/daemon/asc-daemon-client" }

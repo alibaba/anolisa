@@ -18,7 +18,9 @@ use crate::{
 };
 
 mod reconciliation;
-pub use reconciliation::{AGENTSIGHT_PREPARED_APPLY_FORMAT, DEFAULT_AGENTSIGHT_ROUTE};
+pub use reconciliation::{
+    AGENTSIGHT_PREPARED_APPLY_FORMAT, AgentSightClientFactory, DEFAULT_AGENTSIGHT_ROUTE,
+};
 
 const BINDING_PLAN_FORMAT: &str = "agentsight.actplane.binding.v1";
 const BINDING_PLAN_SCHEMA_VERSION: u16 = 1;

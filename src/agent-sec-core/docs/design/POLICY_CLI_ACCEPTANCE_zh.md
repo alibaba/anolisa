@@ -88,7 +88,7 @@ transport/输出边界验收，不用尚未实现的 V1 stub 或假设的通用�
 | CCLI-008 | 总 deadline 覆盖 blocked write/分段 read、精确 LF-inclusive 边界、不自动重试 | `transport.rs` 的 deadline、frame limit、no replay assertions | PASS |
 | CCLI-009 | 真实 CLI＋daemon 非 root 授权与配置生命周期 | 暂无自动化入口 | DEFERRED：双进程 E2E 暂缓 |
 | CCLI-010 | 真实 CLI＋daemon 非 root 完整 CRUD | 暂无自动化入口 | DEFERRED：双进程 E2E 暂缓 |
-| CCLI-012 | 常规 Cargo 的真实 daemon binary 非 root CRUD | `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_runs_full_crud_without_root` | PASS |
+| CCLI-012 | 真实 daemon binary 启动和非 root 只读授权 | `asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root` | 默认 Client 凭据不参与启动；验证查询及退出；完整 CRUD 进程 E2E 单独验收 |
 | CCLI-013 | startup UID 校验及管理员不可继续委派 | daemon CLI `administrator_uids_are_explicit_repeatable_and_bounded`、core `startup_administrators_are_explicit_and_cannot_delegate` | PASS |
 | CCLI-011 | workspace test、Clippy、fmt、Rustdoc、lockfile 和 diff | 以下命令 | PASS |
 | CCLI-014 | 无 runtime 的同步 UDS 与共享 deadline | `transport.rs` 普通 `#[test]`：LF/EOF、精确 frame 边界、分段读、阻塞写、写后读取共享预算、连接前超时、Linux 满连接队列、不重放；`cargo tree -p asc-cli --edges normal` | PASS：13 个同步 transport 测试；普通依赖树无 Tokio |

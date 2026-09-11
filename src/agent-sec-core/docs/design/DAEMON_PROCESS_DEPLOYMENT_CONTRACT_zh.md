@@ -280,8 +280,10 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 失败测试、`asc-cli/tests/pap_process.rs` 的真实 CLI 进程和 UDS 授权测试，以及客户端
 依赖图。CLI 进程测试使用测试进程内的 daemon service；真实 CLI 与 daemon binary
 共同运行的双进程 E2E 暂缓接入。
-`asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_runs_full_crud_without_root`
-同时为常规 Cargo 测试提供真实 daemon binary 成功场景。完整范围与命令见
+`asc-daemon/tests/bootstrap.rs::dproc_configured_administrator_can_query_without_root`
+验证真实 daemon binary 的只读授权和信号退出，不依赖 Client 默认凭据是否可用。测试不创建或覆盖宿主凭据，不向宿主 AgentSight 下发策略。
+完整 PAP CRUD 保留在 `asc-daemon/tests/pap_protocol.rs` 的进程内 UDS fixture 中；后台下发
+装配由 DPROC-021 验证，完整 CLI/daemon 进程链路仍归独立 E2E PR。完整范围与命令见
 [`POLICY_CLI_ACCEPTANCE_zh.md`](POLICY_CLI_ACCEPTANCE_zh.md)，不扩大其它 DPROC gate。
 
 ## 9. 验收矩阵
@@ -319,6 +321,37 @@ DPROC-011 和 DPROC-018 的 focused evidence 为 `asc-cli/tests/commands.rs` 的
 
 每个 DPROC ID 必须映射到机器可执行 fixture 或真实部署证据。Rust unit test 不能代替安装后
 service/package、server-side admission 或真实 Kubernetes rollout 验证。
+
+### 9.3 **[TARGET V2]** Policy 下发配置与生命周期
+
+daemon 的 `main.rs` 调用策略下发服务初始化入口；`reconciliation.rs` 内部通过
+`AgentSightClientFactory::default()` 注册首版 PEP，并启动 Binding 后台下发；注册没有凭据或网络 I/O。
+具体 PEP 的选择和装配由该初始化模块所有；未来的环境变量选择尚未实现。
+目标地址、默认 token 文件路径及凭据读取由 Client 封装，daemon/CLI 不暴露对应参数，
+CRUD request 不传递目标凭据。每次 reconcile 尝试创建 Client 并读取最新凭据；
+缺失或无效凭据进入该 Binding 的有界重试，不阻止 UDS 启动，错误不回显文件内容。Client 对非 literal loopback 的 HTTP 拒绝凭据传输，HTTPS 保留证书验证。
+授权仍来自 UDS peer credentials 与既有管理员配置。
+
+启动顺序是构造 Repository、Client factory/核心并尝试启动 Runtime，再开放 UDS 请求。
+Runtime 初始化失败时记录安全错误并注入不可用通知入口，Binding mutation 返回既有准入错误；
+Policy/Scope CRUD、读查询及其它 daemon 服务继续工作。不能以不注入通知入口的方式静默接受 Binding 写请求。目标尚未
+READY 或暂时不可连接也不阻止 daemon 启动。shutdown 先停止 UDS 新准入并 drain 已准入请求，再停止 Runtime
+领取和扫描，最多等待 30s join 活跃调用；随后沿用进程外层 1s Tokio shutdown 上限。超时
+不会伪装成同步调用已取消或清理成功。单次 reconcile panic 在 worker 调用边界隔离：
+核心收尾后保留已提交状态，未确认结果停止该 ID 自动执行，worker 继续处理其它 Binding，
+不关闭写准入。timer/scanner 或 worker 调度代码自身异常才使 reconciliation 服务失败并停止领取，关闭 Binding mutation 准入，
+但不会主动关闭 daemon。首版不自动重建失败 Runtime，需要进程重启；普通 Binding
+重试或终态失败不影响服务健康。单 Binding 存储/数据错误及 CAS 竞争耗尽只安排该 ID 重试；
+存储/数据错误输出安全诊断，不能伪造已落库的失败状态。补扫失败影响 health，但不关闭写准入。
+实际 Repository 错误由每次 CRUD 操作返回。Memory Repository 无跨重启恢复保证。
+
+| ID | 必须验证 | 可执行 fixture |
+|---|---|---|
+| DPROC-020 | 默认凭据不参与 daemon 启动；PAP 读查询和信号退出可用；reconciliation 不可用时仅拒绝 Binding 写入，Policy/Scope CRUD 仍可完成 | `v2/apps/asc-daemon/tests/bootstrap.rs`；`tests/reconciliation.rs::unavailable_reconciliation_only_rejects_binding_writes` |
+| DPROC-021 | daemon 注入真实 Adapter/核心/Runtime，PAP 接受后下发，Delete 清理及 owned shutdown | `v2/apps/asc-daemon/tests/reconciliation.rs::configured_composition_delivers_pap_intent_and_joins_its_workers` |
+
+DPROC-021 是进程内装配验收，Client 使用 scripted port；完整 CLI→daemon 进程 E2E 是单独 PR，
+不能由此宣称真实 AgentSight/kernel 生效或持久化恢复通过。
 
 ## 10. 当前实现证据
 

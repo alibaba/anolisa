@@ -104,23 +104,22 @@ fn run_case(case: ThreadCase) {
     });
     let (entered_tx, entered_rx) = channel();
     let (release_tx, release_rx) = channel();
-    let (waiting_tx, waiting_rx) = channel();
     let blocking = Arc::new(Blocking {
         inner: harness.clone(),
         block_at: case.block_at.clone(),
         entered: entered_tx,
         release: Mutex::new(release_rx),
     });
-    // Independent workers share the core execution context, not storage locks.
-    let execution = Arc::new(ReconcileExecution::default());
+    // The caller serializes attempts. Runtime tests verify queue ownership.
     let build = || {
         BindingReconciler::new(
             blocking.clone(),
             harness.clone(),
-            BTreeMap::from([(
-                "test".into(),
-                blocking.clone() as Arc<dyn TargetDeploymentClient>,
-            )]),
+            BTreeMap::from([("test".into(), {
+                let client = blocking.clone();
+                Arc::new(move || Ok(client.clone() as Arc<dyn TargetDeploymentClient>))
+                    as Arc<dyn crate::TargetDeploymentClientFactory>
+            })]),
             "test".into(),
             harness.clone(),
             RetryPolicy {
@@ -128,7 +127,6 @@ fn run_case(case: ThreadCase) {
                 base_delay_ms: 100,
                 max_delay_ms: 150,
             },
-            execution.clone(),
         )
         .unwrap()
     };
@@ -169,17 +167,6 @@ fn run_case(case: ThreadCase) {
             );
             first_task.abort();
         }
-        let second_id = id.clone();
-        let second_task = tokio::task::spawn_blocking(move || {
-            waiting_tx.send(()).unwrap();
-            second.reconcile(&second_id)
-        });
-        waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let slot = execution.execution_slot(&id).unwrap().unwrap();
-        assert!(
-            matches!(slot.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
-            "ownership released before join/bookkeeping"
-        );
         assert_eq!(
             harness
                 .script
@@ -193,7 +180,7 @@ fn run_case(case: ThreadCase) {
         );
         release_tx.send(()).unwrap();
         assert_eq!(first_task.await.unwrap().unwrap(), case.first);
-        assert_eq!(second_task.await.unwrap().unwrap(), case.second);
+        assert_eq!(second.reconcile(&id).unwrap(), case.second);
     });
     assert_eq!(harness.repository.read(&id).unwrap(), case.expected);
     let script = harness.script.lock().unwrap();

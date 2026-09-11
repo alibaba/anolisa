@@ -1,6 +1,6 @@
 //! PEP-specific preparation/replay and replacement. No repository dependency.
 
-use asc_policy_target_contracts::TargetDeploymentClient;
+use asc_policy_target_contracts::{TargetDeploymentClient, TargetDeploymentClientFactory};
 use asc_policy_types::target::{
     DeploymentReport, Failure, FailureKind, Observation, PreparedApply, Presence, TargetRef,
 };
@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use asc_policy_types::identifiers::{ResourceId, Revision};
 use asc_policy_types::target::TargetBindingPlan;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
@@ -16,7 +17,58 @@ use super::{
     ApplyBindingRequest, MAX_PLAN_BYTES, classify_process_identity_error, decode_plan, rejected,
     retryable, target_binding_id,
 };
-use crate::{AgentSightTransport, ProcessIdentityError, ProcessIdentityResolver};
+use crate::{
+    AgentSightClientConfigError, AgentSightTransport, ProcessIdentityError, ProcessIdentityResolver,
+};
+
+/// Registers the default PEP without reading credentials or contacting it.
+/// Each attempt receives its own Client, including a fresh token-file read.
+pub struct AgentSightClientFactory {
+    base_url: String,
+    token_file: std::path::PathBuf,
+}
+
+impl Default for AgentSightClientFactory {
+    fn default() -> Self {
+        Self::new(
+            crate::DEFAULT_AGENTSIGHT_BASE_URL,
+            crate::DEFAULT_AGENTSIGHT_TOKEN_FILE,
+        )
+    }
+}
+
+impl AgentSightClientFactory {
+    /// Retains configuration without reading credentials or contacting the PEP.
+    pub fn new(base_url: impl Into<String>, token_file: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token_file: token_file.into(),
+        }
+    }
+}
+
+impl TargetDeploymentClientFactory for AgentSightClientFactory {
+    fn open(&self) -> Result<Arc<dyn TargetDeploymentClient>, Failure> {
+        AgentSightClient::new_with_token_file(&self.base_url, &self.token_file)
+            .map(|client| Arc::new(client) as Arc<dyn TargetDeploymentClient>)
+            .map_err(configuration_failure)
+    }
+}
+
+fn configuration_failure(error: AgentSightClientConfigError) -> Failure {
+    let (kind, code) = match error {
+        AgentSightClientConfigError::InvalidBaseUrl => {
+            (FailureKind::Rejected, "AGENTSIGHT_INVALID_BASE_URL")
+        }
+        AgentSightClientConfigError::CredentialUnavailable => {
+            (FailureKind::Retryable, "AGENTSIGHT_CREDENTIAL_UNAVAILABLE")
+        }
+        AgentSightClientConfigError::InvalidCredential => {
+            (FailureKind::Retryable, "AGENTSIGHT_INVALID_CREDENTIAL")
+        }
+    };
+    Failure::new(kind, code)
+}
 
 /// Versioned opaque prepared payload consumed only by this Client.
 pub const AGENTSIGHT_PREPARED_APPLY_FORMAT: &str = "agentsight.enforcement.apply.v1";
@@ -136,7 +188,7 @@ impl<T, R> AgentSightClient<T, R> {
 
 impl<T: AgentSightTransport, R: ProcessIdentityResolver> AgentSightClient<T, R> {
     /// Prepares a deterministic target identity and fixed request without HTTP.
-    /// The caller must save this value before calling create/update.
+    /// The caller registers its target reference before create/update; request bytes are call-local.
     /// # Errors
     /// Returns a safe plan/process/boot resolution error; no target is modified.
     pub fn prepare_apply(

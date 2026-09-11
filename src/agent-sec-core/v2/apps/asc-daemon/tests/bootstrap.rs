@@ -8,8 +8,6 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 
-mod support;
-
 static DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
 
 struct RunningBinary {
@@ -59,7 +57,7 @@ async fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
         }
     })
     .await
-    .expect("SIGTERM should stop the foreground daemon")
+    .expect("the foreground daemon should exit within the deadline")
 }
 
 async fn request(path: &Path, payload: &[u8]) -> Value {
@@ -80,7 +78,7 @@ async fn dproc_002_003_and_partial_013_binary_registers_pap_and_cleans_socket() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dproc_configured_administrator_runs_full_crud_without_root() {
+async fn dproc_configured_administrator_can_query_without_root() {
     run_binary_scenario(true).await;
 }
 
@@ -98,7 +96,7 @@ async fn run_binary_scenario(configure_admin: bool) {
         .arg(&socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut running = RunningBinary {
@@ -108,17 +106,23 @@ async fn run_binary_scenario(configure_admin: bool) {
     };
 
     wait_for_socket(&running.socket_path).await;
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../crates/daemon/asc-daemon-protocol/tests/fixtures/pap-crud-e2e.json"
-    ))
-    .unwrap();
+    // A read-only request exercises authorization without sending deployments
+    // to the host's AgentSight. Binding delivery has separate component fixtures.
+    let response = request(
+        &running.socket_path,
+        b"{\"method\":\"policy.templates.list\",\"params\":{\"limit\":10,\"offset\":0}}\n",
+    )
+    .await;
+    uuid::Uuid::parse_str(response["requestId"].as_str().unwrap()).unwrap();
     if configure_admin || std::fs::metadata(&running.socket_path).unwrap().uid() == 0 {
-        support::run_frozen_pap_crud_scenario(&running.socket_path, &fixture).await;
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "requestId": response["requestId"],
+                "result": {"items": [], "total": 0}
+            })
+        );
     } else {
-        let first_request = fixture["steps"][0]["request"].clone();
-        let mut payload = serde_json::to_vec(&first_request).unwrap();
-        payload.push(b'\n');
-        let response = request(&running.socket_path, &payload).await;
         assert_eq!(response["error"]["code"], "permission_denied");
     }
 
