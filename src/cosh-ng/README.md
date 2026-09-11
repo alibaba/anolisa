@@ -108,7 +108,11 @@ for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
 the shell and Core. In enhanced integration, the cosh-core runtime makes
 `/agent` open a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
-`@path` references.
+`@path` references. Type `/` in the Composer to browse slash commands, use
+Up/Down to select, and press Enter to execute the selected command. Use Tab to
+complete a command before adding arguments; Enter submits drafts with arguments
+or multiple lines as written.
+Ordinary shell prompts keep native path completion.
 
 To run one locally installed ACP adapter without entering the interactive
 Shell, verify it first and then pipe the prompt through stdin:

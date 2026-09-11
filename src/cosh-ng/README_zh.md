@@ -101,7 +101,9 @@ bash: hello: command not found
 调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
 统一使用 `recommend`、`auto` 或 `trust`。增强集成使用 cosh-core runtime 时，`/agent`
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
-`@路径`引用。
+`@路径`引用。在 Composer 中输入 `/` 可浏览 slash 命令，用上/下键选择、Enter 执行。
+需要填写参数时先按 Tab 补全；带参数或多行的草稿由 Enter 按原文提交。
+普通 Shell prompt 保留原生路径补全。
 
 如果要在不进入交互式 Shell 的情况下运行本机已安装的 ACP Adapter，可以先检查
 Adapter，再通过 stdin 发送 prompt。

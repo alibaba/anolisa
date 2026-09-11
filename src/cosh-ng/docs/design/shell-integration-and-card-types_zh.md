@@ -47,7 +47,7 @@ Enhanced 内部的路由子状态，不等同于没有 hook 的 Native 集成。
 | 无 | Native | 子 Shell | 每个字节直接写入 PTY。Cosh 不装饰用户原提示符，也不观察命令事件。 |
 | `◌` | Enhanced Shell-only | 子 Shell，Cosh 观察 | 包括 `hello`、`/` 和 `??` 在内的普通输入都交给 Shell。Enhanced marker 集成仍加载，因此执行后洞察和安全切换仍可用。 |
 | `◇` | Enhanced Assisted | Shell 执行，Cosh 可路由 | Cosh 可以在 Shell 执行前观察、分类或路由提交的输入。 |
-| `◆` | Agent | Agent runtime | `/agent` 打开无边框行内 Composer，并在可编辑文本前持续显示 `◆ `；任意文本，包括 `ls`，都按 Agent 请求处理。 |
+| `◆` | Agent | Agent runtime | `/agent` 打开无边框行内 Composer，并在可编辑文本前持续显示 `◆ `；普通文本（包括 `ls`）按 Agent 请求处理；开头的 slash 控制命令在本地分发。 |
 | `/` | Cosh Command | Cosh 控制面 | 明确的斜杠命令，只在 Enhanced Assisted 中拦截。 |
 
 `◇ ` 和 `◌ ` 是锚定在 Enhanced hook 的 `prompt_ready` 边界上的外层终端装饰，不会写入
@@ -68,6 +68,22 @@ prompt ghost 或卡牌处于活动状态时，保留原有的 `Shift+Tab` 行为
 
 原生输入绕过候选内容缓存、prompt ghost、斜杠路由和卡牌捕获。信号、终端尺寸
 变化和 EOF 等终端控制仍由 PTY 生命周期处理。
+
+## Composer 命令提交
+
+Composer 的 capture 明确携带 Agent 输入来源。命令候选复用 registry 的公开名称，
+按名称去重，保留完整集合，仅渲染当前选中项所在的六行窗口。输入线程使用当前
+编辑器文本和光标同步计算 slash 候选，避免同一读取块内的 Tab 或 Enter 接受旧候选。
+Enter 仅在单行草稿只有命令 token 时复用补全，并在提交事件前发送更新后的编辑器
+快照。带参数或多行的草稿保留原文。
+路径和 Skill 的 runtime 补全必须匹配文本与光标快照才能接受。
+
+Capture 和提交事件保留 Composer 的工作目录快照，输入事件桥将它填入 slash
+intercept 的 cwd，不依赖 ShellReady 时序或全局 prompt cwd 缓存。
+提交事件携带 slash 路由标记；输入事件桥只生成一次 slash 或 Agent intercept。
+Slash 提交不会保留待处理的 Composer 请求元数据。现有 slash/control consumer
+负责解析、确认、执行以及 prompt 恢复；渲染器不执行命令，也不会自动重开 Composer
+抢占后续卡片。普通草稿和 Shell 路径补全沿用原有路由。
 
 ## 输出事件卡牌
 
