@@ -145,6 +145,9 @@ stacking report) is computed in Rust in-process.
    Not suitable for production cost planning without real workload validation.
 5. **Default config only**: All measurements use default compressor settings.
    Production adapters may use different configurations with different results.
+6. **RTK version metadata**: `benchmark_identity.json` records `rtk_version` as a
+   best-effort traceability field. It will be `"unavailable"` when the rtk binary
+   is not built or not executable; this does not affect the benchmark results.
 
 ## Behavior note
 
