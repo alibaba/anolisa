@@ -272,6 +272,7 @@ test-integration:
 	python3 tests/test_resolve_agent_id.py
 	python3 tests/test_release_regression_probe.py
 	python3 tests/test_qwenpaw_plugin.py
+	python3 tests/test_cosh_ng_compat.py
 
 # Protocol v2 Common Hook parity: replay the contract corpus through the
 # current hooks and real debug binary, then compare with the v2 goldens.
