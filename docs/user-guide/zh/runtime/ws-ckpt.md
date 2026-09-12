@@ -198,6 +198,140 @@ fusermount3 -u /path/to/workspace    # 其他 FUSE 挂载
 后续写入落在副本上而不是挂载的文件系统里，两边会静默分叉。初始化前先卸载嵌套挂载，
 或让挂载点保持在工作区目录树之外。
 
+### 回滚到首次对话之前的快照会阻断 OpenClaw
+
+OpenClaw 首次运行时会向工作区种入一组基线文件（AGENTS.md、BOOTSTRAP.md、SOUL.md、
+IDENTITY.md、USER.md；2026.7.x 还会种入 HEARTBEAT.md 与 TOOLS.md），
+并为该事件保留一条 attestation 记录。如果回滚到 **OpenClaw 首次对话之前**打的快照
+（即不含这些基线文件的快照），OpenClaw 会把基线文件的消失误判为工作区被误删，拒绝工作：
+
+```
+WorkspaceVanishedError: OpenClaw workspace appears to have disappeared ...
+Refusing to reseed BOOTSTRAP.md over a recently attested workspace.
+```
+
+**强烈不建议回滚到 OpenClaw 首次对话之前打的快照。** 首次对话完成后立即打一个快照
+（`ws-ckpt checkpoint -w ...`），此后所有回滚的目标快照都对应一个真实使用过的工作区。
+
+该保护实际检查的是 survival evidence（存活证据），而非快照的拍摄时间：只要目标快照保留了
+OpenClaw 认得的内容，回滚就是安全的。被认可的证据按版本区分：
+
+- 所有版本：
+  - 仍然存在的 BOOTSTRAP.md（setup 尚未完成）；
+  - 与模板不同的任意 profile 文件（SOUL.md、IDENTITY.md、USER.md）；
+  - `memory/` 目录（或 MEMORY.md）；
+  - 已安装的 skill（`skills/<name>/SKILL.md`）；
+  - 种入的基线文件全部仍在、且与 OpenClaw 生成时逐字节一致——attestation 中记录了它们的
+    hash——因此一个从未定制过、但已正常完成 setup 的工作区同样能通过检查。
+- 仅 2026.7.x：内容与生成版本不再一致的必需 bootstrap 文件（AGENTS.md、TOOLS.md 或
+  HEARTBEAT.md）。
+- 仅 2026.8.1 及以后：被定制过的 AGENTS.md（内容既不同于生成版本、也不同于模板）。这些
+  版本不再种入 TOOLS.md 与 HEARTBEAT.md，两者在该版本下也永远不算证据。
+
+由此有两个推论：
+
+- 只有当快照丢掉了**全部**上述证据时才会触发该错误——典型情形是回到基线文件种入之前的
+  状态，或这些文件后来被删除、且没有留下 memory、skills 或定制过的文件。仅仅从未定制过
+  工作区并不会触发：与生成内容一致的基线文件本身就是证据。
+- 不要把安全等同于「快照包含完整的一组种子文件」：OpenClaw 在 setup 完成后会删除
+  BOOTSTRAP.md，且 2026.8.1 起 `openclaw-workspace-state.json` 仅是 legacy 迁移输入——
+  正常的对话后快照两者都不含，但依然是安全的。
+
+**恢复方法（按 OpenClaw 版本选择）：**
+
+- OpenClaw 2026.7.x 及更早版本：删除该工作区对应的 attestation 记录。记录文件名是工作区
+  **归一化后**绝对路径的 SHA-256；OpenClaw 会依次在其状态目录（遵循 `OPENCLAW_STATE_DIR`）、
+  effective home 目录（遵循 `OPENCLAW_HOME`，默认 `$HOME`）下的 `.openclaw` 与 legacy
+  `.clawdbot` 状态目录、以及工作区旁路径查找记录。OpenClaw 用 Node.js 的 `path.resolve`
+  归一化路径（折叠 `..` 段与重复斜杠）并展开 env 覆盖值开头的 `~`，因此下面的命令整体在
+  `node` 内运行：由它推导出完全相同的路径并亲自删除记录，路径内容不会再被 shell 二次求值
+  （npm 方式安装的 OpenClaw CLI 所在环境必有 Node.js）。
+
+  有一个输入是命令无法自行推导的：以 `openclaw --profile <name>` 启动的 agent，其状态目录
+  是 `<effective home>/.openclaw-<name>`（`--dev` 等价于 `--profile dev`），而这个选择只
+  存在于 agent 进程内部——在 shell 里 export `OPENCLAW_PROFILE` 并**不会**改变状态目录，
+  只有命令行 flag 才会。与其猜错目录、静默清理无效位置，命令会在 `OPENCLAW_STATE_DIR`
+  未设置、且 effective home 下存在多个 `.openclaw*` 状态目录时直接报错退出。此时先 export
+  agent 实际使用的状态目录，再重新执行：
+
+  ```bash
+  export OPENCLAW_STATE_DIR="$HOME/.openclaw-team"   # agent 以 `openclaw --profile team ...` 运行
+  ```
+
+  恢复命令：
+
+  ```bash
+  WS='/path/to/workspace'   # 工作区绝对路径（单引号赋值：路径中的 $、反引号等保持字面值）
+  node -e '
+    const crypto = require("crypto"), fs = require("fs"), os = require("os"), path = require("path");
+    const env = process.env;
+    if (!process.argv[1]) { console.error("Set WS to the workspace path and pass it to this command."); process.exit(1); }
+    const rawHome = (env.OPENCLAW_HOME || "").trim();
+    const OC_HOME = rawHome
+      ? path.resolve(rawHome.replace(/^~(?=$|[\\/])/, os.homedir()))
+      : os.homedir();
+    const WS = path.resolve(process.argv[1]);
+    const HASH = crypto.createHash("sha256").update(WS).digest("hex");
+    const sdOverride = (env.OPENCLAW_STATE_DIR || "").trim();
+    let SD;
+    if (sdOverride) {
+      SD = path.resolve(sdOverride.replace(/^~(?=$|[\\/])/, OC_HOME));
+    } else {
+      let candidates = [];
+      try {
+        candidates = fs.readdirSync(OC_HOME, { withFileTypes: true })
+          .filter((e) => e.isDirectory() && (e.name === ".openclaw" || e.name.startsWith(".openclaw-")))
+          .map((e) => path.join(OC_HOME, e.name));
+      } catch {}
+      if (candidates.length > 1) {
+        console.error("Multiple OpenClaw state directories exist under " + OC_HOME + ":\n"
+          + candidates.map((d) => "  " + d).join("\n") + "\n"
+          + "An agent started with `openclaw --profile <name>` (or `--dev`) keeps its state in\n"
+          + "<effective home>/.openclaw-<name>, and that value exists only inside the agent process.\n"
+          + "Export the state directory the agent actually used, then rerun this command:\n"
+          + "  export OPENCLAW_STATE_DIR=" + OC_HOME + "/.openclaw-<name>");
+        process.exit(1);
+      }
+      SD = candidates[0] || path.join(OC_HOME, ".openclaw");
+    }
+    const stateDirs = [...new Set([SD, path.join(OC_HOME, ".openclaw"), path.join(OC_HOME, ".clawdbot")])];
+    const targets = stateDirs.map((d) => path.join(d, "workspace-attestations", HASH + ".attested"));
+    targets.push(WS + ".attested");
+    console.log("workspace:   " + WS);
+    console.log("state dir:   " + SD);
+    let failed = false;
+    for (const t of targets) {
+      try {
+        if (fs.existsSync(t)) { fs.rmSync(t); console.log("removed:     " + t); }
+        else { console.log("not present: " + t); }
+      } catch (err) {
+        failed = true;
+        console.error("FAILED:      " + t + " (" + err.message + ")");
+      }
+    }
+    if (failed) process.exit(1);
+  ' "$WS"
+  ```
+
+  删除后重新运行 agent 会话，OpenClaw 会重新种入基线文件并开始新的 attestation。
+
+- OpenClaw 2026.8.1 及以上：attestation 记录已迁入 OpenClaw 的状态 SQLite 数据库，
+  目前没有只删除这一条记录的命令。报错信息建议执行完整的 OpenClaw 重置
+  （`openclaw reset --scope full`），但那会删除**所有** agent 的 workspace 以及整个
+  OpenClaw 状态目录——包括凭据、会话和已安装的 plugin——破坏面远超本场景所需。要
+  恢复工作区的正常行为，建议再次回滚到工作区真实使用过期间打的快照（即满足上述存活
+  证据条件的任意快照）：
+
+  ```bash
+  ws-ckpt rollback -w /path/to/workspace -s <snapshot-id>
+  ```
+
+  回滚后工作区立即可用。另外，guard 状态本身会过期：最后一次状态写入 24 小时后，OpenClaw
+  会清掉过期的 attestation 并在下一次 agent 运行时重新种入工作区，因此保留 pre-baseline
+  快照、24 小时后重试同样可行，无需完整重置。若不想等 24 小时、需要立即解除阻断，目前
+  只能执行上文所述的完整 OpenClaw 重置。注意：无论是等待过期还是执行重置，下一次 agent
+  运行时基线文件都会被重新种入工作区。
+
 ---
 
 ## 自然语言用法（Agent 驱动）
