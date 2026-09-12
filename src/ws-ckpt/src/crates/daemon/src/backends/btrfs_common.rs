@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::fs::File;
@@ -126,6 +127,7 @@ pub async fn cleanup_init_storage(
     subvol_path: &Path,
     snap_dir: &Path,
     backup_owned: bool,
+    fs_root: &Path,
 ) {
     if backup_owned {
         restore_original_from_backup(original_path).await;
@@ -135,7 +137,11 @@ pub async fn cleanup_init_storage(
         }
     }
     let _ = tokio::fs::remove_dir_all(snap_dir).await;
-    if let Err(e) = delete_subvolume(subvol_path).await {
+    // Space-aware (#3053): the half-migrated subvolume can hold substantial
+    // rsync'd data, and the trigger chain for this cleanup is often "backend
+    // full → init fails with ENOSPC" — i.e. exactly the regime where a plain
+    // async delete strands a cleaner-stalled zombie.
+    if let Err(e) = delete_subvolume_space_aware(subvol_path, fs_root).await {
         error!("cleanup: failed to delete subvolume: {}", e);
     }
 }
@@ -315,6 +321,468 @@ pub async fn delete_subvolume(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Space-aware deletion & zombie subvolume handling (issue #3053)
+//
+// `btrfs subvolume delete` is asynchronous: it only queues the subvolume for
+// removal, and the kernel cleaner thread frees the extents later. Under
+// ENOSPC the cleaner cannot make progress, so deleted subvolumes become
+// zombies (`btrfs subvolume list -d` shows `top level 0` / path `DELETED`)
+// that pin all backend space. Because the daemon reuses the existing mount
+// across restarts (by design, #2809), no mount cycle ever kicks the cleaner,
+// and the space stays pinned until an operator manually umounts.
+//
+// The helpers below (a) gate deletions on backend fullness and push the
+// cleaner synchronously when the backend is nearly full, and (b) detect and
+// drain pre-existing zombies at bootstrap.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Backend usage percentage at which subvolume deletion switches to the
+/// guarded path (delete + bounded `btrfs subvolume sync` to push the cleaner).
+pub const FS_DELETE_GUARD_THRESHOLD_PERCENT: f64 = 95.0;
+
+/// Timeout for the post-delete `btrfs subvolume sync` on the guarded path.
+/// Bounds the extra latency a rollback/cleanup pays when the backend is full.
+pub const DELETE_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout for the bootstrap zombie sweep's `btrfs subvolume sync`. Longer
+/// than the delete-path timeout: draining happens once at startup and the
+/// backend is already in a degraded state when zombies exist.
+pub const BOOTSTRAP_ZOMBIE_SWEEP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeout for the post-reclaim transaction commit (`btrfs filesystem sync`).
+pub const COMMIT_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Commit the current transaction (`btrfs filesystem sync`), best-effort.
+///
+/// `btrfs subvolume sync` waits for the cleaner to finish dropping a deleted
+/// subvolume, but the freed extents only become visible — and usable — once
+/// the transaction commits. Probed empirically on btrfs-progs 6.1/kernel 6.6:
+/// between the two, reported free space can even DROP (extents sit pinned
+/// pre-commit). Guarded deletes and the bootstrap sweep call this right after
+/// a successful subvolume sync so reclaimed space is actually available, and
+/// reflected by `get_usage`/health reporting, without waiting for the next
+/// natural commit cycle (#3053).
+pub async fn commit_filesystem(fs_root: &Path) {
+    let spawned = Command::new("btrfs")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .args(["filesystem", "sync"])
+        .arg(fs_root)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    match spawned {
+        Ok(child) => {
+            match tokio::time::timeout(COMMIT_SYNC_TIMEOUT, child.wait_with_output()).await {
+                Ok(Ok(out)) if out.status.success() => {}
+                Ok(Ok(out)) => warn!(
+                    "btrfs filesystem sync on {} failed: {}",
+                    fs_root.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Ok(Err(e)) => warn!(
+                    "btrfs filesystem sync on {} wait failed: {:#}",
+                    fs_root.display(),
+                    e
+                ),
+                Err(_) => warn!(
+                    "btrfs filesystem sync on {} timed out after {}s",
+                    fs_root.display(),
+                    COMMIT_SYNC_TIMEOUT.as_secs()
+                ),
+            }
+        }
+        Err(e) => warn!(
+            "failed to execute btrfs filesystem sync on {}: {:#}",
+            fs_root.display(),
+            e
+        ),
+    }
+}
+
+/// Whether the backend filesystem is full enough that async subvolume
+/// deletion risks producing cleaner-stalled zombie subvolumes (#3053).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceRisk {
+    Low,
+    High,
+}
+
+/// Pure decision: usage percentage at/above the guard threshold ⇒ High.
+fn space_risk_from_usage(total: u64, used: u64) -> SpaceRisk {
+    if total == 0 {
+        return SpaceRisk::Low;
+    }
+    let pct = used as f64 / total as f64 * 100.0;
+    if pct >= FS_DELETE_GUARD_THRESHOLD_PERCENT {
+        SpaceRisk::High
+    } else {
+        SpaceRisk::Low
+    }
+}
+
+/// Classify the backend's current space risk. Fail-open (Low) when usage
+/// cannot be read: the guard only adds protection, it must never turn a
+/// working delete path into a failing one.
+pub async fn assess_space_risk(fs_root: &Path) -> SpaceRisk {
+    match get_filesystem_usage(fs_root).await {
+        Ok((total, used)) => {
+            let risk = space_risk_from_usage(total, used);
+            if risk == SpaceRisk::High {
+                warn!(
+                    "backend filesystem at {:.1}% ({} / {} bytes) — entering guarded delete path: \
+                     subvolume deletions will wait on the btrfs cleaner (ENOSPC zombie risk, #3053)",
+                    used as f64 / total as f64 * 100.0,
+                    used,
+                    total
+                );
+            }
+            risk
+        }
+        Err(e) => {
+            warn!(
+                "cannot assess backend usage at {:?} before deletion, proceeding unguarded: {:#}",
+                fs_root, e
+            );
+            SpaceRisk::Low
+        }
+    }
+}
+
+/// Resolve the btrfs subvolume (root) id of `path` via
+/// `btrfs inspect-internal rootid`. Must be called BEFORE deletion — the id
+/// is not resolvable once the subvolume is gone.
+pub async fn get_subvolume_id(path: &Path) -> Result<u64> {
+    let output = Command::new("btrfs")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .args(["inspect-internal", "rootid"])
+        .arg(path)
+        .output()
+        .await
+        .context("failed to execute btrfs inspect-internal rootid")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "btrfs inspect-internal rootid failed for {}: {}",
+            path.display(),
+            stderr.trim()
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .with_context(|| format!("failed to parse rootid output for {}", path.display()))
+}
+
+/// List ids of subvolumes that were deleted but not yet reclaimed by the
+/// kernel cleaner ("zombie" subvolumes) on the filesystem containing
+/// `fs_root`. These keep pinning backend space until drained (#3053).
+pub async fn list_deleted_subvolumes(fs_root: &Path) -> Result<Vec<u64>> {
+    let output = Command::new("btrfs")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .args(["subvolume", "list", "-d"])
+        .arg(fs_root)
+        .output()
+        .await
+        .context("failed to execute btrfs subvolume list -d")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("btrfs subvolume list -d failed: {}", stderr.trim());
+    }
+    Ok(parse_deleted_subvolume_ids(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// Parse `btrfs subvolume list -d` output and return ids of deleted
+/// subvolumes only.
+///
+/// The `-d` listing mixes live and deleted entries. Deleted ones are marked
+/// by `top level 0` (orphan root) and — when the kernel no longer knows the
+/// original path — a literal `DELETED` path token:
+///
+/// ```text
+/// ID 256 gen 34 top level 5 path ws-ckpt-data
+/// ID 259 gen 40 top level 0 path DELETED
+/// ```
+fn parse_deleted_subvolume_ids(output: &str) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for line in output.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 || tokens[0] != "ID" {
+            continue;
+        }
+        let Ok(id) = tokens[1].parse::<u64>() else {
+            continue;
+        };
+        let top_level_zero = tokens.windows(3).any(|w| w == ["top", "level", "0"]);
+        let path_deleted = tokens
+            .last()
+            .is_some_and(|t| t.eq_ignore_ascii_case("DELETED"));
+        if top_level_zero || path_deleted {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// Wait (bounded by `timeout`) for the kernel cleaner to finish reclaiming
+/// the given deleted subvolumes via `btrfs subvolume sync`.
+///
+/// The child is killed on timeout (`kill_on_drop`) so a stalled cleaner
+/// never leaves a lingering process behind. A timeout is not a hard error
+/// for the filesystem itself — the cleaner keeps working in the background —
+/// callers decide how to report it.
+pub async fn sync_subvolume_deletes(fs_root: &Path, ids: &[u64], timeout: Duration) -> Result<()> {
+    let mut cmd = Command::new("btrfs");
+    cmd.env("LC_ALL", "C")
+        .env("LANG", "C")
+        .arg("subvolume")
+        .arg("sync")
+        .arg(fs_root)
+        .kill_on_drop(true);
+    for id in ids {
+        cmd.arg(id.to_string());
+    }
+    let child = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to execute btrfs subvolume sync")?;
+
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) if out.status.success() => Ok(()),
+        Ok(Ok(out)) => bail!(
+            "btrfs subvolume sync failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Ok(Err(e)) => Err(e).context("failed to wait for btrfs subvolume sync"),
+        Err(_) => bail!(
+            "btrfs subvolume sync timed out after {}s waiting for the cleaner to reclaim {:?}",
+            timeout.as_secs(),
+            ids
+        ),
+    }
+}
+
+/// Parse `/proc/mounts` content and resolve the mount point of the filesystem
+/// containing `path` (longest-prefix match, octal escapes decoded).
+fn find_mount_point_in(content: &str, path: &Path) -> Option<PathBuf> {
+    let mut best: Option<PathBuf> = None;
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let mp = PathBuf::from(unescape_proc_mount(parts[1]));
+        if path == mp || path.starts_with(&mp) {
+            let better = match &best {
+                Some(b) => mp.as_os_str().len() > b.as_os_str().len(),
+                None => true,
+            };
+            if better {
+                best = Some(mp);
+            }
+        }
+    }
+    best
+}
+
+/// Best-effort resolution of the real mount point of the filesystem containing
+/// `fs_root`, for umount-cycle recovery guidance.
+///
+/// The btrfs-base backend's `fs_root` is `<btrfs_mount>/ws-ckpt-data` — a
+/// SUBDIRECTORY of the host partition — so guidance printing "umount
+/// <fs_root>" would hand operators a command that fails with "not mounted"
+/// at the exact moment the backend is pinned and they are most stressed.
+/// Falls back to `fs_root` itself (correct for btrfs-loop, whose fs_root IS
+/// the mount point) when /proc/mounts is unreadable or unmatched.
+pub async fn mount_point_for(fs_root: &Path) -> PathBuf {
+    match tokio::fs::read_to_string("/proc/mounts").await {
+        Ok(content) => {
+            find_mount_point_in(&content, fs_root).unwrap_or_else(|| fs_root.to_path_buf())
+        }
+        Err(e) => {
+            warn!(
+                "cannot resolve mount point for {:?} ({}); recovery guidance falls back to the path itself",
+                fs_root, e
+            );
+            fs_root.to_path_buf()
+        }
+    }
+}
+
+/// Delete a subvolume, pushing the kernel cleaner synchronously when the
+/// backend is nearly full (`risk == High`).
+///
+/// High-risk path: resolve the subvolume id BEFORE deletion (the path is
+/// unresolvable afterwards), delete, then wait on `btrfs subvolume sync` so
+/// the space is actually reclaimed instead of silently turning into a
+/// zombie. A sync timeout keeps the delete's own success semantics — the
+/// subvolume IS deleted from the namespace — but logs an explicit WARN with
+/// the umount-cycle recovery guidance, because the space may stay pinned.
+pub async fn delete_subvolume_with_risk(
+    path: &Path,
+    fs_root: &Path,
+    risk: SpaceRisk,
+) -> Result<()> {
+    if risk == SpaceRisk::Low {
+        return delete_subvolume(path).await;
+    }
+
+    // Best-effort id capture; deletion proceeds even if rootid fails.
+    let id = match get_subvolume_id(path).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            warn!(
+                "guarded delete: cannot resolve subvolume id of {} ({:#}); \
+                 will not be able to verify cleaner reclaim",
+                path.display(),
+                e
+            );
+            None
+        }
+    };
+
+    delete_subvolume(path).await?;
+
+    let Some(id) = id else {
+        warn!(
+            "guarded delete: {} deleted under high backend usage but its subvolume id is unknown; \
+             watch `btrfs subvolume list -d {}` for zombie subvolumes (#3053)",
+            path.display(),
+            fs_root.display()
+        );
+        return Ok(());
+    };
+
+    match sync_subvolume_deletes(fs_root, &[id], DELETE_SYNC_TIMEOUT).await {
+        Ok(()) => {
+            // Commit so the reclaimed extents are actually free (and visible
+            // to get_usage) instead of sitting pinned until the next natural
+            // transaction cycle — see commit_filesystem.
+            commit_filesystem(fs_root).await;
+            info!(
+                "guarded delete: cleaner reclaimed subvolume {} ({}) synchronously",
+                id,
+                path.display()
+            );
+        }
+        Err(e) => {
+            // Sync may fail after the cleaner already drained the subvolume;
+            // re-check before crying zombie.
+            let still_pending = list_deleted_subvolumes(fs_root)
+                .await
+                .map(|ids| ids.contains(&id))
+                .unwrap_or(true);
+            if still_pending {
+                // Resolve the real mount point: on btrfs-base fs_root is a
+                // subdirectory of the host partition and umounting it directly
+                // would fail with "not mounted".
+                let umount_target = mount_point_for(fs_root).await;
+                warn!(
+                    "guarded delete: subvolume {} ({}) deleted but the cleaner could not reclaim \
+                     it within {}s ({:#}). It is now a DELETED zombie pinning backend space; \
+                     daemon restarts will NOT free it (mount is reused by design). Manual recovery: \
+                     stop ws-ckpt, umount {:?} (the btrfs filesystem containing {:?}), start \
+                     ws-ckpt — the cleaner drains zombies within minutes of a fresh mount cycle \
+                     (#3053)",
+                    id,
+                    path.display(),
+                    DELETE_SYNC_TIMEOUT.as_secs(),
+                    e,
+                    umount_target,
+                    fs_root
+                );
+            } else {
+                info!(
+                    "guarded delete: cleaner reclaimed subvolume {} ({}) after sync reported: {:#}",
+                    id,
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Convenience wrapper for single-delete callers: assess space risk, then
+/// delete with the guard. Batch callers should assess once via
+/// [`assess_space_risk`] and pass the risk to [`delete_subvolume_with_risk`]
+/// per item instead.
+pub async fn delete_subvolume_space_aware(path: &Path, fs_root: &Path) -> Result<()> {
+    let risk = assess_space_risk(fs_root).await;
+    delete_subvolume_with_risk(path, fs_root, risk).await
+}
+
+/// Bootstrap-time zombie sweep (#3053): detect DELETED subvolumes left by a
+/// previous run's cleaner-stalled deletions and try to drain them with a
+/// bounded `btrfs subvolume sync`.
+///
+/// Never fails and never blocks beyond `timeout` + command overhead; a sweep
+/// that cannot drain logs the manual umount-cycle recovery guidance. By
+/// design the daemon reuses the existing mount across restarts (#2809), so
+/// this sync is the only chance a plain restart gets at kicking the cleaner.
+pub async fn sweep_zombie_subvolumes(fs_root: &Path, timeout: Duration) {
+    let ids = match list_deleted_subvolumes(fs_root).await {
+        Ok(ids) if ids.is_empty() => return,
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(
+                "zombie sweep: cannot list deleted subvolumes on {:?}: {:#}",
+                fs_root, e
+            );
+            return;
+        }
+    };
+
+    warn!(
+        "zombie sweep: {} deleted subvolume(s) {:?} on {:?} are still awaiting cleaner reclaim \
+         (they pin backend space); trying `btrfs subvolume sync` (timeout {}s)",
+        ids.len(),
+        ids,
+        fs_root,
+        timeout.as_secs()
+    );
+    if let Err(e) = sync_subvolume_deletes(fs_root, &ids, timeout).await {
+        warn!("zombie sweep: subvolume sync did not complete: {:#}", e);
+    }
+    // Commit the drop so reclaimed space is actually released before the
+    // post-check (extents sit pinned until the transaction commits).
+    commit_filesystem(fs_root).await;
+
+    match list_deleted_subvolumes(fs_root).await {
+        Ok(remaining) if remaining.is_empty() => {
+            info!("zombie sweep: cleaner reclaimed all deleted subvolumes; backend space released");
+        }
+        Ok(remaining) => {
+            // Resolve the real mount point: on btrfs-base fs_root is a
+            // subdirectory of the host partition, not umountable itself.
+            let umount_target = mount_point_for(fs_root).await;
+            warn!(
+                "zombie sweep: {} deleted subvolume(s) {:?} STILL not reclaimed — backend space \
+                 stays pinned and restarting the daemon alone will not free it (mount is reused \
+                 by design). Manual recovery: stop ws-ckpt, umount {:?} (the btrfs filesystem \
+                 containing {:?}), start ws-ckpt; the cleaner drains zombies within minutes of a \
+                 fresh mount cycle (#3053)",
+                remaining.len(),
+                remaining,
+                umount_target,
+                fs_root
+            );
+        }
+        Err(e) => warn!(
+            "zombie sweep: cannot re-check deleted subvolumes on {:?}: {:#}",
+            fs_root, e
+        ),
+    }
+}
+
 /// Compute the diff between two btrfs snapshots using `btrfs send --no-data -p`.
 ///
 /// Requires root privileges and a btrfs filesystem.
@@ -341,19 +809,29 @@ pub async fn diff_between_snapshots(snap_from: &Path, snap_to: &Path) -> Result<
 ///
 /// Creates a temporary read-only snapshot of `live_subvol` inside `snap_dir`,
 /// runs the diff, then removes the temporary snapshot regardless of outcome.
+///
+/// `fs_root` is the backend filesystem root used for space-risk assessment:
+/// the temp snapshot is read-only and shares extents (little space to free),
+/// but its drop still rides the kernel cleaner — on a full backend an
+/// unguarded delete leaves a `list -d` zombie entry that the bootstrap sweep
+/// and health check then report (#3053).
 pub async fn diff_against_live(
     snap_from: &Path,
     live_subvol: &Path,
     snap_dir: &Path,
+    fs_root: &Path,
 ) -> Result<Vec<DiffEntry>> {
     use std::hash::{BuildHasher, Hasher, RandomState};
 
     let h = RandomState::new().build_hasher().finish();
     let tmp_snap = snap_dir.join(format!(".diff-tmp-{:06x}", h & 0xFFFFFF));
 
+    // Assess once for both deletes (stale-cleanup below and post-diff).
+    let risk = assess_space_risk(fs_root).await;
+
     // Clean up stale temp snapshot from a prior crash before creating a new one.
     if tmp_snap.exists() {
-        let _ = delete_subvolume(&tmp_snap).await;
+        let _ = delete_subvolume_with_risk(&tmp_snap, fs_root, risk).await;
     }
 
     create_snapshot(live_subvol, &tmp_snap, true)
@@ -362,7 +840,7 @@ pub async fn diff_against_live(
 
     let result = diff_between_snapshots(snap_from, &tmp_snap).await;
 
-    if let Err(e) = delete_subvolume(&tmp_snap).await {
+    if let Err(e) = delete_subvolume_with_risk(&tmp_snap, fs_root, risk).await {
         warn!(error = %e, path = %tmp_snap.display(), "failed to remove temp diff snapshot");
     }
 
@@ -950,7 +1428,7 @@ mod tests {
             .await
             .unwrap();
 
-        let entries = diff_against_live(&snap1, &src, &base).await.unwrap();
+        let entries = diff_against_live(&snap1, &src, &base, &base).await.unwrap();
         assert!(!entries.is_empty());
 
         // Cleanup
@@ -1119,7 +1597,7 @@ mod tests {
             .unwrap();
         tokio::fs::create_dir(&snap).await.unwrap();
 
-        cleanup_init_storage(orig.to_str().unwrap(), &subvol, &snap, false).await;
+        cleanup_init_storage(orig.to_str().unwrap(), &subvol, &snap, false, tmp.path()).await;
 
         assert!(orig.join("user.txt").exists(), "user data must remain");
         assert!(
@@ -1141,7 +1619,7 @@ mod tests {
         tokio::fs::symlink(&target, &orig).await.unwrap();
         tokio::fs::create_dir(&snap).await.unwrap();
 
-        cleanup_init_storage(orig.to_str().unwrap(), &target, &snap, false).await;
+        cleanup_init_storage(orig.to_str().unwrap(), &target, &snap, false, tmp.path()).await;
 
         assert!(!orig.exists(), "leftover symlink dropped");
     }
@@ -1163,7 +1641,7 @@ mod tests {
         tokio::fs::symlink(&target, &orig).await.unwrap();
         tokio::fs::create_dir(&snap).await.unwrap();
 
-        cleanup_init_storage(orig.to_str().unwrap(), &target, &snap, true).await;
+        cleanup_init_storage(orig.to_str().unwrap(), &target, &snap, true, tmp.path()).await;
 
         assert!(orig.is_dir(), "original restored as real dir");
         assert!(orig.join("user.txt").exists(), "user data back at original");
@@ -1519,5 +1997,407 @@ mod tests {
         // Nothing should be destroyed on ambiguous state.
         assert!(bak.join("user.txt").exists());
         assert!(subvol.join("migrated.txt").exists());
+    }
+
+    // ── Zombie subvolume handling on a real filesystem (#3053) ──
+    // Same environment requirements as the tests above (root + mounted btrfs
+    // at /mnt/btrfs-workspace). Smoke-level: a clean small filesystem cannot
+    // reliably reproduce the ENOSPC cleaner stall, so these verify the new
+    // code paths execute correctly against real btrfs-progs output.
+
+    /// Poll until the cleaner drains all deleted subvolumes (bounded).
+    ///
+    /// A plain async delete leaves a TRANSIENT `list -d` entry even on a
+    /// healthy fs — the idle cleaner wakes on a ~30s cycle, so draining can
+    /// take one or two cycles. Tests must not assert emptiness immediately
+    /// (or even within a few seconds) after an unguarded delete. This is
+    /// exactly the latency the guarded High-risk path removes by waiting on
+    /// `btrfs subvolume sync`, which pushes the cleaner immediately.
+    async fn wait_no_deleted_subvolumes(mount: &Path, attempts: u32) -> bool {
+        for _ in 0..attempts {
+            match list_deleted_subvolumes(mount).await {
+                Ok(ids) if ids.is_empty() => return true,
+                _ => {}
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// Common baseline for the real-fs tests: dead list drained AND usage
+    /// back below the guard threshold. Makes the suite order-independent —
+    /// a failing test cannot poison the next one's risk assessment.
+    async fn wait_clean_baseline(mount: &Path) -> bool {
+        if !wait_no_deleted_subvolumes(mount, 600).await {
+            return false;
+        }
+        for _ in 0..600 {
+            if assess_space_risk(mount).await == SpaceRisk::Low {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root + btrfs filesystem"]
+    async fn space_aware_delete_on_real_btrfs() {
+        let mount = PathBuf::from("/mnt/btrfs-workspace");
+        let path = mount.join("test-guarded-delete");
+        let _ = delete_subvolume(&path).await;
+        assert!(wait_clean_baseline(&mount).await, "baseline not clean");
+
+        create_subvolume(&path).await.expect("create_subvolume");
+        // Fresh small fs → Low risk → plain delete path.
+        assert_eq!(assess_space_risk(&mount).await, SpaceRisk::Low);
+        delete_subvolume_space_aware(&path, &mount)
+            .await
+            .expect("space-aware delete failed");
+        assert!(!path.exists());
+        // Unguarded delete is async and the idle cleaner wakes on a ~30s
+        // cycle: allow two cycles for the transient entry to drain. A healthy
+        // fs must not retain zombies beyond that.
+        assert!(
+            wait_no_deleted_subvolumes(&mount, 600).await,
+            "cleaner did not drain deleted subvolume within 60s"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root + btrfs filesystem"]
+    async fn high_risk_delete_syncs_on_real_btrfs() {
+        let mount = PathBuf::from("/mnt/btrfs-workspace");
+        let path = mount.join("test-highrisk-delete");
+        let _ = delete_subvolume(&path).await;
+        assert!(wait_clean_baseline(&mount).await, "baseline not clean");
+
+        create_subvolume(&path).await.expect("create_subvolume");
+        // Force the guarded branch: rootid capture + delete + subvolume sync.
+        delete_subvolume_with_risk(&path, &mount, SpaceRisk::High)
+            .await
+            .expect("guarded delete failed");
+        assert!(!path.exists());
+        assert!(list_deleted_subvolumes(&mount).await.unwrap().is_empty());
+    }
+
+    /// Everything the full-fs scenario measured, collected before teardown so
+    /// asserts run after the dedicated filesystem is destroyed (a failing
+    /// assert must never leave mounts/loops behind).
+    struct FullFsOutcome {
+        pct: f64,
+        risk: SpaceRisk,
+        victim_id: u64,
+        deleted: Result<()>,
+        used_before: u64,
+        used_after: u64,
+        zombies_at_check: Vec<u64>,
+        late_drained: bool,
+        used_late: u64,
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root + btrfs-progs + a free loop device"]
+    async fn guarded_delete_reclaims_space_on_full_fs() {
+        // The core #3053 guarantee, mirroring the incident sequence: with the
+        // backend at the >=95% guard threshold, a guarded delete (rootid
+        // capture + delete + bounded `btrfs subvolume sync` + commit) must not
+        // SILENTLY pin space. Near ENOSPC the kernel cleaner itself becomes
+        // unreliable (that IS the bug), so the asserted contract is:
+        //
+        //   (a) the space is reclaimed synchronously (cleaner kept up), OR
+        //   (b) the stall is DETECTED — the victim is visible on the dead
+        //       list, i.e. the WARN-with-recovery-guidance path fired, OR
+        //   (c) the space is reclaimed within a bounded drain window.
+        //
+        // Runs on a DEDICATED 2GiB loop fs: an ENOSPC-traumatized btrfs can
+        // misbehave for subsequent operations, so this test must neither
+        // poison nor be poisoned by the shared /mnt/btrfs-workspace.
+        //
+        // The victim is created BEFORE the fill: on a full backend, rollback
+        // deletes a pre-existing subvolume (the old workspace generation);
+        // nothing new of substance can be written at that point.
+        let img = PathBuf::from("/tmp/ws-ckpt-fullfs-test.img");
+        let mnt = PathBuf::from("/mnt/ws-ckpt-fullfs-test");
+        let filler = mnt.join("filler");
+        let victim = mnt.join("victim");
+        let img_str = img.to_string_lossy().to_string();
+        let mnt_str = mnt.to_string_lossy().to_string();
+
+        async fn sh(cmd: &str, args: &[&str]) -> Result<()> {
+            let out = Command::new(cmd)
+                .args(args)
+                .output()
+                .await
+                .with_context(|| format!("spawn {cmd}"))?;
+            if !out.status.success() {
+                bail!(
+                    "{cmd} {:?} failed: {}",
+                    args,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Ok(())
+        }
+
+        let _ = tokio::fs::remove_file(&img).await;
+        tokio::fs::create_dir_all(&mnt).await.expect("mkdir mnt");
+
+        // Scenario body: everything fallible; teardown below runs regardless.
+        let mut loop_dev: Option<String> = None;
+        let outcome: Result<FullFsOutcome> = async {
+            sh("truncate", &["-s", "2G", img_str.as_str()]).await?;
+            let out = Command::new("losetup")
+                .args(["--find", "--show", img_str.as_str()])
+                .output()
+                .await
+                .context("spawn losetup")?;
+            if !out.status.success() {
+                bail!(
+                    "losetup failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            sh("mkfs.btrfs", &["-f", dev.as_str()]).await?;
+            loop_dev = Some(dev.clone());
+            sh("mount", &[dev.as_str(), mnt_str.as_str()]).await?;
+
+            // 1. Victim subvolume with real data.
+            create_subvolume(&victim).await?;
+            let victim_data = format!("of={}", victim.join("data").display());
+            sh(
+                "dd",
+                &["if=/dev/zero", victim_data.as_str(), "bs=1M", "count=20"],
+            )
+            .await?;
+
+            // 2. Fill in 64MiB rounds up to >=96%, COMMITTING each round:
+            //    buffered writes hide behind delayed allocation, leaving
+            //    Free (estimated) — and thus the guard decision — stale until
+            //    writeback (observed empirically: uncommitted fills read ~17%
+            //    while the fs was actually at ENOSPC).
+            create_subvolume(&filler).await?;
+            let mut pct = 0.0f64;
+            for round in 0..40u32 {
+                commit_filesystem(&mnt).await;
+                let (total, used) = get_filesystem_usage(&mnt).await?;
+                pct = if total > 0 {
+                    used as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                if pct >= 96.0 {
+                    break;
+                }
+                let f = filler.join(format!("f{round}"));
+                let of = format!("of={}", f.display());
+                let wrote = sh("dd", &["if=/dev/zero", of.as_str(), "bs=1M", "count=64"])
+                    .await
+                    .is_ok();
+                if !wrote {
+                    // Transient ENOSPC from delalloc reservations: commit and
+                    // squeeze a smaller block in; a failure here means the fs
+                    // is truly at the edge — usage is then past the threshold.
+                    commit_filesystem(&mnt).await;
+                    let _ = sh("dd", &["if=/dev/zero", of.as_str(), "bs=1M", "count=16"]).await;
+                    break;
+                }
+            }
+            commit_filesystem(&mnt).await;
+
+            // 3. The production classifier must see High; then run the guarded
+            //    delete and measure what the guard actually achieved.
+            let risk = assess_space_risk(&mnt).await;
+            let victim_id = get_subvolume_id(&victim).await?;
+            let (_t, used_before) = get_filesystem_usage(&mnt).await?;
+            let deleted = delete_subvolume_with_risk(&victim, &mnt, SpaceRisk::High).await;
+            let (_t, used_after) = get_filesystem_usage(&mnt).await?;
+            let zombies_at_check = list_deleted_subvolumes(&mnt).await.unwrap_or_default();
+
+            // 4. Bounded late-drain window (contract branch c), doubling as
+            //    pre-umount cleanup so the umount is not stuck dropping data.
+            let late_drained = wait_no_deleted_subvolumes(&mnt, 1200).await;
+            commit_filesystem(&mnt).await;
+            let (_t, used_late) = get_filesystem_usage(&mnt).await?;
+
+            let _ = delete_subvolume(&filler).await;
+            let _ = wait_no_deleted_subvolumes(&mnt, 600).await;
+            commit_filesystem(&mnt).await;
+
+            Ok(FullFsOutcome {
+                pct,
+                risk,
+                victim_id,
+                deleted,
+                used_before,
+                used_after,
+                zombies_at_check,
+                late_drained,
+                used_late,
+            })
+        }
+        .await;
+
+        // Teardown ALWAYS runs (also on scenario error): umount (bounded —
+        // btrfs umount drains pending deletes synchronously and can be slow),
+        // detach the loop, drop the image. Nothing may leak into the host.
+        let umounted =
+            tokio::time::timeout(Duration::from_secs(300), sh("umount", &[mnt_str.as_str()]))
+                .await
+                .map_err(|_| anyhow::anyhow!("umount timed out"))
+                .and_then(|r| r);
+        if umounted.is_err() {
+            let _ = sh("umount", &["-l", mnt_str.as_str()]).await;
+        }
+        if let Some(dev) = loop_dev {
+            let _ = sh("losetup", &["-d", dev.as_str()]).await;
+        }
+        let _ = tokio::fs::remove_file(&img).await;
+        let _ = tokio::fs::remove_dir(&mnt).await;
+
+        let o = outcome.expect("full-fs scenario setup/execution failed");
+
+        // Contract asserts (after teardown — failures must not leak state).
+        assert_eq!(
+            o.risk,
+            SpaceRisk::High,
+            "fill stopped at {:.1}% — expected >=95% guard regime",
+            o.pct
+        );
+        o.deleted.expect("guarded delete on full fs failed");
+        let sync_reclaimed = o.used_before.saturating_sub(o.used_after) >= 15 * 1024 * 1024
+            && o.zombies_at_check.is_empty();
+        let stall_detected = o.zombies_at_check.contains(&o.victim_id);
+        let late_reclaimed =
+            o.late_drained && o.used_before.saturating_sub(o.used_late) >= 15 * 1024 * 1024;
+        assert!(
+            sync_reclaimed || stall_detected || late_reclaimed,
+            "guard contract violated at {:.1}%: used {} -> {} (late {}), zombies {:?}, \
+             victim id {}, late_drained {} — space was pinned SILENTLY",
+            o.pct,
+            o.used_before,
+            o.used_after,
+            o.used_late,
+            o.zombies_at_check,
+            o.victim_id,
+            o.late_drained
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root + btrfs filesystem"]
+    async fn zombie_sweep_noop_on_clean_fs() {
+        let mount = PathBuf::from("/mnt/btrfs-workspace");
+        // Earlier tests' async deletes may still be draining on the cleaner's
+        // ~30s cycle; establish a clean baseline before exercising the sweep.
+        assert!(wait_clean_baseline(&mount).await, "baseline not clean");
+        // Clean fs → sweep must return immediately without errors/panics.
+        sweep_zombie_subvolumes(&mount, Duration::from_secs(5)).await;
+        assert!(list_deleted_subvolumes(&mount).await.unwrap().is_empty());
+    }
+
+    // ── Zombie subvolume parsing & space-risk decision (#3053) ──
+    // Pure functions; no root/btrfs required.
+
+    #[test]
+    fn parse_deleted_subvolume_ids_filters_live_entries() {
+        let output = "\
+ID 256 gen 34 top level 5 path ws-ckpt-data
+ID 259 gen 40 top level 0 path DELETED
+ID 260 gen 41 top level 256 path snapshots/ws-abc/snap-1
+ID 261 gen 42 top level 0 path ws-abc.rollback-tmp
+";
+        assert_eq!(parse_deleted_subvolume_ids(output), vec![259, 261]);
+    }
+
+    #[test]
+    fn parse_deleted_subvolume_ids_empty_and_garbage() {
+        assert!(parse_deleted_subvolume_ids("").is_empty());
+        // No "ID" prefix / unparsable ids / short lines are skipped, never panic.
+        let output = "\
+garbage line
+ID notanumber top level 0 path DELETED
+ID
+";
+        assert!(parse_deleted_subvolume_ids(output).is_empty());
+    }
+
+    #[test]
+    fn parse_deleted_subvolume_ids_deleted_marker_without_top_level_zero() {
+        // Some btrfs-progs versions print the DELETED path token while keeping
+        // a non-zero top level; the path marker alone must still match.
+        let output = "ID 300 gen 55 top level 256 path DELETED\n";
+        assert_eq!(parse_deleted_subvolume_ids(output), vec![300]);
+    }
+
+    #[test]
+    fn space_risk_threshold_boundary() {
+        let total = 1000;
+        // Just below the 95% threshold → Low.
+        assert_eq!(space_risk_from_usage(total, 949), SpaceRisk::Low);
+        // Exactly at the threshold → High.
+        assert_eq!(space_risk_from_usage(total, 950), SpaceRisk::High);
+        // Above → High (including the fully-pinned ENOSPC case).
+        assert_eq!(space_risk_from_usage(total, 1000), SpaceRisk::High);
+    }
+
+    #[test]
+    fn space_risk_zero_total_is_low() {
+        // Degenerate/unknown capacity must fail open, never block deletes.
+        assert_eq!(space_risk_from_usage(0, 0), SpaceRisk::Low);
+        assert_eq!(space_risk_from_usage(0, 100), SpaceRisk::Low);
+    }
+
+    // ── Mount point resolution for recovery guidance (#3053) ──
+
+    #[test]
+    fn mount_point_longest_prefix_wins() {
+        let mounts = "\
+proc /proc proc rw 0 0
+/dev/sda1 / ext4 rw 0 0
+/dev/loop0 /mnt/btrfs btrfs rw,relatime 0 0
+";
+        // btrfs-base: data_root is a subdirectory of the real mount.
+        assert_eq!(
+            find_mount_point_in(mounts, Path::new("/mnt/btrfs/ws-ckpt-data")),
+            Some(PathBuf::from("/mnt/btrfs"))
+        );
+        // Exact mount point resolves to itself (btrfs-loop case).
+        assert_eq!(
+            find_mount_point_in(mounts, Path::new("/mnt/btrfs")),
+            Some(PathBuf::from("/mnt/btrfs"))
+        );
+        // Falls back to the root fs for paths outside the btrfs mount.
+        assert_eq!(
+            find_mount_point_in(mounts, Path::new("/var/lib/ws-ckpt")),
+            Some(PathBuf::from("/"))
+        );
+    }
+
+    #[test]
+    fn mount_point_no_sibling_prefix_confusion() {
+        // "/mnt/btrfs2" must not be treated as containing "/mnt/btrfs2x/...".
+        let mounts = "/dev/loop0 /mnt/btrfs2 btrfs rw 0 0\n";
+        assert_eq!(
+            find_mount_point_in(mounts, Path::new("/mnt/btrfs2x/data")),
+            None
+        );
+    }
+
+    #[test]
+    fn mount_point_decodes_octal_escapes() {
+        // Spaces in mount points are octal-escaped in /proc/mounts.
+        let mounts = "/dev/loop0 /mnt/my\\040disk btrfs rw 0 0\n";
+        assert_eq!(
+            find_mount_point_in(mounts, Path::new("/mnt/my disk/ws-ckpt-data")),
+            Some(PathBuf::from("/mnt/my disk"))
+        );
+    }
+
+    #[test]
+    fn mount_point_garbage_lines_skipped() {
+        assert_eq!(find_mount_point_in("", Path::new("/a")), None);
+        assert_eq!(find_mount_point_in("oneword\n", Path::new("/a")), None);
     }
 }

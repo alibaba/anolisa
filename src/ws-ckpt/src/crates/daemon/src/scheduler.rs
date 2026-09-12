@@ -209,10 +209,45 @@ async fn health_check(state: &DaemonState) {
                 let usage_pct = (used as f64 / total as f64) * 100.0;
                 const FS_WARN_THRESHOLD_PERCENT: f64 = 90.0;
                 if usage_pct > FS_WARN_THRESHOLD_PERCENT {
-                    warn!(
-                        "Filesystem usage critical: {:.1}% ({} / {} bytes)",
-                        usage_pct, used, total
-                    );
+                    // High usage is exactly the regime where the btrfs cleaner
+                    // stalls and deleted subvolumes turn into zombies that pin
+                    // all backend space (#3053). Surface them so operators know
+                    // cleanup/restart alone cannot reclaim the space.
+                    let zombies = state
+                        .backend
+                        .deleted_subvolume_ids()
+                        .await
+                        .unwrap_or_default();
+                    if zombies.is_empty() {
+                        warn!(
+                            "Filesystem usage critical: {:.1}% ({} / {} bytes)",
+                            usage_pct, used, total
+                        );
+                    } else {
+                        // Resolve the real mount point for the guidance: on
+                        // btrfs-base data_root() is a SUBDIRECTORY of the host
+                        // partition (<btrfs_mount>/ws-ckpt-data) and umounting
+                        // it directly would fail with "not mounted".
+                        let data_root = state.backend.data_root();
+                        let umount_target =
+                            crate::backends::btrfs_common::mount_point_for(data_root).await;
+                        warn!(
+                            "Filesystem usage critical: {:.1}% ({} / {} bytes); {} deleted \
+                             subvolume(s) {:?} not yet reclaimed by the btrfs cleaner — they pin \
+                             space that ws-ckpt cleanup and daemon restarts cannot free (mount is \
+                             reused by design). Recover with a umount cycle: stop ws-ckpt, \
+                             umount {:?} (the btrfs filesystem containing {:?}), start ws-ckpt; \
+                             the cleaner drains zombies within minutes of a fresh mount cycle \
+                             (#3053)",
+                            usage_pct,
+                            used,
+                            total,
+                            zombies.len(),
+                            zombies,
+                            umount_target,
+                            data_root
+                        );
+                    }
                 } else {
                     info!("Health check OK: filesystem usage {:.1}%", usage_pct);
                 }
