@@ -110,7 +110,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
 	CODE_SCANNER_E2E_SKIP_TELEMETRY=1 python3 -m pytest tests/e2e/ tests/v2/e2e/ \
 		--import-mode=importlib \
-		--ignore=tests/e2e/cli/test_capabilities_e2e.py \
 		--ignore=tests/e2e/cli/test_events_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_jsonl_e2e.py \
 		--ignore=tests/e2e/cli/test_observability_record_sqlite_e2e.py \
@@ -127,7 +126,6 @@ test-e2e-rpm-v2: ## Run E2E tests against V2 RPM-installed binaries
 		--ignore=tests/e2e/linux-sandbox \
 		-v --tb=short
 	@# Pending V2 capabilities behind the ignores above:
-	@#   cli/test_capabilities_e2e.py             -> capability view command
 	@#   cli/test_events_e2e.py                   -> security event query
 	@#   cli/test_observability_record_*_e2e.py   -> observability record sinks
 	@#   cli/test_scan_pii_e2e.py                 -> PII scanning
