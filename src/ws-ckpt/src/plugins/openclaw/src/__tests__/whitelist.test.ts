@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Reset module-level `alreadyEnsured` guard between tests.
 // We import the module fresh each time via dynamic import + vi.resetModules.
@@ -27,6 +28,24 @@ describe("WS_CKPT_TOOL_NAMES", () => {
     expect(WS_CKPT_TOOL_NAMES).toContain("ws-ckpt-config");
     expect(WS_CKPT_TOOL_NAMES).toContain("ws-ckpt-status");
   });
+
+  it("matches the OURS list embedded in install-openclaw.sh", async () => {
+    const { WS_CKPT_TOOL_NAMES } = await import("../whitelist.js");
+
+    // install-openclaw.sh pre-writes the allowlist via `openclaw config set`
+    // and embeds its own copy of the tool names (shell cannot import TS).
+    // Drift here means a new tool silently never gets allowlisted.
+    const scriptPath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../../../../scripts/openclaw/install-openclaw.sh",
+    );
+    const script = fs.readFileSync(scriptPath, "utf-8");
+    const match = script.match(/var OURS = \[([^\]]*)\]/);
+    expect(match, "OURS array not found in install-openclaw.sh").not.toBeNull();
+    const scriptTools = [...match![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+
+    expect([...scriptTools].sort()).toEqual([...WS_CKPT_TOOL_NAMES].sort());
+  });
 });
 
 describe("ensureToolsAlsoAllow", () => {
@@ -42,10 +61,11 @@ describe("ensureToolsAlsoAllow", () => {
     vi.restoreAllMocks();
   });
 
-  it("adds missing tools to openclaw.json", async () => {
+  it("warns about missing tools without modifying openclaw.json", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ws-ckpt-test-"));
     const configPath = path.join(tmpDir, "openclaw.json");
-    fs.writeFileSync(configPath, JSON.stringify({ tools: { alsoAllow: [] } }));
+    const original = JSON.stringify({ tools: { alsoAllow: [] } });
+    fs.writeFileSync(configPath, original);
 
     process.env.OPENCLAW_CONFIG_PATH = configPath;
 
@@ -53,22 +73,26 @@ describe("ensureToolsAlsoAllow", () => {
       "../whitelist.js"
     );
 
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
     const api = {
       config: { tools: { alsoAllow: [] } },
     } as any;
 
     ensureToolsAlsoAllow(api);
 
-    const written = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    expect(written.tools.alsoAllow).toEqual(
-      expect.arrayContaining(WS_CKPT_TOOL_NAMES),
-    );
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0][0] as string;
+    for (const name of WS_CKPT_TOOL_NAMES) {
+      expect(message).toContain(name);
+    }
+    // The plugin never writes openclaw.json — writes belong to the installer.
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
 
-    // Cleanup
     fs.rmSync(tmpDir, { recursive: true });
   });
 
-  it("skips when all tools already present", async () => {
+  it("stays silent when all tools already present", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ws-ckpt-test-"));
     const configPath = path.join(tmpDir, "openclaw.json");
 
@@ -84,14 +108,14 @@ describe("ensureToolsAlsoAllow", () => {
     vi.resetModules();
     const mod = await import("../whitelist.js");
 
-    const writeSpy = vi.spyOn(fs, "writeFileSync");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const api = {
       config: { tools: { alsoAllow: [...WS_CKPT_TOOL_NAMES] } },
     } as any;
 
     mod.ensureToolsAlsoAllow(api);
-    expect(writeSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
 
     fs.rmSync(tmpDir, { recursive: true });
   });
@@ -101,13 +125,15 @@ describe("ensureToolsAlsoAllow", () => {
 
     const mod = await import("../whitelist.js");
 
-    // api has empty alsoAllow, so tools are "missing" and the write will
-    // fail because the dir doesn't exist — but ensureToolsAlsoAllow should
-    // catch the error and not throw.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // api has empty alsoAllow, so all tools are "missing" — warns but must
+    // not throw.
     const api = {
       config: { tools: { alsoAllow: [] } },
     } as any;
 
     expect(() => mod.ensureToolsAlsoAllow(api)).not.toThrow();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 });

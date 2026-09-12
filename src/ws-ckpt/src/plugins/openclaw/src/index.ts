@@ -109,7 +109,8 @@ function register(api: OpenClawPluginApi): void {
   })();
 
   // ------------------------------------------------------------------
-  // 4. Ensure ws-ckpt tools are in tools.alsoAllow whitelist
+  // 4. Warn if ws-ckpt tools are missing from tools.alsoAllow
+  //    (entries are written at install time, never from register())
   // ------------------------------------------------------------------
   ensureToolsAlsoAllow(api);
 
