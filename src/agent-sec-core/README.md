@@ -9,6 +9,12 @@ security event store. Everything runs locally with no Token cost. Applicable to
 Agent OS platforms such as [ANOLISA](../../README.md) and to the six Agent hosts
 listed below.
 
+[![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders)
+
+**AgentSecCore (ANOLISA)** is listed in the [AARM Builder Registry](https://aarm.dev/builders) with **Aligned** status.
+
+AgentSecCore contributes controls to the [ANOLISA OWASP Agentic Top 10 mapping](../../docs/user-guide/en/agent-security/owasp-agentic-top10.md).
+
 ## Background
 
 As AI Agents gradually gain OS-level execution capabilities (file I/O, network access, process management, etc.), traditional application security boundaries no longer apply. Agent Sec Core builds a **defense-in-depth** system at the OS layer, ensuring Agents run in a controlled, auditable, least-privilege environment.

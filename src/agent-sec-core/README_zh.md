@@ -7,6 +7,12 @@
 存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
 运行平台，以及下文列出的六个 Agent 宿主。
 
+[![AARM Aligned](https://img.shields.io/badge/AARM-Aligned-blue.svg)](https://aarm.dev/builders)
+
+**AgentSecCore (ANOLISA)** 已登记于 [AARM Builder Registry](https://aarm.dev/builders)，当前状态为 **Aligned**。
+
+AgentSecCore 的相关安全控制已纳入 [ANOLISA OWASP Agentic Top 10 控制映射](../../docs/user-guide/zh/agent-security/owasp-agentic-top10.md)。
+
 ## 背景
 
 随着 AI Agent 逐步获得操作系统级别的执行能力（文件读写、网络访问、进程管理等），传统应用安全边界已不再适用。Agent Sec Core 从 **OS 层面** 为 Agent 构建纵深防御体系，确保 Agent 在受控、可审计、最小权限的环境中运行。
