@@ -342,7 +342,10 @@ agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 请使用 `analyze`。批量模式下，如果 `/usr/share/anolisa/skills/` 或
 `/usr/local/share/anolisa/skills/` 下由 host 提供的已打包 Skill 无法写入账本状态，
 命令会返回 `status=skipped`、`reasonCode=readonly_system_skill`、
-`persisted=false`。这个运行状态不是 `pass` 结果，也不构成认证；显式执行
+`persisted=false`。`$XDG_DATA_HOME/anolisa/skills/`（默认
+`~/.local/share/anolisa/skills/`）直接子目录中由 host 提供的只读 Skill，
+在未被 `managedSkillDirs` 覆盖时也会跳过，原因码为 `readonly_default_skill`；
+已纳管的用户 Skill 仍保留写入错误。这个运行状态不是 `pass` 结果，也不构成认证；显式执行
 `scan <dir>` 仍会报错。如果跳过项此前没有任何账本 artifact，`check` 和 `status`
 仍会分别报告 `none` / `unscanned`；二者都不表示 `pass`。
 

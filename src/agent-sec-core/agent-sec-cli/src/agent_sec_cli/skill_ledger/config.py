@@ -371,6 +371,12 @@ def is_default_system_skill_dir(skill_dir: str | Path) -> bool:
     return canonical_dir.parent in DEFAULT_SYSTEM_SKILL_ROOTS
 
 
+def is_default_user_skill_dir(skill_dir: str | Path) -> bool:
+    """Return whether *skill_dir* is an immediate child of the raw user root."""
+    canonical_dir = _lexical_path(Path(skill_dir).expanduser())
+    return canonical_dir.parent == get_anolisa_skill_dir()
+
+
 def _is_path_covered_by_entries(skill_dir: Path, entries: list[str]) -> bool:
     """Match a canonical path against config entries without filesystem access."""
     target = _lexical_path(skill_dir)
@@ -401,8 +407,10 @@ def remember_skill_dir(
     """Append *skill_dir* (or its parent glob) to ``managedSkillDirs`` if not covered.
 
     Heuristic for entry format:
+    - Raw user default Skills keep individual paths so auto-remember does not
+      turn read-only siblings into explicitly managed Skills.
     - If the parent directory contains **at least two** sibling sub-directories
-      that each contain ``SKILL.md``, add ``"parent/*"`` (glob pattern).
+      that each contain ``SKILL.md``, other roots use ``"parent/*"``.
     - Otherwise, add the specific directory path.
 
     After appending, runs :func:`_compact_skill_dirs` to prune entries that
@@ -430,7 +438,7 @@ def remember_skill_dir(
     except OSError:
         sibling_skills = []
 
-    if len(sibling_skills) >= 2:
+    if not is_default_user_skill_dir(skill_dir) and len(sibling_skills) >= 2:
         entry = str(parent) + "/*"
     else:
         entry = str(skill_dir)
