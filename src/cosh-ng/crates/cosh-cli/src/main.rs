@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 mod cmd;
 
 use cosh_platform::detect::Distro;
+use cosh_types::error::{CoshError, ErrorCode};
 use cosh_types::output::{CoshResponse, ResponseMeta};
 
 #[derive(Parser)]
@@ -65,7 +66,41 @@ fn main() {
         .with_target(true)
         .try_init();
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Help and version are clap "errors" but should behave as before:
+            // print text to stdout and exit 0.
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let _ = e.print();
+                std::process::exit(0);
+            }
+            // All other clap errors: emit JSON envelope on stdout, exit 1.
+            //
+            // stderr contract: this path stays silent. Never call `e.print()`
+            // or `e.exit()` here — both render clap's human-readable error to
+            // stderr, which would put free text beside the machine-facing
+            // envelope an agent parses on stdout. `e.to_string()` only formats.
+            // `test_clap_error_no_subcommand_emits_json_envelope` and
+            // `test_clap_error_paths_keep_stderr_empty` pin the contract.
+            let distro = Distro::detect();
+            let start = Instant::now();
+            // `details.kind` is a best-effort debugging hint rendered from
+            // clap's `Debug` impl, not a stable API: clap may rename or
+            // regroup `ErrorKind` variants across upgrades. Consumers must
+            // route on `error.code` (`InvalidInput`) and treat `kind` as
+            // log/triage context only.
+            let error = CoshError::new(ErrorCode::InvalidInput, e.to_string(), "cli")
+                .with_details(serde_json::json!({"kind": format!("{:?}", e.kind())}));
+            std::process::exit(print_failure(
+                error,
+                build_meta("cli", &distro, start, false),
+            ));
+        }
+    };
     let distro = Distro::detect();
     let start = Instant::now();
 
