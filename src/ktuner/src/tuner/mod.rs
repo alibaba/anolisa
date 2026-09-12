@@ -292,18 +292,15 @@ fn save_rollback(recommendations: &[Recommendation]) -> Result<()> {
     }))
 }
 
-/// Merge `(param, previous, applied)` entries into the cumulative rollback
-/// record. For a param already recorded, keep the ORIGINAL `previous` (the true
+/// Merge `(param, previous, applied)` entries into a cumulative rollback record.
+/// For a param already recorded, keep the ORIGINAL `previous` (the true
 /// pre-ktuner value) so rollback always restores pristine state even across
 /// multiple tune/fix/import runs; only refresh `applied`. New params are added.
-fn merge_rollback<I>(entries: I) -> Result<()>
+/// Pure (no I/O) so the keep-original-previous invariant is unit-testable.
+fn merge_entries<I>(mut data: RollbackData, entries: I) -> RollbackData
 where
     I: IntoIterator<Item = (String, String, String)>,
 {
-    let dir = Path::new(ROLLBACK_PATH).parent().unwrap();
-    fs::create_dir_all(dir).context("创建 rollback 目录失败")?;
-
-    let mut data = load_rollback();
     for (param, previous, applied) in entries {
         let path = param_to_path(&param);
         data.entries
@@ -315,6 +312,18 @@ where
                 path,
             });
     }
+    data
+}
+
+/// Merge the given entries into the on-disk rollback record and persist it.
+fn merge_rollback<I>(entries: I) -> Result<()>
+where
+    I: IntoIterator<Item = (String, String, String)>,
+{
+    let dir = Path::new(ROLLBACK_PATH).parent().unwrap();
+    fs::create_dir_all(dir).context("创建 rollback 目录失败")?;
+
+    let data = merge_entries(load_rollback(), entries);
 
     let json = serde_json::to_string_pretty(&data)?;
     write_atomic(ROLLBACK_PATH, json.as_bytes()).context("保存 rollback 文件失败")?;
@@ -858,6 +867,42 @@ mod tests {
         assert!(!rollback_should_finalize(1, 0)); // a write failed
         assert!(!rollback_should_finalize(0, 1)); // a path was absent — the missed case
         assert!(!rollback_should_finalize(2, 3));
+    }
+
+    #[test]
+    fn test_merge_keeps_original_previous_refreshes_applied() {
+        let data = RollbackData {
+            version: 1,
+            entries: BTreeMap::new(),
+        };
+        // Run 1: swappiness's pristine value is 10, ktuner applies 20.
+        let data = merge_entries(
+            data,
+            [(
+                "vm.swappiness".to_string(),
+                "10".to_string(),
+                "20".to_string(),
+            )],
+        );
+        // Run 2: a second tune sees the CURRENT value (20) as "previous" and
+        // applies 30. The merge must NOT let this clobber the pristine 10.
+        let data = merge_entries(
+            data,
+            [(
+                "vm.swappiness".to_string(),
+                "20".to_string(),
+                "30".to_string(),
+            )],
+        );
+        let e = data.entries.get("vm.swappiness").expect("entry present");
+        // The invariant the merge doc promises: rollback restores pristine state
+        // across repeated runs. If run 2 overwrote `previous` it would be "20",
+        // and rollback would only undo to the post-run-1 value — a silent
+        // wrong-restore. Discriminating: making and_modify also set `previous`
+        // fails this assert.
+        assert_eq!(e.previous, "10", "pristine previous must survive re-tuning");
+        assert_eq!(e.applied, "30", "applied must refresh to the latest");
+        assert_eq!(e.path, "/proc/sys/vm/swappiness");
     }
 
     #[test]
